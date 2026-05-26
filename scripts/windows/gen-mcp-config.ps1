@@ -3,8 +3,12 @@ param(
   [string]$RepoDir = (Get-Location).Path,
   [string]$ServerName = "workspace-qdrant",
   [string]$QdrantUrl = "http://localhost:6333",
-  [string]$DaemonEndpoint = "localhost:50051",
-  [string]$ToolCsv = "search,retrieve,grep,list,store,rules",
+  [string]$DaemonEndpoint = "http://localhost:50051",
+  [ValidateSet("http", "stdio")]
+  [string]$CodexTransport = "http",
+  [string]$CodexHttpUrl = "http://localhost:6335/mcp",
+  [string]$CodexBearerTokenEnvVar = "MCP_HTTP_TOKEN",
+  [string]$ToolCsv = "search,retrieve,grep,list,store,rules,workspace_index",
   [string]$ConfigSuffix = "",
   [string]$ClaudeConfigPath = "",
   [string]$CodexConfigPath = "",
@@ -21,15 +25,23 @@ function Escape-TomlString([string]$Value) {
 }
 
 function Json-ServerObject([string]$IndexPath) {
+  $indexPathForJson = $IndexPath -replace "\\", "/"
   return [pscustomobject]@{
     command = "node"
-    args = @($IndexPath)
+    args = @($indexPathForJson)
     env = [pscustomobject]@{
       QDRANT_URL = $QdrantUrl
       WQM_DAEMON_ENDPOINT = $DaemonEndpoint
     }
   }
 }
+
+function Write-Utf8NoBomFile([string]$Path, [string]$Content) {
+  $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+  [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
+
+. (Join-Path $PSScriptRoot "semantic-mcp-common.ps1")
 
 $IndexPath = Join-Path $RepoDir "src\typescript\mcp-server\dist\index.js"
 if (-not (Test-Path $IndexPath)) {
@@ -53,15 +65,49 @@ $claudeSnippet = [pscustomobject]@{
   }
 }
 $claudeOut = Join-Path $GeneratedDir "claude_desktop_config.$ServerName$ConfigSuffix.json"
-$claudeSnippet | ConvertTo-Json -Depth 12 | Set-Content -Encoding UTF8 $claudeOut
+Write-Utf8NoBomFile $claudeOut ($claudeSnippet | ConvertTo-Json -Depth 12)
 
 $tools = $ToolCsv.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 $toolsToml = ($tools | ForEach-Object { '"' + (Escape-TomlString $_) + '"' }) -join ", "
 $idxToml = Escape-TomlString $IndexPath
 $qdrantToml = Escape-TomlString $QdrantUrl
 $daemonToml = Escape-TomlString $DaemonEndpoint
+$codexHttpToml = Escape-TomlString $CodexHttpUrl
+$codexBearerTokenEnvVarToml = Escape-TomlString $CodexBearerTokenEnvVar
 
-$codexBlock = @"
+if ($CodexTransport -eq "http") {
+  $codexTokenEnv = [Environment]::GetEnvironmentVariable($CodexBearerTokenEnvVar)
+  $codexTokenFile = Get-EnvFileValue -RepoDir $RepoDir -Name $CodexBearerTokenEnvVar
+  if ($codexTokenEnv) {
+    if ($codexTokenEnv.Trim().Length -lt 16) {
+      Write-Warning "$CodexBearerTokenEnvVar tem menos de 16 caracteres; o Codex HTTP vai falhar com required=true."
+    }
+  } elseif ($codexTokenFile) {
+    if ($codexTokenFile.Trim().Length -lt 16) {
+      Write-Warning "$CodexBearerTokenEnvVar em docker\.env ou .env tem menos de 16 caracteres; o Codex HTTP vai falhar com required=true."
+    } else {
+      Write-Warning "$CodexBearerTokenEnvVar está em docker\.env ou .env, mas não está exportado neste shell; use scripts/windows/start-codex.ps1 ou make -f Makefile.win codex-open para abrir o Codex."
+    }
+  } else {
+    Write-Warning "$CodexBearerTokenEnvVar não foi encontrado no ambiente nem em docker\.env/.env; o Codex HTTP vai falhar com required=true."
+  }
+}
+
+$codexBlock = if ($CodexTransport -eq "http") {
+@"
+# BEGIN workspace-qdrant-fork-kit
+[mcp_servers.$ServerName]
+url = "$codexHttpToml"
+bearer_token_env_var = "$codexBearerTokenEnvVarToml"
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+required = true
+enabled_tools = [$toolsToml]
+
+# END workspace-qdrant-fork-kit
+"@
+} else {
+@"
 # BEGIN workspace-qdrant-fork-kit
 [mcp_servers.$ServerName]
 command = "node"
@@ -76,9 +122,10 @@ QDRANT_URL = "$qdrantToml"
 WQM_DAEMON_ENDPOINT = "$daemonToml"
 # END workspace-qdrant-fork-kit
 "@
+}
 
 $codexOut = Join-Path $GeneratedDir "codex_config.$ServerName$ConfigSuffix.toml"
-$codexBlock | Set-Content -Encoding UTF8 $codexOut
+Write-Utf8NoBomFile $codexOut $codexBlock
 
 Write-Host "Gerado:"
 Write-Host "  $claudeOut"
@@ -103,7 +150,7 @@ if ($ApplyClaude) {
   }
 
   $config.mcpServers | Add-Member -NotePropertyName $ServerName -NotePropertyValue (Json-ServerObject $IndexPath)
-  $config | ConvertTo-Json -Depth 12 | Set-Content -Encoding UTF8 $ClaudeConfigPath
+  Write-Utf8NoBomFile $ClaudeConfigPath ($config | ConvertTo-Json -Depth 12)
   Write-Host "Aplicado Claude config: $ClaudeConfigPath"
 }
 
@@ -117,6 +164,6 @@ if ($ApplyCodex) {
   }
   $pattern = "(?s)# BEGIN workspace-qdrant-fork-kit.*?# END workspace-qdrant-fork-kit\s*"
   $clean = [regex]::Replace($existing, $pattern, "")
-  ($clean.TrimEnd() + "`r`n`r`n" + $codexBlock.TrimEnd() + "`r`n") | Set-Content -Encoding UTF8 $CodexConfigPath
+  Write-Utf8NoBomFile $CodexConfigPath ($clean.TrimEnd() + "`r`n`r`n" + $codexBlock.TrimEnd() + "`r`n")
   Write-Host "Aplicado Codex config: $CodexConfigPath"
 }

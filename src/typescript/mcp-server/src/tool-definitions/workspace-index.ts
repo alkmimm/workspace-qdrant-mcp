@@ -34,12 +34,18 @@ export const workspaceIndexToolDefinition = {
           'register_wqm',
           'register_all_wqm',
           'cleanup_orphans',
+          'sync_current_branch',
         ],
         description: 'Workspace index action to execute.',
       },
       projectName: {
         type: 'string',
         description: 'Logical project name in .wqm-fork/indexed-projects.json.',
+      },
+      projectId: {
+        type: 'string',
+        description:
+          'Project tenant ID from workspace-qdrant. Also accepted inside payload; use projectName when only the logical registry name is known.',
       },
       projectPath: {
         type: 'string',
@@ -48,6 +54,10 @@ export const workspaceIndexToolDefinition = {
       branchName: {
         type: 'string',
         description: 'Agent branch name, for example agent/auth-retry-20260523.',
+      },
+      branch: {
+        type: 'string',
+        description: 'Alias for branchName, useful in Codex context envelopes.',
       },
       baseBranch: {
         type: 'string',
@@ -60,6 +70,10 @@ export const workspaceIndexToolDefinition = {
       worktreePath: {
         type: 'string',
         description: 'Optional explicit worktree path for an agent branch.',
+      },
+      worktree: {
+        type: 'string',
+        description: 'Alias for worktreePath, useful in Codex context envelopes.',
       },
       worktreeRoot: {
         type: 'string',
@@ -80,12 +94,42 @@ export const workspaceIndexToolDefinition = {
       repoDir: {
         type: 'string',
         description:
-          'Optional absolute path to the workspace-qdrant-mcp repo. Defaults to WQM_REPO_DIR or process.cwd().',
+          'For PowerShell-backed actions: path to the workspace-qdrant-mcp repo (defaults to WQM_REPO_DIR or process.cwd()). For sync_current_branch: absolute path to the target repo whose branch is being synced (required).',
+      },
+      currentBranch: {
+        type: 'string',
+        description:
+          'For sync_current_branch: current branch name reported by `git rev-parse --abbrev-ref HEAD`.',
+      },
+      commitHash: {
+        type: 'string',
+        description: 'For sync_current_branch: HEAD commit SHA reported by `git rev-parse HEAD`.',
+      },
+      isWorktree: {
+        type: 'boolean',
+        description:
+          'For sync_current_branch: true when .git in the target repo is a file (linked worktree). The hook detects this by `test -f $REPO/.git`.',
+      },
+      gitRemote: {
+        type: 'string',
+        description:
+          'For sync_current_branch: remote.origin.url from `git config --get remote.origin.url`, used by the daemon for tenant_id calculation.',
+      },
+      hookName: {
+        type: 'string',
+        description:
+          'For sync_current_branch: name of the git hook that fired (post-checkout, post-commit, etc.). Recorded for observability only.',
       },
       allowMutation: {
         type: 'boolean',
         description:
           'Required for mutating actions, in addition to WQM_INDEX_MANAGER_ALLOW_MUTATION=1.',
+      },
+      payload: {
+        type: 'object',
+        description:
+          'Optional action-specific arguments. Top-level arguments take precedence; payload may contain projectId, branch, worktree, baseBranch, returnBranch, useWorktree, purpose, createdBy, projectName, projectPath, worktreePath, worktreeRoot, or repoDir.',
+        additionalProperties: true,
       },
     },
     required: ['action'],

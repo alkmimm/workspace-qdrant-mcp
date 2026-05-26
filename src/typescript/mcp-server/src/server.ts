@@ -56,6 +56,7 @@ import { seedDefaultRule } from './rule-seeder.js';
 export class WorkspaceQdrantMcpServer {
   private readonly server: Server;
   private readonly components: ServerComponents;
+  private readonly config: ServerConfig;
 
   private sessionState: SessionState = {
     sessionId: '',
@@ -63,6 +64,8 @@ export class WorkspaceQdrantMcpServer {
     projectPath: null,
     watchPath: null,
     isWorktree: false,
+    currentBranch: null,
+    lastBranchRefreshAt: 0,
     heartbeatInterval: null,
     daemonConnected: false,
     cleaned: false,
@@ -75,6 +78,7 @@ export class WorkspaceQdrantMcpServer {
   private isInitialized = false;
 
   constructor(options: ServerOptions) {
+    this.config = options.config;
     this.mode = resolveMode(options);
     this.httpOptions = {
       host: options.http?.host ?? DEFAULT_HTTP_HOST,
@@ -85,7 +89,13 @@ export class WorkspaceQdrantMcpServer {
     this.authConfig = options.auth ?? loadAuthConfig();
     this.components = buildServerComponents(options.config);
 
-    this.server = new Server(
+    this.server = this.createMcpServer();
+
+    this.setupHandlers(this.server, this.components, this.sessionState);
+  }
+
+  private createMcpServer(): Server {
+    return new Server(
       { name: SERVER_NAME, version: SERVER_VERSION },
       {
         capabilities: { tools: {} },
@@ -95,38 +105,80 @@ export class WorkspaceQdrantMcpServer {
           'Use the `rules` tool to check for behavioral preferences before starting work.',
           'Use `retrieve` to access specific documents when you know the document ID.',
           'Use `list` to browse project file/folder structure — start with format "summary" to get an overview.',
+          'Use `workspace_index` for indexed-project and agent-branch coordination; prefer read-only actions first, and for Codex context pass projectId, branch, worktree, and action-specific fields inside payload when helpful.',
           'Collections: projects (indexed code), libraries (reference docs), rules (behavioral rules).',
         ].join(' '),
       }
     );
-
-    this.setupHandlers();
   }
 
-  private setupHandlers(): void {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  private setupHandlers(
+    server: Server,
+    components: ServerComponents,
+    sessionState: SessionState
+  ): void {
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: getToolDefinitions(),
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      return this.handleToolCall(request.params.name, request.params.arguments);
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      return this.handleToolCall(request.params.name, request.params.arguments, components, sessionState);
     });
 
-    this.server.onerror = (error): void => {
+    server.onerror = (error): void => {
       logError('MCP server error', error);
     };
 
-    this.server.onclose = (): void => {
+    server.onclose = (): void => {
       logInfo('MCP server closed');
-      this.cleanupSession();
+      void this.cleanupSession(sessionState, components);
     };
   }
 
   private async handleToolCall(
     toolName: string,
-    args: Record<string, unknown> | undefined
+    args: Record<string, unknown> | undefined,
+    components: ServerComponents,
+    sessionState: SessionState
   ): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
-    return dispatchToolCall(toolName, args, this.components, this.sessionState);
+    return dispatchToolCall(toolName, args, components, sessionState);
+  }
+
+  private createSessionState(): SessionState {
+    return {
+      sessionId: '',
+      projectId: null,
+      projectPath: null,
+      watchPath: null,
+      isWorktree: false,
+      currentBranch: null,
+      lastBranchRefreshAt: 0,
+      heartbeatInterval: null,
+      daemonConnected: false,
+      cleaned: false,
+    };
+  }
+
+  private async createHttpSessionServer(): Promise<Server> {
+    const sessionState = this.createSessionState();
+    const components = buildServerComponents(this.config);
+    const { stateManager, daemonClient, projectDetector, healthMonitor } = components;
+    const initResult = stateManager.initialize();
+    if (initResult.status === 'degraded') {
+      logInfo('State manager degraded', { reason: initResult.reason });
+    }
+    await initializeSession(sessionState, daemonClient, projectDetector, () =>
+      startHeartbeat(sessionState, () => sendHeartbeat(sessionState, daemonClient))
+    );
+
+    healthMonitor.start();
+    logDebug('Health monitoring started');
+    await seedDefaultRule(components.rulesTool);
+    recordSessionStart();
+
+    const server = this.createMcpServer();
+    this.setupHandlers(server, components, sessionState);
+    return server;
   }
 
   async start(): Promise<void> {
@@ -137,10 +189,6 @@ export class WorkspaceQdrantMcpServer {
         logInfo('State manager degraded', { reason: initResult.reason });
       }
 
-      await initializeSession(this.sessionState, daemonClient, projectDetector, () =>
-        startHeartbeat(this.sessionState, () => sendHeartbeat(this.sessionState, daemonClient))
-      );
-
       healthMonitor.start();
       logDebug('Health monitoring started');
 
@@ -148,12 +196,28 @@ export class WorkspaceQdrantMcpServer {
       await this.seedDefaultRule();
 
       if (this.mode === 'stdio') {
+        await initializeSession(this.sessionState, daemonClient, projectDetector, () =>
+          startHeartbeat(this.sessionState, () => sendHeartbeat(this.sessionState, daemonClient))
+        );
         const transport = new StdioServerTransport();
         await this.server.connect(transport);
         logInfo('MCP server started', { mode: 'stdio' });
+        recordSessionStart();
       } else if (this.mode === 'http') {
         requireAuth(this.authConfig);
-        this.httpHandle = await startMcpHttpServer(this.server, this.httpOptions, this.authConfig);
+        this.httpHandle = await startMcpHttpServer(
+          () => this.createHttpSessionServer(),
+          this.httpOptions,
+          this.authConfig,
+          // Admin UI deps. Mounting only on the http transport (stdio
+          // doesn't expose HTTP routes). Reuses the same daemonClient
+          // and stateManager that the MCP tools already use, so admin
+          // CRUD and the agent observe identical state.
+          {
+            daemonClient: this.components.daemonClient,
+            stateManager: this.components.stateManager,
+          }
+        );
         logInfo('MCP server started', {
           mode: 'http',
           host: this.httpOptions.host,
@@ -165,7 +229,6 @@ export class WorkspaceQdrantMcpServer {
       }
 
       this.isInitialized = true;
-      recordSessionStart();
     } catch (error) {
       logError('Failed to start MCP server', error);
       throw error;
@@ -174,7 +237,9 @@ export class WorkspaceQdrantMcpServer {
 
   async stop(): Promise<void> {
     logInfo('Stopping MCP server');
-    await this.cleanupSession();
+    if (this.mode !== 'http') {
+      await this.cleanupSession(this.sessionState, this.components);
+    }
     if (this.httpHandle) {
       await stopMcpHttpServer(this.httpHandle);
       this.httpHandle = null;
@@ -195,12 +260,15 @@ export class WorkspaceQdrantMcpServer {
    * double-decrement of the `wqm_mcp_session_count` metric when both the
    * `onclose` handler and `stop()` fire for the same session.
    */
-  private async cleanupSession(): Promise<void> {
-    if (this.sessionState.cleaned) return;
-    this.sessionState.cleaned = true;
+  private async cleanupSession(
+    sessionState: SessionState,
+    components: ServerComponents
+  ): Promise<void> {
+    if (sessionState.cleaned) return;
+    sessionState.cleaned = true;
 
-    const { daemonClient, stateManager, healthMonitor } = this.components;
-    await cleanup(this.sessionState, daemonClient, stateManager, healthMonitor);
+    const { daemonClient, stateManager, healthMonitor } = components;
+    await cleanup(sessionState, daemonClient, stateManager, healthMonitor);
     recordSessionEnd();
   }
 

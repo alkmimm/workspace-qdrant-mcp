@@ -181,7 +181,9 @@ make -f Makefile.win compose-up
 make -f Makefile.win apply-config
 ```
 
-Isso mantém os clientes apontando para o daemon em `localhost:50051`. O atalho local abaixo é opcional.
+Isso mantém o Claude Desktop apontando para o daemon em `http://localhost:50051` e o Codex apontando para o MCP HTTP do stack Docker em `http://localhost:6335/mcp`. O atalho local abaixo é opcional.
+Antes de abrir o Codex, garanta que `MCP_HTTP_TOKEN` esteja disponível no ambiente do processo com o mesmo valor usado em `docker/.env`.
+Para evitar export manual, use `make -f Makefile.win codex-open` ou `.\scripts\windows\start-codex.ps1`; o launcher lê `docker\.env` e exporta `MCP_HTTP_TOKEN` antes de iniciar o Codex.
 
 ### FastEmbed + gRPC quick path (opcional)
 

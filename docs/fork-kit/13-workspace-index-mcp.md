@@ -37,6 +37,15 @@ git commit -m "feat(mcp): add workspace index management tool"
 - `register_wqm`
 - `register_all_wqm`
 - `cleanup_orphans`
+- `sync_current_branch` — *nativa em TypeScript, não passa por PowerShell*
+
+A ação `sync_current_branch` é o ponto de integração para hooks git que
+rodam no host e querem registrar branch/worktree no daemon containerizado
+sem depender de PowerShell. Recebe o estado git da chamada (branch,
+commit, isWorktree, worktreePath, gitRemote) e despacha um
+`RegisterProject` gRPC com `register_if_new=true`. Implementação em
+`src/typescript/mcp-server/src/tools/workspace-index.ts`; ver também
+[scripts/git-hooks/README.md](../../scripts/git-hooks/README.md).
 
 Mutação exige:
 
@@ -51,6 +60,28 @@ E `allowMutation: true` na chamada MCP.
 ```json
 { "action": "list_projects" }
 ```
+
+## Envelope recomendado para Codex
+
+`workspace_index` tambem aceita aliases pensados para Codex:
+
+```json
+{
+  "action": "agent_branch_status",
+  "projectId": "tenant-id-do-projeto",
+  "branch": "agent/auth-retry-20260523",
+  "worktree": "C:/dev/meu-app-agent-auth-retry-20260523",
+  "payload": {
+    "purpose": "corrigir retry de auth"
+  }
+}
+```
+
+Use `projectId` quando voce conhece o tenant retornado pelo workspace-qdrant.
+Use `projectName` quando voce conhece apenas o nome local registrado em
+`.wqm-fork/indexed-projects.json`. `branch` e alias de `branchName`;
+`worktree` e alias de `worktreePath`. Campos no topo da chamada tem
+precedencia sobre campos dentro de `payload`.
 
 ## Exemplo MCP: criar branch de agente
 
