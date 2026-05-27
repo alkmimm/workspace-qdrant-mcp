@@ -196,9 +196,23 @@ function renderCandidates() {
   `).join('');
 }
 
+/** Render an ETA in seconds as a coarse human-readable string ("3s",
+ *  "12m", "2h 14m"). The daemon's rate-window resolution is 5 minutes,
+ *  so any extra precision would be theatre. */
+function formatEta(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s < 0) return 'unknown';
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem === 0 ? `${h}h` : `${h}h ${rem}m`;
+}
+
 /**
  * Render the indexing-progress cell for one registered project.
- * Returns a small HTML snippet showing a progress bar + counts.
+ * Returns a small HTML snippet showing a progress bar + counts + ETA.
  * When the daemon couldn't report (`indexing == null`), shows a dim "—".
  */
 function renderIndexingCell(indexing) {
@@ -217,6 +231,17 @@ function renderIndexingCell(indexing) {
       ? `${inFlight} in flight · ${done}/${total}`
       : `${done} indexed`;
   const labelFailed = failed > 0 ? ` · <span class="warn">${failed} failed</span>` : '';
+  // ETA only renders when the queue is still draining — once idle the
+  // value is uninformative ("0s") and noisy. "Warming up" reflects the
+  // daemon's cold-start window.
+  let etaLine = '';
+  if (inFlight > 0) {
+    const etaText =
+      typeof indexing.eta_seconds === 'number'
+        ? `ETA ~${formatEta(indexing.eta_seconds)}`
+        : 'ETA — warming up';
+    etaLine = `<div class="indexing-eta dim small">${escapeHtml(etaText)}</div>`;
+  }
   return `
     <div class="indexing-cell">
       <div class="indexing-bar indexing-bar-${state}" role="progressbar"
@@ -226,6 +251,7 @@ function renderIndexingCell(indexing) {
       <div class="indexing-meta dim small">
         ${escapeHtml(labelMain)}${labelFailed} · ${pct.toFixed(1)}%
       </div>
+      ${etaLine}
     </div>
   `;
 }

@@ -6,6 +6,7 @@ use chrono::Utc;
 use sqlx::SqlitePool;
 use tonic::Status;
 use tracing::{debug, error, warn};
+use workspace_qdrant_core::indexing_progress::{estimate_eta_seconds, rate_files_per_sec};
 use workspace_qdrant_core::queue_operations::QueueManager;
 
 use crate::proto::{
@@ -26,12 +27,17 @@ const HEARTBEAT_TIMEOUT_SECS: u64 = 60;
 /// while `done` is the durable count from `tracked_files`. The queue rows
 /// for completed work are deleted after retention, so we cannot derive
 /// `done` from the queue alone.
+///
+/// `eta_seconds` is `Some` only when we have at least
+/// [`MIN_RATE_WINDOW_SECONDS`] of recent indexing activity AND a positive
+/// rate — callers must render "warming up" / "unknown" when it's `None`.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct IndexingProgress {
     pub pending: i64,
     pub in_progress: i64,
     pub failed: i64,
     pub done: i64,
+    pub eta_seconds: Option<i64>,
 }
 
 impl IndexingProgress {
@@ -93,11 +99,15 @@ pub(crate) async fn fetch_indexing_progress(
         }
     };
 
+    let rate = rate_files_per_sec(pool, tenant_id).await;
+    let eta_seconds = estimate_eta_seconds(pending, in_progress, rate);
+
     IndexingProgress {
         pending,
         in_progress,
         failed,
         done,
+        eta_seconds,
     }
 }
 
@@ -143,6 +153,7 @@ impl ProjectServiceImpl {
             response.done_count = progress.done;
             response.total_count = progress.total();
             response.percent_complete = progress.percent_complete();
+            response.eta_seconds = progress.eta_seconds;
             Ok(response)
         } else {
             Ok(GetProjectStatusResponse {
@@ -163,6 +174,7 @@ impl ProjectServiceImpl {
                 done_count: 0,
                 total_count: 0,
                 percent_complete: 0.0,
+                eta_seconds: None,
             })
         }
     }
@@ -228,6 +240,7 @@ impl ProjectServiceImpl {
             done_count: 0,
             total_count: 0,
             percent_complete: 0.0,
+            eta_seconds: None,
         })
     }
 

@@ -482,6 +482,12 @@ message GetProjectStatusResponse {
     int64 done_count = 15;                        // tracked_files rows for this tenant
     int64 total_count = 16;                       // pending + in_progress + failed + done
     double percent_complete = 17;                 // done / total * 100; 100.0 when total == 0
+    // Estimated seconds until in-flight queue drains, derived from the rate
+    // at which `tracked_files.updated_at` advances over a rolling window.
+    // Unset (= 0 sentinel + has_eta_seconds=false) during cold-start
+    // (< 60s of data) or when the rate is 0 with pending > 0 — callers
+    // must render "warming up" / "unknown" instead of fabricating a value.
+    optional int64 eta_seconds = 18;
 }
 
 // ListProjects Request/Response

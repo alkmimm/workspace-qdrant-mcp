@@ -413,6 +413,53 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 504,
+      "title": "Time to drain (per tenant)",
+      "description": "Estimated seconds until each tenant's queue is fully drained, derived from tracked_files.updated_at over a 5-minute rolling window. Series with value -1 mean the daemon doesn't have enough recent activity to estimate (cold-start / warming up) — filtered out by the `>= 0` clause.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 58 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "memexd_indexing_eta_seconds_by_tenant >= 0",
+          "legendFormat": "{{tenant_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 505,
+      "title": "Tenants in cold-start (ETA unknown)",
+      "description": "Count of tenants where the daemon can't estimate ETA yet — either the project was just registered, or the indexing rate is currently zero with work still pending. Should drop to 0 within ~1 minute of any sustained activity.",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 4, "x": 12, "y": 58 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 }] }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "count(memexd_indexing_eta_seconds_by_tenant == -1) or vector(0)",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
@@ -425,6 +472,6 @@
   "timezone": "",
   "title": "WQM — memexd Daemon",
   "uid": "wqm-memexd",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }

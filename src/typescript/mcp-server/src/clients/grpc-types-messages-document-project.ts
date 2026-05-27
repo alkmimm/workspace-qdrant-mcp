@@ -91,6 +91,11 @@ export interface GetProjectStatusResponse {
   done_count?: number;
   total_count?: number;
   percent_complete?: number;
+  // Optional ETA in seconds. Absent when the daemon doesn't have enough
+  // recent activity data (cold-start) or when the rate is zero with
+  // pending > 0 — callers must render "warming up" / "unknown" instead
+  // of fabricating a value.
+  eta_seconds?: number;
 }
 
 export interface ListProjectsRequest {

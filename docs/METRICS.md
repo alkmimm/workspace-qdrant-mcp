@@ -93,6 +93,27 @@ topk(10, sum by (tenant_id) (memexd_unified_queue_depth_by_tenant{status="pendin
 max by (tenant_id) (memexd_unified_queue_depth_by_tenant{status="pending"}) > 5000
 ```
 
+#### `memexd_indexing_eta_seconds_by_tenant`
+**Type:** Gauge
+**Labels:** `tenant_id`
+**Description:** Estimated seconds until each tenant's queue is fully
+drained. Derived from the rate at which `tracked_files.updated_at`
+advances over a 5-minute window, capped at 24 h. Set to `-1` when the
+daemon can't estimate (cold-start, zero throughput with pending > 0,
+or queue already drained) — Prometheus has no native null. Filter the
+sentinel out in PromQL with `>= 0`.
+
+```promql
+# Only series with a real estimate
+memexd_indexing_eta_seconds_by_tenant >= 0
+
+# Tenants in "warming up" state right now
+count(memexd_indexing_eta_seconds_by_tenant == -1)
+
+# Alert when one tenant's ETA exceeds 1h for >10 minutes
+max by (tenant_id) (memexd_indexing_eta_seconds_by_tenant >= 0) > 3600
+```
+
 #### `queue_age_oldest_pending_seconds`
 **Type:** Gauge
 **Labels:** None

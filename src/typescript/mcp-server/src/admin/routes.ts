@@ -126,6 +126,7 @@ const handleSnapshot: RouteHandler = async (_req, res, { daemonClient, stateMana
       done: number;
       total: number;
       percent: number;
+      eta_seconds?: number;
     } | null;
   }
   let registered: RegisteredProject[] = [];
@@ -152,7 +153,7 @@ const handleSnapshot: RouteHandler = async (_req, res, { daemonClient, stateMana
       const proj = base[idx];
       if (!proj || result.status !== 'fulfilled' || !result.value.found) return;
       const s = result.value;
-      proj.indexing = {
+      const indexing: NonNullable<RegisteredProject['indexing']> = {
         pending: s.pending_count ?? 0,
         in_progress: s.in_progress_count ?? 0,
         failed: s.failed_count ?? 0,
@@ -160,6 +161,8 @@ const handleSnapshot: RouteHandler = async (_req, res, { daemonClient, stateMana
         total: s.total_count ?? 0,
         percent: s.percent_complete ?? 100,
       };
+      if (typeof s.eta_seconds === 'number') indexing.eta_seconds = s.eta_seconds;
+      proj.indexing = indexing;
     });
     registered = base;
   } catch {

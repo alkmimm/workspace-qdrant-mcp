@@ -294,6 +294,19 @@ async function handleSyncCurrentBranch(
   }
 }
 
+/** Render an ETA in seconds as a coarse human-readable string ("3s", "12m",
+ *  "2h 14m"). Kept intentionally crude — exact precision is meaningless
+ *  for an estimate built from a 5-minute rate window. */
+function formatEtaSeconds(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'unknown';
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const rem = minutes % 60;
+  return rem === 0 ? `${hours}h` : `${hours}h ${rem}m`;
+}
+
 /**
  * `indexing_status` action — report per-project indexing progress without
  * shelling out to wqm. Reads the daemon's `GetProjectStatus` (which fills
@@ -351,10 +364,26 @@ async function handleIndexingStatus(
     const total = status.total_count ?? 0;
     const percent = status.percent_complete ?? 100;
     const inFlight = pending + inProgress;
+    const eta = typeof status.eta_seconds === 'number' ? status.eta_seconds : undefined;
+    const etaSummary =
+      eta === undefined
+        ? 'ETA unknown (warming up)'
+        : `ETA ~${formatEtaSeconds(eta)}`;
     const summary =
       inFlight === 0
         ? `Indexing complete (${done} files indexed; ${failed} failed)`
-        : `Indexing in progress: ${inFlight} files in flight, ${done}/${total} done (${percent.toFixed(1)}%)`;
+        : `Indexing in progress: ${inFlight} files in flight, ${done}/${total} done (${percent.toFixed(1)}%) · ${etaSummary}`;
+
+    const indexing: {
+      pending: number;
+      in_progress: number;
+      failed: number;
+      done: number;
+      total: number;
+      percent: number;
+      eta_seconds?: number;
+    } = { pending, in_progress: inProgress, failed, done, total, percent };
+    if (eta !== undefined) indexing.eta_seconds = eta;
 
     return {
       success: true,
@@ -363,14 +392,7 @@ async function handleIndexingStatus(
       project_name: status.project_name,
       project_root: status.project_root,
       is_active: status.is_active,
-      indexing: {
-        pending,
-        in_progress: inProgress,
-        failed,
-        done,
-        total,
-        percent,
-      },
+      indexing,
       summary,
     };
   } catch (err) {

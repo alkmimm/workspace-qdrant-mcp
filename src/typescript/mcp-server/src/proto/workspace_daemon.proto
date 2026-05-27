@@ -477,6 +477,9 @@ message GetProjectStatusResponse {
     int64 done_count = 15;
     int64 total_count = 16;
     double percent_complete = 17;
+    // Estimated seconds until in-flight queue drains. Unset when the
+    // rate is unknown (cold-start or zero throughput with pending > 0).
+    optional int64 eta_seconds = 18;
 }
 
 // ListProjects Request/Response

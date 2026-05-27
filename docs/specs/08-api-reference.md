@@ -399,7 +399,8 @@ explanation.
     "failed": 0,
     "done": 318,
     "total": 2164,
-    "percent": 14.7
+    "percent": 14.7,
+    "eta_seconds": 720
   }
 }
 ```
@@ -414,6 +415,26 @@ Field semantics:
 | `done`        | `tracked_files` (durable)              | persisted across queue cleanup           |
 | `total`       | sum of the four above                  | denominator for `percent`                |
 | `percent`     | `done / total * 100`                   | `100.0` when total = 0                   |
+| `eta_seconds` | rate over `tracked_files.updated_at`   | **optional**; absent during cold-start    |
+
+**ETA semantics:** `eta_seconds` is derived from a 5-minute rolling
+window over `tracked_files.updated_at`. The field is *omitted entirely*
+(not zero) when the daemon cannot estimate honestly:
+
+- **Cold-start** — fewer than 60 seconds of activity (a freshly registered
+  project, or a project that just resumed after being idle).
+- **Zero throughput with work pending** — the queue has items but no
+  files have been indexed in the last 5 minutes.
+
+Treat absence as "warming up / unknown" rather than "indexed". The
+estimate is capped at 24 hours; anything longer caps to `86400` so UIs
+don't render absurd values.
+
+The estimate is naturally crude: file types have wildly different
+per-file costs (a one-line `.md` vs. a 2000-line `.rs` with tree-sitter
++ LSP enrichment), so individual ETAs may swing by 2–3× as the queue's
+type mix shifts. The intent is "minutes vs. hours", not a precise
+countdown.
 
 The MCP caches `GetProjectStatus` per `tenant_id` for ~1500 ms so a burst
 of searches doesn't fan out to gRPC each time. The block is **omitted** —
@@ -452,11 +473,15 @@ project reported by the daemon's `ListProjects`. Response shape:
     "failed": 0,
     "done": 318,
     "total": 2164,
-    "percent": 14.7
+    "percent": 14.7,
+    "eta_seconds": 720
   },
-  "summary": "Indexing in progress: 1846 files in flight, 318/2164 done (14.7%)"
+  "summary": "Indexing in progress: 1846 files in flight, 318/2164 done (14.7%) · ETA ~12m"
 }
 ```
+
+When the daemon can't estimate yet, `eta_seconds` is omitted and the
+summary ends with `· ETA unknown (warming up)`.
 
 ### Removed/Automated Features
 

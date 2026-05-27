@@ -370,13 +370,20 @@ rpc GetProjectStatus(GetProjectStatusRequest) returns (GetProjectStatusResponse)
 - `done_count`: `tracked_files` rows for this tenant (durable across queue cleanup)
 - `total_count`: `pending + in_progress + failed + done`
 - `percent_complete`: `done_count / total_count * 100`; `100.0` when `total_count == 0`
+- `eta_seconds` (optional): estimated seconds to drain
+  `(pending + in_progress)`. Absent when the daemon can't estimate —
+  either fewer than 60s of recent indexing activity (cold-start) or
+  zero throughput with pending > 0.
 
 The four queue counters come from a single grouped `SELECT … CASE WHEN`
 on `unified_queue WHERE tenant_id = ?`, so the handler costs one extra
 round-trip vs. the legacy response. The `done_count` query is a
-`tracked_files JOIN watch_folders` filtered by `tenant_id`. On any DB
-error the indexing fields fall back to zero — the registration metadata
-is still returned.
+`tracked_files JOIN watch_folders` filtered by `tenant_id`. The ETA is
+computed from a 5-minute rolling window over `tracked_files.updated_at`
+in the shared `workspace_qdrant_core::indexing_progress` module, then
+capped at 24h. On any DB error the indexing fields fall back to zero
+and `eta_seconds` is omitted — the registration metadata is still
+returned.
 
 #### ListProjects
 

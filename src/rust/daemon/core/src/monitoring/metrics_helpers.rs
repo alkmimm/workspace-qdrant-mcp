@@ -246,6 +246,14 @@ impl DaemonMetrics {
             .set(depth);
     }
 
+    /// Set per-tenant indexing ETA in seconds. Pass `-1` when the rate is
+    /// unknown so PromQL can filter via `>= 0`.
+    pub fn set_indexing_eta_seconds(&self, tenant_id: &str, seconds: i64) {
+        self.indexing_eta_seconds_by_tenant
+            .with_label_values(&[tenant_id])
+            .set(seconds);
+    }
+
     /// Record unified queue item processed
     pub fn unified_queue_item_processed(
         &self,

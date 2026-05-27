@@ -345,3 +345,8 @@ details summary:hover { color: var(--link); }
 .indexing-meta .warn {
   color: var(--warn);
 }
+.indexing-eta {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}

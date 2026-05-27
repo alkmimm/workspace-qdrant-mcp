@@ -87,6 +87,11 @@ export async function fetchIndexingProgress(
       total: status.total_count ?? 0,
       percent: status.percent_complete ?? 100,
     };
+    // ETA is optional — only attach when the daemon actually provided
+    // one. Skipping it preserves the "warming up" semantic for callers.
+    if (typeof status.eta_seconds === 'number') {
+      value.eta_seconds = status.eta_seconds;
+    }
     indexingProgressCache.set(projectId, { value, fetchedAt: now });
     return value;
   } catch (err) {

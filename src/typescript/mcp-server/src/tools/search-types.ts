@@ -113,6 +113,11 @@ export interface IndexingProgress {
   done: number;
   total: number;
   percent: number;
+  /** Estimated seconds until the queue drains for this tenant.
+   *  Absent when the daemon doesn't have enough recent activity to
+   *  estimate honestly (cold-start) or when the rate is zero with
+   *  pending > 0. UIs should render "warming up" in those cases. */
+  eta_seconds?: number;
 }
 
 export interface SearchResponse {

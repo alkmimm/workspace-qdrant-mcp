@@ -382,3 +382,16 @@ pub(super) fn create_per_tenant_indexing_metric() -> IntGaugeVec {
         &["tenant_id", "status"],
     )
 }
+
+/// Per-tenant ETA (seconds) derived from the rate at which
+/// `tracked_files.updated_at` advances over a 5-minute window. Set to
+/// `-1` when the daemon can't estimate (cold-start, rate==0, queue
+/// drained) — Prometheus has no native null, and a sentinel lets PromQL
+/// filter via `>= 0`.
+pub(super) fn create_per_tenant_eta_metric() -> IntGaugeVec {
+    int_gauge_vec(
+        "indexing_eta_seconds_by_tenant",
+        "Estimated seconds to drain the queue per tenant; -1 = unknown / warming up",
+        &["tenant_id"],
+    )
+}

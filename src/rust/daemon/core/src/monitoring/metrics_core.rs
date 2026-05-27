@@ -12,10 +12,10 @@ use prometheus::{
 };
 
 use super::metrics_factories::{
-    create_dependency_metrics, create_indexed_project_metrics, create_per_tenant_indexing_metric,
-    create_queue_metrics, create_session_metrics, create_system_metrics,
-    create_telemetry_extension_metrics, create_tenant_metrics, create_unified_queue_metrics,
-    create_watch_metrics, register_all,
+    create_dependency_metrics, create_indexed_project_metrics, create_per_tenant_eta_metric,
+    create_per_tenant_indexing_metric, create_queue_metrics, create_session_metrics,
+    create_system_metrics, create_telemetry_extension_metrics, create_tenant_metrics,
+    create_unified_queue_metrics, create_watch_metrics, register_all,
 };
 
 /// Global metrics registry
@@ -131,6 +131,11 @@ pub struct DaemonMetrics {
     /// because those rows are deleted by `cleanup_completed_unified_items`).
     pub unified_queue_depth_by_tenant: IntGaugeVec,
 
+    /// Per-tenant indexing ETA (seconds). Set to `-1` when unknown
+    /// (cold-start / rate=0 / queue already drained).
+    /// Labels: tenant_id
+    pub indexing_eta_seconds_by_tenant: IntGaugeVec,
+
     /// Unified queue processing time in seconds by item_type
     /// Labels: item_type
     pub unified_queue_processing_time_seconds: HistogramVec,
@@ -222,6 +227,7 @@ struct CreatedMetrics {
     watch_events_throttled_total: IntCounterVec,
     unified_queue_depth: IntGaugeVec,
     unified_queue_depth_by_tenant: IntGaugeVec,
+    indexing_eta_seconds_by_tenant: IntGaugeVec,
     unified_queue_processing_time_seconds: HistogramVec,
     unified_queue_items_total: IntCounterVec,
     unified_queue_enqueues_total: IntCounterVec,
@@ -273,6 +279,7 @@ fn create_all_metrics() -> CreatedMetrics {
         unified_queue_retries_total,
     ) = create_unified_queue_metrics();
     let unified_queue_depth_by_tenant = create_per_tenant_indexing_metric();
+    let indexing_eta_seconds_by_tenant = create_per_tenant_eta_metric();
     let (
         watcher_events_total,
         watcher_coalesced_total,
@@ -318,6 +325,7 @@ fn create_all_metrics() -> CreatedMetrics {
         watch_events_throttled_total,
         unified_queue_depth,
         unified_queue_depth_by_tenant,
+        indexing_eta_seconds_by_tenant,
         unified_queue_processing_time_seconds,
         unified_queue_items_total,
         unified_queue_enqueues_total,
@@ -366,6 +374,7 @@ fn register_metrics(registry: &Registry, m: &CreatedMetrics) {
             Box::new(m.watch_events_throttled_total.clone()),
             Box::new(m.unified_queue_depth.clone()),
             Box::new(m.unified_queue_depth_by_tenant.clone()),
+            Box::new(m.indexing_eta_seconds_by_tenant.clone()),
             Box::new(m.unified_queue_processing_time_seconds.clone()),
             Box::new(m.unified_queue_items_total.clone()),
             Box::new(m.unified_queue_enqueues_total.clone()),
@@ -419,6 +428,7 @@ impl DaemonMetrics {
             watch_events_throttled_total: m.watch_events_throttled_total,
             unified_queue_depth: m.unified_queue_depth,
             unified_queue_depth_by_tenant: m.unified_queue_depth_by_tenant,
+            indexing_eta_seconds_by_tenant: m.indexing_eta_seconds_by_tenant,
             unified_queue_processing_time_seconds: m.unified_queue_processing_time_seconds,
             unified_queue_items_total: m.unified_queue_items_total,
             unified_queue_enqueues_total: m.unified_queue_enqueues_total,
