@@ -7,14 +7,12 @@
 //! signal is detected mid-batch, signalling the caller to `return Ok(())`
 //! from the processing loop.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-
-use futures::stream::{FuturesUnordered, StreamExt};
 
 use crate::adaptive_resources::ResourceProfile;
 use crate::allowed_extensions::AllowedExtensions;
@@ -34,6 +32,8 @@ use crate::unified_queue_processor::error::UnifiedProcessorError;
 use crate::unified_queue_processor::UnifiedQueueProcessor;
 use crate::unified_queue_schema::{ItemType, QueueOperation, QueueStatus, UnifiedQueueItem};
 use crate::{DocumentProcessor, EmbeddingGenerator};
+
+use super::concurrent_dispatch::run_dispatch_loop;
 
 /// Owned dependency bundle for a single spawned item future.
 ///
@@ -118,78 +118,23 @@ pub(super) async fn process_batch(
         processed_tenants: Arc::clone(&processed_tenants),
     };
 
-    let mut pending: VecDeque<UnifiedQueueItem> = items.into();
-    let mut in_flight: FuturesUnordered<
-        tokio::task::JoinHandle<()>,
-    > = FuturesUnordered::new();
-    let mut cancelled = false;
-
-    while !pending.is_empty() || !in_flight.is_empty() {
-        if cancellation_token.is_cancelled() {
-            if !cancelled {
-                warn!(
-                    "Shutdown requested during item processing — draining {} in-flight, re-leasing {} pending",
-                    in_flight.len(),
-                    pending.len()
-                );
-                cancelled = true;
-                if !pending.is_empty() {
-                    let pending_slice: Vec<UnifiedQueueItem> = pending.drain(..).collect();
-                    re_lease_pending(queue_manager, &pending_slice).await;
-                }
-            }
-        }
-
-        if !cancelled && !pending.is_empty() && check_memory_pressure(config).await {
-            // Re-lease ALL pending items (F-044) so they return to pending
-            // instead of being stuck in_progress until lease expiry. In-flight
-            // items drain to completion below.
-            let pending_slice: Vec<UnifiedQueueItem> = pending.drain(..).collect();
-            re_lease_pending(queue_manager, &pending_slice).await;
-            // Match the legacy 10s back-off inside the batch so the next
-            // dispatch cycle does not retry immediately. The outer
-            // `handle_memory_pressure` gate in run_poll_cycle re-checks RSS
-            // before the next dequeue.
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        }
-
-        // Dispatch as many items as the semaphore allows.
-        while !cancelled && !pending.is_empty() {
-            let permit = match Arc::clone(&item_semaphore).try_acquire_owned() {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-            let item = pending.pop_front().expect("pending non-empty guarded above");
-            let deps_clone = deps.clone();
-            // Spawn a task so its panic boundary is local to the item and the
-            // task remains pollable through FuturesUnordered even when the
-            // outer scope yields elsewhere.
-            in_flight.push(tokio::spawn(process_one_item_owned(item, permit, deps_clone)));
-        }
-
-        if in_flight.is_empty() {
-            break;
-        }
-
-        // Await the next completion. We use FuturesUnordered::next; on
-        // cancellation we still want to drain in-flight to avoid half-applied
-        // SQLite state, so we do NOT bail out on cancel here.
-        match in_flight.next().await {
-            Some(Ok(())) => {}
-            Some(Err(join_err)) => {
-                if join_err.is_panic() {
-                    error!("Spawned item future panicked: {}", join_err);
-                } else {
-                    debug!("Spawned item future cancelled at runtime: {}", join_err);
-                }
-            }
-            None => break,
-        }
-
-        if !cancelled {
+    let deps_for_spawn = deps.clone();
+    let cancelled = run_dispatch_loop(
+        items,
+        Arc::clone(&item_semaphore),
+        queue_manager,
+        cancellation_token,
+        |item, permit| {
+            let d = deps_for_spawn.clone();
+            tokio::spawn(process_one_item_owned(item, permit, d))
+        },
+        || async { UnifiedQueueProcessor::check_memory_pressure(config.max_memory_percent).await },
+        || async {
             apply_inter_dispatch_delay(config, warmup_state, resource_profile_rx).await;
-        }
-    }
+        },
+        config.max_memory_percent,
+    )
+    .await;
 
     if cancelled {
         return Err(());
@@ -255,42 +200,6 @@ async fn process_one_item_owned(
             handle_item_failure(&item, e, start_time, &deps).await;
         }
     }
-}
-
-/// Check memory pressure, returning `true` if the batch should pause.
-async fn check_memory_pressure(config: &UnifiedProcessorConfig) -> bool {
-    if !UnifiedQueueProcessor::check_memory_pressure(config.max_memory_percent).await {
-        return false;
-    }
-
-    warn!(
-        "Memory pressure during batch processing (<{}% available), pausing remaining items",
-        100u8.saturating_sub(config.max_memory_percent)
-    );
-    true
-}
-
-/// Re-lease the given items so they return to pending (F-044).
-///
-/// Without this, items leased as part of the batch but not yet processed would
-/// remain `in_progress` until their lease expires, blocking other workers.
-async fn re_lease_pending(queue_manager: &QueueManager, items: &[UnifiedQueueItem]) {
-    if items.is_empty() {
-        return;
-    }
-    let count = items.len();
-    let mut failures = 0;
-    for item in items {
-        if let Err(e) = queue_manager.re_lease_item(&item.queue_id, 30).await {
-            warn!(queue_id = %item.queue_id, "Failed to re-lease pending item: {}", e);
-            failures += 1;
-        }
-    }
-    info!(
-        total = count,
-        released = count - failures,
-        "Re-leased pending batch items"
-    );
 }
 
 /// Apply inter-dispatch delay based on warmup state, adaptive profile, or config default.
