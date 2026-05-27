@@ -140,19 +140,11 @@ pub(super) async fn process_batch(
         return Err(());
     }
 
-    // All spawned futures have completed by the time we reach here, so the
-    // only strong references should be ours and `deps.processed_tenants`.
-    // `deps` is dropped now so the only reference is `processed_tenants`.
-    drop(deps);
-    let drained = match Arc::try_unwrap(processed_tenants) {
-        Ok(m) => m.into_inner(),
-        Err(arc) => {
-            // Defensive fallback: clone via async lock if a stray Arc still
-            // exists. Shouldn't happen in practice — spawned tasks are
-            // joined above so they no longer hold deps clones.
-            arc.lock().await.clone()
-        }
-    };
+    // Spawned tasks have all completed by this point. The outer `deps` and
+    // the spawn closure's captured `deps_for_spawn` still hold Arc clones to
+    // `processed_tenants`, so we read it through the mutex rather than
+    // try_unwrap (which would always fall through to the lock path anyway).
+    let drained = processed_tenants.lock().await.clone();
     Ok(drained)
 }
 
