@@ -106,6 +106,15 @@ Every watch folder the daemon knows about, regardless of activity
 state:
 
 - **Project** — path the daemon is watching.
+- **Indexing** — per-project progress bar plus `<in_flight> in flight ·
+  <done>/<total> · <percent>%`. The bar pulses while items are pending
+  or in progress, turns solid green when the queue is drained, and goes
+  amber when `failed > 0`. When the daemon doesn't report a value (for
+  example right after registration before the first reconcile), the
+  cell shows `—` instead of guessing. The snapshot route enriches every
+  registered project with this data in parallel via
+  `GetProjectStatus`; per-project failures degrade gracefully and don't
+  blank the whole row.
 - **Tenant ID** — the project's `tenant_id` (e.g. `local_5288aa13ad6c`
   for path-derived or a 12-char hex for remote-derived). Stable
   across worktrees of the same repo when a remote is configured.

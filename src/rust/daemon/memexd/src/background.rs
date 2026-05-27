@@ -146,6 +146,9 @@ pub fn start_queue_depth_exporter(pool: SqlitePool) -> JoinHandle<()> {
         let known_pairs: std::sync::Arc<
             tokio::sync::Mutex<std::collections::HashSet<(String, String)>>,
         > = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
+        let known_tenant_pairs: std::sync::Arc<
+            tokio::sync::Mutex<std::collections::HashSet<(String, String)>>,
+        > = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
         loop {
             interval.tick().await;
             match manager.get_unified_queue_depth_by_type_status().await {
@@ -166,6 +169,24 @@ pub fn start_queue_depth_exporter(pool: SqlitePool) -> JoinHandle<()> {
                     guard.extend(seen);
                 }
                 Err(e) => debug!("queue depth refresh failed: {}", e),
+            }
+            // Per-tenant indexing-progress gauge (Grafana / MCP indexing block).
+            match manager.get_unified_queue_depth_by_tenant_status().await {
+                Ok(rows) => {
+                    let mut seen = std::collections::HashSet::new();
+                    for (tenant_id, status, count) in rows {
+                        METRICS.set_unified_queue_depth_by_tenant(&tenant_id, &status, count);
+                        seen.insert((tenant_id, status));
+                    }
+                    let mut guard = known_tenant_pairs.lock().await;
+                    for pair in guard.iter() {
+                        if !seen.contains(pair) {
+                            METRICS.set_unified_queue_depth_by_tenant(&pair.0, &pair.1, 0);
+                        }
+                    }
+                    guard.extend(seen);
+                }
+                Err(e) => debug!("per-tenant queue depth refresh failed: {}", e),
             }
             match manager.get_unified_queue_stats().await {
                 Ok(stats) => METRICS.set_unified_queue_stale_items(stats.stale_leases),

@@ -97,6 +97,24 @@ export interface SearchResult {
   graph_context?: GraphContext;
 }
 
+/**
+ * Per-project indexing-progress block attached to project-scoped search
+ * responses while the daemon's queue is still draining.
+ *
+ * `pending` + `in_progress` + `failed` come from `unified_queue`; `done`
+ * is the durable count from `tracked_files`. `percent` is `done / total *
+ * 100`, capped at 100.0. We only attach this when `(pending + in_progress)
+ * > 0` so a fully indexed project doesn't pay the noise cost.
+ */
+export interface IndexingProgress {
+  pending: number;
+  in_progress: number;
+  failed: number;
+  done: number;
+  total: number;
+  percent: number;
+}
+
 export interface SearchResponse {
   results: SearchResult[];
   total: number;
@@ -106,6 +124,9 @@ export interface SearchResponse {
   collections_searched: string[];
   status?: 'ok' | 'uncertain';
   status_reason?: string;
+  /** Attached only when `scope === 'project'` and the daemon queue
+   *  still has work for the current tenant. Absent otherwise. */
+  indexing?: IndexingProgress;
 }
 
 /**

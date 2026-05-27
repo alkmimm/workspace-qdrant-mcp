@@ -343,6 +343,76 @@
           }
         }
       ]
+    },
+    { "id": 500, "type": "row", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 49 }, "title": "Indexing progress (per tenant)", "collapsed": false },
+    {
+      "id": 501,
+      "title": "Total in-flight (pending + in_progress)",
+      "description": "Sum of unified_queue items across all tenants that are still pending or in progress. When this is 0, every registered project is fully indexed.",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 100 }, { "color": "red", "value": 1000 }] }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(memexd_unified_queue_depth_by_tenant{status=~\"pending|in_progress\"}) or vector(0)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 502,
+      "title": "Per-tenant queue depth (stacked by status)",
+      "description": "Live snapshot of unified_queue items per tenant_id, split by status (pending / in_progress / failed). Sustained growth on one tenant = that project's indexing isn't keeping up.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 10, "x": 4, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 15,
+            "stacking": { "mode": "normal" }
+          }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (tenant_id, status) (memexd_unified_queue_depth_by_tenant)",
+          "legendFormat": "{{tenant_id}} / {{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 503,
+      "title": "Top 10 tenants by pending items",
+      "description": "Snapshot of the tenants with the most still-pending items in unified_queue. Use to identify which project needs attention when /metrics shows growing backlog.",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 500 }] }
+        }
+      },
+      "options": { "displayMode": "lcd", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "topk(10, sum by (tenant_id) (memexd_unified_queue_depth_by_tenant{status=\"pending\"}))",
+          "legendFormat": "{{tenant_id}}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
@@ -355,6 +425,6 @@
   "timezone": "",
   "title": "WQM — memexd Daemon",
   "uid": "wqm-memexd",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

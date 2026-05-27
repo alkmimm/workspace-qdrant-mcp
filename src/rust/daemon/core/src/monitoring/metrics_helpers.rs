@@ -236,6 +236,16 @@ impl DaemonMetrics {
             .set(depth);
     }
 
+    /// Set per-tenant unified queue depth for a given status.
+    ///
+    /// Drives the Grafana indexing-progress panel and the MCP search-time
+    /// `indexing` block. Refreshed every 10s by `start_queue_depth_exporter`.
+    pub fn set_unified_queue_depth_by_tenant(&self, tenant_id: &str, status: &str, depth: i64) {
+        self.unified_queue_depth_by_tenant
+            .with_label_values(&[tenant_id, status])
+            .set(depth);
+    }
+
     /// Record unified queue item processed
     pub fn unified_queue_item_processed(
         &self,

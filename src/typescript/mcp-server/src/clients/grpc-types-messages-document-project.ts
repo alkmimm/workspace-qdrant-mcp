@@ -82,6 +82,15 @@ export interface GetProjectStatusResponse {
   last_active?: { seconds: number; nanos: number };
   registered_at?: { seconds: number; nanos: number };
   git_remote?: string;
+  is_worktree?: boolean;
+  main_worktree_path?: string;
+  // Indexing-progress block (filled by daemon's project_service).
+  pending_count?: number;
+  in_progress_count?: number;
+  failed_count?: number;
+  done_count?: number;
+  total_count?: number;
+  percent_complete?: number;
 }
 
 export interface ListProjectsRequest {

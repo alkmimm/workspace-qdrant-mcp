@@ -380,6 +380,84 @@ The `uncertain` status indicates that:
 - Memory rules may be stale
 - The user should be aware results might be incomplete
 
+### Indexing-Progress Block
+
+When `scope === "project"` and the current tenant is resolvable, every
+`search` response carries an `indexing` block sourced from the daemon's
+`GetProjectStatus` RPC. The block lets callers tell "the queue is still
+draining" apart from "results are complete" — without it, an early
+search of a freshly-registered project returns zero hits with no
+explanation.
+
+```json
+{
+  "results": [...],
+  "total": 10,
+  "indexing": {
+    "pending": 1842,
+    "in_progress": 4,
+    "failed": 0,
+    "done": 318,
+    "total": 2164,
+    "percent": 14.7
+  }
+}
+```
+
+Field semantics:
+
+| Field         | Source                                 | Meaning                                  |
+| ------------- | -------------------------------------- | ---------------------------------------- |
+| `pending`     | `unified_queue` (`status='pending'`)   | enqueued but not started                 |
+| `in_progress` | `unified_queue` (`status='in_progress'`) | being processed right now              |
+| `failed`      | `unified_queue` (`status='failed'`)    | hit terminal failure; will retry / skip  |
+| `done`        | `tracked_files` (durable)              | persisted across queue cleanup           |
+| `total`       | sum of the four above                  | denominator for `percent`                |
+| `percent`     | `done / total * 100`                   | `100.0` when total = 0                   |
+
+The MCP caches `GetProjectStatus` per `tenant_id` for ~1500 ms so a burst
+of searches doesn't fan out to gRPC each time. The block is **omitted** —
+not zeroed — when the daemon is unreachable or the project is unknown,
+so callers can treat absence as "no signal" rather than "indexed".
+
+For an on-demand probe outside of search, use the
+[`workspace_index` action `indexing_status`](#workspace_index-indexing_status)
+or query the Grafana dashboard "Indexing progress (per tenant)" section
+backed by `memexd_unified_queue_depth_by_tenant{tenant_id,status}`.
+
+### workspace_index `indexing_status` action
+
+A dedicated read-only action that returns the indexing block plus a
+human-readable summary. Useful for diagnostics in the dockerized MCP
+container where `wqm` is not on PATH.
+
+```typescript
+workspace_index({ action: "indexing_status", projectId?: string })
+```
+
+When `projectId` is omitted, the action falls back to the first active
+project reported by the daemon's `ListProjects`. Response shape:
+
+```json
+{
+  "success": true,
+  "action": "indexing_status",
+  "project_id": "5288aa13ad6c",
+  "project_name": "workspace-qdrant-mcp",
+  "project_root": "/run/desktop/mnt/host/c/Users/...",
+  "is_active": true,
+  "indexing": {
+    "pending": 1842,
+    "in_progress": 4,
+    "failed": 0,
+    "done": 318,
+    "total": 2164,
+    "percent": 14.7
+  },
+  "summary": "Indexing in progress: 1846 files in flight, 318/2164 done (14.7%)"
+}
+```
+
 ### Removed/Automated Features
 
 The following are **not exposed as MCP tools**:
