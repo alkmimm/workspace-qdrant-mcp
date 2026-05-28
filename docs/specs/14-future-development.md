@@ -677,6 +677,16 @@ Surfaced by a 2026-05-28 round-2 audit. **Already removed:** dead `lib.rs` modul
 - [ ] `docs/GRPC_API.md` — stale "4 services / 20 RPCs" (actual: 7 core + 5 write services) + Python client example; referenced from `EXAMPLES.md`, `CHANGELOG.md`. Refresh, or fold into `specs/08-api-reference.md`.
 - [ ] `docs/MIGRATION.md` + `docs/PHASE1_MIGRATION_GUIDE.md` — historical migration guides (Python 3.10+ prereq); referenced from `CHANGELOG.md` / `TROUBLESHOOTING.md`. If removed, fix those links first.
 
+### H. Round-4 docs consolidation (2026-05-28)
+
+**Removed (Tier A — orphaned/stale):** `EXAMPLES.md`, `FUNCTIONAL_TESTING_GUIDE.md`, `BENCHMARK_FILE_INGESTION.md`, `DOCUMENTATION_FRAMEWORK_GUIDE.md`, `docs/SECURITY.md`, `collection_types/`. **Removed (Tier B — with link repoints):** `docs/architecture/*` (12, unbuilt context-injector PRD), `API.md`, `CLI.md`, `claude_code_integration.md`. INDEX.md gaps filled (Guides & Operations section, specs 16/20/21, self-watch-loop runbook, cli-redesign plan).
+
+**Still pending:**
+
+- [ ] **`docs/TESTING.md`** — kept (no canonical replacement); refresh content for the Rust/TS toolchain (drop pytest/Python).
+- [ ] **Tier C — unify:** fold `QUEUE_SCHEMA.md` into `specs/04-write-path.md` and `METRICS.md` into `specs/09-search-instrumentation.md` (migrate live content, then delete + repoint `LSP_INTEGRATION.md`).
+- [ ] **`scripts/install-claude-hooks.sh`** — Python-era installer (`python -m workspace_qdrant_mcp.http_server`); superseded by `wqm init hooks install`. Evaluate for removal.
+
 ---
 
 ## Related Documents
