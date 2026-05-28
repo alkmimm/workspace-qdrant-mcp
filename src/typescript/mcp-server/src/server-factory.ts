@@ -13,6 +13,7 @@ import { StoreTool } from './tools/store.js';
 import { GrepTool } from './tools/grep.js';
 import { ListFilesTool } from './tools/list-files/index.js';
 import type { ServerConfig } from './types/index.js';
+import { DEFAULT_CONFIG } from './types/generated-defaults.js';
 
 export interface ServerComponents {
   daemonClient: DaemonClient;
@@ -30,7 +31,7 @@ export interface ServerComponents {
 
 /** Build Qdrant config, conditionally including API key for exactOptionalPropertyTypes. */
 function buildQdrantConfig(config: ServerConfig): { qdrantUrl: string; qdrantApiKey?: string } {
-  const qdrantUrl = config.qdrant?.url ?? 'http://localhost:6333';
+  const qdrantUrl = config.qdrant?.url ?? DEFAULT_CONFIG.qdrant.url;
   const result: { qdrantUrl: string; qdrantApiKey?: string } = { qdrantUrl };
   if (config.qdrant?.apiKey) result.qdrantApiKey = config.qdrant.apiKey;
   return result;
@@ -45,7 +46,7 @@ function createTools(
   config: ServerConfig
 ) {
   const searchTool = new SearchTool(qdrantConfig, daemonClient, stateManager, projectDetector);
-  const retrieveTool = new RetrieveTool(qdrantConfig, projectDetector);
+  const retrieveTool = new RetrieveTool(qdrantConfig, projectDetector, daemonClient);
   const rulesConfig: { qdrantUrl: string; qdrantApiKey?: string; duplicationThreshold?: number } = {
     ...qdrantConfig,
   };

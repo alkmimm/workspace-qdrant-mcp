@@ -8,13 +8,15 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { basename, join, resolve as resolvePath } from 'node:path';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 
 import type { AuthConfig } from '../auth-middleware.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
+import mcpPublicConfig from '../constants/mcp-public-config.json' with { type: 'json' };
+import { DEFAULT_HTTP_PORT } from '../server-types.js';
 import { logError, logInfo } from '../utils/logger.js';
 
 import { scanForGitProjects, type ProjectCandidate } from './discovery.js';
@@ -111,16 +113,26 @@ const handleSnapshot: RouteHandler = async (_req, res, { daemonClient, stateMana
   // and is the only process that can read it through bind mounts on
   // Docker Desktop. gRPC avoids the SQLITE_CANTOPEN failures we'd hit
   // pointing better-sqlite3 at a 9P-mounted state.db.
-  let registered: Array<{
+  interface RegisteredProject {
     tenantId: string;
     path: string;
     remoteUrl: string;
     isActive: boolean;
     lastActivityAt: string | null;
-  }> = [];
+    indexing: {
+      pending: number;
+      in_progress: number;
+      failed: number;
+      done: number;
+      total: number;
+      percent: number;
+      eta_seconds?: number;
+    } | null;
+  }
+  let registered: RegisteredProject[] = [];
   try {
     const listResp = await daemonClient.listProjects({});
-    registered = (listResp.projects ?? []).map((p) => ({
+    const base: RegisteredProject[] = (listResp.projects ?? []).map((p) => ({
       tenantId: p.project_id,
       path: p.project_root,
       remoteUrl: '',
@@ -128,7 +140,31 @@ const handleSnapshot: RouteHandler = async (_req, res, { daemonClient, stateMana
       lastActivityAt: p.last_active
         ? new Date(p.last_active.seconds * 1000).toISOString()
         : null,
+      indexing: null,
     }));
+
+    // Enrich each project with per-tenant indexing progress, in parallel.
+    // Falls back to `null` on per-project error so the dashboard can render
+    // the row without the progress bar instead of blanking the whole page.
+    const progressResults = await Promise.allSettled(
+      base.map((proj) => daemonClient.getProjectStatus({ project_id: proj.tenantId }))
+    );
+    progressResults.forEach((result, idx) => {
+      const proj = base[idx];
+      if (!proj || result.status !== 'fulfilled' || !result.value.found) return;
+      const s = result.value;
+      const indexing: NonNullable<RegisteredProject['indexing']> = {
+        pending: s.pending_count ?? 0,
+        in_progress: s.in_progress_count ?? 0,
+        failed: s.failed_count ?? 0,
+        done: s.done_count ?? 0,
+        total: s.total_count ?? 0,
+        percent: s.percent_complete ?? 100,
+      };
+      if (typeof s.eta_seconds === 'number') indexing.eta_seconds = s.eta_seconds;
+      proj.indexing = indexing;
+    });
+    registered = base;
   } catch {
     // Daemon offline / not yet started — leave the list empty.
     registered = [];
@@ -408,6 +444,15 @@ const handleInstallHooks: RouteHandler = async (req, res) => {
     '--hooks-dir',
     join(repoRoot, '.wqm-fork', 'git-hooks'),
   ];
+  // When the MCP runs in a container, install.sh sees its own path under the
+  // bind mount (e.g. `/run/desktop/...`), but the generated hooks must embed
+  // a path the host shell can execute. Forwarding the dev-root pair lets
+  // install.sh translate the prefix before writing the hooks.
+  const hostDevRoot = process.env['WQM_HOST_DEV_ROOT'];
+  const containerDevRoot = process.env['WQM_DEV_ROOT'];
+  if (hostDevRoot && containerDevRoot) {
+    args.push('--host-dev-root', hostDevRoot, '--container-dev-root', containerDevRoot);
+  }
   if (useForce) args.push('--force');
 
   await new Promise<void>((resolveOp) => {
@@ -434,6 +479,127 @@ const handleInstallHooks: RouteHandler = async (req, res) => {
   });
 };
 
+// ── /api/ignore/global — read + write global.wqmignore ──────────────────────
+
+/**
+ * Resolve the directory that holds daemon state files (global.wqmignore,
+ * memexd.db, …). Derived from `WQM_DATABASE_PATH` so both the daemon and
+ * the MCP server agree on the location regardless of deployment mode.
+ */
+function getStateDirForIgnore(): string | null {
+  const dbPath = process.env['WQM_DATABASE_PATH'];
+  if (!dbPath) return null;
+  return dirname(dbPath);
+}
+
+const handleGetGlobalIgnore: RouteHandler = async (_req, res) => {
+  const stateDir = getStateDirForIgnore();
+  if (!stateDir) {
+    writeError(res, 500, 'WQM_DATABASE_PATH not set — cannot locate global.wqmignore');
+    return;
+  }
+  const ignoreFile = join(stateDir, 'global.wqmignore');
+  const content = existsSync(ignoreFile) ? readFileSync(ignoreFile, 'utf-8') : '';
+  writeJson(res, 200, { content, path: ignoreFile });
+};
+
+const handlePutGlobalIgnore: RouteHandler = async (req, res) => {
+  const body = await readJsonBody(req);
+  if (typeof body['content'] !== 'string') {
+    writeError(res, 400, '`content` (string) is required');
+    return;
+  }
+  const content = body['content'] as string;
+  const stateDir = getStateDirForIgnore();
+  if (!stateDir) {
+    writeError(res, 500, 'WQM_DATABASE_PATH not set — cannot locate global.wqmignore');
+    return;
+  }
+  const ignoreFile = join(stateDir, 'global.wqmignore');
+  try {
+    writeFileSync(ignoreFile, content, 'utf-8');
+  } catch (err) {
+    logError('admin global.wqmignore write failed', err, { ignoreFile });
+    writeError(res, 500, 'write failed', err instanceof Error ? err.message : String(err));
+    return;
+  }
+  logInfo('admin global.wqmignore updated', { bytes: content.length, path: ignoreFile });
+  writeJson(res, 200, { ok: true, bytes: content.length, path: ignoreFile });
+};
+
+// ── /api/ignore/reapply — re-run ignore reconciliation without restart ──────
+
+/**
+ * Calls `AdminWriteService.ReapplyIgnoreRules` over gRPC. After editing
+ * `global.wqmignore` the user can click "Reapply ignore" to enqueue
+ * file/delete for newly-excluded paths and file/add for newly-included
+ * paths, without waiting for a daemon restart or a per-project ignore
+ * touch.
+ */
+const handleReapplyIgnore: RouteHandler = async (_req, res, { daemonClient }) => {
+  try {
+    const response = await daemonClient.reapplyIgnoreRules();
+    logInfo('admin reapply ignore rules', {
+      projects: response.projects_processed,
+      stale_deleted: response.stale_deleted,
+      missing_added: response.missing_added,
+    });
+    writeJson(res, 200, {
+      ok: true,
+      projectsProcessed: response.projects_processed,
+      staleDeleted: response.stale_deleted,
+      missingAdded: response.missing_added,
+    });
+  } catch (error) {
+    logError('admin reapply ignore rules failed', error, {});
+    writeError(
+      res,
+      502,
+      'reapply ignore rules failed',
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+};
+
+// ── /api/watches/pause + /resume — per-watch pause/resume ───────────────────
+
+interface WatchActionRequest {
+  /** Watch ID, ID prefix, or filesystem path. */
+  watchId: string;
+}
+
+const handleWatchPause: RouteHandler = async (req, res, { daemonClient }) => {
+  const body = (await readJsonBody(req)) as Partial<WatchActionRequest>;
+  const watchId = body.watchId;
+  if (!watchId || typeof watchId !== 'string') {
+    writeError(res, 400, 'watchId required');
+    return;
+  }
+  try {
+    const response = await daemonClient.pauseWatch({ watch_id: watchId });
+    writeJson(res, 200, { ok: true, affectedCount: response.affected_count });
+  } catch (error) {
+    logError('admin watch pause failed', error, { watchId });
+    writeError(res, 502, 'pause failed', error instanceof Error ? error.message : String(error));
+  }
+};
+
+const handleWatchResume: RouteHandler = async (req, res, { daemonClient }) => {
+  const body = (await readJsonBody(req)) as Partial<WatchActionRequest>;
+  const watchId = body.watchId;
+  if (!watchId || typeof watchId !== 'string') {
+    writeError(res, 400, 'watchId required');
+    return;
+  }
+  try {
+    const response = await daemonClient.resumeWatch({ watch_id: watchId });
+    writeJson(res, 200, { ok: true, affectedCount: response.affected_count });
+  } catch (error) {
+    logError('admin watch resume failed', error, { watchId });
+    writeError(res, 502, 'resume failed', error instanceof Error ? error.message : String(error));
+  }
+};
+
 // ── /api/settings — read + write the JSON settings file ─────────────────────
 
 const handleGetSettings: RouteHandler = async (_req, res) => {
@@ -455,6 +621,112 @@ const handlePutSettings: RouteHandler = async (req, res) => {
   writeJson(res, 200, next);
 };
 
+// ── /api/config/clients — generate client config snippets ───────────────────
+
+const handleGetClientConfigs: RouteHandler = async (_req, res) => {
+  const port = process.env['MCP_HTTP_PORT'] ?? String(DEFAULT_HTTP_PORT);
+  const token = process.env['MCP_HTTP_TOKEN'] ?? '';
+  const mcpUrl = `http://localhost:${port}/mcp`;
+
+  const claudeConfig = {
+    mcpServers: {
+      'workspace-qdrant': {
+        command: 'npx',
+        args: ['mcp-remote', mcpUrl, '--header', `Authorization: Bearer ${token}`],
+      },
+    },
+  };
+
+  const claudeHttpConfig = {
+    mcpServers: {
+      'workspace-qdrant': {
+        url: mcpUrl,
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    },
+  };
+
+  // All Codex-related defaults (tool list + timeouts) come from
+  // src/constants/mcp-public-config.json. Do not hardcode here — see file header.
+  const toolsToml = mcpPublicConfig.publicTools.map((t) => `"${t}"`).join(', ');
+  const codexConfig = [
+    `# workspace-qdrant MCP`,
+    `[mcp_servers.workspace-qdrant]`,
+    `url = "${mcpUrl}"`,
+    `bearer_token_env_var = "MCP_HTTP_TOKEN"`,
+    `startup_timeout_sec = ${mcpPublicConfig.codex.startup_timeout_sec}`,
+    `tool_timeout_sec = ${mcpPublicConfig.codex.tool_timeout_sec}`,
+    `required = true`,
+    `enabled_tools = [${toolsToml}]`,
+  ].join('\n');
+
+  writeJson(res, 200, {
+    claudeDesktop: {
+      mcp_remote: JSON.stringify(claudeConfig, null, 2),
+      http_native: JSON.stringify(claudeHttpConfig, null, 2),
+    },
+    codex: codexConfig,
+    mcpUrl,
+    port,
+    hasToken: !!token,
+  });
+};
+
+// ── /api/logs/mcp — tail the MCP server JSONL log file ──────────────────────
+
+const handleGetMcpLogs: RouteHandler = async (req, res) => {
+  const url = new URL(req.url ?? '/', 'http://x');
+  const lines = Math.min(parseInt(url.searchParams.get('lines') ?? '100', 10), 500);
+
+  const logDir = process.env['WQM_LOG_DIR'] ?? null;
+  if (!logDir || !existsSync(logDir)) {
+    writeJson(res, 200, { lines: [], note: 'Log directory not found' });
+    return;
+  }
+
+  let logFile: string | null = null;
+  try {
+    const files = readdirSync(logDir)
+      .filter(f => f.startsWith('mcp-server') && f.endsWith('.jsonl'))
+      .map(f => ({ name: f, mtime: statSync(join(logDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    if (files.length > 0 && files[0]) logFile = join(logDir, files[0].name);
+  } catch { /* ignore */ }
+
+  if (!logFile || !existsSync(logFile)) {
+    writeJson(res, 200, { lines: [], note: 'No log file found' });
+    return;
+  }
+
+  try {
+    const content = readFileSync(logFile, 'utf-8');
+    const allLines = content.split('\n').filter(l => l.trim());
+    const tail = allLines.slice(-lines);
+    const parsed = tail.map(l => {
+      try { return JSON.parse(l); } catch { return { msg: l }; }
+    });
+    writeJson(res, 200, { lines: parsed, file: logFile, total: allLines.length });
+  } catch (err) {
+    writeError(res, 500, 'read failed', err instanceof Error ? err.message : String(err));
+  }
+};
+
+// ── /api/daemon/raw-health — proxy to memexd metrics /health ────────────────
+
+const handleDaemonRawHealth: RouteHandler = async (_req, res) => {
+  const metricsHost = process.env['WQM_DAEMON_METRICS_HOST'] ?? 'memexd';
+  const metricsPort = process.env['WQM_DAEMON_METRICS_PORT'] ?? '9091';
+  try {
+    const resp = await fetch(`http://${metricsHost}:${metricsPort}/health`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    const text = await resp.text();
+    writeJson(res, 200, { ok: resp.ok, statusCode: resp.status, body: text });
+  } catch (err) {
+    writeJson(res, 200, { ok: false, reason: err instanceof Error ? err.message : String(err) });
+  }
+};
+
 // ── Route table ──────────────────────────────────────────────────────────────
 
 type Route = { method: string; path: string; handler: RouteHandler };
@@ -468,6 +740,14 @@ const ROUTES: ReadonlyArray<Route> = [
   { method: 'POST', path: '/admin/api/hooks/install', handler: handleInstallHooks },
   { method: 'GET', path: '/admin/api/settings', handler: handleGetSettings },
   { method: 'PUT', path: '/admin/api/settings', handler: handlePutSettings },
+  { method: 'GET', path: '/admin/api/ignore/global', handler: handleGetGlobalIgnore },
+  { method: 'PUT', path: '/admin/api/ignore/global', handler: handlePutGlobalIgnore },
+  { method: 'POST', path: '/admin/api/ignore/reapply', handler: handleReapplyIgnore },
+  { method: 'POST', path: '/admin/api/watches/pause', handler: handleWatchPause },
+  { method: 'POST', path: '/admin/api/watches/resume', handler: handleWatchResume },
+  { method: 'GET', path: '/admin/api/config/clients', handler: handleGetClientConfigs },
+  { method: 'GET', path: '/admin/api/logs/mcp', handler: handleGetMcpLogs },
+  { method: 'GET', path: '/admin/api/daemon/raw-health', handler: handleDaemonRawHealth },
 ];
 
 /**

@@ -473,6 +473,21 @@ message GetProjectStatusResponse {
     optional string git_remote = 9;
     bool is_worktree = 10;                        // True if this is a worktree watch root
     optional string main_worktree_path = 11;      // [canonical] Path to the main working tree (if worktree)
+    // Indexing progress (per-tenant counts). `done_count` is sourced from
+    // `tracked_files` (durable across queue cleanup); the in-flight counters
+    // come from `unified_queue`. `percent_complete` is 100.0 when total == 0.
+    int64 pending_count = 12;                     // unified_queue rows in 'pending'
+    int64 in_progress_count = 13;                 // unified_queue rows in 'in_progress'
+    int64 failed_count = 14;                      // unified_queue rows in 'failed'
+    int64 done_count = 15;                        // tracked_files rows for this tenant
+    int64 total_count = 16;                       // pending + in_progress + failed + done
+    double percent_complete = 17;                 // done / total * 100; 100.0 when total == 0
+    // Estimated seconds until in-flight queue drains, derived from the rate
+    // at which `tracked_files.updated_at` advances over a rolling window.
+    // Unset (= 0 sentinel + has_eta_seconds=false) during cold-start
+    // (< 60s of data) or when the rate is 0 with pending > 0 — callers
+    // must render "warming up" / "unknown" instead of fabricating a value.
+    optional int64 eta_seconds = 18;
 }
 
 // ListProjects Request/Response
@@ -584,6 +599,13 @@ message TextSearchMatch {
     optional string branch = 5;                   // Branch name
     repeated string context_before = 6;           // Lines before the match
     repeated string context_after = 7;            // Lines after the match
+    // File size in bytes, when known. Populated for FTS5 results from
+    // file_metadata.size_bytes (search.db v7+) or from fs::metadata on
+    // the grep-searcher delegate path. Consumed by the MCP server's
+    // token-economy metric (spec 20 §3.2) to compute real `bytes_in`
+    // for grep. May be absent — the MCP server falls back to its
+    // per-file proxy in that case.
+    optional int64 file_size = 8;
 }
 
 // -----------------------------------------------------------------------------
@@ -819,6 +841,12 @@ service WatchWriteService {
     // Resume all paused watchers (set is_paused=0)
     rpc ResumeWatchers(google.protobuf.Empty) returns (WatchMutationResponse);
 
+    // Pause a specific watch folder (set is_paused=1)
+    rpc PauseWatch(WatchIdRequest) returns (WatchMutationResponse);
+
+    // Resume a specific watch folder (set is_paused=0)
+    rpc ResumeWatch(WatchIdRequest) returns (WatchMutationResponse);
+
     // Enable a specific watch folder
     rpc EnableWatch(WatchIdRequest) returns (WatchMutationResponse);
 
@@ -904,6 +932,13 @@ service AdminWriteService {
     // Trigger full re-embed pipeline (drain queue, recreate canonical
     // collections at settings.output_dim, re-enqueue all indexed sources).
     rpc TriggerReembed(TriggerReembedRequest) returns (TriggerReembedResponse);
+
+    // Reapply ignore rules across all active projects without restart.
+    // Iterates watch_folders with collection='projects' AND enabled=1,
+    // compares tracked_files against the current global+per-project ignore
+    // rules, enqueues file/delete for newly-excluded paths, file/add for
+    // newly-included paths.
+    rpc ReapplyIgnoreRules(google.protobuf.Empty) returns (ReapplyIgnoreRulesResponse);
 }
 
 // =============================================================================
@@ -1208,6 +1243,13 @@ message TriggerReembedResponse {
     uint32 rules_enqueued = 2;                        // Rules re-enqueued from rules_mirror
     uint32 scratchpad_enqueued = 3;                   // Scratchpad items re-enqueued
     string message = 4;
+}
+
+// ReapplyIgnoreRules Response
+message ReapplyIgnoreRulesResponse {
+    uint32 projects_processed = 1;                    // Number of active projects iterated
+    uint32 stale_deleted = 2;                         // Tracked files enqueued for deletion (newly ignored)
+    uint32 missing_added = 3;                         // Filesystem entries enqueued for indexing (newly included)
 }
 
 // GetEmbeddingProviderStatus Response
