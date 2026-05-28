@@ -20,6 +20,8 @@ export type {
   MetricsResponse,
   QueueStatsResponse,
   GetEmbeddingProviderStatusResponse,
+  RebuildIndexRequest,
+  RebuildIndexResponse,
   RefreshSignalRequest,
   ServerStatusNotification,
   CollectionConfig,

@@ -8,6 +8,8 @@ import type {
   MetricsResponse,
   QueueStatsResponse,
   GetEmbeddingProviderStatusResponse,
+  RebuildIndexRequest,
+  RebuildIndexResponse,
   RefreshSignalRequest,
   ServerStatusNotification,
   CreateCollectionRequest,
@@ -85,6 +87,10 @@ export interface SystemServiceClient {
   getQueueStats(
     request: Record<string, never>,
     callback: (error: Error | null, response: QueueStatsResponse) => void
+  ): void;
+  rebuildIndex(
+    request: RebuildIndexRequest,
+    callback: (error: Error | null, response: RebuildIndexResponse) => void
   ): void;
 }
 
@@ -241,9 +247,22 @@ export interface ReapplyIgnoreRulesResponse {
   missing_added: number;
 }
 
+export interface ReembedTenantRequest {
+  tenant_id: string;
+}
+
+export interface ReembedTenantResponse {
+  files_enqueued: number;
+  message: string;
+}
+
 export interface AdminWriteServiceClient {
   reapplyIgnoreRules(
     request: Record<string, never>,
     callback: (error: Error | null, response: ReapplyIgnoreRulesResponse) => void
+  ): void;
+  reembedTenant(
+    request: ReembedTenantRequest,
+    callback: (error: Error | null, response: ReembedTenantResponse) => void
   ): void;
 }
