@@ -6,6 +6,7 @@ import type {
   HealthCheckResponse,
   SystemStatusResponse,
   MetricsResponse,
+  QueueStatsResponse,
   GetEmbeddingProviderStatusResponse,
   RefreshSignalRequest,
   ServerStatusNotification,
@@ -80,6 +81,10 @@ export interface SystemServiceClient {
   getEmbeddingProviderStatus(
     request: Record<string, never>,
     callback: (error: Error | null, response: GetEmbeddingProviderStatusResponse) => void
+  ): void;
+  getQueueStats(
+    request: Record<string, never>,
+    callback: (error: Error | null, response: QueueStatsResponse) => void
   ): void;
 }
 
