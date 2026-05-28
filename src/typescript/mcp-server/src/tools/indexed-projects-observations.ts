@@ -419,6 +419,17 @@ export interface DaemonWatchListResult {
   source: 'daemon-grpc';
   total_count?: number;
   watches?: DaemonWatchInfo[];
+/**
+ * Daemon health snapshot sourced from SystemService.Health over gRPC.
+ * `ok` means the RPC succeeded (daemon reachable); `status` carries the
+ * daemon's own assessment (HEALTHY / DEGRADED / ...). On an unreachable
+ * daemon `ok` is false and `error` holds the gRPC failure message.
+ */
+export interface DaemonHealthResult {
+  ok: boolean;
+  source: 'daemon-grpc';
+  status?: string;
+  components?: Array<{ component: string; status: string; message: string }>;
   error?: string;
 }
 
@@ -449,6 +460,99 @@ export async function probeDaemonWatches(
         is_paused: w.is_paused,
         is_archived: w.is_archived,
       })),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      source: 'daemon-grpc',
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+ * Queue-depth snapshot sourced from SystemService.GetQueueStats over gRPC.
+ * The daemon reads its own SQLite (authoritative DB on the daemon volume), so
+ * counts are correct regardless of where the MCP server runs.
+ */
+export interface DaemonQueueResult {
+  ok: boolean;
+  source: 'daemon-grpc';
+  pending_count?: number;
+  in_progress_count?: number;
+  completed_count?: number;
+  failed_count?: number;
+  stale_items_count?: number;
+  by_item_type?: Record<string, number>;
+  by_collection?: Record<string, number>;
+  error?: string;
+}
+
+export interface Observation {
+  timestamp: string;
+  project: string;
+  root: string;
+  qdrant: QdrantProbe;
+  daemonTcp: TcpProbe;
+  wqmHealth: DaemonHealthResult;
+  queue: DaemonQueueResult;
+  branches: ObservationBranch[];
+}
+
+function serviceStatusLabel(value: number): string {
+  return ServiceStatus[value] ?? String(value);
+}
+
+/**
+ * Probe daemon health over gRPC (SystemService.Health). Never throws — an
+ * unreachable daemon yields `{ ok: false, error }` so the observation still
+ * serialises cleanly.
+ */
+async function probeDaemonHealth(
+  client: DaemonClient | null | undefined
+): Promise<DaemonHealthResult> {
+  if (!client) {
+    return { ok: false, source: 'daemon-grpc', error: 'daemon gRPC client unavailable' };
+  }
+  try {
+    const r = await client.healthCheck();
+    return {
+      ok: true,
+      source: 'daemon-grpc',
+      status: serviceStatusLabel(r.status),
+      components: (r.components ?? []).map((c) => ({
+        component: c.component_name,
+        status: serviceStatusLabel(c.status),
+        message: c.message,
+      })),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      source: 'daemon-grpc',
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Probe queue depth over gRPC (SystemService.GetQueueStats). Never throws.
+ */
+async function probeDaemonQueue(
+  client: DaemonClient | null | undefined
+): Promise<DaemonQueueResult> {
+  if (!client) {
+    return { ok: false, source: 'daemon-grpc', error: 'daemon gRPC client unavailable' };
+  }
+  try {
+    const r = await client.getQueueStats();
+    return {
+      ok: true,
+      source: 'daemon-grpc',
+      pending_count: r.pending_count,
+      in_progress_count: r.in_progress_count,
+      completed_count: r.completed_count,
+      failed_count: r.failed_count,
+      stale_items_count: r.stale_items_count,
+      by_item_type: r.by_item_type,
+      by_collection: r.by_collection,
     };
   } catch (err) {
     return {
