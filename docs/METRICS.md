@@ -252,8 +252,8 @@ The daemon serves the metrics on its Prometheus endpoint (default `http://127.0.
 # HELP queue_items_enqueued_total Total items enqueued by item_type and operation
 # TYPE queue_items_enqueued_total counter
 queue_items_enqueued_total 42
-queue_items_enqueued_total{item_type="file", op="ingest"} 35
-queue_items_enqueued_total{item_type="content", op="update"} 7
+queue_items_enqueued_total{item_type="file", op="add"} 35
+queue_items_enqueued_total{item_type="text", op="update"} 7
 
 # HELP queue_depth_current Current queue depth by status
 # TYPE queue_depth_current gauge
@@ -345,6 +345,4 @@ groups:
 
 4. **Track wait duration percentiles**: High p95/p99 wait times indicate bottlenecks even if average is acceptable.
 
-5. **Set up drift alerts during migration**: Queue drift should be zero after dual-write stabilization.
-
-6. **Review Grafana dashboard regularly**: The pre-built dashboard provides at-a-glance health monitoring.
+5. **Review Grafana dashboard regularly**: The pre-built dashboard provides at-a-glance health monitoring.

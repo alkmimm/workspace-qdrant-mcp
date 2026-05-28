@@ -674,7 +674,7 @@ Surfaced by a 2026-05-28 round-2 audit. **Already removed:** dead `lib.rs` modul
 **UPDATE, do NOT remove** (Python-era content but live-referenced — removing breaks links):
 
 - [ ] `docs/ARCHITECTURE.md` — Python-era ("FastMCP", "4 Tools", "DaemonClient Python gRPC Client") but referenced by `docs/reference/architecture.md`, `TROUBLESHOOTING.md`, `BACKUP_RESTORE.md`, `LSP_INTEGRATION.md`, `WATCH_QUEUE_HANDSHAKE.md`, `runbooks/qdrant-corruption.md`, and the Related Documents table below. It is the canonical visual-diagrams doc — refresh the content, don't delete.
-- [ ] `docs/GRPC_API.md` — stale "4 services / 20 RPCs" (actual: 7 core + 5 write services) + Python client example; referenced from `EXAMPLES.md`, `CHANGELOG.md`. Refresh, or fold into `specs/08-api-reference.md`.
+- [ ] `docs/GRPC_API.md` — stale "4 services / 20 RPCs" (actual: 7 core + 5 write services) + Python client example. Refresh, or fold into `specs/08-api-reference.md`.
 - [ ] `docs/MIGRATION.md` + `docs/PHASE1_MIGRATION_GUIDE.md` — historical migration guides (Python 3.10+ prereq); referenced from `CHANGELOG.md` / `TROUBLESHOOTING.md`. If removed, fix those links first.
 
 ### H. Round-4 docs consolidation (2026-05-28)
