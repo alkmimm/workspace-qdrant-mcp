@@ -26,6 +26,7 @@
 |----------|-------------|
 | [LSP Integration](LSP_INTEGRATION.md) | Per-project LSP setup and code-intelligence guide |
 | [Claude Code Hooks](CLAUDE_CODE_HOOKS.md) | CLI-based session-lifecycle hooks |
+| [Metrics](METRICS.md) | Prometheus metrics catalog and alerting rules |
 | [Troubleshooting](TROUBLESHOOTING.md) | Diagnostics and common issues |
 | [Backup & Restore](BACKUP_RESTORE.md) | Snapshot and restore procedures |
 | [OS Compatibility](OS_COMPATIBILITY.md) | Per-platform support matrix |

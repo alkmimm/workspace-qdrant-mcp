@@ -637,7 +637,7 @@ than bundled into the deletion. Line numbers are as-of-audit pointers.
 ### B. Legacy migration tooling (no users to migrate)
 
 - [ ] `scripts/phase3_cutover.sh` — cutover script that drops `ingestion_queue` / `content_ingestion_queue` (tables already gone; `unified_queue` is canonical).
-- [ ] Legacy-queue sections in `docs/MIGRATION.md` and `docs/QUEUE_SCHEMA.md`.
+- [ ] Legacy-queue section in `docs/MIGRATION.md` (`QUEUE_SCHEMA.md` was deleted — it duplicated and contradicted `specs/04-write-path.md`).
 
 ### C. Stale documentation
 
@@ -684,7 +684,7 @@ Surfaced by a 2026-05-28 round-2 audit. **Already removed:** dead `lib.rs` modul
 **Still pending:**
 
 - [ ] **`docs/TESTING.md`** — kept (no canonical replacement); refresh content for the Rust/TS toolchain (drop pytest/Python).
-- [ ] **Tier C — unify:** fold `QUEUE_SCHEMA.md` into `specs/04-write-path.md` and `METRICS.md` into `specs/09-search-instrumentation.md` (migrate live content, then delete + repoint `LSP_INTEGRATION.md`).
+- [x] **Tier C (done):** `QUEUE_SCHEMA.md` **deleted** — it was stale and contradicted `specs/04-write-path.md` (had a stored `priority` column, old item types, old idempotency format), so nothing was migrated. `METRICS.md` **kept + refreshed** — on inspection it is a broad, mostly-live Prometheus catalog (queue/tool/system/watch metrics) that does **not** fit folding into the search-only `specs/09`; dropped its dead "Dual-Write Migration" + Python-API sections and indexed it in INDEX.md.
 - [ ] **`scripts/install-claude-hooks.sh`** — Python-era installer (`python -m workspace_qdrant_mcp.http_server`); superseded by `wqm init hooks install`. Evaluate for removal.
 
 ---
