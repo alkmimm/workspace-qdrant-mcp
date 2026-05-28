@@ -25,6 +25,7 @@ pub mod fts_batch_processor;
 pub mod git;
 pub mod graph;
 pub mod grouping;
+pub mod indexing_progress;
 pub mod idle;
 pub mod idle_history;
 pub mod ignore_mtime;
@@ -115,7 +116,6 @@ pub use monitoring as logging;
 pub use monitoring as metrics;
 pub use monitoring as metrics_history;
 pub use monitoring as remote_monitor;
-pub use monitoring as tool_monitor;
 
 // ── Re-exports: core types ──────────────────────────────────────────────
 pub use crate::core_types::{
@@ -177,16 +177,11 @@ pub use crate::monitoring::{
     LoggingErrorMonitor,
     MetricsServer,
     MetricsSnapshot,
-    MonitoringError,
-    MonitoringResult,
     PerformanceMetrics,
     QueueContext,
-    RequeueStats,
     SearchContext,
     // Multi-tenant structured logging
     SessionContext,
-    // Tool monitor
-    ToolMonitor,
     METRICS,
 };
 pub use crate::patterns::{
@@ -206,7 +201,7 @@ pub use crate::queue_health::QueueProcessorHealth;
 pub use crate::queue_operations::{
     QueueError, QueueLoadLevel as QueueOpsLoadLevel, QueueManager, QueueThrottlingSummary,
 };
-pub use crate::queue_types::{MissingTool, ProcessorConfig};
+pub use crate::queue_types::ProcessorConfig;
 pub use crate::schema_version::{SchemaError, SchemaManager, CURRENT_SCHEMA_VERSION};
 pub use crate::search_db::{
     search_db_path_from_state, SearchDbError, SearchDbManager, SearchDbResult, SEARCH_DB_FILENAME,
@@ -261,13 +256,14 @@ pub use crate::storage::{
 };
 pub use crate::tree_sitter::{
     check_grammar_compatibility, create_grammar_manager, detect_language,
-    detect_language_with_overrides, extract_chunks, extract_chunks_with_provider, get_language,
-    get_static_language, is_language_available, is_language_supported, known_grammar_languages,
-    ChunkExtractor, ChunkType, CompatibilityStatus, DownloadError, GrammarCachePaths,
-    GrammarDownloader, GrammarError, GrammarInfo, GrammarLoader, GrammarManager, GrammarMetadata,
-    GrammarResult, GrammarSource, GrammarStatus, GrammarValidationResult, LanguageProvider,
-    LoadedGrammar, LoadedGrammarsProvider, RuntimeInfo, SemanticChunk, SemanticChunker,
-    StaticLanguageProvider, TreeSitterParser, VersionError,
+    detect_language_with_overrides, extract_chunks, extract_chunks_with_provider,
+    extract_chunks_with_provider_and_tokenizer, get_language, get_static_language,
+    is_language_available, is_language_supported, known_grammar_languages, ChunkExtractor,
+    ChunkType, CompatibilityStatus, DownloadError, GrammarCachePaths, GrammarDownloader,
+    GrammarError, GrammarInfo, GrammarLoader, GrammarManager, GrammarMetadata, GrammarResult,
+    GrammarSource, GrammarStatus, GrammarValidationResult, LanguageProvider, LoadedGrammar,
+    LoadedGrammarsProvider, RuntimeInfo, SemanticChunk, SemanticChunker, StaticLanguageProvider,
+    TreeSitterParser, VersionError,
 };
 pub use crate::type_aware_processor::{
     get_settings_for_type, CollectionTypeSettings, ConcurrentOperationTracker,

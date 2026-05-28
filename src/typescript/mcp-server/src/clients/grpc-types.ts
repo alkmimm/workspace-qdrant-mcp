@@ -18,7 +18,10 @@ export {
   type SystemStatusResponse,
   type Metric,
   type MetricsResponse,
+  type QueueStatsResponse,
   type GetEmbeddingProviderStatusResponse,
+  type RebuildIndexRequest,
+  type RebuildIndexResponse,
   type RefreshSignalRequest,
   type ServerStatusNotification,
   // CollectionService
@@ -45,6 +48,9 @@ export {
   type ListProjectsRequest,
   type ProjectInfo,
   type ListProjectsResponse,
+  type ListWatchesRequest,
+  type WatchInfo,
+  type ListWatchesResponse,
   type HeartbeatRequest,
   type HeartbeatResponse,
   // EmbeddingService
@@ -87,4 +93,11 @@ export type {
   GraphServiceClient,
   QueueWriteServiceClient,
   TrackingWriteServiceClient,
+  WatchWriteServiceClient,
+  AdminWriteServiceClient,
+  WatchIdRequest,
+  WatchMutationResponse,
+  ReapplyIgnoreRulesResponse,
+  ReembedTenantRequest,
+  ReembedTenantResponse,
 } from './grpc-types-clients.js';

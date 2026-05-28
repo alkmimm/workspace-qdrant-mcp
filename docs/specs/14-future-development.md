@@ -568,9 +568,94 @@ The capabilities being built form the foundation for a general-purpose knowledge
 
 **Note:** These defaults apply to fixed-size text chunking only. Tree-sitter semantic chunking uses natural code boundaries (functions, classes, methods) and has its own size limits (`DEFAULT_MAX_CHUNK_SIZE = 8000` estimated tokens).
 
+### Ignore Candidate Ranking — Phase 2: Cost vs Usage
+
+**Phase 1 (shipped):** `wqm admin ignore-candidates` ranks directories by a pure-cost score derived from `tracked_files`:
+
+```
+score = file_count × (1 + 2·failure_rate + extension_homogeneity)
+```
+
+This catches vendor/generated folders that are large, fail tree-sitter/LSP, or are homogeneous (e.g. 95% `.json`, `.min.js`, `.snap`). It uses only data the daemon already persists — no telemetry collection.
+
+**Limitation:** the Phase 1 score has no signal of *usage*. A large folder of useful project code outranks a small folder of build artifacts. False positives are obvious to a human reviewing the list, but the ranking is noisier than it needs to be.
+
+**Phase 2 (proposed): add a value-of-use signal so the score reflects cost minus value.**
+
+The MCP server already mediates every `search`, `grep`, and `retrieve` call. By recording a lightweight per-path-prefix hit counter (a SQLite table `path_usage_hits(path_prefix, tool, hits, last_hit_at)` populated as each query returns), the daemon accumulates a distribution of "what does the agent actually look at."
+
+Updated score:
+
+```
+score = cost − value_of_use
+      = file_count × (1 + 2·failure_rate + ext_homogeneity)
+        − usage_weight × log(1 + hits_in_window)
+```
+
+The candidate that emerges is no longer "biggest folder" but "biggest folder that **nobody ever consults**" — precisely what `.wqmignore` should target.
+
+**Implementation sketch:**
+
+1. New table `path_usage_hits` (schema bump) — primary key on `(path_prefix, tool)`, with rolling 30-day window via daily decay or fixed retention.
+2. Instrument the TypeScript MCP server (`store`, `search`, `grep`, `retrieve`, `list`) and the gRPC `TextSearchService` to enqueue a `usage_hit` event keyed by the path prefix of each returned chunk's `relative_path` (depth match: same `--depth` as the ranking command).
+3. Extend `wqm admin ignore-candidates` to look up hit counts at the same depth and subtract a usage term from the score.
+4. Optional: `--explain` flag dumps the cost and usage components separately so operators see *why* a directory is ranked where it is.
+
+**Trade-offs vs Phase 1:**
+
+- Requires schema migration and instrumentation across two languages (TS MCP server + Rust daemon).
+- Needs a 1–2 week collection window before scores stabilize for a given project.
+- Sensitive to "cold" projects: a brand-new project's `node_modules` will tie with its `src/` because both have zero hits. Mitigation: weight `value_of_use` only after `total_hits_in_window ≥ N` (e.g. 200).
+- Privacy/PII: path prefixes are project-internal, so risk is low, but the hit counter is still operator-visible state — document it in the privacy section if/when shipped.
+
+**When to revisit:** once Phase 1 has been used in anger on a few projects and the false-positive rate from pure-cost ranking is shown to matter operationally. Until then, the simpler form is good enough.
+
 ### Distance Matrix Visualization
 
 Qdrant's Distance Matrix API can compute pairwise distances between points using the `dense` vector. This could power interactive code intelligence visualizations showing clusters of semantically related files, functions, or documentation. Could serve as a stepping stone toward full Graph RAG by revealing natural code clusters. See the [Qdrant Dashboard Visualization](12-configuration.md#qdrant-dashboard-visualization) section for current capabilities.
+
+---
+
+## Cleanup Backlog (Deferred Removals & Tech Debt)
+
+Captured from a legacy-code audit (2026-05-28). The dead v1 error-handler /
+tool-monitor / `queue_operations/legacy.rs` subsystems and the obvious dead
+artifacts (`.wqm-fork/`, `archives/`, stray `Cargo.toml.orig`,
+`.github/actions/setup-python-deps/`) have already been removed. The items below
+are confirmed-but-deferred: each needs its own verified change (and some need a
+runtime/data-safety check), so they were intentionally left for follow-up rather
+than bundled into the deletion. Line numbers are as-of-audit pointers.
+
+### A. Back-compat shims (removable under the "NO MIGRATION EFFORT" policy)
+
+- [ ] **CLI hidden deprecated aliases** — `src/rust/cli/src/main.rs:95-100,164,369-393` (~9 `hide=true` commands delegating to new subcommands). Remove enum variants + match arms. Verify no local scripts call bare `wqm search` / `wqm ingest`.
+- [ ] **Legacy queue-type string mappings** — `src/rust/common/src/queue_types/item_type.rs:56-59` and `operation.rs:44,55` (`"content"→Text`, `"project"/"library"→Tenant`, `"ingest"→Add`). Update guard tests `src/rust/common/tests/compatibility_vectors.rs:215,232`. Confirm no enqueuer still emits the old strings.
+- [ ] **`src/rust/common/src/rules_legacy.rs`** (235 lines, legacy `RULE` header parser) — used by daemon `rules_payload_backfill.rs` and CLI `rules/inject.rs` (issue #58 safety net). **Remove only after confirming no stored rules use the old header format** (data-safety check, not statically decidable).
+- [ ] **TS legacy `stdio` boolean flag** — `src/typescript/mcp-server/src/{server-types.ts:91-96,server.ts:320-337,index.ts:31,config.ts:143}`. Migrate tests to `mode`, then drop the flag.
+- [ ] **TS `legacyArtifacts` detection** — `admin/routes.ts:289-333` + `admin/app.js:248-260` (cleanup helper for the removed PowerShell git-hook + `.bak` files). Remove if users are unlikely to still have old artifacts installed.
+
+### B. Legacy migration tooling (no users to migrate)
+
+- [ ] `scripts/phase3_cutover.sh` — cutover script that drops `ingestion_queue` / `content_ingestion_queue` (tables already gone; `unified_queue` is canonical).
+- [ ] Legacy-queue sections in `docs/MIGRATION.md` and `docs/QUEUE_SCHEMA.md`.
+
+### C. Stale documentation
+
+- [ ] **Duplicate spec #16** — `docs/specs/16-path-abstraction-audit.md` (Status: Complete) duplicates the living `16-path-abstraction.md`; `docs/specs/19-branch-worktree-audit.md` is also a completed audit. Archive/retire both out of `specs/`.
+- [ ] `docs/specs/01-architecture.md` — ASCII diagram shows a "memory" collection (canonical is `rules` + `scratchpad`) and only 4 MCP tools (actual: 6 — store/search/rules/retrieve/grep/list). Update.
+- [ ] Broken `FIRST-PRINCIPLES.md` links — file no longer exists; referenced in `docs/specs/00-overview.md:24` and the Related Documents table below.
+- [ ] `CLAUDE.md` — says "7 gRPC services"; the proto defines **12** (7 core/read + 5 enqueue-only write services).
+- [ ] `.github/pull_request_template.md` — entirely Python-era (pytest, black, ruff, mypy, PEP 8, docstrings/type-hints, non-existent `tests/{unit,integration,e2e,benchmarks}/`). Rewrite for the Rust + TypeScript toolchain (`cargo test`/`fmt`/`clippy`, `npm test`/`tsc`).
+
+### D. EmbeddingWatchdog follow-ups (spec 18 — beyond §3.3, which is implemented)
+
+- [ ] **§3.2 degraded-mode boot** — `memexd` currently aborts startup if the embedding provider fails its dim/init check (`check_dim_and_start_health_monitor`). Make transient init failures start in degraded mode + watchdog instead of aborting (keep the hard `DimensionMismatch` abort).
+- [ ] **§3.4 queue-processor degraded mode** — read `embedding::EmbeddingHealth` in the unified queue processor; while `Unavailable`, re-lease embedding items (`lease_until = now + short_delay`, status `pending`) **without** counting against `retry_count`.
+- [ ] Wire `EmbeddingHealth` into the gRPC `SystemService` health response so availability is observable.
+
+### E. Potential latent bug (investigate, do not silence)
+
+- [ ] `src/rust/daemon/memexd/src/startup.rs:349` — `check_existing_instance` ignores its `project_id: Option<&String>` parameter (unused-variable warning). Determine whether the single-instance check should be project-scoped; either wire `project_id` in or document why it is intentionally unused.
 
 ---
 
@@ -588,10 +673,11 @@ Qdrant's Distance Matrix API can compute pairwise distances between points using
 
 ---
 
-**Version:** 1.10.0
-**Last Updated:** 2026-02-24
+**Version:** 1.11.0
+**Last Updated:** 2026-05-28
 **Changes:**
 
+- v1.11.0: Added "Cleanup Backlog (Deferred Removals & Tech Debt)" section from a 2026-05-28 legacy audit — back-compat shims (CLI aliases, queue-type legacy mappings, `rules_legacy`, TS `stdio`/`legacyArtifacts`), legacy migration tooling, stale docs, EmbeddingWatchdog §3.2/§3.4 follow-ups, and a suspected unused-`project_id` bug. In the same pass the dead v1 error-handler/tool-monitor/`legacy.rs` subsystems and dead artifacts were removed and the EmbeddingWatchdog (§3.3) was implemented.
 - Current fork behavior: the MCP session lifecycle now re-activates known projects first and falls back to `register_if_new=true` so fresh projects and worktrees are registered automatically on first connect.
 
 - v1.10.0: Marked Phase 1 (SQLite CTEs) as COMPLETE — documented all implemented graph subsystem components (GraphStore trait, SqliteGraphStore, algorithms, extractor, migrator, factory, SharedGraphStore, gRPC GraphService with 7 RPCs, CLI `wqm graph` with 7 subcommands, criterion benchmarks, CI workflow); added measured performance results; updated CLI command examples to reflect actual implemented syntax

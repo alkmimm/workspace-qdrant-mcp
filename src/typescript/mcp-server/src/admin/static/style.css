@@ -163,6 +163,24 @@ input:focus {
   outline-offset: -1px;
   border-color: var(--link);
 }
+textarea {
+  width: 100%;
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-family: var(--mono);
+  line-height: 1.6;
+  resize: vertical;
+  min-width: 0;
+}
+textarea:focus {
+  outline: 2px solid var(--link);
+  outline-offset: -1px;
+  border-color: var(--link);
+}
 button {
   background: var(--bg-3);
   color: var(--fg);
@@ -211,6 +229,9 @@ button.small { padding: 4px 10px; font-size: 12px; }
 }
 .data td.num, .data th.num { text-align: right; font-family: var(--mono); }
 .data tbody tr:hover { background: var(--bg-3); }
+tr.log-warn td { color: var(--warn); }
+tr.log-err td { color: var(--err); }
+.mono { font-family: var(--mono); }
 .data .path {
   font-family: var(--mono);
   font-size: 12px;
@@ -277,3 +298,55 @@ details summary:hover { color: var(--link); }
   z-index: 100;
 }
 .toast.error { border-left-color: var(--err); }
+
+/* ── Indexing progress cell (registered-projects table) ─────────── */
+.indexing-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+}
+.indexing-bar {
+  position: relative;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.indexing-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease-in-out;
+}
+.indexing-bar-idle .indexing-bar-fill {
+  background: var(--accent);
+}
+.indexing-bar-warn .indexing-bar-fill {
+  background: var(--warn);
+}
+.indexing-bar-active .indexing-bar-fill {
+  background: linear-gradient(
+    90deg,
+    var(--accent) 0%,
+    color-mix(in srgb, var(--accent) 70%, white) 50%,
+    var(--accent) 100%
+  );
+  background-size: 200% 100%;
+  animation: indexing-pulse 1.6s linear infinite;
+}
+@keyframes indexing-pulse {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.indexing-meta {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.indexing-meta .warn {
+  color: var(--warn);
+}
+.indexing-eta {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}

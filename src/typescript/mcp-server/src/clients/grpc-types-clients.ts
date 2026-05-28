@@ -6,7 +6,10 @@ import type {
   HealthCheckResponse,
   SystemStatusResponse,
   MetricsResponse,
+  QueueStatsResponse,
   GetEmbeddingProviderStatusResponse,
+  RebuildIndexRequest,
+  RebuildIndexResponse,
   RefreshSignalRequest,
   ServerStatusNotification,
   CreateCollectionRequest,
@@ -28,6 +31,8 @@ import type {
   GetProjectStatusResponse,
   ListProjectsRequest,
   ListProjectsResponse,
+  ListWatchesRequest,
+  ListWatchesResponse,
   HeartbeatRequest,
   HeartbeatResponse,
   EmbedTextRequest,
@@ -80,6 +85,14 @@ export interface SystemServiceClient {
   getEmbeddingProviderStatus(
     request: Record<string, never>,
     callback: (error: Error | null, response: GetEmbeddingProviderStatusResponse) => void
+  ): void;
+  getQueueStats(
+    request: Record<string, never>,
+    callback: (error: Error | null, response: QueueStatsResponse) => void
+  ): void;
+  rebuildIndex(
+    request: RebuildIndexRequest,
+    callback: (error: Error | null, response: RebuildIndexResponse) => void
   ): void;
 }
 
@@ -137,6 +150,10 @@ export interface ProjectServiceClient {
   listProjects(
     request: ListProjectsRequest,
     callback: (error: Error | null, response: ListProjectsResponse) => void
+  ): void;
+  listWatches(
+    request: ListWatchesRequest,
+    callback: (error: Error | null, response: ListWatchesResponse) => void
   ): void;
   heartbeat(
     request: HeartbeatRequest,
@@ -200,5 +217,58 @@ export interface TrackingWriteServiceClient {
   deleteRuleMirror(
     request: DeleteRuleMirrorRequest,
     callback: (error: Error | null, response: Record<string, never>) => void
+  ): void;
+}
+
+export interface WatchIdRequest {
+  watch_id: string;
+}
+
+export interface WatchMutationResponse {
+  affected_count: number;
+}
+
+export interface WatchWriteServiceClient {
+  pauseWatchers(
+    request: Record<string, never>,
+    callback: (error: Error | null, response: WatchMutationResponse) => void
+  ): void;
+  resumeWatchers(
+    request: Record<string, never>,
+    callback: (error: Error | null, response: WatchMutationResponse) => void
+  ): void;
+  pauseWatch(
+    request: WatchIdRequest,
+    callback: (error: Error | null, response: WatchMutationResponse) => void
+  ): void;
+  resumeWatch(
+    request: WatchIdRequest,
+    callback: (error: Error | null, response: WatchMutationResponse) => void
+  ): void;
+}
+
+export interface ReapplyIgnoreRulesResponse {
+  projects_processed: number;
+  stale_deleted: number;
+  missing_added: number;
+}
+
+export interface ReembedTenantRequest {
+  tenant_id: string;
+}
+
+export interface ReembedTenantResponse {
+  files_enqueued: number;
+  message: string;
+}
+
+export interface AdminWriteServiceClient {
+  reapplyIgnoreRules(
+    request: Record<string, never>,
+    callback: (error: Error | null, response: ReapplyIgnoreRulesResponse) => void
+  ): void;
+  reembedTenant(
+    request: ReembedTenantRequest,
+    callback: (error: Error | null, response: ReembedTenantResponse) => void
   ): void;
 }

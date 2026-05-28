@@ -9,6 +9,7 @@ import { readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 import { SqliteStateManager } from '../clients/sqlite-state-manager.js';
+import { getEffectiveCwd } from './request-context.js';
 
 // Project signature files/directories
 const PROJECT_MARKERS = [
@@ -51,6 +52,17 @@ export interface ProjectInfo {
   projectPath: string;
   isActive: boolean;
   gitRemote?: string | undefined;
+}
+
+export interface GetProjectInfoOptions {
+  /**
+   * When path detection finds no project AND exactly one project is
+   * registered, assume that project instead of returning null. Intended for
+   * CWD-based MCP tool detection — where the host path may not be reconcilable
+   * with the daemon-stored path (e.g. the host-cwd header was absent and the
+   * container WORKDIR leaked through) — not for strict lookups.
+   */
+  fallbackToSoleProject?: boolean;
 }
 
 /**
@@ -143,11 +155,31 @@ export class ProjectDetector {
    *
    * @param projectPath Absolute path to project root
    * @param waitForRegistration If true, retry if project not found
+   * @param options Optional resolution behavior (see {@link GetProjectInfoOptions})
    * @returns ProjectInfo or null if not found/registered
    */
   async getProjectInfo(
     projectPath: string,
-    waitForRegistration = false
+    waitForRegistration = false,
+    options: GetProjectInfoOptions = {}
+  ): Promise<ProjectInfo | null> {
+    const info = await this.detectProjectByPath(projectPath, waitForRegistration);
+    if (info) {
+      return info;
+    }
+    if (options.fallbackToSoleProject) {
+      return this.soleRegisteredProject();
+    }
+    return null;
+  }
+
+  /**
+   * Path-based detection: cache lookup, then a longest-prefix match against
+   * the daemon's registered project paths. Returns null on miss.
+   */
+  private async detectProjectByPath(
+    projectPath: string,
+    waitForRegistration: boolean
   ): Promise<ProjectInfo | null> {
     const normalizedPath = resolve(projectPath);
 
@@ -179,6 +211,36 @@ export class ProjectDetector {
   }
 
   /**
+   * Fallback for CWD-based detection: when no project maps to the host path
+   * and exactly one project is registered, assume it. Returns null when zero
+   * or 2+ projects are registered, or when the database is unavailable.
+   */
+  private soleRegisteredProject(): ProjectInfo | null {
+    if (!this.stateManager.isConnected()) {
+      const initResult = this.stateManager.initialize();
+      if (initResult.status === 'degraded') {
+        return null;
+      }
+    }
+
+    const all = this.stateManager.listAllProjects();
+    if (all.status !== 'ok' || all.data.length !== 1) {
+      return null;
+    }
+
+    const [project] = all.data;
+    if (!project) {
+      return null;
+    }
+    return {
+      projectId: project.project_id,
+      projectPath: project.project_path,
+      isActive: project.is_active,
+      gitRemote: project.git_remote_url,
+    };
+  }
+
+  /**
    * Get current project info based on working directory
    *
    * Combines findProjectRoot and getProjectInfo.
@@ -188,7 +250,7 @@ export class ProjectDetector {
    * @returns ProjectInfo or null
    */
   async getCurrentProject(
-    cwd: string = process.cwd(),
+    cwd: string = getEffectiveCwd(),
     waitForRegistration = false
   ): Promise<ProjectInfo | null> {
     // Pass cwd directly — the database query uses longest-prefix matching
@@ -202,7 +264,7 @@ export class ProjectDetector {
    * Convenience method that returns just the project_id.
    */
   async getCurrentProjectId(
-    cwd: string = process.cwd(),
+    cwd: string = getEffectiveCwd(),
     waitForRegistration = false
   ): Promise<string | null> {
     const info = await this.getCurrentProject(cwd, waitForRegistration);

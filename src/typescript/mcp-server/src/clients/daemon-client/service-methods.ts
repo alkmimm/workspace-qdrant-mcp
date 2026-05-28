@@ -24,6 +24,11 @@ import type {
   DeleteRuleMirrorRequest,
   UpsertScratchpadMirrorRequest,
   DeleteScratchpadMirrorRequest,
+  WatchIdRequest,
+  WatchMutationResponse,
+  ReapplyIgnoreRulesResponse,
+  ReembedTenantRequest,
+  ReembedTenantResponse,
 } from '../grpc-types.js';
 
 import { DaemonClientSystem } from './system-methods.js';
@@ -193,6 +198,54 @@ export class DaemonClientService extends DaemonClientSystem {
         'deleteScratchpadMirror',
         request,
         this.getMethodTimeout('deleteScratchpadMirror')
+      )
+    );
+  }
+
+  // ── WatchWriteService ──
+
+  async pauseWatch(request: WatchIdRequest): Promise<WatchMutationResponse> {
+    return this.callWithRetry(() =>
+      grpcUnaryWithTimeout(
+        this.watchWriteClient,
+        'pauseWatch',
+        request,
+        this.getMethodTimeout('pauseWatch')
+      )
+    );
+  }
+
+  async resumeWatch(request: WatchIdRequest): Promise<WatchMutationResponse> {
+    return this.callWithRetry(() =>
+      grpcUnaryWithTimeout(
+        this.watchWriteClient,
+        'resumeWatch',
+        request,
+        this.getMethodTimeout('resumeWatch')
+      )
+    );
+  }
+
+  // ── AdminWriteService ──
+
+  async reapplyIgnoreRules(): Promise<ReapplyIgnoreRulesResponse> {
+    return this.callWithRetry(() =>
+      grpcUnaryWithTimeout(
+        this.adminWriteClient,
+        'reapplyIgnoreRules',
+        {},
+        this.getMethodTimeout('reapplyIgnoreRules')
+      )
+    );
+  }
+
+  async reembedTenant(request: ReembedTenantRequest): Promise<ReembedTenantResponse> {
+    return this.callWithRetry(() =>
+      grpcUnaryWithTimeout(
+        this.adminWriteClient,
+        'reembedTenant',
+        request,
+        this.getMethodTimeout('reembedTenant')
       )
     );
   }
