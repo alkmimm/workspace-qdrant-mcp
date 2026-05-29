@@ -44,6 +44,7 @@ Operational playbooks for recovering from specific incident classes.
 |----------|-------------|
 | [Qdrant Corruption Recovery](runbooks/qdrant-corruption.md) | Unloadable collections after a dirty shutdown — auto-quarantine wrapper, manual fallback, drift cleanup |
 | [Self-Watch Loop Recovery](runbooks/self-watch-loop.md) | Docker / `memexd_db` recovery for the self-watch loop |
+| [Pause / Resume GitHub Actions](runbooks/pause-github-actions.md) | Disable/enable all (or single) Actions workflows and cancel in-progress runs via `gh` |
 
 ## Specifications
 
