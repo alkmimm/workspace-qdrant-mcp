@@ -13,9 +13,13 @@
 //! matches under an ignored `proto/src/generated/` tree).
 //!
 //! This module is the missing FK enforcement: diff the `file_id`s present
-//! in search.db against `tracked_files`, and route every orphan through
-//! [`FtsBatchProcessor::delete_file`] — the same transactional,
-//! incremental-FTS5 delete the live path uses.
+//! in search.db against `tracked_files`, then remove the orphans by one of
+//! two paths sized to the backlog — surgical per-file deletes through
+//! [`FtsBatchProcessor::delete_file`] (incremental FTS5, no rebuild) for a
+//! handful of orphans, or chunked bulk `DELETE`s plus a full FTS5 rebuild
+//! for an accumulated backlog (the production case above carried 45k
+//! orphaned files / 19.6M lines — per-line FTS5 deletes would mean ~40M
+//! statements at startup).
 //!
 //! Run at startup BEFORE the queue processor starts (no FTS5 work in
 //! flight, so the diff cannot race the batch writer) — the same window as
@@ -40,15 +44,44 @@ pub struct OrphanGcStats {
     pub lines_deleted: u64,
 }
 
+/// Orphan-count threshold above which the GC switches from surgical
+/// per-file deletes (incremental FTS5 maintenance) to bulk `DELETE`s plus a
+/// full FTS5 rebuild.
+///
+/// The surgical path issues one FTS5 'delete' command per line — fine for a
+/// handful of files, catastrophic for an accumulated backlog (observed in
+/// production: 45k orphaned files carrying 19.6M code_lines ≈ 40M
+/// statements). Past this threshold, chunked `DELETE ... WHERE file_id IN`
+/// plus one `INSERT INTO code_lines_fts(code_lines_fts) VALUES('rebuild')`
+/// is orders of magnitude cheaper.
+const BULK_PATH_FILE_THRESHOLD: usize = 64;
+
+/// Max ids per `IN`-list chunk (keeps bind-variable count well under
+/// SQLite's limit).
+const ID_CHUNK: usize = 500;
+
 /// Remove search.db content whose `tracked_files` row no longer exists.
 ///
 /// `state_pool` is the state.db pool (`tracked_files` lives there). An
 /// empty `tracked_files` is treated as authoritative: with no tracked files
 /// there is no live content, so everything in search.db is orphaned — the
 /// rescan/reembed path rebuilds it from disk.
+///
+/// `tracked_files.file_id` is `AUTOINCREMENT`, so ids are never reused and
+/// the orphan snapshot can never come to refer to a different, newer file.
 pub async fn gc_orphaned_files(
     search_db: &SearchDbManager,
     state_pool: &SqlitePool,
+) -> SearchDbResult<OrphanGcStats> {
+    gc_orphaned_files_with_threshold(search_db, state_pool, BULK_PATH_FILE_THRESHOLD).await
+}
+
+/// [`gc_orphaned_files`] with an explicit bulk-path threshold (tests force
+/// either path with it).
+pub(crate) async fn gc_orphaned_files_with_threshold(
+    search_db: &SearchDbManager,
+    state_pool: &SqlitePool,
+    bulk_threshold: usize,
 ) -> SearchDbResult<OrphanGcStats> {
     let search_pool = search_db.pool();
 
@@ -80,33 +113,92 @@ pub async fn gc_orphaned_files(
         return Ok(OrphanGcStats::default());
     }
 
-    info!(
-        "[search_gc] {} orphaned search-db file(s) (tracked_files row gone) — removing",
-        orphans.len()
-    );
+    let stats = if orphans.len() <= bulk_threshold {
+        info!(
+            "[search_gc] {} orphaned search-db file(s) — surgical per-file delete",
+            orphans.len()
+        );
+        surgical_delete(search_db, &orphans).await
+    } else {
+        info!(
+            "[search_gc] {} orphaned search-db file(s) — bulk delete + FTS5 rebuild",
+            orphans.len()
+        );
+        bulk_delete(search_db, &orphans).await?
+    };
 
+    info!(
+        "[search_gc] done: {} file(s), {} line(s) removed",
+        stats.files_deleted, stats.lines_deleted
+    );
+    Ok(stats)
+}
+
+/// Per-file delete through [`FtsBatchProcessor::delete_file`] — keeps the
+/// FTS5 index incrementally consistent, no rebuild needed. Per-file failures
+/// are logged and skipped so one bad row cannot strand the rest.
+async fn surgical_delete(search_db: &SearchDbManager, orphans: &[i64]) -> OrphanGcStats {
     let processor = FtsBatchProcessor::new(search_db, FtsBatchConfig::default());
     let mut stats = OrphanGcStats::default();
-    for (i, file_id) in orphans.iter().enumerate() {
+    for file_id in orphans {
         match processor.delete_file(*file_id).await {
             Ok(lines) => {
                 stats.files_deleted += 1;
                 stats.lines_deleted += lines as u64;
             }
             Err(e) => {
-                // Keep going: one bad file must not strand the rest.
                 warn!("[search_gc] failed to delete file_id={}: {}", file_id, e);
             }
         }
-        if (i + 1) % 500 == 0 {
-            info!("[search_gc] progress: {}/{} files", i + 1, orphans.len());
-        }
     }
+    stats
+}
+
+/// Chunked bulk `DELETE` of `code_lines` + `file_metadata`, then a full FTS5
+/// rebuild.
+///
+/// The bulk `DELETE` bypasses the per-row FTS5 'delete' command, leaving the
+/// external-content index referencing dead rowids; the trailing 'rebuild'
+/// re-derives it from the surviving `code_lines`. Until the rebuild commits,
+/// FTS queries may transiently return phantom rowids — acceptable in the
+/// pre-start window this GC runs in (and self-healing once rebuilt).
+async fn bulk_delete(
+    search_db: &SearchDbManager,
+    orphans: &[i64],
+) -> SearchDbResult<OrphanGcStats> {
+    let pool = search_db.pool();
+    let mut stats = OrphanGcStats::default();
+
+    let mut tx = pool.begin().await?;
+    for chunk in orphans.chunks(ID_CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+
+        let sql = format!("DELETE FROM code_lines WHERE file_id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for id in chunk {
+            q = q.bind(id);
+        }
+        stats.lines_deleted += q.execute(&mut *tx).await?.rows_affected();
+
+        let sql = format!("DELETE FROM file_metadata WHERE file_id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for id in chunk {
+            q = q.bind(id);
+        }
+        q.execute(&mut *tx).await?;
+
+        stats.files_deleted += chunk.len() as u64;
+    }
+    tx.commit().await?;
 
     info!(
-        "[search_gc] done: {} file(s), {} line(s) removed",
-        stats.files_deleted, stats.lines_deleted
+        "[search_gc] bulk delete committed ({} lines) — rebuilding FTS5 index",
+        stats.lines_deleted
     );
+    search_db
+        .rebuild_and_maybe_optimize_fts(stats.lines_deleted as usize)
+        .await?;
+
     Ok(stats)
 }
 
@@ -201,6 +293,50 @@ mod tests {
             )
             .await
                 >= 2
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_path_removes_orphans_and_rebuilds_fts() {
+        // Force the bulk path with a threshold below the orphan count: the
+        // chunked DELETEs bypass per-row FTS5 maintenance, so this also
+        // proves the trailing rebuild leaves the index consistent.
+        let (_d, db) = search_db_in_temp().await;
+        seed_file(&db, 1, "tracked line one\ntracked line two").await;
+        seed_file(&db, 2, "orphan generated stub alpha").await;
+        seed_file(&db, 3, "orphan generated stub beta").await;
+        seed_file(&db, 4, "orphan generated stub gamma").await;
+        let state = state_pool_with_tracked(&[1]).await;
+
+        let stats = gc_orphaned_files_with_threshold(&db, &state, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(stats.files_deleted, 3);
+        assert_eq!(stats.lines_deleted, 3);
+        let pool = db.pool();
+        assert_eq!(count(pool, "SELECT COUNT(*) FROM file_metadata").await, 1);
+        assert_eq!(
+            count(pool, "SELECT COUNT(*) FROM code_lines WHERE file_id != 1").await,
+            0
+        );
+        assert_eq!(
+            count(
+                pool,
+                "SELECT COUNT(*) FROM code_lines_fts WHERE code_lines_fts MATCH 'generated stub'"
+            )
+            .await,
+            0,
+            "rebuilt FTS index must not ghost-match deleted content"
+        );
+        assert!(
+            count(
+                pool,
+                "SELECT COUNT(*) FROM code_lines_fts WHERE code_lines_fts MATCH 'tracked line'"
+            )
+            .await
+                >= 2,
+            "rebuilt FTS index must still match surviving content"
         );
     }
 
