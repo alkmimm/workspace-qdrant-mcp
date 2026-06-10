@@ -339,7 +339,8 @@ services:
       WQM_SEARCH_RERANK: ${WQM_SEARCH_RERANK:-}
       # Blend weight 0–1 for the rerank score: final pool order is
       # (1-w)·norm(rrf_boosted) + w·norm(rerank). 1 = pure cross-encoder
-      # order; empty = code default (1). Per-call `rerankWeight` wins.
+      # order; empty = code default (0.25, the measured optimum on the
+      # 44-query benchmark). Per-call `rerankWeight` wins.
       WQM_SEARCH_RERANK_WEIGHT: ${WQM_SEARCH_RERANK_WEIGHT:-}
       # Trust the bind-mounted repo: git's "dubious ownership" check
       # otherwise rejects every command because the bind mount preserves

@@ -116,6 +116,21 @@ blends both signals — `(1-w)·norm(rrf_boosted) + w·norm(rerank)` — instead
 of fully replacing the bi-encoder order; `w=1` reproduces the legacy
 pure-reranker order.
 
+Weight sweep on the 44-query benchmark (2026-06-10, semantic mode —
+top1 / top3 / top10 / recall@10 / MRR / avg ms):
+
+| w | top1 | top3 | top10 | rec@10 | MRR | ms |
+|---|---|---|---|---|---|---|
+| 0 (baseline) | 31.8 | 56.8 | 68.2 | 60.2 | 0.45 | 43 |
+| **0.25 (default)** | **34.1** | **59.1** | **72.7** | **62.5** | **0.47** | 67 |
+| 0.5 | 25.0 | 50.0 | 72.7 | 61.4 | 0.40 | 84 |
+| 1.0 (pure reranker) | 6.8 | 29.5 | 59.1 | 48.9 | 0.21 | 135 |
+
+The cross-encoder helps only as a **weak nudge**: at w=0.25 every semantic
+aggregate beats the no-rerank baseline (hybrid top3 50→56.8 too), while
+giving it full authority (w=1) is strictly worse even multilingual — same
+pathology previously measured with the English jina-turbo model.
+
 There is deliberately **no failover** for reranking: the CPU TEI standby
 serves only the e5 embedder, and silently swapping to the (worse,
 English-only) local fastembed model would change scoring semantics

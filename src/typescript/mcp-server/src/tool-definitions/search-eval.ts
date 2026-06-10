@@ -56,7 +56,7 @@ export const searchEvalToolDefinition = {
       rerankWeight: {
         type: 'number',
         description:
-          'Blend weight 0–1 for the rerank score: final pool order is (1-w)·norm(rrf_boosted) + w·norm(rerank). 1 = pure cross-encoder order; 0 = rerank off (default: WQM_SEARCH_RERANK_WEIGHT, else 1).',
+          'Blend weight 0–1 for the rerank score: final pool order is (1-w)·norm(rrf_boosted) + w·norm(rerank). 1 = pure cross-encoder order; 0 = rerank off (default: WQM_SEARCH_RERANK_WEIGHT, else 0.25 — measured optimum).',
       },
     },
     required: [],

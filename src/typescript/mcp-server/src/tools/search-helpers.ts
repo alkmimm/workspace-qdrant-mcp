@@ -568,8 +568,12 @@ const RERANK_POOL = 30;
 /** Default blend weight (0–1) for the cross-encoder score when reranking.
  * 1 sorts the pool purely by the reranker (legacy replace behavior); values
  * in between mix the bi-encoder + path-boost order with the reranker's.
- * Per-call `rerankWeight` wins over the env default. */
-const RERANK_WEIGHT = tuningFromEnv('WQM_SEARCH_RERANK_WEIGHT', 1.0);
+ * 0.25 is the measured optimum on the 44-query benchmark (2026-06-10,
+ * bge-reranker-v2-m3 on the GPU sidecar): the cross-encoder helps as a WEAK
+ * nudge — semantic top1/top3/top10/recall/MRR all ≥ baseline — while w ≥ 0.5
+ * degrades top1/top3 sharply (w=1: semantic top1 31.8→6.8). Per-call
+ * `rerankWeight` wins over the env default. */
+const RERANK_WEIGHT = tuningFromEnv('WQM_SEARCH_RERANK_WEIGHT', 0.25);
 
 /** Blend min-max-normalized base (RRF + path boost) and cross-encoder scores
  * for the rerank pool: `(1-w)·norm(base) + w·norm(rerank)`. `baseScores` is
@@ -696,6 +700,12 @@ export async function finalizeResults(
   // pool order BLENDS the two signals instead of fully reordering:
   // `(1-w)·norm(rrf_boosted) + w·norm(rerank)` with w from `rerankWeight` /
   // WQM_SEARCH_RERANK_WEIGHT (1 = legacy pure-reranker order, 0 = rerank off).
+  // MEASURED 2026-06-10 (bge-reranker-v2-m3 on GPU, 44 queries): the full
+  // reorder is still strictly worse even multilingual (w=1: semantic top1
+  // 31.8→6.8, MRR 0.45→0.21) — but as a weak nudge it beats the baseline on
+  // every semantic aggregate: w=0.25 → top3 56.8→59.1, top10 68.2→72.7,
+  // recall@10 60.2→62.5, MRR 0.45→0.47 at +24ms avg latency; hybrid top3
+  // 50→56.8. Hence the 0.25 default for WQM_SEARCH_RERANK_WEIGHT.
   const rerankDefault = process.env['WQM_SEARCH_RERANK'] === '1';
   const rerankWeight = Math.min(params.options.rerankWeight ?? RERANK_WEIGHT, 1);
   const ranked =
