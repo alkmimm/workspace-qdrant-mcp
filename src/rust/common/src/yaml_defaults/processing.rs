@@ -121,6 +121,11 @@ pub struct YamlEmbeddingConfig {
     /// warm while a GPU `base_url` is preferred). Empty = no fallback.
     pub fallback_base_url: String,
     pub remote_batch_size: usize,
+    /// Per-input character cap for the remote provider (full submitted
+    /// string, prefix + context header included). Oversized inputs are
+    /// truncated locally instead of being rejected remotely with
+    /// HTTP 422 string_too_long.
+    pub max_input_chars: usize,
     pub api_key_env_var: String,
     pub output_dim: usize,
     pub health_probe_cache_secs: u64,
@@ -146,6 +151,7 @@ impl Default for YamlEmbeddingConfig {
             base_url: "https://api.openai.com".to_string(),
             fallback_base_url: String::new(),
             remote_batch_size: 128,
+            max_input_chars: 120_000,
             api_key_env_var: "OPENAI_API_KEY".to_string(),
             output_dim: 1536,
             health_probe_cache_secs: 60,
