@@ -369,14 +369,12 @@ impl EmbeddingService for EmbeddingServiceImpl {
             .generate_sparse_vector_internal(&req.text, &req.collection)
             .await
         {
-            Ok((sparse_map, vocab_size)) => {
-                Ok(Response::new(SparseVectorResponse {
-                    indices_values: sparse_map,
-                    vocab_size,
-                    success: true,
-                    error_message: String::new(),
-                }))
-            }
+            Ok((sparse_map, vocab_size)) => Ok(Response::new(SparseVectorResponse {
+                indices_values: sparse_map,
+                vocab_size,
+                success: true,
+                error_message: String::new(),
+            })),
             Err(e) => {
                 error!("GenerateSparseVector failed: {:?}", e);
                 Ok(Response::new(SparseVectorResponse {
