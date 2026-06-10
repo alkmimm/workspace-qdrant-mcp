@@ -324,6 +324,13 @@ services:
       # writer (host) and the MCP reader (container) thus stay schema-compatible.
       WQM_HOST_DEV_ROOT: ${WQM_HOST_DEV_ROOT:-}
       WQM_DEV_ROOT: ${WQM_DEV_ROOT}
+      # Search-ranking tuning knobs (empty = code defaults; see search-types
+      # tuningFromEnv). Re-tuned against the 44-query benchmark whenever the
+      # retrieval side changes (embedding model, sparse pipeline).
+      WQM_PATH_BOOST_ALPHA: ${WQM_PATH_BOOST_ALPHA:-}
+      WQM_SPARSE_ONLY_WEIGHT: ${WQM_SPARSE_ONLY_WEIGHT:-}
+      # "1" flips the cross-encoder rerank default ON (per-call `rerank` wins).
+      WQM_SEARCH_RERANK: ${WQM_SEARCH_RERANK:-}
       # Trust the bind-mounted repo: git's "dubious ownership" check
       # otherwise rejects every command because the bind mount preserves
       # host uids that don't match the container's `node` user.
