@@ -117,6 +117,9 @@ pub struct YamlEmbeddingConfig {
     pub model_cache_dir: Option<String>,
     pub provider: String,
     pub base_url: String,
+    /// Optional standby endpoint for the SAME model (e.g. CPU server kept
+    /// warm while a GPU `base_url` is preferred). Empty = no fallback.
+    pub fallback_base_url: String,
     pub remote_batch_size: usize,
     pub api_key_env_var: String,
     pub output_dim: usize,
@@ -141,6 +144,7 @@ impl Default for YamlEmbeddingConfig {
             model_cache_dir: None,
             provider: "openai_compatible".to_string(),
             base_url: "https://api.openai.com".to_string(),
+            fallback_base_url: String::new(),
             remote_batch_size: 128,
             api_key_env_var: "OPENAI_API_KEY".to_string(),
             output_dim: 1536,
