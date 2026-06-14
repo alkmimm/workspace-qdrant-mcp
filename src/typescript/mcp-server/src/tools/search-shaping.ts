@@ -44,9 +44,27 @@ const TEXT_BODY_KEYS: readonly string[] = [
   'body',
 ];
 
-function truncateText(text: string, cap: number, id: string, collection: string): string {
+function metadataNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function buildRetrieveReference(r: SearchResult): string {
+  const filePath = r.metadata['file_path'] as string | undefined;
+  const lineNumber = metadataNumber(r.metadata['line_number']);
+  if (filePath && lineNumber !== undefined) {
+    return `retrieve(filePath=${JSON.stringify(filePath)}, lineNumber=${lineNumber}, collection=${JSON.stringify(r.collection)})`;
+  }
+  return `retrieve(documentId=${JSON.stringify(r.id)}, collection=${JSON.stringify(r.collection)})`;
+}
+
+function truncateText(text: string, cap: number, reference: string): string {
   if (text.length <= cap) return text;
-  const marker = ` ... [truncated at ${cap} chars; full chunk via retrieve(documentId="${id}", collection="${collection}")]`;
+  const marker = ` ... [truncated at ${cap} chars; full chunk via ${reference}]`;
   const keep = Math.max(0, cap - marker.length);
   return text.slice(0, keep) + marker;
 }
@@ -114,22 +132,18 @@ function shapeAsSummary(r: SearchResult): SearchResult {
   return out;
 }
 
-function shapeParentContext(
-  parent: ParentContext,
-  cap: number,
-  id: string,
-  collection: string
-): ParentContext {
+function shapeParentContext(parent: ParentContext, cap: number, reference: string): ParentContext {
   return {
     ...parent,
-    unit_text: truncateText(parent.unit_text ?? '', cap, id, collection),
+    unit_text: truncateText(parent.unit_text ?? '', cap, reference),
   };
 }
 
 function shapeAsTruncated(r: SearchResult, cap: number): SearchResult {
+  const retrieveReference = buildRetrieveReference(r);
   const out: SearchResult = {
     ...r,
-    content: truncateText(r.content ?? '', cap, r.id, r.collection),
+    content: truncateText(r.content ?? '', cap, retrieveReference),
     // Drop content duplication AND the daemon's ranking-aid fields from
     // metadata: without this we'd ship the body twice for any sub-cap hit,
     // and carry ~1.5–2k tokens of keywords/baskets noise per hit that the
@@ -137,7 +151,7 @@ function shapeAsTruncated(r: SearchResult, cap: number): SearchResult {
     metadata: stripBulkMetadata(r.metadata),
   };
   if (r.parent_context) {
-    out.parent_context = shapeParentContext(r.parent_context, cap, r.id, r.collection);
+    out.parent_context = shapeParentContext(r.parent_context, cap, retrieveReference);
   }
   return out;
 }

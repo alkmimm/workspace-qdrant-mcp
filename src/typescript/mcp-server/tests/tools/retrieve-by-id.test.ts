@@ -192,6 +192,111 @@ describe('RetrieveTool - retrieve by document ID', () => {
     expect(result.hint).toContain('filter');
   });
 
+  it('should resolve exact-search locators via filePath + lineNumber', async () => {
+    const QdrantClientMock = await import('@qdrant/js-client-rest');
+    const retrieveMock = vi.fn().mockResolvedValue([]);
+    const scrollMock = vi.fn().mockResolvedValue({
+      points: [
+        {
+          id: 'chunk-1',
+          payload: {
+            content: 'first chunk',
+            tenant_id: 'test-project-123',
+            file_path: 'src/foo.ts',
+            chunk_start_line: 1,
+            chunk_end_line: 40,
+          },
+        },
+        {
+          id: 'chunk-2',
+          payload: {
+            content: 'matching chunk',
+            tenant_id: 'test-project-123',
+            file_path: 'src/foo.ts',
+            chunk_start_line: 41,
+            chunk_end_line: 80,
+          },
+        },
+      ],
+    });
+    vi.mocked(QdrantClientMock.QdrantClient).mockImplementationOnce(
+      () =>
+        ({
+          retrieve: retrieveMock,
+          scroll: scrollMock,
+        }) as unknown as ReturnType<typeof QdrantClientMock.QdrantClient>
+    );
+
+    const newTool = new RetrieveTool({ qdrantUrl: 'http://localhost:6333' }, mockProjectDetector);
+
+    const result = await newTool.retrieve({
+      filePath: 'src/foo.ts',
+      lineNumber: 42,
+      collection: 'projects',
+      projectId: 'test-project-123',
+    });
+
+    expect(retrieveMock).not.toHaveBeenCalled();
+    expect(scrollMock).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+    expect(result.documents).toHaveLength(1);
+    expect(result.documents[0].id).toBe('chunk-2');
+    expect(result.documents[0].content).toBe('matching chunk');
+    expect(result.documents[0].metadata.file_path).toBe('src/foo.ts');
+  });
+
+  it('should still accept legacy path:line documentIds for compatibility', async () => {
+    const QdrantClientMock = await import('@qdrant/js-client-rest');
+    const retrieveMock = vi.fn().mockResolvedValue([]);
+    const scrollMock = vi.fn().mockResolvedValue({
+      points: [
+        {
+          id: 'chunk-1',
+          payload: {
+            content: 'first chunk',
+            tenant_id: 'test-project-123',
+            file_path: 'src/foo.ts',
+            chunk_start_line: 1,
+            chunk_end_line: 40,
+          },
+        },
+        {
+          id: 'chunk-2',
+          payload: {
+            content: 'matching chunk',
+            tenant_id: 'test-project-123',
+            file_path: 'src/foo.ts',
+            chunk_start_line: 41,
+            chunk_end_line: 80,
+          },
+        },
+      ],
+    });
+    vi.mocked(QdrantClientMock.QdrantClient).mockImplementationOnce(
+      () =>
+        ({
+          retrieve: retrieveMock,
+          scroll: scrollMock,
+        }) as unknown as ReturnType<typeof QdrantClientMock.QdrantClient>
+    );
+
+    const newTool = new RetrieveTool({ qdrantUrl: 'http://localhost:6333' }, mockProjectDetector);
+
+    const result = await newTool.retrieve({
+      documentId: 'src/foo.ts:42',
+      collection: 'projects',
+      projectId: 'test-project-123',
+    });
+
+    expect(retrieveMock).not.toHaveBeenCalled();
+    expect(scrollMock).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+    expect(result.documents).toHaveLength(1);
+    expect(result.documents[0].id).toBe('chunk-2');
+    expect(result.documents[0].content).toBe('matching chunk');
+    expect(result.documents[0].metadata.file_path).toBe('src/foo.ts');
+  });
+
   it('should handle retrieve errors gracefully', async () => {
     const QdrantClientMock = await import('@qdrant/js-client-rest');
     vi.mocked(QdrantClientMock.QdrantClient).mockImplementationOnce(

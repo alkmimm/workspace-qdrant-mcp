@@ -131,11 +131,12 @@ At the start of every session:
   or to find files by type/language
 - `retrieve` — direct access to a known Qdrant point id or metadata filter.
   Use the `id` field from `search`/`list` results; if you only have
-  `metadata.document_id`, use `filter: { document_id: "..." }`. Read the
-  returned `hint` when `success=false` before retrying, especially when you
-  are paginating through large documents chunk-by-chunk after a `search`.
-  The tool will also try the metadata filter automatically if the direct
-  point lookup misses.
+  `metadata.document_id`, use `filter: { document_id: "..." }`. If the hit
+  came from exact search, pass `filePath` + `lineNumber` from the result
+  metadata. Read the returned `hint` when `success=false` before retrying,
+  especially when you are paginating through large documents chunk-by-chunk
+  after a `search`. The tool will also try the metadata filter automatically if
+  the direct point lookup misses.
 - `store` — persist reference documentation, notes, or web pages to the
   libraries collection. Also used to register new projects
 - `rules` — read and write behavioral rules that persist across sessions

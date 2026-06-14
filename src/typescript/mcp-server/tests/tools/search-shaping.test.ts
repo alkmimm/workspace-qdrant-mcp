@@ -66,6 +66,22 @@ describe('shapeHitPayloads', () => {
       expect(shapedContent).toContain('retrieve');
     });
 
+    it('points exact-search hits at filePath + lineNumber instead of documentId', () => {
+      const longText = 'x'.repeat(5000);
+      const r = makeResult({
+        id: 'src/foo.ts:42',
+        collection: 'projects',
+        content: longText,
+        metadata: { file_path: 'src/foo.ts', line_number: 42 },
+      });
+      const { response: shaped } = shapeHitPayloads(makeResponse([r]), baseOptions());
+      const shapedContent = shaped.results[0].content;
+      expect(shapedContent).toContain(
+        'retrieve(filePath="src/foo.ts", lineNumber=42, collection="projects")'
+      );
+      expect(shapedContent).not.toContain('retrieve(documentId=');
+    });
+
     it('keeps the 10-hit response well under 25k chars on broad results', () => {
       // Simulate a worst-case broad search: 10 hits of ~10kB chunk text.
       const hits = Array.from({ length: 10 }, (_, i) =>
