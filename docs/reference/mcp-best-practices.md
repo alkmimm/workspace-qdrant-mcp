@@ -129,8 +129,13 @@ At the start of every session:
   function names, import paths, specific constants, error messages
 - `list` — browse project structure. Use to orient yourself before diving in,
   or to find files by type/language
-- `retrieve` — direct access to a known document ID or metadata filter.
-  Use after `search` to paginate through large documents chunk-by-chunk
+- `retrieve` — direct access to a known Qdrant point id or metadata filter.
+  Use the `id` field from `search`/`list` results; if you only have
+  `metadata.document_id`, use `filter: { document_id: "..." }`. Read the
+  returned `hint` when `success=false` before retrying, especially when you
+  are paginating through large documents chunk-by-chunk after a `search`.
+  The tool will also try the metadata filter automatically if the direct
+  point lookup misses.
 - `store` — persist reference documentation, notes, or web pages to the
   libraries collection. Also used to register new projects
 - `rules` — read and write behavioral rules that persist across sessions

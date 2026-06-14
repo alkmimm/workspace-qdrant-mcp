@@ -47,6 +47,8 @@ export interface RetrieveResponse {
   total?: number;
   hasMore?: boolean;
   message?: string;
+  /** Short, actionable recovery guidance for the caller. */
+  hint?: string;
 }
 
 export interface RetrieveToolConfig {

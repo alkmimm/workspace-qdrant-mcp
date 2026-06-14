@@ -80,6 +80,7 @@ describe('RetrieveTool — F-002 by-ID ownership check', () => {
     expect(result.success).toBe(false);
     expect(result.documents).toHaveLength(0);
     expect(result.message).toContain('Document not found');
+    expect(result.hint).toContain('result `id` field');
   });
 
   it('returns the document when tenant_id matches the caller', async () => {
@@ -123,6 +124,8 @@ describe('RetrieveTool — F-002 by-ID ownership check', () => {
     expect(retrieveFn).not.toHaveBeenCalled();
     expect(result.success).toBe(false);
     expect(result.message).toContain('scope');
+    expect(result.hint).toContain('cwd');
+    expect(result.hint).toContain('projectId');
   });
 
   it('library by-ID lookup requires libraryName and verifies it on the payload', async () => {
@@ -202,6 +205,8 @@ describe('RetrieveTool — F-011 project-scope retrieve null projectId', () => {
     expect(result.total).toBe(0);
     expect(result.hasMore).toBe(false);
     expect(result.message).toContain('scope');
+    expect(result.hint).toContain('cwd');
+    expect(result.hint).toContain('projectId');
   });
 
   it('scrolls with tenant filter when projects scope resolves', async () => {

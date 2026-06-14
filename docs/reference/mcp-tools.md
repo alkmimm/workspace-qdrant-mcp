@@ -138,6 +138,14 @@ Retrieve documents by ID or metadata filter. Use `retrieve` when you already kno
 
 At least one of `documentId` or `filter` should be provided.
 
+If you are retrieving something returned by `search` or `list`, pass the
+result `id` field to `documentId`. The metadata field `document_id` is not a
+Qdrant point id; use `filter: { "document_id": "..." }` for that case. The
+tool will also try that metadata filter automatically if the direct point id
+lookup misses.
+
+Failures may include a short `hint` with the recommended recovery step.
+
 ### Examples
 
 Retrieve a document by its known ID:

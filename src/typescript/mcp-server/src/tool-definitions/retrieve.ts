@@ -12,14 +12,14 @@ import {
 export const retrieveToolDefinition = {
   name: 'retrieve',
   description:
-    "Retrieve documents by their point id or by a metadata filter. Pass `documentId` = the `id` field from a search/list result (NOT the metadata `document_id`). To look up by the `document_id` metadata field instead, use `filter: {\"document_id\": \"...\"}`. Prefer `search` for discovery, `retrieve` for known points.",
+    "Retrieve documents by their point id or by a metadata filter. Pass `documentId` = the `id` field from a search/list result (NOT the metadata `document_id`). To look up by the `document_id` metadata field instead, use `filter: {\"document_id\": \"...\"}`; the tool will also try that filter automatically if the point id lookup misses. Prefer `search` for discovery, `retrieve` for known points.",
   inputSchema: {
     type: 'object' as const,
     properties: {
       documentId: {
         type: 'string',
         description:
-          'The point id to retrieve — the `id` field from a search or list result (a Qdrant point UUID). NOT the metadata `document_id` (a content hash); to match that, use `filter: {"document_id": "..."}` instead.',
+          'The point id to retrieve — the `id` field from a search or list result (a Qdrant point UUID). NOT the metadata `document_id` (a content hash); to match that, use `filter: {"document_id": "..."}` instead. The tool will also try that filter automatically when the point id lookup misses.',
       },
       collection: {
         type: 'string',

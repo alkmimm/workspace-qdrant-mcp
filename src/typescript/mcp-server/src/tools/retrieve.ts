@@ -69,34 +69,80 @@ export function computeRetrieveEconomy(documents: RetrievedDocument[]): {
   return { bytesOut, bytesIn: bytesOut };
 }
 
+const RETRIEVE_ID_FILTER_HINT =
+  'If you only have `metadata.document_id`, use `filter: { document_id: "<value>" }` instead.';
+
+function looksLikeContentHash(documentId: string): boolean {
+  return /^[a-f0-9]{64}$/i.test(documentId);
+}
+
+function buildUnknownArgsHint(unknownArgs: string[]): string {
+  if (unknownArgs.includes('query')) {
+    return '`retrieve` does not search by content. Use `search` for discovery, then pass the hit `id` field to `retrieve`.';
+  }
+
+  if (
+    unknownArgs.some((arg) => {
+      const normalized = arg.toLowerCase();
+      return normalized === 'documentid' || normalized === 'document_id' || normalized === 'metadata';
+    })
+  ) {
+    return `Use \`documentId\` for point IDs and \`filter\` for metadata lookups. ${RETRIEVE_ID_FILTER_HINT}`;
+  }
+
+  return `Use only the documented retrieve parameters. For point IDs, pass \`documentId\`; for metadata lookups, use \`filter\`. ${RETRIEVE_ID_FILTER_HINT}`;
+}
+
+function buildNotFoundHint(documentId: string): string {
+  const base = 'If this came from `search` or `list`, pass the result `id` field to `retrieve`.';
+  if (looksLikeContentHash(documentId)) {
+    return `${base} The requested value looks like a metadata \`document_id\` hash, so use \`filter: { document_id: "${documentId}" }\` instead.`;
+  }
+  return `${base} ${RETRIEVE_ID_FILTER_HINT}`;
+}
+
+function buildFallbackDocumentIdFilter(documentId: string): Record<string, string> {
+  return { document_id: documentId };
+}
+
+function failureResponse(message: string, hint?: string): RetrieveResponse {
+  const response: RetrieveResponse = {
+    success: false,
+    documents: [],
+    total: 0,
+    hasMore: false,
+    message,
+  };
+  if (hint !== undefined) {
+    response.hint = hint;
+  }
+  return response;
+}
+
 /** Returned when the caller passes argument names retrieve does not accept. */
 function invalidArgsResponse(unknownArgs: string[]): RetrieveResponse {
   const searchHint = unknownArgs.includes('query')
     ? ' `retrieve` does not search by content — use the `search` tool for queries.'
     : '';
-  return {
-    success: false,
-    documents: [],
-    total: 0,
-    hasMore: false,
-    message:
-      `Unknown retrieve parameter(s): ${unknownArgs.join(', ')}.${searchHint} ` +
+  return failureResponse(
+    `Unknown retrieve parameter(s): ${unknownArgs.join(', ')}.${searchHint} ` +
       `Valid parameters: ${RETRIEVE_ARG_KEYS.join(', ')}.`,
-  };
+    buildUnknownArgsHint(unknownArgs)
+  );
 }
 
 /** Returned when the caller passes scope but it cannot be resolved. */
 function unresolvedTenantResponse(collection: RetrieveCollectionType): RetrieveResponse {
-  return {
-    success: false,
-    documents: [],
-    total: 0,
-    hasMore: false,
-    message:
-      `Cannot retrieve from "${collection}" without a resolvable scope. ` +
+  const scopeHint =
+    collection === 'libraries'
+      ? 'Pass `libraryName` for libraries.'
+      : 'Pass `cwd` (to auto-detect the project) or `projectId` (for projects and scratchpad).';
+  return failureResponse(
+    `Cannot retrieve from "${collection}" without a resolvable scope. ` +
       'Pass `cwd` (to auto-detect the project) or `projectId` (for projects), ' +
       'or `libraryName` (for libraries).',
-  };
+    scopeHint
+  );
 }
 
 /**
@@ -238,12 +284,10 @@ export class RetrieveTool {
       filter?: Record<string, string>;
       limit: number;
       offset: number;
-      projectId?: string;
-      libraryName?: string;
-    } = { collectionName, collection, limit, offset };
+      projectId: string | undefined;
+      libraryName: string | undefined;
+    } = { collectionName, collection, limit, offset, projectId: resolvedProjectId, libraryName };
     if (filter) filterParams.filter = filter;
-    if (resolvedProjectId) filterParams.projectId = resolvedProjectId;
-    if (libraryName) filterParams.libraryName = libraryName;
 
     const result = await this.retrieveByFilter(filterParams);
     this.finishRetrieve(eventId, result, startTime);
@@ -304,13 +348,36 @@ export class RetrieveTool {
 
       const point = result[0];
       if (!point) {
-        return { success: false, documents: [], message: `Document not found: ${documentId}` };
+        const fallback = await this.retrieveByFilter({
+          collectionName,
+          collection,
+          filter: buildFallbackDocumentIdFilter(documentId),
+          limit: 10,
+          offset: 0,
+          projectId: resolvedProjectId,
+          libraryName,
+        });
+
+        if (fallback.success && fallback.documents.length > 0) {
+          return fallback;
+        }
+        if (!fallback.success) {
+          return fallback;
+        }
+
+        return failureResponse(
+          `Document not found: ${documentId}`,
+          buildNotFoundHint(documentId)
+        );
       }
 
       // F-002: ownership check. A mismatch is reported as not-found —
       // we MUST NOT leak that the ID exists in a foreign tenant.
       if (!payloadMatchesScope(point.payload, collection, resolvedProjectId, libraryName)) {
-        return { success: false, documents: [], message: `Document not found: ${documentId}` };
+        return failureResponse(
+          `Document not found: ${documentId}`,
+          buildNotFoundHint(documentId)
+        );
       }
 
       const document: RetrievedDocument = {
@@ -321,11 +388,10 @@ export class RetrieveTool {
 
       return { success: true, documents: [document], total: 1, hasMore: false };
     } catch (error) {
-      return {
-        success: false,
-        documents: [],
-        message: `Failed to retrieve document: ${error instanceof Error ? error.message : 'unknown error'}`,
-      };
+      return failureResponse(
+        `Failed to retrieve document: ${error instanceof Error ? error.message : 'unknown error'}`,
+        'Check Qdrant connectivity and confirm the collection name. If this started from `search` or `list`, make sure you passed the result `id` field.'
+      );
     }
   }
 
@@ -335,8 +401,8 @@ export class RetrieveTool {
     filter?: Record<string, string>;
     limit: number;
     offset: number;
-    projectId?: string;
-    libraryName?: string;
+    projectId: string | undefined;
+    libraryName: string | undefined;
   }): Promise<RetrieveResponse> {
     const { collectionName, collection, filter, limit, offset, projectId, libraryName } = params;
 
@@ -375,11 +441,10 @@ export class RetrieveTool {
           message: 'Collection not found or empty',
         };
       }
-      return {
-        success: false,
-        documents: [],
-        message: `Failed to retrieve documents: ${errorMessage}`,
-      };
+      return failureResponse(
+        `Failed to retrieve documents: ${errorMessage}`,
+        'Check Qdrant connectivity and confirm the collection name.'
+      );
     }
   }
 

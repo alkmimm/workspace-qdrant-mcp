@@ -119,15 +119,17 @@ Direct document access for chunk-by-chunk retrieval.
 
 ```typescript
 retrieve({
-    document_id?: string,              // Specific document ID
-    collection?: "projects" | "libraries" | "rules", // default: "projects"
-    metadata?: Record<string, unknown>, // Metadata filters
+    documentId?: string,               // Qdrant point id (from search/list result `id`)
+    collection?: "projects" | "libraries" | "rules" | "scratchpad", // default: "projects"
+    filter?: Record<string, string>,    // Metadata filters, e.g. { document_id: "..." }
     limit?: number,                    // default: 10
     offset?: number,                   // default: 0, for pagination
 });
 ```
 
-**Use case:** Retrieving specific documents by ID or metadata filter for chunk-by-chunk access without overwhelming context. Use `search` for discovery by query, and `retrieve` for direct access when you know the document ID or metadata.
+**Use case:** Retrieving specific documents by ID or metadata filter for chunk-by-chunk access without overwhelming context. Use `search` for discovery by query, and `retrieve` for direct access when you know the Qdrant point `id` from a result or when you need a metadata lookup. If you only have `metadata.document_id`, pass it through `filter.document_id` instead of `documentId`. The tool will also try that metadata filter automatically when the direct point lookup misses.
+
+**Recovery hint:** Error responses may include a `hint` field with the next action to try.
 
 #### rules
 
@@ -737,4 +739,3 @@ Code relationship graph queries and algorithms. Operates on the embedded graph d
 - Returns export/import counts and validation (nodes_match, edges_match)
 
 ---
-

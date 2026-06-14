@@ -102,6 +102,7 @@ describe('RetrieveTool - retrieve by document ID', () => {
       () =>
         ({
           retrieve: vi.fn().mockResolvedValue([]),
+          scroll: vi.fn().mockResolvedValue({ points: [] }),
         }) as unknown as ReturnType<typeof QdrantClientMock.QdrantClient>
     );
 
@@ -115,6 +116,80 @@ describe('RetrieveTool - retrieve by document ID', () => {
     expect(result.success).toBe(false);
     expect(result.documents).toHaveLength(0);
     expect(result.message).toContain('Document not found');
+    expect(result.hint).toContain('result `id` field');
+    expect(result.hint).toContain('filter');
+  });
+
+  it('should fall back to metadata.document_id when the point id is missing', async () => {
+    const QdrantClientMock = await import('@qdrant/js-client-rest');
+    const scrollFn = vi.fn().mockResolvedValue({
+      points: [
+        {
+          id: 'chunk-1',
+          payload: {
+            content: 'Chunk content here',
+            title: 'Fallback Chunk',
+            source_type: 'file',
+            tenant_id: 'test-project-123',
+            document_id: 'doc-abc',
+          },
+        },
+      ],
+    });
+    vi.mocked(QdrantClientMock.QdrantClient).mockImplementationOnce(
+      () =>
+        ({
+          retrieve: vi.fn().mockResolvedValue([]),
+          scroll: scrollFn,
+        }) as unknown as ReturnType<typeof QdrantClientMock.QdrantClient>
+    );
+
+    const newTool = new RetrieveTool({ qdrantUrl: 'http://localhost:6333' }, mockProjectDetector);
+
+    const result = await newTool.retrieve({
+      documentId: 'doc-abc',
+      collection: 'projects',
+      projectId: 'test-project-123',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.documents).toHaveLength(1);
+    expect(result.documents[0].id).toBe('chunk-1');
+    expect(result.documents[0].content).toBe('Chunk content here');
+    expect(result.documents[0].metadata.document_id).toBe('doc-abc');
+    expect(scrollFn).toHaveBeenCalledTimes(1);
+    const [, request] = scrollFn.mock.calls[0];
+    const filter = (request as Record<string, unknown>).filter as Record<string, unknown>;
+    expect(filter).toBeDefined();
+    expect(filter.must).toEqual(
+      expect.arrayContaining([
+        { key: 'tenant_id', match: { value: 'test-project-123' } },
+        { key: 'document_id', match: { value: 'doc-abc' } },
+      ])
+    );
+  });
+
+  it('should suggest filter.document_id when the requested id looks like a content hash', async () => {
+    const QdrantClientMock = await import('@qdrant/js-client-rest');
+    vi.mocked(QdrantClientMock.QdrantClient).mockImplementationOnce(
+      () =>
+        ({
+          retrieve: vi.fn().mockResolvedValue([]),
+          scroll: vi.fn().mockResolvedValue({ points: [] }),
+        }) as unknown as ReturnType<typeof QdrantClientMock.QdrantClient>
+    );
+
+    const newTool = new RetrieveTool({ qdrantUrl: 'http://localhost:6333' }, mockProjectDetector);
+
+    const result = await newTool.retrieve({
+      documentId: '2aa6f841182b38bdf5ed3beb4c00453a498f3a356d7eb8ee07bcd7bfddbda423',
+      collection: 'projects',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('Document not found');
+    expect(result.hint).toContain('document_id');
+    expect(result.hint).toContain('filter');
   });
 
   it('should handle retrieve errors gracefully', async () => {
@@ -135,6 +210,7 @@ describe('RetrieveTool - retrieve by document ID', () => {
 
     expect(result.success).toBe(false);
     expect(result.message).toContain('Failed to retrieve document');
+    expect(result.hint).toContain('Qdrant');
   });
 });
 
