@@ -366,9 +366,10 @@ pub(super) mod linux_idle {
         #[test]
         fn zero_cores_treated_as_one() {
             let detector = detector_with(vec![0.5], 1.0, 0);
-            // 0.5 / 1 = 0.5 < 1.0 → idle → 0 on first call
+            // 0.5 / 1 = 0.5 < 1.0 → idle. The first poll returns a tiny
+            // elapsed time because the detector starts counting at creation.
             let idle = detector.seconds_since_last_input().unwrap();
-            assert_eq!(idle, 0.0);
+            assert!(idle >= 0.0 && idle < 0.05, "expected near-zero idle, got {idle}s");
         }
 
         #[test]
