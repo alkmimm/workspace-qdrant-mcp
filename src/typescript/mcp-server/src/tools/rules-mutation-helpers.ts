@@ -296,6 +296,63 @@ export async function findRuleIdByLabel(
   return docId !== undefined && docId !== null ? String(docId) : String(first.id);
 }
 
+/** Page size for the exact-duplicate idempotency scroll. */
+const EXACT_DUP_SCROLL_PAGE = 256;
+/** Hard cap on pages walked (256 * 256 = 65 536 rules) so a pathological
+ *  non-terminating cursor can never hang the add path. Past this we treat the
+ *  bucket as "no exact duplicate found" and let the add proceed. */
+const EXACT_DUP_SCROLL_MAX_PAGES = 256;
+
+/**
+ * Find an existing rule whose trimmed content equals `target`, within the
+ * pre-built (scope, tenant) `filter`. Drives idempotent `add`.
+ *
+ * Paginates the scroll instead of inspecting a single 256-row page: a
+ * (scope, tenant) bucket can exceed one page, and the WHOLE point of this
+ * check is that re-adding identical content is a no-op — a single-page cap
+ * would silently miss a duplicate past the first page and create exactly the
+ * row the check exists to prevent.
+ *
+ * Fail-open: any Qdrant error returns null so the add proceeds rather than
+ * being blocked by a transient read failure.
+ */
+export async function findExactContentRuleId(
+  qdrantClient: QdrantClient,
+  filter: Record<string, unknown> | null,
+  target: string
+): Promise<{ id: string; label?: string } | null> {
+  const trimmed = target.trim();
+  if (!trimmed) return null;
+  try {
+    let offset: string | number | undefined;
+    for (let page = 0; page < EXACT_DUP_SCROLL_MAX_PAGES; page++) {
+      const result = await qdrantClient.scroll(RULES_COLLECTION, {
+        limit: EXACT_DUP_SCROLL_PAGE,
+        with_payload: true,
+        ...(filter ? { filter } : {}),
+        ...(offset !== undefined ? { offset } : {}),
+      });
+      for (const point of result.points ?? []) {
+        const existing = (point.payload?.[FIELD_CONTENT] as string | undefined)?.trim();
+        if (existing === trimmed) {
+          const label = point.payload?.['label'] as string | undefined;
+          return { id: String(point.id), ...(label ? { label } : {}) };
+        }
+      }
+      const next = result.next_page_offset;
+      if (typeof next === 'string' || typeof next === 'number') {
+        offset = next;
+      } else {
+        // null / undefined / object cursor → Qdrant has no further pages.
+        return null;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function persistUpdateRule(
   daemonClient: DaemonClient,
   qdrantClient: QdrantClient,
