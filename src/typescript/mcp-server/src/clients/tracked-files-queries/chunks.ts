@@ -15,6 +15,10 @@ export interface ListChunkCandidatesOptions {
   watchFolderId: string;
   needles: string[];
   fileType?: string;
+  /** Restrict candidates to one git branch (the search path's effective
+   *  branch). Omit / pass undefined to span branches — mirrors the normal
+   *  search filter, which only constrains branch when it is concrete (not `*`). */
+  branch?: string;
   limit?: number;
 }
 
@@ -32,6 +36,13 @@ export function listChunkCandidates(
     if (options.fileType) {
       conditions.push('tf.file_type = ?');
       params.push(options.fileType);
+    }
+    if (options.branch) {
+      // Branch scope: this candidate query only constrained watch_folder +
+      // needle, so it used to span EVERY indexed branch of the project. Apply
+      // the same branch filter the normal search path applies.
+      conditions.push('tf.branch = ?');
+      params.push(options.branch);
     }
 
     const needleClauses: string[] = [];
