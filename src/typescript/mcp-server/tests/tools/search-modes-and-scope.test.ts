@@ -60,6 +60,7 @@ function createMockStateManager(): SqliteStateManager {
     listTags: vi.fn().mockReturnValue([]),
     getTagHierarchy: vi.fn().mockReturnValue([]),
     getWatchFolderIdByTenantId: vi.fn().mockReturnValue(null),
+    getProjectById: vi.fn().mockReturnValue({ data: null }),
     getActiveBasePoints: vi.fn().mockReturnValue([]),
   } as unknown as SqliteStateManager;
 }

@@ -18,6 +18,7 @@ function makeStateManager(): SqliteStateManager {
     logSearchEvent: vi.fn(),
     updateSearchEvent: vi.fn(),
     updateSearchEventEconomy: vi.fn(),
+    getProjectById: vi.fn().mockReturnValue({ data: null }),
   } as unknown as SqliteStateManager;
 }
 
