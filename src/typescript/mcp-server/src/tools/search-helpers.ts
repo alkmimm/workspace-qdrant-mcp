@@ -35,9 +35,11 @@ import {
 import { expandGraphContext } from './search-graph-context.js';
 import { logDebug } from '../utils/logger.js';
 import {
+  concreteBranchFilter,
   resolveEffectiveBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
+import { FIELD_BASE_POINT, FIELD_BRANCH, FIELD_TENANT_ID } from '../common/native-bridge.js';
 
 /** Maximum active base_points we still attach as a Qdrant filter. Above
  * this the filter clause would blow past server-side limits; we instead
@@ -366,6 +368,49 @@ function qdrantPointId(pointId: string): string {
   return pointId;
 }
 
+/**
+ * Scope-guard for supplemental symbol candidates. The candidate point ids come
+ * from the SQLite `qdrant_chunks` mirror, which (a) is filtered only by
+ * watch_folder + needle and (b) is known to drift from Qdrant. Re-check each
+ * retrieved point's payload against the SAME scope the normal search path
+ * enforces — tenant, concrete branch (mirroring `buildBranchCondition`), and
+ * active base_points (multi-clone disambiguation) — so a symbol match can never
+ * surface a chunk from another branch or another clone of the project. Qdrant
+ * payload is the source of truth here, not the drifting mirror.
+ *
+ * Exported for unit testing.
+ */
+export function filterSupplementalPointsToScope<
+  T extends { payload?: Record<string, unknown> | null },
+>(
+  points: T[],
+  scope: {
+    tenantId: string | undefined;
+    branch: string | undefined;
+    basePoints: string[] | undefined;
+  }
+): T[] {
+  const effectiveBranch = concreteBranchFilter(scope.branch);
+  const basePoints =
+    scope.basePoints && scope.basePoints.length > 0 ? new Set(scope.basePoints) : undefined;
+  return points.filter((point) => {
+    const payload = point.payload ?? {};
+    if (scope.tenantId !== undefined && payload[FIELD_TENANT_ID] !== scope.tenantId) {
+      return false;
+    }
+    if (effectiveBranch !== undefined && payload[FIELD_BRANCH] !== effectiveBranch) {
+      return false;
+    }
+    if (basePoints !== undefined) {
+      const basePoint = payload[FIELD_BASE_POINT];
+      if (typeof basePoint !== 'string' || !basePoints.has(basePoint)) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
 async function searchSupplementalSymbolCandidates(
   qdrantClient: QdrantClient,
   coll: string,
@@ -379,10 +424,12 @@ async function searchSupplementalSymbolCandidates(
   const watchFolderId = params.stateManager.getWatchFolderIdByTenantId(params.currentProjectId);
   if (!watchFolderId) return [];
 
+  const effectiveBranch = concreteBranchFilter(params.branch);
   const candidates = params.stateManager.listChunkCandidates({
     watchFolderId,
     needles,
     ...(params.fileType ? { fileType: params.fileType } : {}),
+    ...(effectiveBranch !== undefined ? { branch: effectiveBranch } : {}),
     limit: SUPPLEMENTAL_SYMBOL_LIMIT,
   });
   if (candidates.data.length === 0) return [];
@@ -392,7 +439,15 @@ async function searchSupplementalSymbolCandidates(
       ids: candidates.data.map((candidate) => qdrantPointId(candidate.pointId)),
       with_payload: true,
     });
-    return points.map((point, index) => ({
+    // Candidate ids come from the SQLite mirror (watch_folder + needle only,
+    // and known to drift); re-verify each point's payload against the caller's
+    // full scope so a match can't leak across branches or clones.
+    const scopedPoints = filterSupplementalPointsToScope(points, {
+      tenantId: params.currentProjectId,
+      branch: params.branch,
+      basePoints: params.basePoints,
+    });
+    return scopedPoints.map((point, index) => ({
       id: String(point.id),
       score: SUPPLEMENTAL_SYMBOL_SCORE - index * 0.001,
       collection: coll,

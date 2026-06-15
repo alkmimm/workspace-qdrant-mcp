@@ -34,18 +34,19 @@ CREATE TABLE qdrant_chunks (
 );
 `;
 
-function seedFile(db: DatabaseType, relativePath: string, fileType = 'code'): number {
+function seedFile(db: DatabaseType, relativePath: string, fileType = 'code', branch = 'main'): number {
   const info = db.prepare(`
     INSERT INTO tracked_files
       (watch_folder_id, file_path, relative_path, branch, file_type, file_mtime, file_hash, created_at, updated_at)
-    VALUES (?, ?, ?, 'main', ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     WATCH_ID,
     `/repo/${relativePath}`,
     relativePath,
+    branch,
     fileType,
     NOW,
-    `hash-${relativePath}`,
+    `hash-${relativePath}-${branch}`,
     NOW,
     NOW
   );
@@ -110,5 +111,30 @@ describe('listChunkCandidates', () => {
 
     expect(result.status).toBe('ok');
     expect(result.data.map((entry) => entry.pointId)).toEqual(['code-point']);
+  });
+
+  it('restricts candidates to the requested branch, and spans branches when omitted', () => {
+    const mainFileId = seedFile(db, 'src/widget.ts', 'code', 'main');
+    const featFileId = seedFile(db, 'src/widget.ts', 'code', 'feature/x');
+    seedChunk(db, mainFileId, 'main-point', 'WidgetFactory', 10);
+    seedChunk(db, featFileId, 'feat-point', 'WidgetFactory', 10);
+
+    // A concrete branch must not surface chunks indexed under another branch.
+    const onlyMain = listChunkCandidates(db, {
+      watchFolderId: WATCH_ID,
+      needles: ['WidgetFactory'],
+      branch: 'main',
+      limit: 5,
+    });
+    expect(onlyMain.status).toBe('ok');
+    expect(onlyMain.data.map((entry) => entry.pointId)).toEqual(['main-point']);
+
+    // Omitting branch spans every indexed branch (explicit cross-branch, e.g. `*`).
+    const spanning = listChunkCandidates(db, {
+      watchFolderId: WATCH_ID,
+      needles: ['WidgetFactory'],
+      limit: 5,
+    });
+    expect(spanning.data.map((entry) => entry.pointId).sort()).toEqual(['feat-point', 'main-point']);
   });
 });
