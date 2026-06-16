@@ -335,6 +335,9 @@ services:
       # retrieval side changes (embedding model, sparse pipeline).
       WQM_PATH_BOOST_ALPHA: ${WQM_PATH_BOOST_ALPHA:-}
       WQM_SPARSE_ONLY_WEIGHT: ${WQM_SPARSE_ONLY_WEIGHT:-}
+      # Global down-weight for the keyword/sparse leg in RRF fusion so it
+      # backfills below dense ordering (dense-dominant). Empty = code default 0.25.
+      WQM_KEYWORD_WEIGHT: ${WQM_KEYWORD_WEIGHT:-}
       WQM_SYMBOL_MATCH_BOOST: ${WQM_SYMBOL_MATCH_BOOST:-}
       # "1" flips the cross-encoder rerank default ON (per-call `rerank` wins).
       WQM_SEARCH_RERANK: ${WQM_SEARCH_RERANK:-}
