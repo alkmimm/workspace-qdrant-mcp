@@ -184,8 +184,13 @@ queries:
 
   - id: impl-remote-embeddings
     query: Where is the OpenAI-compatible remote embedding provider implemented?
+    # 2026-06-15 gold audit: openai.rs holds the OpenAiCompatibleProvider struct
+    # + DenseProvider::embed impl, but the actual HTTP request/parse lives in the
+    # openai/ submodule (http.rs ranks #1 for this query). Any file of the
+    # provider module answers "where is it implemented" — broaden like impl-fts5-exact.
     expectedFiles:
       - src/rust/daemon/core/src/embedding/provider/openai.rs
+      - "src/rust/daemon/core/src/embedding/provider/openai/*.rs"
 
   - id: impl-chunk-payload
     query: Which code builds the Qdrant point payload with chunk symbol metadata?

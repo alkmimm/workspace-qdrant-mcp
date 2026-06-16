@@ -131,6 +131,56 @@ Both endpoints must serve `BAAI/bge-m3` before the daemon starts. Do not mix
 BGE-M3 on one endpoint with e5 on the other: failover is safe only when the
 model, dimension, and prefixes match.
 
+## Code-aware dense model: CodeRankEmbed (GPU primary + CPU standby)
+
+`nomic-ai/CodeRankEmbed` (137M, **768d**, 8192 ctx, MIT, NomicBERT) is a
+**code-specialized** dense model. On the 46-query benchmark it lifted semantic
+`recall@10` from **58.7 (BGE-M3) → 81.5** (top10 67.4→87.0), clearing the ≥70
+gate — the biggest single retrieval win to date, because the prior models
+(e5 / BGE-M3) are general/multilingual and underperform on code. **Trade-off:**
+it is English-centric, but the regression is **cross-lingual-only**. Measured on
+DOC-V2's real Portuguese docs, a Portuguese query against Portuguese docs is
+**100% recall** — same-language prose is unaffected. The only loss is the niche
+of a **Portuguese query against English code** (query-PT→code on DOC-V2: 16.7%
+recall@10 vs **75%** for the same queries in English), which is avoidable by
+querying code in English (the search tool's own guidance). The swap is global
+(one shared dense vector space across all tenants), so it can't be scoped
+per-project.
+
+**CPU standby is Infinity, not TEI.** TEI's CPU image prefers its ONNX/ORT
+backend and CodeRankEmbed ships **safetensors only**; its custom NomicBERT arch
+has no usable ONNX export (optimum refuses it without a bespoke `OnnxConfig`), so
+TEI cannot serve it. The CPU sidecar (`embeddings` service) therefore runs
+**Infinity on `--device cpu`** (PyTorch serves safetensors), sharing the
+`infinity_data` cache with the GPU backend so weights are not re-downloaded.
+Failover GPU→CPU and automatic recovery are validated.
+
+```bash
+# docker/.env
+WQM_EMBEDDING_SIDECAR_MODEL=nomic-ai/CodeRankEmbed
+COMPOSE_PROFILES=embeddings-cpu,embeddings-gpu
+```
+
+```yaml
+# state/memexd/config.yaml
+embedding:
+  provider: openai_compatible
+  base_url: http://wqm-embeddings-gpu:7997
+  fallback_base_url: http://wqm-embeddings:80   # CPU standby (Infinity --device cpu)
+  model: nomic-ai/CodeRankEmbed
+  output_dim: 768
+  document_prefix: ""            # ASYMMETRIC: documents get NO prefix …
+  query_prefix: "Represent this query for searching relevant code: "  # … query does
+```
+
+The query prefix is applied daemon-side in the `EmbedText` gRPC, so it takes
+effect from config alone (no rebuild). Follow the destructive
+[Changing the model](#changing-the-model--reembed) runbook (the dim change
+1024→768 needs `--bootstrap-reembed`). Because the dense signal is now strong,
+the sparse/BM25 leg adds little for code — `mode: "semantic"` is the best mode
+for code-heavy projects; `KEYWORD_WEIGHT` is left at the dense-dominant 0.25 so
+sparse can still rescue exact-term (incl. non-English) matches elsewhere.
+
 ## Cross-encoder reranker (2nd-stage search)
 
 The GPU Infinity service also serves a **second** model — the multilingual
