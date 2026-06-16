@@ -56,3 +56,25 @@ export function applyEffectiveBranch<T extends { branch?: string }>(
 export function concreteBranchFilter(branch: string | undefined): string | undefined {
   return branch && branch !== '*' ? branch : undefined;
 }
+
+/**
+ * Decide the base branch to fall back to for files unchanged on the caller's
+ * feature branch. The daemon only tags CHANGED files under a feature branch
+ * (unchanged files stay under the project's base branch), so a branch-scoped
+ * read on a feature branch would otherwise miss most of the project.
+ *
+ * `baseBranch` must be resolved from the indexed DATA (the branch the daemon
+ * actually tagged the bulk under — see `getBaseBranch`), NOT from git's local
+ * default, because the daemon's base tag can differ from the repo's git default
+ * (e.g. files tagged "main" while git's default is "master"). Returns undefined
+ * when no fallback should apply: no concrete effective branch (e.g. "*" or
+ * unset), no base branch, or the effective branch already IS the base branch.
+ */
+export function resolveFallbackBranch(params: {
+  effectiveBranch: string | undefined;
+  baseBranch: string | null | undefined;
+}): string | undefined {
+  const eff = concreteBranchFilter(params.effectiveBranch);
+  if (!eff || !params.baseBranch) return undefined;
+  return params.baseBranch !== eff ? params.baseBranch : undefined;
+}
