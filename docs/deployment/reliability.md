@@ -48,9 +48,11 @@ local Docker Desktop). They are qualitative guides, not SLAs.
   makes simulating inter-service partitions awkward; the nearest
   approximation (`docker network disconnect`) is left for manual
   exploration.
-- **Long-running soak.** We have no data on degradation over 24h+. The
-  daemon's Prometheus metrics (`wqm_queue_depth`, `wqm_mcp_session_count`)
-  are the right signal if you want to grow one.
+- **Long-running soak.** We have no automated data on degradation over 24h+.
+  The daemon's Prometheus metrics (`wqm_queue_depth`,
+  `wqm_mcp_session_count`) are the right signal for queue/session health, but
+  memexd does **not** export process RSS, so memory growth has its own
+  out-of-band watcher — see *Memory-growth watch* below.
 
 ## Operational recommendations
 
@@ -82,6 +84,42 @@ CHAOS_ITERATIONS=10 tests/integration/docker/test-chaos.sh
 Scratch directories under `/tmp/wqm-e2e-chaos.*` are preserved on
 failure; `compose logs` is dumped to `logs/compose.log` in that dir.
 
+
+## Memory-growth watch (memexd soak signal)
+
+memexd's resident set has been observed to grow slowly over days under
+sustained indexing load — tens of GiB before a restart recovers it. Because
+memexd exports only app-level `memexd_*` metrics (no process RSS) to
+Prometheus, there is no time series to consult after the climb. The
+`scripts/mem-watch/` harness fills that gap.
+
+**Read the trend on anonymous memory, not the charged total.** A container's
+cgroup `memory.current` is mostly **reclaimable page cache** — it looks
+alarming but is not a leak. The non-reclaimable part is the `anon` line of
+`memory.stat`. As a concrete example, a memexd at 6.1 GiB charged was only
+1.76 GiB anon (the rest cache). The sampler records both; `analyze.py` bases
+its verdict on `anon`.
+
+### Usage (Linux / WSL, where the container stack runs)
+
+```bash
+make mem-watch-start   # detached sampler, 5-min cadence, survives the shell
+make mem-watch         # on demand: per-container trend + leak projection
+make mem-watch-stop
+```
+
+Raw equivalents (no make): `setsid nohup bash scripts/mem-watch/sampler.sh &`
+then `python3 scripts/mem-watch/analyze.py`. Samples land in
+`$HOME/.wqm-mem-watch/samples.csv` (override with `WQM_MEM_WATCH_DIR`), outside
+the repo. A slow GiB/day leak needs a few hours of samples to separate from
+normal indexing churn, so let it run before trusting the slope.
+
+### Recovery
+
+If anon climbs toward restart territory, `docker compose restart memexd` drops
+it back without data loss: memexd's queue writer persists to SQLite first
+(see the Qdrant-restart row above), so the queue drains on recovery rather
+than losing points. This is the same restart the chaos test exercises.
 
 ## Cross-process single-instance lock
 

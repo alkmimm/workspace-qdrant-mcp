@@ -43,7 +43,8 @@ MEMEXD_DB_VOLUME ?= workspace-qdrant-mcp_memexd_db
 .PHONY: help check-env first-time redeploy \
 	stack-up stack-down stack-restart stack-status stack-logs \
 	build-images mcp-rebuild memexd-recreate \
-	health-quick scan register-all watch reindex reindex-status hooks-install clean
+	health-quick scan register-all watch reindex reindex-status hooks-install clean \
+	mem-watch-start mem-watch mem-watch-stop
 
 help:
 	@echo "============================================================"
@@ -70,6 +71,9 @@ help:
 	@echo "  watch            poll indexing progress until all projects drain (or timeout)"
 	@echo "  reindex          trigger a full reindex of the watched projects (admin API)"
 	@echo "  reindex-status   per-project indexing progress (one-shot)"
+	@echo "  mem-watch-start  start the background memory-growth sampler (detached)"
+	@echo "  mem-watch        analyze memory samples: per-container trend + leak projection"
+	@echo "  mem-watch-stop   stop the background memory sampler"
 	@echo "  hooks-install    install POSIX git hooks into .wqm-fork/git-hooks"
 	@echo "  clean            remove the MCP dist build artifacts"
 	@echo "------------------------------------------------------------"
@@ -198,6 +202,32 @@ reindex: check-env
 # Per-project indexing progress (pending / done / total / percent) from snapshot.
 reindex-status: check-env
 	@python3 "$(REPO)/scripts/wqm_admin.py" status "http://localhost:$(MCP_HTTP_PORT)"
+
+# ── Memory-growth watch (memexd soak signal) ─────────────────────────────────
+#
+# memexd's resident set grows slowly over days under sustained indexing load and
+# exports no process RSS to Prometheus, so there's nothing to consult after the
+# fact. mem-watch-start logs cgroup memory (charged + anonymous) for the wqm
+# containers every WQM_MEM_WATCH_INTERVAL seconds to MEM_WATCH_DIR; mem-watch
+# reports the trend. Judge a leak on ANON, not charged (cache). See
+# docs/deployment/reliability.md and scripts/mem-watch/README.md.
+MEM_WATCH_DIR ?= $(HOME)/.wqm-mem-watch
+
+mem-watch-start:
+	@setsid nohup bash "$(REPO)/scripts/mem-watch/sampler.sh" >/dev/null 2>&1 & true
+	@sleep 1
+	@echo "memory sampler launched (logs: $(MEM_WATCH_DIR)/samples.csv). Analyze: make mem-watch"
+
+mem-watch:
+	@python3 "$(REPO)/scripts/mem-watch/analyze.py" "$(MEM_WATCH_DIR)/samples.csv"
+
+mem-watch-stop:
+	@pid="$(MEM_WATCH_DIR)/sampler.pid"; \
+	if [[ -f "$$pid" ]] && kill "$$(cat "$$pid")" 2>/dev/null; then \
+		echo "memory sampler stopped (pid $$(cat "$$pid"))"; \
+	else \
+		echo "no running sampler found ($$pid)"; \
+	fi
 
 hooks-install:
 	@echo "Installing POSIX git hooks (sh + curl -> MCP HTTP)..."
