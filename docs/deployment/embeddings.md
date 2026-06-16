@@ -131,6 +131,50 @@ Both endpoints must serve `BAAI/bge-m3` before the daemon starts. Do not mix
 BGE-M3 on one endpoint with e5 on the other: failover is safe only when the
 model, dimension, and prefixes match.
 
+## Code-aware dense model: CodeRankEmbed (GPU-only)
+
+`nomic-ai/CodeRankEmbed` (137M, **768d**, 8192 ctx, MIT, NomicBERT) is a
+**code-specialized** dense model. On the 46-query benchmark it lifted semantic
+`recall@10` from **58.7 (BGE-M3) → 81.5** (top10 67.4→87.0), clearing the ≥70
+gate — the biggest single retrieval win to date, because the prior models
+(e5 / BGE-M3) are general/multilingual and underperform on code. **Trade-off:**
+it is English-centric and **regresses Portuguese / prose retrieval** (the `pt-`
+category dropped from ~50% to 37.5% top10) — relevant if the watch root includes
+Portuguese-doc projects (e.g. DOC-V2). The swap is global (one shared dense
+vector space across all tenants), so it can't be scoped per-project.
+
+**GPU-only.** The TEI CPU image prefers its ONNX/ORT backend and CodeRankEmbed
+ships **safetensors only** (no `model.onnx`) → TEI 404s and the container exits.
+Infinity (PyTorch) serves it fine. So run `COMPOSE_PROFILES=embeddings-gpu` and
+leave `fallback_base_url` empty (no CPU warm-standby). A CPU fallback would need
+a manual ONNX export of the model.
+
+```bash
+# docker/.env
+WQM_EMBEDDING_SIDECAR_MODEL=nomic-ai/CodeRankEmbed
+COMPOSE_PROFILES=embeddings-gpu
+```
+
+```yaml
+# state/memexd/config.yaml
+embedding:
+  provider: openai_compatible
+  base_url: http://wqm-embeddings-gpu:7997
+  fallback_base_url: ""          # no CPU standby — TEI can't serve this model
+  model: nomic-ai/CodeRankEmbed
+  output_dim: 768
+  document_prefix: ""            # ASYMMETRIC: documents get NO prefix …
+  query_prefix: "Represent this query for searching relevant code: "  # … query does
+```
+
+The query prefix is applied daemon-side in the `EmbedText` gRPC, so it takes
+effect from config alone (no rebuild). Follow the destructive
+[Changing the model](#changing-the-model--reembed) runbook (the dim change
+1024→768 needs `--bootstrap-reembed`). Because the dense signal is now strong,
+the sparse/BM25 leg adds little for code — `mode: "semantic"` is the best mode
+for code-heavy projects; `KEYWORD_WEIGHT` is left at the dense-dominant 0.25 so
+sparse can still rescue exact-term (incl. non-English) matches elsewhere.
+
 ## Cross-encoder reranker (2nd-stage search)
 
 The GPU Infinity service also serves a **second** model — the multilingual
