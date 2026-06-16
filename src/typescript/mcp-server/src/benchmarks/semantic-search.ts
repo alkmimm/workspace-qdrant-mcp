@@ -694,9 +694,14 @@ function buildSearchOptions(
     query: query.query,
     limit: merged.limit,
     scope: merged.scope,
-    // Tag harness traffic in search_events so REAL agent queries can be mined
+    // Tag harness traffic so REAL agent queries (actor 'claude') can be mined
     // from the history without dozens of benchmark repetitions drowning them.
-    telemetryActor: 'benchmark',
+    // The search_events schema CHECK only permits ('claude','user','daemon'),
+    // so use 'user' — distinct from the assistant's 'claude' yet honest (eval
+    // runs are human-initiated). A dedicated 'benchmark' actor would require a
+    // CHECK-widening migration (cf. v39 relaxing the `op` CHECK); until then
+    // 'benchmark' was silently rejected and every eval search spammed an ERROR.
+    telemetryActor: 'user',
   };
   if (merged.collection !== undefined) options.collection = merged.collection;
   if (merged.projectId !== undefined) options.projectId = merged.projectId;

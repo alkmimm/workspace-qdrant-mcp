@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tonic::Status;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use workspace_qdrant_core::embedding::provider::DenseProvider;
 use workspace_qdrant_core::storage::{
     DocumentPoint, MultiTenantConfig, StorageClient, StorageError,
 };
@@ -73,9 +74,15 @@ pub(crate) fn chunk_text(
 }
 
 /// Ensure collection exists, create if not.
+///
+/// `vector_size` is the active dense provider's output dimensionality, so a
+/// freshly-created collection matches the embeddings we will insert (the
+/// `MultiTenantConfig` default is the legacy 384d all-MiniLM size, which would
+/// otherwise mismatch a 768d provider like CodeRankEmbed).
 pub(crate) async fn ensure_collection_exists(
     storage_client: &StorageClient,
     collection_name: &str,
+    vector_size: u64,
 ) -> Result<(), Status> {
     match storage_client.collection_exists(collection_name).await {
         Ok(true) => {
@@ -84,10 +91,13 @@ pub(crate) async fn ensure_collection_exists(
         }
         Ok(false) => {
             info!(
-                "Creating collection '{}' with multi-tenant config (dense+sparse)",
-                collection_name
+                "Creating collection '{}' with multi-tenant config (dense={}d + sparse)",
+                collection_name, vector_size
             );
-            let config = MultiTenantConfig::default();
+            let config = MultiTenantConfig {
+                vector_size,
+                ..MultiTenantConfig::default()
+            };
             storage_client
                 .create_multi_tenant_collection(collection_name, &config)
                 .await
@@ -132,6 +142,7 @@ pub(crate) fn map_storage_error(err: StorageError) -> Status {
 
 /// Build a single DocumentPoint from chunk content and metadata.
 async fn build_document_point(
+    dense_provider: &Arc<dyn DenseProvider>,
     chunk_content: &str,
     chunk_index: usize,
     total_chunks: usize,
@@ -139,7 +150,18 @@ async fn build_document_point(
     metadata: &HashMap<String, String>,
     created_at: &str,
 ) -> Result<DocumentPoint, Status> {
-    let dense_embedding = embedding::generate_embedding(chunk_content).await?;
+    // Dense vector via the daemon's configured provider (e.g. 768d
+    // CodeRankEmbed), matching the dimensionality of the canonical collections.
+    let dense_embedding = {
+        let mut embeddings = dense_provider.embed(&[chunk_content]).await.map_err(|e| {
+            error!("Dense provider embed failed: {:?}", e);
+            Status::internal(format!("Embedding generation failed: {}", e))
+        })?;
+        embeddings
+            .pop()
+            .ok_or_else(|| Status::internal("Dense provider returned no embedding"))?
+            .vector
+    };
     let sparse_vector = embedding::generate_sparse_vector(chunk_content).await?;
     let sparse_option = if sparse_vector.is_empty() {
         None
@@ -170,8 +192,10 @@ async fn build_document_point(
 }
 
 /// Process text ingestion: chunk, embed, and store.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn ingest_text_internal(
     storage_client: &Arc<StorageClient>,
+    dense_provider: &Arc<dyn DenseProvider>,
     content: String,
     collection_name: String,
     document_id: String,
@@ -184,7 +208,12 @@ pub(crate) async fn ingest_text_internal(
         return Err(Status::invalid_argument("Content cannot be empty"));
     }
 
-    ensure_collection_exists(storage_client, &collection_name).await?;
+    ensure_collection_exists(
+        storage_client,
+        &collection_name,
+        dense_provider.output_dim() as u64,
+    )
+    .await?;
 
     let chunks = chunk_text(&content, do_chunk, chunk_size, chunk_overlap);
     let total_chunks = chunks.len();
@@ -199,6 +228,7 @@ pub(crate) async fn ingest_text_internal(
 
     for (chunk_content, chunk_index) in chunks {
         let point = build_document_point(
+            dense_provider,
             &chunk_content,
             chunk_index,
             total_chunks,

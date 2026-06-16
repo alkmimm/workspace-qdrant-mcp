@@ -48,12 +48,16 @@ impl GrpcServer {
         let storage_client = self.create_storage_client();
         let system_service = self.build_system_service(&storage_client);
         let collection_service = CollectionServiceImpl::new(Arc::clone(&storage_client));
-        let document_service = DocumentServiceImpl::new(Arc::clone(&storage_client));
         let dense_provider = self.dense_provider.clone().ok_or_else(|| {
             GrpcError::Configuration(
                 "GrpcServer requires a DenseProvider — call .with_dense_provider(...) before start()".to_string(),
             )
         })?;
+        // DocumentService (ingest_text — store/rules direct writes) embeds with
+        // the SAME configured provider as EmbeddingService, so its dense vectors
+        // match the collections' dimensionality (e.g. 768d CodeRankEmbed).
+        let document_service =
+            DocumentServiceImpl::new(Arc::clone(&storage_client), Arc::clone(&dense_provider));
         // Pass the writable model cache dir (same one the dense provider uses)
         // so the lazy reranker download lands somewhere writable instead of the
         // CWD-relative `.fastembed_cache` default.
