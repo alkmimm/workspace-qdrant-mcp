@@ -339,3 +339,99 @@ All seven are now resolved.
   two production call sites (`registration.rs`, `deactivation.rs`) to pass
   `"session"`. Test fixtures keep the legacy `"main"` value; behavior is
   unchanged because the parameter is never read.
+
+---
+
+## 8. Discovery-tool branch scoping (2026-06)
+
+A discovery test against a project sitting on a feature branch (`bws-engineer`,
+on `docs/integration-collector-plano-melhoria`) surfaced that the MCP discovery
+tools returned almost nothing on a non-default branch. Investigation isolated
+two independent MCP-side bugs (both fixed) plus two follow-ups (scoped, not yet
+done). The engine (embeddings, Qdrant, FTS, graph) is sound — the indexed data
+was complete the whole time; the defects were in branch scoping, not retrieval.
+
+### 8.1 `list` dropped its `branch` argument
+
+- **Status**: **bug** — fixed (PR #118).
+- **Evidence**: `buildListOptions` (`tool-builders/list.ts`) parsed
+  path/depth/format/fileType/language/extension/pattern/includeTests/limit/
+  projectId/component — but never read `args.branch`. `options.branch` was
+  therefore always `undefined`, so `ListFilesTool.list` fell through to the
+  current-branch default and `branch:"*"` / `branch:"main"` had no effect. The
+  `search` (`tool-builders/search.ts:49-50`) and `grep`
+  (`tool-builders/grep.ts:44-45`) builders already parsed it; `list`'s omission
+  was the gap. The list SQL and the effective-branch resolver were both correct —
+  the parameter simply never reached them.
+- **Live**: `list branch:"*"` 42→2227, `list branch:"main"` 42→2177.
+- **Fix**: parse `branch` in `buildListOptions`.
+
+### 8.2 `list` showed only changed files on a feature branch
+
+- **Status**: **bug** — fixed (PR #118).
+- **Evidence**: the daemon only tags CHANGED files under a feature branch
+  (cross-branch-dedup, spec 21, re-keys only changed-but-identical files);
+  unchanged files keep the project's base-branch tag. So a branch-scoped `list`
+  on a feature branch returned only the handful of changed files (56 of ~2210 on
+  bws-engineer).
+- **Fix**: on a non-base branch, `list` matches `branch IN (current, base)` and
+  suppresses base-branch rows whose `relative_path` is overridden on the current
+  branch (those show in their feature version instead) — i.e. the project as it
+  appears on that branch. The base branch is resolved from the indexed DATA
+  (`getBaseBranch` = the branch the daemon tagged the bulk of files under), NOT
+  git's local default, because they can differ: bws-engineer's files are tagged
+  `main` while git's default (`origin/HEAD`) is `master`. (An initial git-based
+  `getDefaultBranch` resolved `master`, matched zero rows, and merged nothing —
+  reverted in favour of the data-driven resolver.) No-op on the base branch and
+  for `branch:"*"`.
+- **Live**: `list` default (on the feature branch) 56→2210 (2177 base + 33
+  net-new feature files; the ~23 changed files appear in their feature version,
+  base copies suppressed — no double count).
+
+### 8.3 `search` / `grep` base-branch fallback
+
+- **Status**: **gap** — follow-up.
+- The same sparse-per-branch effect as §8.2 applies to `search` and `grep`: on a
+  feature branch they surface only the changed files. Unlike `list`, `branch:"*"`
+  DOES work for them (their builders parse `branch`), so a workaround exists in
+  the interim. The fix mirrors §8.2: a Qdrant multi-branch filter + override
+  suppression for `search`, and — because the daemon's `TextSearchRequest.branch`
+  is single-valued (`proto/workspace_daemon.proto:645`) — a 2-call merge for
+  `grep`. These are on the hot retrieval path and should land with unit tests.
+
+### 8.4 Unbounded WAL on the daemon state DB
+
+- **Status**: **gap** — follow-up (perf/disk, daemon-side).
+- **Evidence**: `memexd.db-wal` was observed at ~730 MB on a 790 MB main DB. The
+  daemon runs only PASSIVE auto-checkpoint (`queue_config.rs`
+  `wal_autocheckpoint=1000`), which copies frames into the main DB but never
+  truncates the WAL file; there is no `wal_checkpoint(TRUNCATE)` anywhere. The
+  data is intact (a fresh reader and an `immutable=1` read both see the full
+  2210 rows), so this is disk/perf only, not a correctness issue.
+- **Follow-up**: a periodic `wal_checkpoint(TRUNCATE)` idle task under
+  `src/rust/daemon/core/src/idle/tasks/`.
+
+### 8.5 Lessons learned
+
+- **Check the argument-parsing layer before the deep one.** §8.1 presented as a
+  stale read / DB desync for most of the investigation. The `list` SQL and the
+  Qdrant filter both honour `branch` correctly; the bug was upstream, in the
+  builder that never populated `options.branch`. A long chain of plausible root
+  causes — stale long-lived SQLite connection, WAL data-loss, deleted/replaced
+  inode, duplicate `watch_folders`, stale deployment — was investigated and
+  refuted before anyone read `buildListOptions`. The cheap, shallow layer
+  (raw args → tool options) is the first place to look, not the last.
+- **A container restart cleanly falsifies "stale long-lived connection."** When
+  `list` still returned the wrong count after recreating the (stateless,
+  reader-only) MCP container, the long-lived-connection hypothesis was dead and
+  attention correctly moved to code.
+- **A branch-merge's base branch must come from the DATA, not git.** The daemon's
+  base-branch tag (what it labelled the bulk of files) can differ from the repo's
+  git default. `git symbolic-ref refs/remotes/origin/HEAD` returned `master` and
+  merged zero rows; the majority-tracked branch (`getBaseBranch`) returned `main`
+  and worked.
+- **"Flapping" / "stale branch resolution" were measurement artifacts.** The MCP
+  reads the live `.git/HEAD` via the bind mount (verified byte-identical between
+  host and container); transient `main` readings during probing were shell noise
+  (a worktree session's `GIT_DIR` and timing), not real branch churn, and
+  `.git/HEAD`'s mtime confirmed HEAD never moved.
