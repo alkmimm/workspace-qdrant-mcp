@@ -65,7 +65,7 @@ export const searchToolDefinition = {
       scoreThreshold: {
         type: 'number',
         description:
-          'Minimum similarity score threshold (0-1, default: 0.3). Results below this score are filtered out.',
+          'Minimum similarity score threshold (0-1, default: 0.3). Applied at the vector-store stage on the raw cosine similarity, before any reranking. In each result, `score` is that pre-rerank similarity (comparable across queries, same scale as this threshold); when the cross-encoder reranker is active, results also carry a `rerankScore` (per-query blended rank, 0-1) that reflects ordering. Compare this threshold against `score`, not `rerankScore`.',
       },
       includeLibraries: {
         type: 'boolean',

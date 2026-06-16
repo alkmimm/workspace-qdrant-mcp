@@ -1066,12 +1066,15 @@ async function rerankResults(
         leftover.push(item);
         return;
       }
-      // Surface the blended score so the final ordering and the reported
-      // score agree.
-      item.score = score;
+      // Order by the blended (rerank) signal, but KEEP `item.score` as the
+      // pre-rerank similarity for display — it stays comparable across queries
+      // and on the same scale as `scoreThreshold` (raw cosine), instead of the
+      // min-max-normalized pool rank that forces the pool minimum to a
+      // misleading 0.0. Expose the ordering signal separately as `rerankScore`.
+      item.rerankScore = score;
       scored.push(item);
     });
-    scored.sort((a, b) => b.score - a.score);
+    scored.sort((a, b) => (b.rerankScore ?? 0) - (a.rerankScore ?? 0));
     return [...scored, ...leftover, ...results.slice(poolSize)];
   } catch (err) {
     logDebug('Rerank failed; using pre-rerank order', {
