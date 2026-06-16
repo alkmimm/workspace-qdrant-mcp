@@ -550,34 +550,41 @@ services:
   # reembed, and the daemon re-detects a recovered primary within ~60s.
   # ─────────────────────────────────────────────────────────────────────────
   embeddings:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.7
+    # Infinity on CPU (NOT TEI): TEI's CPU image is ONNX-only, and the active
+    # model CodeRankEmbed ships safetensors with a custom NomicBERT arch that
+    # has no usable ONNX export — TEI cannot serve it. Infinity (PyTorch) serves
+    # safetensors on CPU and is the warm standby. Shares the infinity_data cache
+    # with the GPU backend so model weights are not re-downloaded. (For TEI-native
+    # models like e5/bge-m3, Infinity-CPU also serves them — it is a superset, just
+    # heavier than TEI on CPU; acceptable for a rarely-hit fallback.)
+    image: michaelf34/infinity:latest
     container_name: wqm-embeddings
     <<: *restart
     logging: *default-logging
     command:
+      - v2
       - --model-id
       - ${WQM_EMBEDDING_SIDECAR_MODEL:-intfloat/multilingual-e5-large}
-      - --auto-truncate
-      - --hostname
-      - 0.0.0.0
       - --port
       - "80"
+      - --url-prefix
+      - /v1
+      - --device
+      - cpu
     environment:
-      RUST_LOG: info
+      DO_NOT_TRACK: "1"
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "curl -fsS http://127.0.0.1/health || curl -fsS http://127.0.0.1/embed -H 'Content-Type: application/json' -d '{\"inputs\":\"health check\"}' >/dev/null",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:80/health', timeout=5)\"",
         ]
       interval: 15s
       timeout: 10s
-      retries: 20
-      start_period: 90s
+      retries: 30
+      start_period: 300s
     volumes:
-      # Reuses the weights downloaded by the hand-run wqm-tei container on
-      # 2026-06-10 (external volume) — no 2.2GB re-download on first up.
-      - tei_data:/data
+      - infinity_data:/app/.cache
     networks:
       - workspace-network
     profiles:

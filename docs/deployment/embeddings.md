@@ -131,28 +131,34 @@ Both endpoints must serve `BAAI/bge-m3` before the daemon starts. Do not mix
 BGE-M3 on one endpoint with e5 on the other: failover is safe only when the
 model, dimension, and prefixes match.
 
-## Code-aware dense model: CodeRankEmbed (GPU-only)
+## Code-aware dense model: CodeRankEmbed (GPU primary + CPU standby)
 
 `nomic-ai/CodeRankEmbed` (137M, **768d**, 8192 ctx, MIT, NomicBERT) is a
 **code-specialized** dense model. On the 46-query benchmark it lifted semantic
 `recall@10` from **58.7 (BGE-M3) → 81.5** (top10 67.4→87.0), clearing the ≥70
 gate — the biggest single retrieval win to date, because the prior models
 (e5 / BGE-M3) are general/multilingual and underperform on code. **Trade-off:**
-it is English-centric and **regresses Portuguese / prose retrieval** (the `pt-`
-category dropped from ~50% to 37.5% top10) — relevant if the watch root includes
-Portuguese-doc projects (e.g. DOC-V2). The swap is global (one shared dense
-vector space across all tenants), so it can't be scoped per-project.
+it is English-centric, but the regression is **cross-lingual-only**. Measured on
+DOC-V2's real Portuguese docs, a Portuguese query against Portuguese docs is
+**100% recall** — same-language prose is unaffected. The only loss is the niche
+of a **Portuguese query against English code** (query-PT→code on DOC-V2: 16.7%
+recall@10 vs **75%** for the same queries in English), which is avoidable by
+querying code in English (the search tool's own guidance). The swap is global
+(one shared dense vector space across all tenants), so it can't be scoped
+per-project.
 
-**GPU-only.** The TEI CPU image prefers its ONNX/ORT backend and CodeRankEmbed
-ships **safetensors only** (no `model.onnx`) → TEI 404s and the container exits.
-Infinity (PyTorch) serves it fine. So run `COMPOSE_PROFILES=embeddings-gpu` and
-leave `fallback_base_url` empty (no CPU warm-standby). A CPU fallback would need
-a manual ONNX export of the model.
+**CPU standby is Infinity, not TEI.** TEI's CPU image prefers its ONNX/ORT
+backend and CodeRankEmbed ships **safetensors only**; its custom NomicBERT arch
+has no usable ONNX export (optimum refuses it without a bespoke `OnnxConfig`), so
+TEI cannot serve it. The CPU sidecar (`embeddings` service) therefore runs
+**Infinity on `--device cpu`** (PyTorch serves safetensors), sharing the
+`infinity_data` cache with the GPU backend so weights are not re-downloaded.
+Failover GPU→CPU and automatic recovery are validated.
 
 ```bash
 # docker/.env
 WQM_EMBEDDING_SIDECAR_MODEL=nomic-ai/CodeRankEmbed
-COMPOSE_PROFILES=embeddings-gpu
+COMPOSE_PROFILES=embeddings-cpu,embeddings-gpu
 ```
 
 ```yaml
@@ -160,7 +166,7 @@ COMPOSE_PROFILES=embeddings-gpu
 embedding:
   provider: openai_compatible
   base_url: http://wqm-embeddings-gpu:7997
-  fallback_base_url: ""          # no CPU standby — TEI can't serve this model
+  fallback_base_url: http://wqm-embeddings:80   # CPU standby (Infinity --device cpu)
   model: nomic-ai/CodeRankEmbed
   output_dim: 768
   document_prefix: ""            # ASYMMETRIC: documents get NO prefix …
