@@ -137,23 +137,36 @@ export function resultFileKey(result: SearchResult): string {
  * dense leg's, displacing semantically-found code from the final top-k. A
  * chunk the dense leg retrieved as well needs no demotion: the same-chunk
  * double vote is a high-precision agreement signal and is what hybrid's
- * top-1/top-3 edge over pure semantic comes from (measured on the 12-query
- * known-item benchmark). So fusion keeps both-leg sums at full strength and
- * halves only the sparse-ONLY entries.
+ * top-1/top-3 edge over pure semantic comes from. This factor STACKS on top of
+ * {@link KEYWORD_WEIGHT}: the keyword leg is first scaled globally by
+ * KEYWORD_WEIGHT (dense-dominant fusion), then sparse-ONLY entries are demoted
+ * further by this factor — so an unconfirmed sparse vote contributes
+ * ≈ KEYWORD_WEIGHT × SPARSE_ONLY_WEIGHT of a raw RRF vote, acting as backfill
+ * below dense ordering. The path-relevance boost (up to ×1.8) applied after
+ * fusion can still lift a sparse-only hit whose file path/symbol matches the
+ * query — the exact-identifier rescue case — past the dense tail.
  *
- * 0.5 puts the best unconfirmed sparse vote (0.5/(k+1) ≈ 0.0082) just below
- * the dense leg's floor at the default pool depth (1/(k+50) ≈ 0.0091,
- * k = 60, pool = limit×5 = 50), so unconfirmed keyword hits act as backfill
- * below dense results rather than displacing them. The path-relevance boost
- * (up to ×1.8) applied after fusion can still lift a sparse-only hit whose
- * file path/symbol matches the query — the exact-identifier rescue case —
- * past the dense tail.
- *
- * Tunable via WQM_SPARSE_ONLY_WEIGHT. 0.5 was calibrated when the sparse leg
- * was vocabulary-misaligned noise; with the lexicon-aligned sparse vectors and
- * identifier subtokens, sparse-only hits carry real signal — re-tune against
- * the 44-query benchmark after retrieval-side changes. */
+ * Tunable via WQM_SPARSE_ONLY_WEIGHT; re-tune with KEYWORD_WEIGHT against the
+ * benchmark (`search_eval`, hybrid mode) after retrieval-side changes. */
 const SPARSE_ONLY_WEIGHT = tuningFromEnv('WQM_SPARSE_ONLY_WEIGHT', 0.5);
+
+/**
+ * Global down-weight applied to EVERY keyword/sparse RRF contribution (both
+ * dense-confirmed and sparse-only), making fusion strongly dense-dominant.
+ *
+ * Why: the BM25 leg subtokenizes identifiers (`applyRRFFusion` -> apply, rrf,
+ * fusion) for recall, which floods the query with common subtokens (apply,
+ * fusion, implementation) that BM25-match many files. Pure rank fusion discards
+ * IDF, so those low-precision sparse hits got the same RRF weight as a rare
+ * high-IDF identifier match and displaced the strong dense top-1 — measured as
+ * hybrid recall@10 38% vs semantic 58.7% on the 46-query benchmark (identifier
+ * queries collapsed 83% -> 17%). Scaling the whole sparse leg down turns it into
+ * a tie-breaker/backfill that can lift confirmed agreements and path-matched
+ * hits without overriding dense ordering. Tunable via WQM_KEYWORD_WEIGHT; re-tune
+ * against the benchmark (`search_eval`, hybrid mode) — semantic mode is the
+ * sparse-off upper bound (~59).
+ */
+const KEYWORD_WEIGHT = tuningFromEnv('WQM_KEYWORD_WEIGHT', 0.25);
 
 /**
  * Apply Reciprocal Rank Fusion to combine results.
@@ -182,10 +195,12 @@ export function applyRRFFusion(results: SearchResult[], mode: SearchMode): Searc
 
   keywordResults.forEach((result, rank) => {
     const key = `${result.collection}:${result.id}`;
-    const rrfScore = 1 / (RRF_K + rank + 1);
+    // Dense-dominant fusion: scale the whole keyword leg by KEYWORD_WEIGHT so it
+    // backfills/breaks ties below dense ordering instead of displacing it.
+    const rrfScore = (1 / (RRF_K + rank + 1)) * KEYWORD_WEIGHT;
     const existing = rrfScores.get(key);
-    // Confirmed by the dense leg: full-strength vote on top of the dense one.
-    // Dense leg never saw this chunk: demoted, unconfirmed keyword evidence.
+    // Confirmed by the dense leg: weighted vote on top of the dense one.
+    // Dense leg never saw this chunk: demoted further (sparse-only, unconfirmed).
     if (existing) existing.score += rrfScore;
     else rrfScores.set(key, { score: rrfScore * SPARSE_ONLY_WEIGHT, result: { ...result } });
   });
