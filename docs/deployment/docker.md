@@ -163,15 +163,19 @@ the host fails silently.
 
 ### Embedding provider and collection dimension
 
-Since 2026-06-10 the reference deployment runs
-`WQM_EMBEDDING_PROVIDER=openai_compatible` with
-`intfloat/multilingual-e5-large` (1024d) served by in-stack backend
-containers — a GPU one (Infinity, preferred) and a CPU one (TEI, warm
+Since 2026-06-16 the reference deployment runs
+`WQM_EMBEDDING_PROVIDER=openai_compatible` with the **code-specialized**
+`nomic-ai/CodeRankEmbed` (768d) served by in-stack **Infinity** backend
+containers — a GPU one (preferred) and a CPU one (`--device cpu`, warm
 standby), selected via `COMPOSE_PROFILES` with automatic daemon-side
-failover between them. **See
+failover between them. The CPU sidecar is Infinity, **not** TEI: TEI's CPU
+image is ONNX-only and CodeRankEmbed ships a custom NomicBERT safetensors
+model. Earlier profiles used `intfloat/multilingual-e5-large` then
+`BAAI/bge-m3` (both 1024d, general/multilingual). **See
 [embeddings.md](embeddings.md)** for the full picture: backend selection,
 failover semantics, the NVIDIA Container Toolkit requirement (and why),
-Blackwell/TEI compatibility, and the model-change/reembed procedure.
+Blackwell/TEI compatibility, the code-vs-multilingual trade-off, and the
+model-change/reembed procedure.
 
 `WQM_EMBEDDING_PROVIDER=fastembed` remains the zero-dependency fallback
 (in-process ONNX pinned to the 384-dim `AllMiniLM-L6-v2` checkpoint) for

@@ -226,10 +226,19 @@ Verdict: `poor` → `mixed` (only `top3 < 80%` remains).
 
 ## Reaching the remaining gate (`top3 ≥ 80%`)
 
-Cheap levers (dedup, overfetch, path-boost) took recall@10 past its gate but
-top-3 ranking is still embedding-limited (all-MiniLM-L6-v2 conflates adjacent
-subsystems). The designed path to higher top-3 is the **second-stage reranker**
-already specced in [the search-quality plan](../plans/2026-05-25-search-quality-next-steps.md)
-(Phase 3: pluggable `RerankProvider`, local `BAAI/bge-reranker-base` via
-fastembed or remote `openai_compatible`, `fallback_to_rrf`). Grow the dataset
-(>30 queries across subsystems) before tuning the reranker to avoid overfitting.
+**Update (2026-06-16) — the gate was reached by the embedding upgrade, not the
+reranker.** Cheap levers (dedup, overfetch, path-boost) plus a second-stage
+cross-encoder lifted recall@10 to the ~58–73% range but stalled on top-3,
+because every dense model up to that point (all-MiniLM → e5 → BGE-M3) was
+*general/multilingual*, not code-specialized — the misses were **retrieval**
+failures (the gold chunk never entered the candidate pool), which no reranker or
+fusion tuning can fix. Swapping the dense model to the code-specialized
+`nomic-ai/CodeRankEmbed` (768d) lifted semantic **recall@10 58.7 → 81.5** and
+**top3 63.0 → 76.1** (top10 87.0), clearing the recall gate. The residual
+top-3 < 80% is now almost entirely the **`pt-` (Portuguese-query → English-code)
+cross-lingual** category — a niche the "query code in English" guidance already
+covers (same-language prose retrieval is unaffected). Full write-up:
+[CodeRankEmbed migration outcomes](../plans/2026-06-16-coderankembed-embedding-swap-outcomes.md).
+
+Earlier guidance (still valid for *general* dense models): grow the dataset
+(>30 queries across subsystems) before tuning a reranker, to avoid overfitting.
