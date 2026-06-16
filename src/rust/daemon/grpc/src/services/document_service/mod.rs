@@ -31,7 +31,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use workspace_qdrant_core::embedding::provider::{DenseProvider, FastEmbedProvider};
 use workspace_qdrant_core::storage::StorageClient;
-use wqm_common::constants::{COLLECTION_LIBRARIES, COLLECTION_PROJECTS};
+use wqm_common::constants::{COLLECTION_LIBRARIES, COLLECTION_PROJECTS, COLLECTION_RULES};
 use wqm_common::timestamps;
 
 use crate::proto::{
@@ -131,6 +131,16 @@ impl DocumentService for DocumentServiceImpl {
             "collection_basename".to_string(),
             req.collection_basename.clone(),
         );
+        // Routing tags the rules collection's tenant under `project_id` (used by
+        // the MCP list/dedup filters), but the daemon's rule remove/update and the
+        // startup rules_mirror backfill key on `tenant_id`. Without it, rules added
+        // here are never removable/updatable (the delete filter matches 0 points).
+        // Write both so the rule is discoverable AND mutable.
+        if collection_name == COLLECTION_RULES {
+            enriched_metadata
+                .entry("tenant_id".to_string())
+                .or_insert_with(|| tenant_value.clone());
+        }
 
         let response = ingestion::ingest_text_internal(
             &self.storage_client,
