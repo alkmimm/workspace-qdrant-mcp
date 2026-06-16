@@ -129,6 +129,9 @@ function shapeAsSummary(r: SearchResult): SearchResult {
     metadata: pickSummaryMetadata(r.metadata),
   };
   if (r.title) out.title = r.title;
+  // Carry the rerank ordering signal through the summary allowlist (the
+  // truncate path keeps it via spread; summary rebuilds, so add it explicitly).
+  if (r.rerankScore !== undefined) out.rerankScore = r.rerankScore;
   return out;
 }
 

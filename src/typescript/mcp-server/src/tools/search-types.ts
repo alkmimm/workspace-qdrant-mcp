@@ -122,7 +122,15 @@ export interface GraphContext {
 
 export interface SearchResult {
   id: string;
+  /** Pre-rerank similarity: raw cosine for the dense/semantic lane (same scale
+   *  as `scoreThreshold`), or the RRF-fused score for hybrid. Stays comparable
+   *  across queries. NOT overwritten by the reranker. */
   score: number;
+  /** Present only when the cross-encoder reranker ran: the per-query, min-max
+   *  blended rank in [0,1] that determined this result's order (1 = top of the
+   *  pool, the pool minimum is 0). Use this to understand ordering; use `score`
+   *  for absolute similarity. Absent when rerank is off. */
+  rerankScore?: number;
   collection: string;
   content: string;
   title?: string;
