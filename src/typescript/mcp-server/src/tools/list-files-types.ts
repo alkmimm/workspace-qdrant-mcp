@@ -26,6 +26,11 @@ export interface ListOptions {
   projectId?: string;
   /** Filter by branch name. Defaults to the current Git branch; "*" searches all branches. */
   branch?: string;
+  /**
+   * Default/base branch to fall back to for files unchanged on `branch` (set
+   * internally for feature-branch views; not a caller-facing argument).
+   */
+  fallbackBranch?: string;
   /** Filter by component (dot-separated ID or prefix, e.g. "daemon" or "daemon.core") */
   component?: string;
   /** Opaque pagination cursor from a previous response's next_token */

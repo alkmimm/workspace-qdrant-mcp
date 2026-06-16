@@ -8,7 +8,7 @@
  */
 
 export type { TrackedFileEntry, ListTrackedFilesOptions } from './tracked-files.js';
-export { listTrackedFiles, countTrackedFiles } from './tracked-files.js';
+export { listTrackedFiles, countTrackedFiles, getBaseBranch } from './tracked-files.js';
 
 export type { ChunkCandidateEntry, ListChunkCandidatesOptions } from './chunks.js';
 export { listChunkCandidates } from './chunks.js';

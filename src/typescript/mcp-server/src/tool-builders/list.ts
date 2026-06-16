@@ -43,5 +43,12 @@ export function buildListOptions(args: Record<string, unknown> | undefined): Lis
   const component = args?.['component'] as string | undefined;
   if (component) options.component = component;
 
+  // Branch scoping: parse the `branch` arg so callers can target a specific
+  // branch or pass "*" to opt out of the current-branch default. Without this
+  // the arg is silently dropped and `list` always falls back to the caller's
+  // current Git branch (search.ts / grep.ts builders already parse it).
+  const branch = args?.['branch'] as string | undefined;
+  if (branch) options.branch = branch;
+
   return options;
 }
