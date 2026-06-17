@@ -400,8 +400,16 @@ impl GenericExtractor {
                         break;
                     }
                 }
-            } else if kind == "do_block" || child.child_count() > 0 {
-                // Recurse into nested blocks (Elixir do blocks, etc.)
+            } else if (kind == "do_block" || child.child_count() > 0)
+                && !self.patterns.paired_body_node_types.iter().any(|t| t == kind)
+            {
+                // Recurse into nested blocks (Elixir do blocks, etc.), but NOT
+                // into a paired body that the preceding signature already
+                // consumed (Dart's `function_body`). Descending into it would
+                // re-extract the body's local functions as members of the
+                // enclosing container with the wrong parent. Empty
+                // `paired_body_node_types` (every other language) preserves the
+                // original recursion.
                 self.extract_methods_from_body(&child, source, file_path, parent_name, chunks);
             }
         }
@@ -441,10 +449,17 @@ impl GenericExtractor {
 
         chunks.push(chunk);
 
-        // Extract methods from container body
+        // Extract methods from container body. Enum is included for languages
+        // with methods on enums (Dart enhanced enums, Java enums with bodies);
+        // for plain C-style enums the body has no method/function nodes, so
+        // nothing extra is emitted.
         if matches!(
             chunk_type,
-            ChunkType::Class | ChunkType::Impl | ChunkType::Module | ChunkType::Trait
+            ChunkType::Class
+                | ChunkType::Impl
+                | ChunkType::Module
+                | ChunkType::Trait
+                | ChunkType::Enum
         ) {
             self.extract_methods_from_body(node, source, file_path, &name, &mut chunks);
         }

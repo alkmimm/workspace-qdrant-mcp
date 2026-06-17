@@ -157,12 +157,16 @@ pub fn extract_function_calls(
 /// identifiable callee; downstream `is_valid_symbol_name` discards stragglers.
 fn resolve_postfix_callee(arg_node: &Node, source: &str) -> Option<String> {
     let parent = arg_node.parent()?;
-    let prev = if parent.kind() == "cascade_section" {
-        arg_node.prev_sibling()?
-    } else {
-        // `parent` is the `selector` wrapping the argument list; the callee sits
-        // before that selector.
-        parent.prev_sibling()?
+    let prev = match parent.kind() {
+        // Cascade: `..method(args)` — the callee precedes the args within the
+        // cascade section.
+        "cascade_section" => arg_node.prev_sibling()?,
+        // Normal postfix: the args wrapper sits inside a `selector`; the callee
+        // sits before that selector.
+        "selector" => parent.prev_sibling()?,
+        // Any other parent is not a Dart postfix-call shape — don't guess a
+        // callee from an unrelated preceding node.
+        _ => return None,
     };
 
     if prev.kind() == "identifier" {
