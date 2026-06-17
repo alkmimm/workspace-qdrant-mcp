@@ -427,7 +427,7 @@ export async function fallbackSearch(
     results: limitedResults,
     total: limitedResults.length,
     query: options.query,
-    mode: options.mode ?? 'hybrid',
+    mode: options.mode ?? 'semantic',
     scope,
     collections_searched: collections,
     status: 'uncertain',

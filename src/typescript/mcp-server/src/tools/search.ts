@@ -226,7 +226,7 @@ export class SearchTool {
         eventId
       );
     }
-    const mode = options.mode ?? 'hybrid';
+    const mode = options.mode ?? 'semantic';
     const limit = options.limit ?? DEFAULT_LIMIT;
     const scope = options.scope ?? 'project';
     const collectionsToSearch = determineCollections(

@@ -133,10 +133,10 @@ describe('SearchTool — search modes and scope', () => {
       });
     });
 
-    it('should use default hybrid mode when not specified', async () => {
+    it('should use default semantic mode when not specified', async () => {
       const result = await searchTool.search({ query: 'test query' });
 
-      expect(result.mode).toBe('hybrid');
+      expect(result.mode).toBe('semantic');
     });
   });
 

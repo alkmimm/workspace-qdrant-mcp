@@ -8,7 +8,8 @@ export const graphToolDefinition = {
   description:
     'Navigate the code-relationship graph: callers/callees, change-impact, importance ranking, and module clusters. ' +
     'Built from symbol relations (calls, contains, uses-type, imports) extracted during indexing. ' +
-    'Use this to understand how code connects before editing — e.g. "what calls this function?", "what breaks if I change X?", "what are the most central functions?".',
+    'Use this to understand how code connects before editing — e.g. "what calls this function?", "what breaks if I change X?", "what are the most central functions?". ' +
+    'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules → none (project-wide).',
   inputSchema: {
     type: 'object' as const,
     properties: {
