@@ -149,11 +149,21 @@ impl GenericExtractor {
         file_path: &str,
         chunk_type: ChunkType,
         parent: Option<&str>,
+        body_sibling: Option<&Node>,
     ) -> SemanticChunk {
         let name = self.extract_name(node, source);
-        let content = node_text(node, source);
+        // For grammars where the body is a following sibling (Dart), the chunk
+        // spans from the signature start to the body end so the content and the
+        // CALLS-bearing body are captured together.
+        let content = match body_sibling {
+            Some(b) => &source[node.start_byte()..b.end_byte()],
+            None => node_text(node, source),
+        };
         let start_line = node.start_position().row + 1;
-        let end_line = node.end_position().row + 1;
+        let end_line = match body_sibling {
+            Some(b) => b.end_position().row + 1,
+            None => node.end_position().row + 1,
+        };
 
         let is_async = matches!(chunk_type, ChunkType::Function | ChunkType::Method)
             && self
@@ -187,15 +197,21 @@ impl GenericExtractor {
             effective_type,
             ChunkType::Function | ChunkType::AsyncFunction | ChunkType::Method
         ) {
-            let body_node_type = self.patterns.body_node.as_deref();
-            if let Some(body_type) = body_node_type {
-                if let Some(body) = find_child_by_kind(node, body_type) {
-                    extract_function_calls(&body, source, &self.patterns.call_nodes)
-                } else {
-                    extract_function_calls(node, source, &self.patterns.call_nodes)
-                }
+            let call_nodes = &self.patterns.call_nodes;
+            let arg_nodes = &self.patterns.call_arg_node_types;
+            // Grammars with a sibling body (Dart) carry their calls there, not
+            // inside the signature node.
+            if let Some(b) = body_sibling {
+                extract_function_calls(b, source, call_nodes, arg_nodes)
+            } else if let Some(body) = self
+                .patterns
+                .body_node
+                .as_deref()
+                .and_then(|body_type| find_child_by_kind(node, body_type))
+            {
+                extract_function_calls(&body, source, call_nodes, arg_nodes)
             } else {
-                extract_function_calls(node, source, &self.patterns.call_nodes)
+                extract_function_calls(node, source, call_nodes, arg_nodes)
             }
         } else {
             Vec::new()
@@ -228,10 +244,48 @@ impl GenericExtractor {
     // ── Name extraction ───────────────────────────────────────────────
 
     fn extract_name<'a>(&self, node: &Node<'a>, source: &'a str) -> &'a str {
+        if let Some(name) = self.extract_name_precise(node, source) {
+            return name;
+        }
+
+        // The name field can live one level down inside a wrapper node (Dart's
+        // `method_signature` wraps the named `function_signature` / getter /
+        // constructor). Descend into a configured wrapper and retry. Empty
+        // `name_descend_types` (every other language) skips this entirely.
+        if !self.patterns.name_descend_types.is_empty() {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if self
+                    .patterns
+                    .name_descend_types
+                    .iter()
+                    .any(|t| t == child.kind())
+                {
+                    if let Some(name) = self.extract_name_precise(&child, source) {
+                        return name;
+                    }
+                }
+            }
+        }
+
+        // Fallback: second word in text (e.g., "def name", "fn name", "class Name")
+        let text = node_text(node, source);
+        text.split_whitespace()
+            .nth(1)
+            .map(|s| s.split('(').next().unwrap_or(s))
+            .map(|s| s.split('<').next().unwrap_or(s))
+            .map(|s| s.split(':').next().unwrap_or(s))
+            .unwrap_or("anonymous")
+    }
+
+    /// Precise name strategies: the configured `name_node` kind, then the common
+    /// `name`/`declarator`/`pattern` fields. Returns `None` when neither matches
+    /// so the caller can descend or fall back.
+    fn extract_name_precise<'a>(&self, node: &Node<'a>, source: &'a str) -> Option<&'a str> {
         // Try the configured name_node type first
         if let Some(ref name_type) = self.patterns.name_node {
             if let Some(name_node) = find_child_by_kind(node, name_type) {
-                return node_text(&name_node, source);
+                return Some(node_text(&name_node, source));
             }
         }
 
@@ -244,21 +298,14 @@ impl GenericExtractor {
                     || name_node.kind() == "pointer_declarator"
                 {
                     if let Some(inner) = find_child_by_kind(&name_node, "identifier") {
-                        return node_text(&inner, source);
+                        return Some(node_text(&inner, source));
                     }
                 }
-                return text;
+                return Some(text);
             }
         }
 
-        // Fallback: second word in text (e.g., "def name", "fn name", "class Name")
-        let text = node_text(node, source);
-        text.split_whitespace()
-            .nth(1)
-            .map(|s| s.split('(').next().unwrap_or(s))
-            .map(|s| s.split('<').next().unwrap_or(s))
-            .map(|s| s.split(':').next().unwrap_or(s))
-            .unwrap_or("anonymous")
+        None
     }
 
     // ── Class/module body walking ─────────────────────────────────────
@@ -291,6 +338,7 @@ impl GenericExtractor {
             .or_else(|| find_child_by_kind(node, "class_body"))
             .or_else(|| find_child_by_kind(node, "declaration_list"))
             .or_else(|| find_child_by_kind(node, "enum_body"))
+            .or_else(|| find_child_by_kind(node, "extension_body"))
             .or_else(|| find_child_by_kind(node, "interface_body"))
             .or_else(|| find_child_by_kind(node, "block"))
             .or_else(|| find_child_by_kind(node, "body"));
@@ -328,12 +376,14 @@ impl GenericExtractor {
                 || async_fn_types.iter().any(|t| t == kind);
 
             if is_method {
+                let body_sibling = walker::paired_body_sibling(&self.patterns, &child);
                 chunks.push(self.extract_definition(
                     &child,
                     source,
                     file_path,
                     ChunkType::Function,
                     Some(parent_name),
+                    body_sibling.as_ref(),
                 ));
             } else if Some(kind) == decorated_wrapper {
                 // Handle decorated methods (Python @decorator pattern)
@@ -345,12 +395,21 @@ impl GenericExtractor {
                             file_path,
                             ChunkType::Function,
                             Some(parent_name),
+                            None,
                         ));
                         break;
                     }
                 }
-            } else if kind == "do_block" || child.child_count() > 0 {
-                // Recurse into nested blocks (Elixir do blocks, etc.)
+            } else if (kind == "do_block" || child.child_count() > 0)
+                && !self.patterns.paired_body_node_types.iter().any(|t| t == kind)
+            {
+                // Recurse into nested blocks (Elixir do blocks, etc.), but NOT
+                // into a paired body that the preceding signature already
+                // consumed (Dart's `function_body`). Descending into it would
+                // re-extract the body's local functions as members of the
+                // enclosing container with the wrong parent. Empty
+                // `paired_body_node_types` (every other language) preserves the
+                // original recursion.
                 self.extract_methods_from_body(&child, source, file_path, parent_name, chunks);
             }
         }
@@ -390,10 +449,17 @@ impl GenericExtractor {
 
         chunks.push(chunk);
 
-        // Extract methods from container body
+        // Extract methods from container body. Enum is included for languages
+        // with methods on enums (Dart enhanced enums, Java enums with bodies);
+        // for plain C-style enums the body has no method/function nodes, so
+        // nothing extra is emitted.
         if matches!(
             chunk_type,
-            ChunkType::Class | ChunkType::Impl | ChunkType::Module | ChunkType::Trait
+            ChunkType::Class
+                | ChunkType::Impl
+                | ChunkType::Module
+                | ChunkType::Trait
+                | ChunkType::Enum
         ) {
             self.extract_methods_from_body(node, source, file_path, &name, &mut chunks);
         }
@@ -428,7 +494,7 @@ impl ChunkExtractor for GenericExtractor {
             &file_path_str,
             &mut chunks,
             &|n, s, fp, ct| self.extract_container(n, s, fp, ct),
-            &|n, s, fp, ct, p| self.extract_definition(n, s, fp, ct, p),
+            &|n, s, fp, ct, p, b| self.extract_definition(n, s, fp, ct, p, b),
         );
 
         Ok(chunks)

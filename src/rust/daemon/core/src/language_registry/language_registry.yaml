@@ -179,6 +179,32 @@
         quality: official
     has_cpp_scanner: true
     symbol_name: c_sharp
+  # No name_node: declarations carry the name in a `name:` field whose value is
+  # an `identifier`, but a custom return type is ALSO an `identifier` child, so
+  # find-by-kind would grab the return type. The `name` field is authoritative.
+  semantic_patterns:
+    preamble:
+      node_types: [using_directive, extern_alias_directive]
+    function:
+      node_types: [local_function_statement]
+      async_node_types: []
+    class:
+      node_types: [class_declaration, record_declaration]
+    method:
+      node_types: [method_declaration, constructor_declaration, destructor_declaration, property_declaration]
+      context: inside_class
+    struct:
+      node_types: [struct_declaration]
+    enum:
+      node_types: [enum_declaration]
+    interface:
+      node_types: [interface_declaration]
+    module:
+      node_types: [namespace_declaration, file_scoped_namespace_declaration]
+    type_alias:
+      node_types: [delegate_declaration]
+    body_node: block
+    comment_nodes: [comment]
   lsp_servers: []
 
 # ── Clojure ──────────────────────────────────────────────────────────
@@ -311,6 +337,33 @@
       - repo: UserNobody14/tree-sitter-dart
         quality: community
     has_cpp_scanner: true
+  # Dart's grammar splits each definition into a `*_signature` node followed by
+  # a sibling `function_body` (the `_top_level_definition` /
+  # `_class_member_definition` wrappers are hidden rules), and has no discrete
+  # call node — invocations are `<callee> (selector (argument_part …))`. The
+  # paired_body / name_descend / call_arg fields drive the generic extractor to
+  # span the body, name methods via the wrapped signature, and resolve CALLS.
+  semantic_patterns:
+    preamble:
+      node_types: [import_or_export, library_name, part_directive, part_of_directive]
+    function:
+      node_types: [function_signature, getter_signature, setter_signature]
+      async_node_types: []
+    class:
+      node_types: [class_definition, mixin_declaration, extension_declaration]
+    method:
+      node_types: [method_signature]
+      context: inside_class
+    enum:
+      node_types: [enum_declaration]
+    type_alias:
+      node_types: [type_alias]
+    name_node: identifier
+    comment_nodes: [comment, documentation_comment]
+    docstring_style: preceding_comments
+    paired_body_node_types: [function_body]
+    name_descend_types: [function_signature, getter_signature, setter_signature, constructor_signature, factory_constructor_signature, constant_constructor_signature, operator_signature]
+    call_arg_node_types: [argument_part]
   lsp_servers: []
 
 # ── Protocol Buffers ─────────────────────────────────────────────────
@@ -788,6 +841,27 @@
       - repo: tree-sitter/tree-sitter-julia
         quality: official
     has_cpp_scanner: true
+  # No name_node: `function_definition`/`struct_definition` carry the name in a
+  # `signature`/`type_head`, not a direct identifier child, so the second-word
+  # fallback (`function foo(...)` -> `foo`) is the reliable path; only
+  # `module_definition` has a real `name` field. `call_expression` is a default;
+  # macro calls (`@foo`) are the extra call node.
+  semantic_patterns:
+    preamble:
+      node_types: [using_statement, import_statement]
+    function:
+      node_types: [function_definition]
+      async_node_types: []
+    struct:
+      node_types: [struct_definition]
+    module:
+      node_types: [module_definition]
+    macro:
+      node_types: [macro_definition]
+    type_alias:
+      node_types: [abstract_definition, primitive_definition]
+    call_nodes: [macrocall_expression]
+    comment_nodes: [line_comment, block_comment]
   lsp_servers: []
 
 # ── Kotlin ───────────────────────────────────────────────────────────
@@ -801,6 +875,25 @@
       - repo: fwcd/tree-sitter-kotlin
         quality: community
     has_cpp_scanner: false
+  # Interfaces and enum classes are `class_declaration` (keyword-distinguished),
+  # so there is no separate interface/enum group. `call_expression` is already a
+  # default call node, so no call_nodes are needed.
+  semantic_patterns:
+    preamble:
+      node_types: [import_header]
+    function:
+      node_types: [function_declaration]
+      async_node_types: []
+    class:
+      node_types: [class_declaration, object_declaration, companion_object]
+    method:
+      node_types: [function_declaration]
+      context: inside_class
+    type_alias:
+      node_types: [type_alias]
+    name_node: simple_identifier
+    body_node: function_body
+    comment_nodes: [line_comment, multiline_comment]
   lsp_servers: []
 
 # ── LaTeX ────────────────────────────────────────────────────────────
@@ -1126,6 +1219,31 @@
         quality: official
     has_cpp_scanner: true
     src_subdir: php
+  # PHP's grammar uses a dedicated `name` node kind for declaration names, and
+  # several distinct call nodes beyond the universal `call_expression` default.
+  semantic_patterns:
+    preamble:
+      node_types: [namespace_use_declaration, include_expression, include_once_expression, require_expression, require_once_expression]
+    function:
+      node_types: [function_definition]
+      async_node_types: []
+    class:
+      node_types: [class_declaration]
+    method:
+      node_types: [method_declaration]
+      context: inside_class
+    enum:
+      node_types: [enum_declaration]
+    interface:
+      node_types: [interface_declaration]
+    trait:
+      node_types: [trait_declaration]
+    module:
+      node_types: [namespace_definition]
+    call_nodes: [function_call_expression, member_call_expression, scoped_call_expression, nullsafe_member_call_expression]
+    name_node: name
+    body_node: compound_statement
+    comment_nodes: [comment]
   lsp_servers:
     - name: phpactor
       binary: phpactor
@@ -1592,6 +1710,34 @@
       - repo: vala-lang/tree-sitter-vala
         quality: community
     has_cpp_scanner: false
+  # Method/function names are a direct `symbol` child; class/struct/enum names
+  # are `unqualified_type`, handled by the second-word fallback. `object_creation`
+  # is a default call node; `method_call_expression` is the extra one.
+  semantic_patterns:
+    preamble:
+      node_types: [using_directive]
+    function:
+      node_types: []
+      async_node_types: []
+    class:
+      node_types: [class_declaration]
+    method:
+      node_types: [method_declaration, creation_method_declaration, constructor_declaration, destructor_declaration]
+      context: inside_class
+    struct:
+      node_types: [struct_declaration]
+    enum:
+      node_types: [enum_declaration]
+    interface:
+      node_types: [interface_declaration]
+    module:
+      node_types: [namespace_declaration]
+    type_alias:
+      node_types: [delegate_declaration]
+    call_nodes: [method_call_expression]
+    name_node: symbol
+    body_node: block
+    comment_nodes: [comment]
   lsp_servers: []
 
 # ── Vue ──────────────────────────────────────────────────────────────

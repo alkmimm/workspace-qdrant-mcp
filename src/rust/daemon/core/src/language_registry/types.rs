@@ -220,6 +220,37 @@ pub struct SemanticPatterns {
     /// language whose call node was not one of the defaults built ZERO CALLS.
     #[serde(default)]
     pub call_nodes: Vec<String>,
+    /// AST node kinds for a definition BODY that the grammar attaches as a
+    /// *following sibling* of the signature node rather than nesting inside it.
+    /// Dart is the motivating case: `_top_level_definition` and
+    /// `_class_member_definition` are hidden rules, so a function/method parses
+    /// as `function_signature`/`method_signature` followed by a sibling
+    /// `function_body` — the signature node contains no body, so call extraction
+    /// and the chunk span would otherwise miss it. When a matched definition
+    /// node is immediately followed by a sibling of one of these kinds, the
+    /// extractor extends the chunk to cover the body and pulls CALLS from it.
+    /// Empty (every other language) = no look-ahead, behaviour unchanged.
+    ///
+    /// `skip_serializing_if` keeps this field out of the chunking-fingerprint
+    /// digest (see `chunker::fingerprint`) when empty, so adding it does NOT
+    /// invalidate every already-indexed language's chunks — only languages that
+    /// actually set it get a new fingerprint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paired_body_node_types: Vec<String>,
+    /// Wrapper node kinds to descend into (one level) when name extraction
+    /// fails on the matched definition node, retrying on the wrapped child.
+    /// Dart's `method_signature` wraps the named `function_signature` /
+    /// `getter_signature` / `constructor_signature`, so the name field lives a
+    /// level down. Empty (every other language) = no descent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub name_descend_types: Vec<String>,
+    /// AST node kinds for the *argument-list wrapper* of a call in grammars
+    /// that have no discrete call node (Dart's `argument_part`). The call
+    /// extractor resolves the callee from such a node's sibling position rather
+    /// than a child field (see `extract_function_calls`). These complement
+    /// `call_nodes`; empty (every other language) = postfix resolution off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_arg_node_types: Vec<String>,
 }
 
 /// A group of AST node types matching a semantic category.

@@ -206,6 +206,9 @@ pub fn to_semantic_patterns(extracted: &ExtractedPatterns) -> SemanticPatterns {
         call_nodes: Vec::new(),
         decorated_wrapper: None,
         root_wrappers: Vec::new(),
+        paired_body_node_types: Vec::new(),
+        name_descend_types: Vec::new(),
+        call_arg_node_types: Vec::new(),
     }
 }
 

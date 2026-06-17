@@ -385,6 +385,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_stub_edges_repoints_contains_source() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // A real class + a same-named constructor (method) in the same file,
+        // plus the file-less parent stub that CONTAINS edges are authored from.
+        // The stub even carries the "wrong" type (Module) that Dart's parent
+        // inference produces — resolution must still pick the real *container*
+        // (the class), never the same-named constructor.
+        let class = GraphNode::new(T, "app.dart", "Widget", NodeType::Class);
+        let ctor = GraphNode::new(T, "app.dart", "Widget", NodeType::Method);
+        let build = GraphNode::new(T, "app.dart", "build", NodeType::Method);
+        let parent_stub = GraphNode::stub(T, "Widget", NodeType::Module);
+        store
+            .upsert_nodes(&[
+                class.clone(),
+                ctor.clone(),
+                build.clone(),
+                parent_stub.clone(),
+            ])
+            .await
+            .unwrap();
+        // CONTAINS authored from the file-less parent stub (stub -> member).
+        let contains = GraphEdge::new(
+            T,
+            &parent_stub.node_id,
+            &build.node_id,
+            EdgeType::Contains,
+            "app.dart",
+        );
+        store.insert_edges(&[contains]).await.unwrap();
+
+        let repointed = store.resolve_stub_edges(T).await.unwrap();
+        assert_eq!(repointed, 1, "the CONTAINS source-stub repoints");
+
+        // The class node now reaches its member; the constructor must not have
+        // captured the CONTAINS edge.
+        let from_class = store
+            .query_related(T, &class.node_id, 1, None)
+            .await
+            .unwrap();
+        assert!(
+            from_class.iter().any(|n| n.symbol_name == "build"),
+            "class node should reach its member via the repointed CONTAINS"
+        );
+        let from_ctor = store
+            .query_related(T, &ctor.node_id, 1, None)
+            .await
+            .unwrap();
+        assert!(
+            !from_ctor.iter().any(|n| n.symbol_name == "build"),
+            "same-named constructor must not own the CONTAINS edge"
+        );
+
+        // The file-less parent stub is pruned once its edge is repointed.
+        let guard = store.read().await;
+        let stub_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM graph_nodes WHERE tenant_id = ?1 AND file_path = ''",
+        )
+        .bind(T)
+        .fetch_one(guard.pool())
+        .await
+        .unwrap();
+        assert_eq!(stub_count, 0, "resolved parent stub pruned");
+    }
+
+    #[tokio::test]
     async fn test_clone_is_cheap() {
         let store = test_shared_store().await;
         let clone1 = store.clone();
