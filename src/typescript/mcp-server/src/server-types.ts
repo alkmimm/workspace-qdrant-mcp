@@ -17,6 +17,16 @@ export interface SessionState {
   sessionId: string;
   projectId: string | null;
   projectPath: string | null;
+  /**
+   * Last host working directory seen on this session, from an explicit
+   * `x-mcp-host-cwd` header or a tool-body `cwd` argument. Persisted so that
+   * SUBSEQUENT calls in the same HTTP session that omit `cwd` still resolve the
+   * project — over HTTP the client (e.g. Claude Code) cannot send the header
+   * per session, so without this an agent would have to repeat `cwd` on every
+   * single call or get "Could not detect project". `null` until the first
+   * explicit cwd is seen. See `resolveStickyCwd` and `handleToolCall`.
+   */
+  lastHostCwd: string | null;
   /** Canonical watch path returned by daemon (may differ from projectPath due to symlink resolution) */
   watchPath: string | null;
   isWorktree: boolean;

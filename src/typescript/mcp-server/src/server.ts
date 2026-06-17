@@ -15,7 +15,11 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 
 import type { ServerConfig } from './types/index.js';
 import { logInfo, logError, logDebug } from './utils/logger.js';
-import { resolveBodyCwdOverride, runWithRequestContext } from './utils/request-context.js';
+import {
+  getRequestContext,
+  resolveStickyCwd,
+  runWithRequestContext,
+} from './utils/request-context.js';
 import {
   SERVER_NAME,
   SERVER_VERSION,
@@ -63,6 +67,7 @@ export class WorkspaceQdrantMcpServer {
     sessionId: '',
     projectId: null,
     projectPath: null,
+    lastHostCwd: null,
     watchPath: null,
     isWorktree: false,
     currentBranch: null,
@@ -148,19 +153,22 @@ export class WorkspaceQdrantMcpServer {
     components: ServerComponents,
     sessionState: SessionState
   ): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
-    // Body-level host-CWD fallback. The HTTP transport binds the host cwd from
-    // the `x-mcp-host-cwd` header, which always wins. But a client may be
+    // Session-sticky host-CWD resolution. The HTTP transport binds the host cwd
+    // from the `x-mcp-host-cwd` header, which always wins. But a client may be
     // unable to send that header per session (e.g. Claude Code over HTTP has no
-    // dynamic header for the cwd). In that case an agent can pass its working
-    // directory in the tool's `cwd` argument; bind it into the request context
-    // so getEffectiveCwd() — and thus project auto-detection — picks it up
-    // exactly as if it were the header. Precedence stays:
-    //   header > body `cwd` > WQM_DEFAULT_HOST_CWD > process.cwd().
-    const override = resolveBodyCwdOverride(
-      typeof args?.['cwd'] === 'string' ? (args['cwd'] as string) : undefined
-    );
-    if (override) {
-      return runWithRequestContext({ hostCwd: override }, () =>
+    // dynamic header for the cwd). In that case an agent passes its working
+    // directory in the tool's `cwd` argument — and we remember it on the session
+    // so SUBSEQUENT calls that omit `cwd` still resolve the project, instead of
+    // every cwd-less call failing with "Could not detect project". Precedence:
+    //   header > body `cwd` > session sticky cwd > WQM_DEFAULT_HOST_CWD > process.cwd().
+    const { bind, sticky } = resolveStickyCwd({
+      headerCwd: getRequestContext()?.hostCwd,
+      bodyCwd: typeof args?.['cwd'] === 'string' ? (args['cwd'] as string) : undefined,
+      stickyCwd: sessionState.lastHostCwd,
+    });
+    if (sticky) sessionState.lastHostCwd = sticky;
+    if (bind) {
+      return runWithRequestContext({ hostCwd: bind }, () =>
         dispatchToolCall(toolName, args, components, sessionState)
       );
     }
@@ -172,6 +180,7 @@ export class WorkspaceQdrantMcpServer {
       sessionId: '',
       projectId: null,
       projectPath: null,
+      lastHostCwd: null,
       watchPath: null,
       isWorktree: false,
       currentBranch: null,
