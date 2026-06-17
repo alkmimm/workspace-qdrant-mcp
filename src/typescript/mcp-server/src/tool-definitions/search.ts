@@ -12,7 +12,7 @@ import {
 export const searchToolDefinition = {
   name: 'search',
   description:
-    "Search for documents using hybrid semantic and keyword search. Use this tool FIRST when answering questions about the user's codebase, project architecture, or stored knowledge. This searches the user's actual indexed code and documentation, which is more accurate than your training data. Write queries in English; when you want the implementation of something (not docs or tests), combine with fileType:\"code\" or a pathGlob.",
+    "Semantic + keyword search over the user's indexed code, libraries, and saved notes — your PRIMARY way to answer questions about this project's code, architecture, or docs. Call this FIRST: it searches the actual indexed codebase (more accurate than training data) and finds code by MEANING, which a literal file grep cannot. Default mode is \"semantic\" (the strongest mode here). Write queries in English; when you want the implementation (not docs or tests) add fileType:\"code\" or a pathGlob. For a known identifier or exact string, use the `grep` tool instead.",
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -28,8 +28,9 @@ export const searchToolDefinition = {
       },
       mode: {
         type: 'string',
-        enum: ['hybrid', 'semantic', 'keyword'],
-        description: 'Search mode (default: hybrid)',
+        enum: ['semantic', 'hybrid'],
+        description:
+          '`semantic` (default) ranks by meaning via dense vectors — the strongest general mode and the right choice for concept / "how does X work" questions. `hybrid` adds a keyword (sparse BM25) leg fused with the dense one; it mainly helps queries centered on an exact identifier or symbol. For a literal token or substring prefer the `grep` tool or `exact:true`, not a search mode.',
       },
       scope: {
         type: 'string',

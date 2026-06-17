@@ -24,7 +24,11 @@ function extractScopeOptions(
   if (collection) options.collection = collection;
 
   const mode = args?.['mode'] as string | undefined;
-  if (mode === 'hybrid' || mode === 'semantic' || mode === 'keyword') options.mode = mode;
+  // `keyword` (sparse-only) is intentionally not accepted from the public tool:
+  // it is the weakest mode and the schema no longer advertises it — an agent
+  // after a literal token should use `grep`/`exact`. Internal callers that need
+  // the sparse leg set mode directly on SearchOptions (search-exact), bypassing this.
+  if (mode === 'hybrid' || mode === 'semantic') options.mode = mode;
 
   const scope = args?.['scope'] as string | undefined;
   if (scope === 'project' || scope === 'global' || scope === 'all') options.scope = scope;

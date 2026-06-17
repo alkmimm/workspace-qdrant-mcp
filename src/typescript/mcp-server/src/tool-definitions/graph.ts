@@ -8,7 +8,8 @@ export const graphToolDefinition = {
   description:
     'Navigate the code-relationship graph: callers/callees, change-impact, importance ranking, and module clusters. ' +
     'Built from symbol relations (calls, contains, uses-type, imports) extracted during indexing. ' +
-    'Use this to understand how code connects before editing — e.g. "what calls this function?", "what breaks if I change X?", "what are the most central functions?".',
+    'Use this to understand how code connects before editing — e.g. "what calls this function?", "what breaks if I change X?", "what are the most central functions?". ' +
+    'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules → none (project-wide).',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -29,15 +30,18 @@ export const graphToolDefinition = {
       },
       symbolType: {
         type: 'string',
+        default: 'function',
         description:
           "Symbol kind for 'relations' node lookup (function, class, struct, method, …). Default: 'function'.",
       },
       maxHops: {
         type: 'number',
+        default: 1,
         description: "Traversal depth for 'relations' (1-5, default 1).",
       },
       topK: {
         type: 'number',
+        default: 20,
         description: "Number of top results for 'hotspots' and 'bridges' (default 20).",
       },
       maxSamples: {
@@ -47,6 +51,7 @@ export const graphToolDefinition = {
       },
       minSize: {
         type: 'number',
+        default: 2,
         description: "Minimum community size for 'modules' (default 2).",
       },
       edgeTypes: {
