@@ -62,9 +62,22 @@ pub fn extract_function_calls(
     node: &Node,
     source: &str,
     extra_call_kinds: &[String],
+    arg_call_kinds: &[String],
 ) -> Vec<String> {
     let mut calls = Vec::new();
     let mut cursor = node.walk();
+
+    fn push_call(calls: &mut Vec<String>, name: &str) {
+        // Reduce the callee expression to its bare function name.
+        // Generic/turbofish arguments are stripped first, so a call like
+        // `foo::<String, _>()` yields `foo` rather than the type-argument
+        // fragments `<String` / `_>`.
+        if let Some(clean_name) = clean_callee_name(name) {
+            if !calls.contains(&clean_name) {
+                calls.push(clean_name);
+            }
+        }
+    }
 
     fn visit(
         node: &Node,
@@ -72,6 +85,7 @@ pub fn extract_function_calls(
         calls: &mut Vec<String>,
         cursor: &mut tree_sitter::TreeCursor,
         extra_call_kinds: &[String],
+        arg_call_kinds: &[String],
     ) {
         if is_call_node(node.kind(), extra_call_kinds) {
             // Resolve the callee node. `function`/`callee` cover the C-family
@@ -88,29 +102,95 @@ pub fn extract_function_calls(
                 .or_else(|| node.child_by_field_name("type"))
                 .or_else(|| node.child(0))
             {
-                let name = node_text(&callee, source);
-                // Reduce the callee expression to its bare function name.
-                // Generic/turbofish arguments are stripped first, so a call like
-                // `foo::<String, _>()` yields `foo` rather than the type-argument
-                // fragments `<String` / `_>`.
-                if let Some(clean_name) = clean_callee_name(name) {
-                    if !calls.contains(&clean_name) {
-                        calls.push(clean_name);
-                    }
-                }
+                push_call(calls, node_text(&callee, source));
+            }
+        } else if !arg_call_kinds.is_empty() && arg_call_kinds.iter().any(|k| k == node.kind()) {
+            // Postfix/selector grammars (Dart) have no discrete call node: an
+            // invocation parses as `<callee> (selector (argument_part …))` with
+            // the callee as a *sibling* of the argument wrapper, not a child
+            // field. Resolve it from the argument node's position instead.
+            if let Some(name) = resolve_postfix_callee(node, source) {
+                push_call(calls, &name);
             }
         }
 
         // Visit children
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i as u32) {
-                visit(&child, source, calls, cursor, extra_call_kinds);
+                visit(
+                    &child,
+                    source,
+                    calls,
+                    cursor,
+                    extra_call_kinds,
+                    arg_call_kinds,
+                );
             }
         }
     }
 
-    visit(node, source, &mut calls, &mut cursor, extra_call_kinds);
+    visit(
+        node,
+        source,
+        &mut calls,
+        &mut cursor,
+        extra_call_kinds,
+        arg_call_kinds,
+    );
     calls
+}
+
+/// Resolve the callee name for a postfix/selector call grammar from the
+/// argument-list wrapper node (Dart's `argument_part`).
+///
+/// Dart shapes an invocation as a chain of siblings:
+/// - `foo(a)` → `(identifier foo) (selector (argument_part …))` — the callee is
+///   the `selector`'s preceding sibling, the base `identifier`.
+/// - `recv.method(a)` → `… (selector (… (identifier method))) (selector
+///   (argument_part …))` — the callee is the method `identifier` inside the
+///   `selector` preceding the argument selector.
+/// - `..method(a)` (cascade) → `(cascade_section (cascade_selector (identifier
+///   method)) (argument_part …))` — the callee is the argument's preceding
+///   sibling within the cascade.
+///
+/// Returns `None` for call-on-call (`foo()()`) and other shapes with no
+/// identifiable callee; downstream `is_valid_symbol_name` discards stragglers.
+fn resolve_postfix_callee(arg_node: &Node, source: &str) -> Option<String> {
+    let parent = arg_node.parent()?;
+    let prev = if parent.kind() == "cascade_section" {
+        arg_node.prev_sibling()?
+    } else {
+        // `parent` is the `selector` wrapping the argument list; the callee sits
+        // before that selector.
+        parent.prev_sibling()?
+    };
+
+    if prev.kind() == "identifier" {
+        return Some(node_text(&prev, source).to_string());
+    }
+    // A preceding `selector` that itself applies arguments is a call-on-call —
+    // there is no named callee to attribute, so skip it.
+    if prev.kind() == "selector" {
+        let mut cursor = prev.walk();
+        if prev.children(&mut cursor).any(|c| c.kind() == "argument_part") {
+            return None;
+        }
+    }
+    first_identifier_descendant(&prev, source).map(|s| s.to_string())
+}
+
+/// Depth-first search for the first `identifier` node at or under `node`.
+fn first_identifier_descendant<'a>(node: &Node, source: &'a str) -> Option<&'a str> {
+    if node.kind() == "identifier" {
+        return Some(node_text(node, source));
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(found) = first_identifier_descendant(&child, source) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Reduce a callee expression to its bare function name.
