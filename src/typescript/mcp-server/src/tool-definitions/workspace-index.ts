@@ -10,7 +10,7 @@
 export const workspaceIndexToolDefinition = {
   name: 'workspace_index',
   description:
-    'Observe and manage indexed projects, agent-created branches, and worktrees for workspace-qdrant. Read-only by default; mutations require explicit double opt-in.',
+    'Observe and manage workspace-qdrant indexing: project registry, agent-branch lifecycle, and worktrees. Most actions are READ-ONLY observability and run by default. The 8 MUTATING actions require DOUBLE opt-in — `allowMutation: true` AND the server env `WQM_INDEX_MANAGER_ALLOW_MUTATION=1` (which you cannot observe from here, so a mutating call fails with a clear error until the operator sets it) — plus explicit user confirmation. See the `action` enum for the per-action read-only/mutating split.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -37,7 +37,18 @@ export const workspaceIndexToolDefinition = {
           'sync_current_branch',
           'indexing_status',
         ],
-        description: 'Workspace index action to execute.',
+        description:
+          'Which action to run. READ-ONLY (default, no opt-in): ' +
+          'list_projects, project_status, status_all (registered projects); ' +
+          'list_branches, agent_branch_status (agent branches); ' +
+          'indexing_status (queue/progress for the current project); ' +
+          'observe_project, observe_all (indexing observability snapshot); ' +
+          'incremental_check, incremental_check_all (probe for unindexed changes). ' +
+          'MUTATING — require allowMutation:true AND WQM_INDEX_MANAGER_ALLOW_MUTATION=1 AND user confirmation: ' +
+          'init (create the local registry); add_project (register a directory); ' +
+          'start_agent_branch, finish_agent_branch, abandon_agent_branch (agent-branch lifecycle); ' +
+          'register_wqm, register_all_wqm (register the wqm checkout for LSP); cleanup_orphans (drop dead registry entries). ' +
+          'sync_current_branch is for git hooks ONLY — agents must not call it.',
       },
       projectName: {
         type: 'string',

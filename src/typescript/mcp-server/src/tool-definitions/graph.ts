@@ -30,15 +30,18 @@ export const graphToolDefinition = {
       },
       symbolType: {
         type: 'string',
+        default: 'function',
         description:
           "Symbol kind for 'relations' node lookup (function, class, struct, method, …). Default: 'function'.",
       },
       maxHops: {
         type: 'number',
+        default: 1,
         description: "Traversal depth for 'relations' (1-5, default 1).",
       },
       topK: {
         type: 'number',
+        default: 20,
         description: "Number of top results for 'hotspots' and 'bridges' (default 20).",
       },
       maxSamples: {
@@ -48,6 +51,7 @@ export const graphToolDefinition = {
       },
       minSize: {
         type: 'number',
+        default: 2,
         description: "Minimum community size for 'modules' (default 2).",
       },
       edgeTypes: {
