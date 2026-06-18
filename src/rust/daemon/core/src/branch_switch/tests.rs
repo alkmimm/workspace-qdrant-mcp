@@ -1,6 +1,5 @@
 //! Tests for the branch switch protocol.
 
-use std::collections::HashSet;
 use std::time::Duration;
 
 use sqlx::sqlite::SqlitePoolOptions;
@@ -15,8 +14,8 @@ use crate::unified_queue_schema::{
 };
 use crate::watch_folders_schema;
 
-use super::db::{batch_update_branch, update_last_commit_hash};
-use super::queue::enqueue_file_op;
+use super::db::{fetch_unchanged_relative_paths, update_last_commit_hash};
+use super::queue::{enqueue_file_op, enqueue_unchanged_file};
 use super::types::BranchSwitchStats;
 
 async fn create_test_pool() -> SqlitePool {
@@ -67,17 +66,13 @@ async fn insert_watch_folder(pool: &SqlitePool, watch_id: &str, tenant_id: &str,
 async fn insert_tracked_file(
     pool: &SqlitePool,
     watch_id: &str,
-    file_path: &str,
     branch: &str,
     file_hash: &str,
     relative_path: &str,
-    base_point: &str,
 ) {
-    // Post-v37: the schema has only `relative_path` (no `file_path`). The
-    // legacy `file_path` parameter is retained as the test's local key for
-    // backwards-compatible test fixture code paths; it is bound to the
-    // relative_path column (tests pass identical paths into both slots).
-    let _ = file_path; // legacy param, no SQL column
+    let base_point = wqm_common::hashing::compute_base_point(
+        "t1", branch, relative_path, file_hash,
+    );
     sqlx::query(
         "INSERT INTO tracked_files (watch_folder_id, relative_path, branch, file_mtime, file_hash,
          collection, base_point, created_at, updated_at)
@@ -94,119 +89,73 @@ async fn insert_tracked_file(
 #[test]
 fn test_branch_switch_stats_default() {
     let stats = BranchSwitchStats::default();
-    assert_eq!(stats.batch_updated, 0);
+    assert_eq!(stats.enqueued_unchanged, 0);
     assert_eq!(stats.enqueued_changed, 0);
     assert_eq!(stats.enqueued_added, 0);
     assert_eq!(stats.enqueued_deleted, 0);
     assert_eq!(stats.errors, 0);
 }
 
+/// All old-branch files are dedup candidates when the new branch has no rows
+/// yet (the `git checkout -b feature` case: same commit, empty diff).
 #[tokio::test]
-async fn test_batch_update_branch_basic() {
+async fn test_fetch_unchanged_returns_all_when_new_branch_empty() {
     let pool = create_test_pool().await;
     setup_tables(&pool).await;
+    insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
 
-    let tenant = "t1";
-    let watch_id = "w1";
-    insert_watch_folder(&pool, watch_id, tenant, "/tmp/project").await;
+    insert_tracked_file(&pool, "w1", "main", "hash_a", "src/a.rs").await;
+    insert_tracked_file(&pool, "w1", "main", "hash_b", "src/b.rs").await;
+    insert_tracked_file(&pool, "w1", "main", "hash_c", "src/c.rs").await;
 
-    // Insert 3 files on branch "main"
-    let bp1 = wqm_common::hashing::compute_base_point(tenant, "main", "src/a.rs", "hash_a");
-    let bp2 = wqm_common::hashing::compute_base_point(tenant, "main", "src/b.rs", "hash_b");
-    let bp3 = wqm_common::hashing::compute_base_point(tenant, "main", "src/c.rs", "hash_c");
-
-    insert_tracked_file(
-        &pool, watch_id, "src/a.rs", "main", "hash_a", "src/a.rs", &bp1,
-    )
-    .await;
-    insert_tracked_file(
-        &pool, watch_id, "src/b.rs", "main", "hash_b", "src/b.rs", &bp2,
-    )
-    .await;
-    insert_tracked_file(
-        &pool, watch_id, "src/c.rs", "main", "hash_c", "src/c.rs", &bp3,
-    )
-    .await;
-
-    // File b.rs changed on the target branch
-    let mut changed = HashSet::new();
-    changed.insert("src/b.rs".to_string());
-
-    // Batch update from "main" to "feature"
-    let count = batch_update_branch(&pool, watch_id, "main", "feature", &changed)
+    let mut paths = fetch_unchanged_relative_paths(&pool, "w1", "main", "feature")
         .await
         .unwrap();
+    paths.sort();
+    assert_eq!(
+        paths,
+        vec![
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+            "src/c.rs".to_string()
+        ]
+    );
+}
 
-    // Only 2 files should be updated (a.rs, c.rs — b.rs is in changed set)
-    assert_eq!(count, 2);
+/// Files already tracked on the target branch are excluded — repeated switches
+/// stay idempotent and don't re-enqueue already-deduped files.
+#[tokio::test]
+async fn test_fetch_unchanged_excludes_paths_already_on_new_branch() {
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
 
-    // Verify branch was updated for unchanged files
-    let branch_a: String =
-        sqlx::query_scalar("SELECT branch FROM tracked_files WHERE relative_path = 'src/a.rs'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(branch_a, "feature");
+    insert_tracked_file(&pool, "w1", "main", "hash_a", "src/a.rs").await;
+    insert_tracked_file(&pool, "w1", "main", "hash_b", "src/b.rs").await;
+    insert_tracked_file(&pool, "w1", "main", "hash_c", "src/c.rs").await;
+    // a.rs already deduped onto feature in a prior switch.
+    insert_tracked_file(&pool, "w1", "feature", "hash_a", "src/a.rs").await;
 
-    let branch_c: String =
-        sqlx::query_scalar("SELECT branch FROM tracked_files WHERE relative_path = 'src/c.rs'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(branch_c, "feature");
-
-    // b.rs should still be on "main"
-    let branch_b: String =
-        sqlx::query_scalar("SELECT branch FROM tracked_files WHERE relative_path = 'src/b.rs'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(branch_b, "main");
-
-    // Verify base_point was recomputed for updated files
-    let new_bp_a = wqm_common::hashing::compute_base_point(tenant, "feature", "src/a.rs", "hash_a");
-    let stored_bp: String =
-        sqlx::query_scalar("SELECT base_point FROM tracked_files WHERE relative_path = 'src/a.rs'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(stored_bp, new_bp_a);
+    let mut paths = fetch_unchanged_relative_paths(&pool, "w1", "main", "feature")
+        .await
+        .unwrap();
+    paths.sort();
+    assert_eq!(
+        paths,
+        vec!["src/b.rs".to_string(), "src/c.rs".to_string()]
+    );
 }
 
 #[tokio::test]
-async fn test_batch_update_branch_empty_changed_set() {
+async fn test_fetch_unchanged_empty_when_old_branch_has_no_files() {
     let pool = create_test_pool().await;
     setup_tables(&pool).await;
-
-    let tenant = "t1";
-    let watch_id = "w1";
-    insert_watch_folder(&pool, watch_id, tenant, "/tmp/project").await;
-
-    let bp = wqm_common::hashing::compute_base_point(tenant, "main", "src/a.rs", "hash_a");
-    insert_tracked_file(
-        &pool, watch_id, "src/a.rs", "main", "hash_a", "src/a.rs", &bp,
-    )
-    .await;
-
-    let changed = HashSet::new();
-    let count = batch_update_branch(&pool, watch_id, "main", "dev", &changed)
-        .await
-        .unwrap();
-    assert_eq!(count, 1);
-}
-
-#[tokio::test]
-async fn test_batch_update_branch_no_files() {
-    let pool = create_test_pool().await;
-    setup_tables(&pool).await;
-
     insert_watch_folder(&pool, "w1", "t1", "/tmp/empty").await;
 
-    let changed = HashSet::new();
-    let count = batch_update_branch(&pool, "w1", "main", "dev", &changed)
+    let paths = fetch_unchanged_relative_paths(&pool, "w1", "main", "dev")
         .await
         .unwrap();
-    assert_eq!(count, 0);
+    assert!(paths.is_empty());
 }
 
 #[tokio::test]
@@ -260,4 +209,28 @@ async fn test_enqueue_file_op() {
         .await
         .unwrap();
     assert_eq!(op, "update");
+}
+
+/// Unchanged files must be enqueued as `Add` (not `Update`) so the Update
+/// pre-flight's non-branch-scoped defensive delete can't wipe the source
+/// branch's points before the dedup fast-path scrolls them.
+#[tokio::test]
+async fn test_enqueue_unchanged_file_uses_add_op() {
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
+
+    let qm = QueueManager::new(pool.clone());
+
+    enqueue_unchanged_file(&qm, "t1", "projects", "src/main.rs", "feature")
+        .await
+        .unwrap();
+
+    let (op, branch): (String, String) =
+        sqlx::query_as("SELECT op, branch FROM unified_queue WHERE tenant_id = 't1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(op, "add");
+    assert_eq!(branch, "feature");
 }

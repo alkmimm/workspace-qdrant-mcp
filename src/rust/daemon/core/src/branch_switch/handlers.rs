@@ -11,8 +11,8 @@ use crate::queue_operations::QueueManager;
 use crate::unified_queue_schema::QueueOperation;
 use crate::watching_queue::get_current_branch;
 
-use super::db::{batch_update_branch, fetch_watch_folder, update_last_commit_hash};
-use super::queue::{enqueue_changed_file, enqueue_tenant_scan};
+use super::db::{fetch_unchanged_relative_paths, fetch_watch_folder, update_last_commit_hash};
+use super::queue::{enqueue_changed_file, enqueue_tenant_scan, enqueue_unchanged_file};
 use super::types::BranchSwitchStats;
 
 /// Handle a git event by dispatching to the appropriate handler.
@@ -66,7 +66,8 @@ pub async fn handle_git_event(
     }
 }
 
-/// Handle a branch switch: diff-tree for changes, batch-update unchanged, enqueue changed.
+/// Handle a branch switch: diff-tree for changes, enqueue unchanged files for
+/// dedup re-key, enqueue changed files for full ingest.
 async fn handle_branch_switch(
     event: &GitEvent,
     pool: &SqlitePool,
@@ -93,12 +94,19 @@ async fn handle_branch_switch(
     let changed_paths: HashSet<String> = changes.iter().map(|c| c.path.clone()).collect();
     let mut stats = BranchSwitchStats::default();
 
-    // 1. Batch update unchanged files: update branch in tracked_files
-    apply_batch_branch_update(
+    // 1. Re-key unchanged files onto the new branch via the dedup fast-path.
+    //    Enqueuing them as Add ops lets try_branch_dedup copy the existing
+    //    Qdrant points + FTS5 rows under the new branch (no re-embed). The old
+    //    SQL-only re-key relabelled tracked_files but left Qdrant + search.db
+    //    on the old branch, so search/grep returned empty on the new branch.
+    enqueue_unchanged_files(
         pool,
+        queue_manager,
         &event.watch_folder_id,
         old_branch,
         new_branch,
+        tenant_id,
+        collection,
         &changed_paths,
         &mut stats,
     )
@@ -123,37 +131,61 @@ async fn handle_branch_switch(
     }
 
     info!(
-        "Branch switch complete for {}: {} batch-updated, {} changed, {} added, {} deleted, {} errors",
-        event.watch_folder_id, stats.batch_updated, stats.enqueued_changed,
+        "Branch switch complete for {}: {} unchanged re-keyed, {} changed, {} added, {} deleted, {} errors",
+        event.watch_folder_id, stats.enqueued_unchanged, stats.enqueued_changed,
         stats.enqueued_added, stats.enqueued_deleted, stats.errors
     );
 
     Ok(stats)
 }
 
-/// Apply the batch branch update for unchanged files.
-async fn apply_batch_branch_update(
+/// Enqueue unchanged files (tracked on the old branch, byte-identical content)
+/// as `Add` ops on the new branch so the cross-branch dedup fast-path re-keys
+/// their Qdrant points + FTS5 rows. Paths present in the diff are skipped —
+/// they changed and take the full-ingest path via `enqueue_all_changed_files`.
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_unchanged_files(
     pool: &SqlitePool,
+    queue_manager: &QueueManager,
     watch_folder_id: &str,
     old_branch: &str,
     new_branch: &str,
+    tenant_id: &str,
+    collection: &str,
     changed_paths: &HashSet<String>,
     stats: &mut BranchSwitchStats,
 ) {
-    match batch_update_branch(pool, watch_folder_id, old_branch, new_branch, changed_paths).await {
-        Ok(count) => {
-            stats.batch_updated = count;
-            if count > 0 {
-                info!(
-                    "Batch-updated {} unchanged files: branch {} -> {}",
-                    count, old_branch, new_branch
+    let unchanged =
+        match fetch_unchanged_relative_paths(pool, watch_folder_id, old_branch, new_branch).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to fetch unchanged paths for branch switch: {}", e);
+                stats.errors += 1;
+                return;
+            }
+        };
+
+    for rel in unchanged {
+        if changed_paths.contains(&rel) {
+            continue;
+        }
+        match enqueue_unchanged_file(queue_manager, tenant_id, collection, &rel, new_branch).await {
+            Ok(()) => stats.enqueued_unchanged += 1,
+            Err(e) => {
+                warn!(
+                    "Failed to enqueue unchanged file {} on {}: {}",
+                    rel, new_branch, e
                 );
+                stats.errors += 1;
             }
         }
-        Err(e) => {
-            warn!("Batch branch update failed: {}", e);
-            stats.errors += 1;
-        }
+    }
+
+    if stats.enqueued_unchanged > 0 {
+        info!(
+            "Enqueued {} unchanged files for dedup re-key: branch {} -> {}",
+            stats.enqueued_unchanged, old_branch, new_branch
+        );
     }
 }
 

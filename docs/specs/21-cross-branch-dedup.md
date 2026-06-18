@@ -77,16 +77,31 @@ already has the same `(watch_folder_id, relative_path, file_hash)`:
 
 On a 0-point scroll (stale row / partial cleanup) it falls back to a full ingest.
 
-### B. Branch-switch re-keying — `branch_switch/db.rs`
+### B. Branch-switch re-key — `branch_switch/handlers.rs`
 
-On `git checkout`, files **not** in the changed-paths set don't re-ingest at all:
+On `git checkout`, the switch handler diffs the two trees. Files **in** the diff
+are enqueued for full ingest. Files **not** in the diff (byte-identical to the
+old branch) are enqueued as `Add` ops on the new branch via
 [`branch_switch/db.rs`](../../src/rust/daemon/core/src/branch_switch/db.rs)
-recomputes each unchanged file's `base_point` for the new branch and `UPDATE`s the
-`tracked_files` rows in place (`SET branch = ?, base_point = ?`) via a temp-table
-join — no parse, no embed.
+(`fetch_unchanged_relative_paths`) + `enqueue_unchanged_file` — they then hit
+mechanism **A** above, which copies the existing Qdrant points + FTS5 rows under
+the new branch's `base_point` (no parse, no embed).
 
-Net effect: switching or branching is near-free on the indexed-data side; only
-genuinely changed files pay the full embed cost.
+> **History / fix 2026-06-18.** The original mechanism B `UPDATE`d
+> `tracked_files` in place (`SET branch, base_point`) via a temp-table join — SQL
+> only. That relabelled the bookkeeping but never re-keyed the actual Qdrant
+> points or `search.db` rows, which stayed under the *old* branch's `base_point`
+> / `branch`. Since both `search` (Qdrant `payload.branch`) and `grep`
+> (`file_metadata.branch`) filter by branch, every unchanged file came up
+> **empty** on the new branch. The fix routes unchanged files through
+> mechanism A instead (enqueue as `Add`, not `Update` — the Update pre-flight's
+> non-branch-scoped defensive delete would wipe the source branch's points
+> before dedup could scroll them). Net effect: the *embed* is still skipped, but
+> the points/rows are physically copied so the new branch is searchable.
+
+Net effect: switching or branching skips the (dominant) embed cost; only
+genuinely changed files pay the full pipeline. Storage still duplicates per
+branch — that is what Layer 2 removes.
 
 ## Original design (Layer 1 as proposed, plus the open Layer 2)
 
