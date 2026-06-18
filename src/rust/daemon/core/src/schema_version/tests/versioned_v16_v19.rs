@@ -372,8 +372,8 @@ async fn test_migration_v19_backfill() {
     ).execute(&pool).await.unwrap();
 
     sqlx::query(
-        "INSERT INTO tracked_files (watch_folder_id, relative_path, branch, file_mtime, file_hash, collection, created_at, updated_at)
-         VALUES ('w1', 'src/main.rs', 'main', '2025-01-01T00:00:00Z', 'deadbeef', 'projects', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
+        "INSERT INTO tracked_files (watch_folder_id, relative_path, branches, file_mtime, file_hash, collection, created_at, updated_at)
+         VALUES ('w1', 'src/main.rs', '[\"main\"]', '2025-01-01T00:00:00Z', 'deadbeef', 'projects', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
     ).execute(&pool).await.unwrap();
 
     let bp: Option<String> = sqlx::query_scalar(

@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 
 use crate::queue_operations::QueueManager;
 use crate::tracked_files_schema::{
-    CREATE_TRACKED_FILES_V37_INDEXES_SQL, CREATE_TRACKED_FILES_V37_SQL,
+    CREATE_TRACKED_FILES_V41_INDEXES_SQL, CREATE_TRACKED_FILES_V41_SQL,
 };
 use crate::unified_queue_schema::{
     QueueOperation, CREATE_UNIFIED_QUEUE_INDEXES_SQL, CREATE_UNIFIED_QUEUE_SQL,
@@ -36,11 +36,11 @@ async fn setup_tables(pool: &SqlitePool) {
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query(CREATE_TRACKED_FILES_V37_SQL)
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
         .execute(pool)
         .await
         .unwrap();
-    for idx in CREATE_TRACKED_FILES_V37_INDEXES_SQL {
+    for idx in CREATE_TRACKED_FILES_V41_INDEXES_SQL {
         sqlx::query(idx).execute(pool).await.unwrap();
     }
     sqlx::query(CREATE_UNIFIED_QUEUE_SQL)
@@ -66,19 +66,20 @@ async fn insert_watch_folder(pool: &SqlitePool, watch_id: &str, tenant_id: &str,
 async fn insert_tracked_file(
     pool: &SqlitePool,
     watch_id: &str,
-    branch: &str,
+    branches_list: &[&str],
     file_hash: &str,
     relative_path: &str,
 ) {
     let base_point = wqm_common::hashing::compute_base_point("t1", relative_path, file_hash);
+    let branches = serde_json::to_string(branches_list).unwrap();
     sqlx::query(
-        "INSERT INTO tracked_files (watch_folder_id, relative_path, branch, file_mtime, file_hash,
+        "INSERT INTO tracked_files (watch_folder_id, relative_path, branches, file_mtime, file_hash,
          collection, base_point, created_at, updated_at)
          VALUES (?1, ?2, ?3, '2025-01-01T00:00:00Z', ?4, 'projects', ?5, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
     )
     .bind(watch_id)
     .bind(relative_path)
-    .bind(branch)
+    .bind(&branches)
     .bind(file_hash)
     .bind(base_point)
     .execute(pool).await.unwrap();
@@ -102,9 +103,9 @@ async fn test_fetch_unchanged_returns_all_when_new_branch_empty() {
     setup_tables(&pool).await;
     insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
 
-    insert_tracked_file(&pool, "w1", "main", "hash_a", "src/a.rs").await;
-    insert_tracked_file(&pool, "w1", "main", "hash_b", "src/b.rs").await;
-    insert_tracked_file(&pool, "w1", "main", "hash_c", "src/c.rs").await;
+    insert_tracked_file(&pool, "w1", &["main"], "hash_a", "src/a.rs").await;
+    insert_tracked_file(&pool, "w1", &["main"], "hash_b", "src/b.rs").await;
+    insert_tracked_file(&pool, "w1", &["main"], "hash_c", "src/c.rs").await;
 
     let mut paths = fetch_unchanged_relative_paths(&pool, "w1", "main", "feature")
         .await
@@ -128,11 +129,11 @@ async fn test_fetch_unchanged_excludes_paths_already_on_new_branch() {
     setup_tables(&pool).await;
     insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
 
-    insert_tracked_file(&pool, "w1", "main", "hash_a", "src/a.rs").await;
-    insert_tracked_file(&pool, "w1", "main", "hash_b", "src/b.rs").await;
-    insert_tracked_file(&pool, "w1", "main", "hash_c", "src/c.rs").await;
-    // a.rs already deduped onto feature in a prior switch.
-    insert_tracked_file(&pool, "w1", "feature", "hash_a", "src/a.rs").await;
+    insert_tracked_file(&pool, "w1", &["main"], "hash_b", "src/b.rs").await;
+    insert_tracked_file(&pool, "w1", &["main"], "hash_c", "src/c.rs").await;
+    // a.rs already deduped onto feature in a prior switch: one content-row with
+    // both branches in its set.
+    insert_tracked_file(&pool, "w1", &["main", "feature"], "hash_a", "src/a.rs").await;
 
     let mut paths = fetch_unchanged_relative_paths(&pool, "w1", "main", "feature")
         .await

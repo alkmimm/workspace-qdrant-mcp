@@ -120,7 +120,7 @@ mod tests {
         };
         let (sql, _) = build_regex_search_query(&fts_query, &options);
         assert!(sql.contains("fm.tenant_id = ?2"));
-        assert!(sql.contains("fm.branch = ?3"));
+        assert!(sql.contains("json_each(fm.branches) WHERE value = ?3"));
         assert!(sql.contains("fm.file_path LIKE ?4"));
     }
 }

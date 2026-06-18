@@ -592,7 +592,8 @@ mod tests {
     fn test_fts5_search_by_project_branch_sql_valid() {
         assert!(FTS5_SEARCH_BY_PROJECT_BRANCH_SQL.contains("MATCH ?1"));
         assert!(FTS5_SEARCH_BY_PROJECT_BRANCH_SQL.contains("fm.tenant_id = ?2"));
-        assert!(FTS5_SEARCH_BY_PROJECT_BRANCH_SQL.contains("fm.branch = ?3"));
+        // Post-v10 the branch filter scans the `branches` JSON set.
+        assert!(FTS5_SEARCH_BY_PROJECT_BRANCH_SQL.contains("json_each(fm.branches)"));
     }
 
     #[test]

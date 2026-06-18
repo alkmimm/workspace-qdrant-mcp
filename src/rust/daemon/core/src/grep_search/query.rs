@@ -12,7 +12,9 @@ pub(super) async fn query_file_paths(
     options: &SearchOptions,
     glob_matcher: Option<&Box<dyn Fn(&str) -> bool + Send + Sync>>,
 ) -> Result<Vec<FileInfo>, SearchDbError> {
-    let mut sql = String::from("SELECT file_path, tenant_id, branch FROM file_metadata WHERE 1=1");
+    let mut sql = String::from(
+        "SELECT file_path, tenant_id, branches AS branch FROM file_metadata WHERE 1=1",
+    );
     let mut next_param = 1;
 
     if options.tenant_id.is_some() {
@@ -20,7 +22,10 @@ pub(super) async fn query_file_paths(
         next_param += 1;
     }
     if options.branch.is_some() {
-        sql.push_str(&format!(" AND branch = ?{}", next_param));
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?{})",
+            next_param
+        ));
         next_param += 1;
     }
     if options.path_prefix.is_some() {

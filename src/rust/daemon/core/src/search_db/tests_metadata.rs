@@ -31,10 +31,10 @@ async fn test_file_metadata_indexes_exist() {
     let db_path = tmp.path().join("search.db");
     let manager = SearchDbManager::new(&db_path).await.unwrap();
 
-    for idx_name in &[
-        "idx_file_metadata_tenant",
-        "idx_file_metadata_tenant_branch",
-    ] {
+    // Post-v10 the per-(tenant, branch) index is dropped — there is no scalar
+    // `branch` column anymore (branches live in a JSON set). The tenant index
+    // and the base_point index remain.
+    for idx_name in &["idx_file_metadata_tenant", "idx_file_metadata_base_point"] {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
         )
@@ -72,15 +72,18 @@ async fn test_file_metadata_upsert() {
         .unwrap();
 
     let row =
-        sqlx::query("SELECT tenant_id, branch, file_path FROM file_metadata WHERE file_id = 1")
+        sqlx::query("SELECT tenant_id, branches, file_path FROM file_metadata WHERE file_id = 1")
             .fetch_one(manager.pool())
             .await
             .unwrap();
     assert_eq!(row.get::<String, _>("tenant_id"), "project-abc");
-    assert_eq!(row.get::<String, _>("branch"), "main");
+    let branches: Vec<String> =
+        serde_json::from_str(&row.get::<String, _>("branches")).unwrap();
+    assert_eq!(branches, vec!["main".to_string()]);
     assert_eq!(row.get::<String, _>("file_path"), "/src/lib.rs");
 
-    // Upsert (update branch)
+    // Upsert with a second branch. Post-v10 the `branches` set is additive
+    // (json_each UNION), so the new branch is merged in rather than replacing.
     sqlx::query(crate::code_lines_schema::UPSERT_FILE_METADATA_SQL)
         .bind(1_i64)
         .bind("project-abc")
@@ -95,11 +98,17 @@ async fn test_file_metadata_upsert() {
         .await
         .unwrap();
 
-    let row2 = sqlx::query("SELECT branch FROM file_metadata WHERE file_id = 1")
+    let row2 = sqlx::query("SELECT branches FROM file_metadata WHERE file_id = 1")
         .fetch_one(manager.pool())
         .await
         .unwrap();
-    assert_eq!(row2.get::<String, _>("branch"), "feature/new");
+    let mut branches2: Vec<String> =
+        serde_json::from_str(&row2.get::<String, _>("branches")).unwrap();
+    branches2.sort();
+    assert_eq!(
+        branches2,
+        vec!["feature/new".to_string(), "main".to_string()]
+    );
 
     manager.close().await;
 }
@@ -189,11 +198,14 @@ async fn test_file_metadata_null_branch() {
         .await
         .unwrap();
 
-    let row = sqlx::query("SELECT branch FROM file_metadata WHERE file_id = 1")
+    let row = sqlx::query("SELECT branches FROM file_metadata WHERE file_id = 1")
         .fetch_one(manager.pool())
         .await
         .unwrap();
-    assert!(row.get::<Option<String>, _>("branch").is_none());
+    // A NULL branch upsert leaves the `branches` set empty (post-v10).
+    let branches: Vec<String> =
+        serde_json::from_str(&row.get::<String, _>("branches")).unwrap();
+    assert!(branches.is_empty());
 
     manager.close().await;
 }
@@ -415,7 +427,10 @@ async fn test_fts5_search_by_project_branch() {
         .unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].get::<String, _>("branch"), "feature/v2");
+    // The query aliases `fm.branches AS branch`, so the value is the JSON array.
+    let branches: Vec<String> =
+        serde_json::from_str(&rows[0].get::<String, _>("branch")).unwrap();
+    assert_eq!(branches, vec!["feature/v2".to_string()]);
 
     manager.close().await;
 }

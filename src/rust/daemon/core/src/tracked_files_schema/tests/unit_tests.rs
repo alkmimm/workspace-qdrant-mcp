@@ -219,7 +219,7 @@ fn test_tracked_file_nullable_fields() {
     };
 
     let json = serde_json::to_string(&file).expect("Failed to serialize");
-    assert!(json.contains("\"branch\":null"));
+    assert!(json.contains("\"branches\":[]"));
     assert!(json.contains("\"language\":null"));
     assert!(json.contains("\"extension\":null"));
 }

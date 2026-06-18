@@ -15,8 +15,8 @@ async fn test_has_other_references_single_watch() {
         .await
         .unwrap();
 
-    use crate::tracked_files_schema::CREATE_TRACKED_FILES_V37_SQL;
-    sqlx::query(CREATE_TRACKED_FILES_V37_SQL)
+    use crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL;
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
         .execute(&pool)
         .await
         .unwrap();
@@ -30,8 +30,8 @@ async fn test_has_other_references_single_watch() {
     ).execute(&pool).await.unwrap();
 
     sqlx::query(
-        "INSERT INTO tracked_files (watch_folder_id, branch, file_mtime, file_hash, collection, base_point, relative_path, created_at, updated_at)
-         VALUES ('w1', 'main', '2025-01-01T00:00:00Z', 'hash1', 'projects', 'bp_abc123', 'src/main.rs', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
+        "INSERT INTO tracked_files (watch_folder_id, branches, file_mtime, file_hash, collection, base_point, relative_path, created_at, updated_at)
+         VALUES ('w1', '[\"main\"]', '2025-01-01T00:00:00Z', 'hash1', 'projects', 'bp_abc123', 'src/main.rs', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
     ).execute(&pool).await.unwrap();
 
     // Only this row references the base_point -- no OTHER references.
@@ -56,8 +56,8 @@ async fn test_has_other_references_two_watches() {
         .await
         .unwrap();
 
-    use crate::tracked_files_schema::CREATE_TRACKED_FILES_V37_SQL;
-    sqlx::query(CREATE_TRACKED_FILES_V37_SQL)
+    use crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL;
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
         .execute(&pool)
         .await
         .unwrap();
@@ -77,13 +77,13 @@ async fn test_has_other_references_two_watches() {
 
     // Both reference the same base_point (same file version in two clones)
     sqlx::query(
-        "INSERT INTO tracked_files (watch_folder_id, branch, file_mtime, file_hash, collection, base_point, relative_path, created_at, updated_at)
-         VALUES ('w1', 'main', '2025-01-01T00:00:00Z', 'hash1', 'projects', 'bp_shared', 'src/main.rs', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
+        "INSERT INTO tracked_files (watch_folder_id, branches, file_mtime, file_hash, collection, base_point, relative_path, created_at, updated_at)
+         VALUES ('w1', '[\"main\"]', '2025-01-01T00:00:00Z', 'hash1', 'projects', 'bp_shared', 'src/main.rs', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
     ).execute(&pool).await.unwrap();
 
     sqlx::query(
-        "INSERT INTO tracked_files (watch_folder_id, branch, file_mtime, file_hash, collection, base_point, relative_path, created_at, updated_at)
-         VALUES ('w2', 'main', '2025-01-01T00:00:00Z', 'hash1', 'projects', 'bp_shared', 'src/main.rs', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
+        "INSERT INTO tracked_files (watch_folder_id, branches, file_mtime, file_hash, collection, base_point, relative_path, created_at, updated_at)
+         VALUES ('w2', '[\"main\"]', '2025-01-01T00:00:00Z', 'hash1', 'projects', 'bp_shared', 'src/main.rs', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
     ).execute(&pool).await.unwrap();
 
     let w1_fid: i64 = sqlx::query_scalar(

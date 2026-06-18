@@ -935,7 +935,7 @@ mod tests {
             let pool = SqlitePool::connect(&format!("sqlite://{}?mode=rwc", db_path.display()))
                 .await
                 .expect("create sqlite pool");
-            sqlx::query(crate::tracked_files_schema::CREATE_TRACKED_FILES_V37_SQL)
+            sqlx::query(crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL)
                 .execute(&pool)
                 .await
                 .unwrap();

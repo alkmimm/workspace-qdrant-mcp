@@ -459,8 +459,8 @@ mod tests {
         for rel in ["src/main.rs", "docs/readme.md"] {
             sqlx::query(
                 "INSERT INTO tracked_files \
-                 (watch_folder_id, relative_path, branch, file_mtime, file_hash, collection, base_point, created_at, updated_at) \
-                 VALUES ('wf1', ?1, 'main', '2025-01-01T00:00:00Z', 'h', 'projects', 'bp', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
+                 (watch_folder_id, relative_path, branches, file_mtime, file_hash, collection, base_point, created_at, updated_at) \
+                 VALUES ('wf1', ?1, '[\"main\"]', '2025-01-01T00:00:00Z', 'h', 'projects', 'bp', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
             )
             .bind(rel)
             .execute(&pool)

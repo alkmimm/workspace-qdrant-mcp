@@ -30,13 +30,13 @@ async fn setup_tables(pool: &SqlitePool) {
         .await
         .unwrap();
 
-    // Create tracked_files in the post-v37 shape (no absolute `file_path`,
-    // UNIQUE on `(watch_folder_id, relative_path, branch)`).
-    sqlx::query(CREATE_TRACKED_FILES_V37_SQL)
+    // Create tracked_files in the post-v41 shape (no absolute `file_path`,
+    // `branches` JSON set, UNIQUE on `(watch_folder_id, relative_path, file_hash)`).
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
         .execute(pool)
         .await
         .unwrap();
-    for idx in CREATE_TRACKED_FILES_V37_INDEXES_SQL {
+    for idx in CREATE_TRACKED_FILES_V41_INDEXES_SQL {
         sqlx::query(idx).execute(pool).await.unwrap();
     }
 
