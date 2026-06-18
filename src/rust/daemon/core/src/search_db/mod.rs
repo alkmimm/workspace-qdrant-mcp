@@ -146,17 +146,20 @@ impl SearchDbManager {
     pub async fn file_metadata_stats_by_tenant_branch(&self) -> Result<Vec<FileMetadataStats>> {
         // Layer 2 stage 2: `branches` is a JSON set, so a file shared by N
         // branches counts once per branch (same per-(tenant,branch) semantics as
-        // the old per-branch rows). `json_each` expands the set; rows with an
-        // empty set (libraries) contribute no per-branch gauge.
+        // the old per-branch rows). `json_each` expands the set; a LEFT JOIN keeps
+        // rows with an EMPTY set (e.g. libraries, or a NULL-branch upsert) so they
+        // still contribute to the gauge under the literal "(none)" branch label —
+        // dropping them would silently undercount indexed files.
         let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
             "SELECT \
                  fm.tenant_id, \
-                 je.value AS branch, \
+                 COALESCE(je.value, '(none)') AS branch, \
                  COUNT(*) AS file_count, \
                  COALESCE(SUM(fm.size_bytes), 0) AS total_bytes, \
                  COALESCE(SUM(CASE WHEN fm.fts5_skipped = 1 THEN 1 ELSE 0 END), 0) AS skipped_count \
-             FROM file_metadata fm, json_each(fm.branches) je \
-             GROUP BY fm.tenant_id, je.value",
+             FROM file_metadata fm \
+             LEFT JOIN json_each(fm.branches) je \
+             GROUP BY fm.tenant_id, COALESCE(je.value, '(none)')",
         )
         .fetch_all(&self.pool)
         .await?;

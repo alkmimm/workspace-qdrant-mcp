@@ -163,7 +163,7 @@ async fn collect_matches<'q>(
             content: row.get("content"),
             file_path,
             tenant_id: row.get("tenant_id"),
-            branch: row.get("branch"),
+            branch: crate::text_search::display_branch(row.get("branch")),
             context_before: vec![],
             context_after: vec![],
             file_size: row.try_get::<Option<i64>, _>("size_bytes").ok().flatten(),

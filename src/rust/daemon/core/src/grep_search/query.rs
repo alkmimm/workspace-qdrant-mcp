@@ -61,7 +61,7 @@ pub(super) async fn query_file_paths(
         files.push(FileInfo {
             file_path,
             tenant_id: row.get("tenant_id"),
-            branch: row.get("branch"),
+            branch: crate::text_search::display_branch(row.get("branch")),
         });
     }
 
