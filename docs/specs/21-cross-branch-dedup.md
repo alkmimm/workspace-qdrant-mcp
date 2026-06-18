@@ -153,12 +153,20 @@ This eliminates storage duplication entirely. ~500 lines + migration.
 
 ## Layer 2 — concrete implementation plan (drafted 2026-06-18)
 
-**Status: planned, not yet implemented.** Deep cross-language impact analysis is
-done (below). This is a single coherent breaking change: `base_point` becomes
+**Status: Stage 1 SHIPPED + deployed + reembed-verified (2026-06-18); Stage 2
+planned.** This is a single coherent breaking change: `base_point` becomes
 branch-agnostic, so identical content on N branches maps to ONE physical Qdrant
 point and ONE DB row, with the branch set carried alongside. Because the
 identity hash changes, **a full reembed is inherent** (every existing point_id
 changes) — acceptable here (pre-release, no users; "NO MIGRATION EFFORT").
+
+- **Stage 1 (vector dedup core) — DONE** (commit `42fe7c9c78`): branch-agnostic
+  `base_point`, Qdrant payload `branch` is now an ARRAY, dedup appends a branch
+  to the shared points via `set_payload` (no vector copy), `has_other_references`
+  ref-counts by `file_id`, delete/update drop a branch from the array instead of
+  wiping shared points. `tracked_files`/`file_metadata` rows stay PER-BRANCH (all
+  sharing one `base_point`). Verified live: reembed → points carry `branch=['main']`.
+- **Stage 2 (one-row collapse + FTS5 dedup) — planned**, see blueprint below.
 
 ### Data model
 
@@ -242,6 +250,61 @@ TS MCP server: `tools/branch-scope.ts`, `tools/search-filters.ts`,
   no longer grows when checking out a second branch with identical content, and
   (b) `search`/`grep` on each branch return that branch's files and **not** files
   that exist only on the other branch (branch isolation preserved).
+
+### Stage 2 — execution blueprint (one validate-green commit, then deploy + 2nd reembed)
+
+All-or-nothing: the daemon won't compile/run until every item lands. **Churn-reducer:**
+keep every caller's `branch` argument; absorb the branch-set entirely in the
+operations layer, so the ~18 ingest call-sites are untouched.
+
+**Schema (state.db, migration v41 — rebuild + clear; reembed repopulates):**
+- `tracked_files`: drop scalar `branch`; add `branches TEXT NOT NULL DEFAULT '[]'`
+  (JSON array). `UNIQUE(watch_folder_id, relative_path, file_hash)` (was `…, branch`).
+  Drop `idx_tracked_files_branch`. One row per content version of a path.
+- v41 `up()`: mirror `v37::rebuild_tracked_files` (FK OFF → rename→create new DDL→
+  drop old→recreate indexes) + `DELETE FROM qdrant_chunks`. Bump
+  `CURRENT_SCHEMA_VERSION=41`, `mod v41;` + `registry.register(Box::new(v41::V41Migration))`.
+
+**Schema (search.db, its own migration runner — `search_db/migrations.rs`):**
+- `file_metadata`: drop scalar `branch`; add `branches TEXT NOT NULL DEFAULT '[]'`.
+  Keyed by `file_id` (= content-row). `code_lines` already shared by `file_id`.
+- `UPSERT_FILE_METADATA_SQL`: merge the branch into `branches`
+  (`json_insert`/`json_group_array(DISTINCT …)`), don't overwrite.
+- FTS5 search constants (`FTS5_SEARCH_BY_PROJECT_BRANCH_SQL`) + query builders
+  (`text_search/{exact,regex}_search`): `AND EXISTS(SELECT 1 FROM json_each(fm.branches) WHERE value=?)`.
+
+**Operations layer (the only Rust logic that changes):**
+- `operations.rs`/`transactions.rs`:
+  - decoder → `TrackedFile.branches: Vec<String>` (parse JSON; was `branch: Option<String>`).
+  - `lookup_tracked_file(watch, rel, branch)` (sig unchanged): `… AND EXISTS(SELECT 1 FROM json_each(branches) WHERE value=?3)`.
+  - `insert_tracked_file_tx(… branch …)` (sig unchanged): `INSERT … branches=json_array(?branch)
+    ON CONFLICT(watch_folder_id, relative_path, file_hash) DO UPDATE SET
+    branches=(SELECT json_group_array(DISTINCT value) FROM (SELECT value FROM json_each(tracked_files.branches) UNION SELECT ?branch)) RETURNING file_id`.
+  - `get_tracked_file_paths`/`get_tracked_files_by_prefix`: return `branches` (or the joined set).
+- `types.rs`: `TrackedFile.branch → branches: Vec<String>` (grep readers — currently
+  near-zero; callers use `item.branch`, not `existing.branch`).
+
+**Delete / GC / dedup (adapt the Stage-1 logic):**
+- Remove-branch-from-content now means: `UPDATE … SET branches = (json minus ?branch)`
+  for the row; if `json_array_length(branches)=0` → delete the row (CASCADE
+  qdrant_chunks) → then Stage-1 `has_other_references(base_point, file_id)` decides the
+  Qdrant point (other watch-folder clone keeps it; else delete). Still also
+  `remove_branch_from_base_point` on the Qdrant array.
+- `update_preamble`: on content change, remove `item.branch` from the OLD content-row's
+  `branches`; GC if empty.
+- `branch_dedup`: with the upsert-merge insert, the SQL append is automatic; keep the
+  Qdrant `add_branch_to_base_point` + drop the per-branch `tracked_files` insert (now
+  an upsert). Likely simplifies.
+- `branch_prune`: `… WHERE EXISTS(json_each(branches) … = ?branch)` → strip branch from
+  each row's set, GC empties.
+
+**Metrics:** `indexed_files_count{tenant,branch}` exporter → `json_each(branches)` so a
+shared row counts once per branch it holds.
+
+**Verify:** validate gate; targeted tests (tracked_files upsert-merge, lookup-by-branch,
+prune-strips-set, FTS5 branch∈branches). Then deploy → v41 + search.db migration clear
+the tables → **2nd full reembed** repopulates one row per content with its branch set
+(run only after the Stage-1 reembed drains).
 
 ## Recommendation
 
