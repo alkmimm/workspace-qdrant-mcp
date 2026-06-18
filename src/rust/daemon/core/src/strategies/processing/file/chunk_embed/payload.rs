@@ -38,7 +38,12 @@ pub(super) fn build_chunk_payload(
         serde_json::json!(file_document_id),
     );
     payload.insert("tenant_id".to_string(), serde_json::json!(item.tenant_id));
-    payload.insert("branch".to_string(), serde_json::json!(item.branch));
+    // Layer 2: `branch` is an ARRAY — the set of branches that hold this exact
+    // content (one shared physical point, since base_point is branch-agnostic).
+    // New content starts with just this branch; the cross-branch dedup fast-path
+    // appends others via set_payload. Qdrant keyword `match` against an array is
+    // "contains", so branch-scoped search filters keep working unchanged.
+    payload.insert("branch".to_string(), serde_json::json!([item.branch]));
     payload.insert("base_point".to_string(), serde_json::json!(base_point));
     payload.insert(
         "relative_path".to_string(),

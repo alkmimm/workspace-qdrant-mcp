@@ -33,7 +33,7 @@ pub async fn get_files_needing_reconcile(
     pool: &SqlitePool,
 ) -> Result<Vec<TrackedFile>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT file_id, watch_folder_id, relative_path, branch, file_type, language,
+        "SELECT file_id, watch_folder_id, relative_path, branches, file_type, language,
                 file_mtime, file_hash, chunk_count, chunking_method, chunker_version,
                 lsp_status, treesitter_status, last_error,
                 needs_reconcile, reconcile_reason, extension, is_test,
@@ -89,9 +89,10 @@ pub async fn get_files_needing_upgrade(
 
     let query = if language.is_some() {
         format!(
-            "SELECT tf.file_id, tf.relative_path, tf.branch, tf.collection
+            "SELECT tf.file_id, tf.relative_path, je.value AS branch, tf.collection
              FROM tracked_files tf
-             JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id
+             JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id,
+                  json_each(tf.branches) je
              WHERE wf.tenant_id = ?1
                AND ({})
                AND tf.language = ?2",
@@ -99,9 +100,10 @@ pub async fn get_files_needing_upgrade(
         )
     } else {
         format!(
-            "SELECT tf.file_id, tf.relative_path, tf.branch, tf.collection
+            "SELECT tf.file_id, tf.relative_path, je.value AS branch, tf.collection
              FROM tracked_files tf
-             JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id
+             JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id,
+                  json_each(tf.branches) je
              WHERE wf.tenant_id = ?1
                AND ({})",
             status_filter

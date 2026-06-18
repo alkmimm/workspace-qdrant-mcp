@@ -50,8 +50,11 @@ impl PayloadBuilder {
         self
     }
 
+    /// Layer 2: `branch` is an ARRAY of the branches that hold this content
+    /// (one shared physical point). This sets the initial single-element set;
+    /// the cross-branch dedup fast-path appends more via set_payload.
     pub fn branch(mut self, b: &str) -> Self {
-        self.inner.insert("branch".into(), serde_json::json!(b));
+        self.inner.insert("branch".into(), serde_json::json!([b]));
         self
     }
 
@@ -211,7 +214,7 @@ mod tests {
 
         assert_eq!(payload["tenant_id"], serde_json::json!("test-tenant"));
         assert_eq!(payload["content"], serde_json::json!("hello world"));
-        assert_eq!(payload["branch"], serde_json::json!("main"));
+        assert_eq!(payload["branch"], serde_json::json!(["main"]));
         assert_eq!(payload["item_type"], serde_json::json!("file"));
     }
 

@@ -3,7 +3,8 @@
 //! Handles branch switch and commit events detected by the git watcher.
 //! On branch switch:
 //!   1. Uses `diff_tree` to find changed files between old and new commits
-//!   2. Batch-updates unchanged files (branch column only, no re-ingestion)
+//!   2. Enqueues unchanged files as Add ops so the cross-branch dedup fast-path
+//!      re-keys their Qdrant points + FTS5 rows onto the new branch (no embed)
 //!   3. Enqueues changed files for re-ingestion via the unified queue
 //!   4. Updates `last_commit_hash` in `watch_folders`
 //!

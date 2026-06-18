@@ -52,15 +52,22 @@ async fn insert_tracked_file(
     branch: &str,
     relative_path: &str,
 ) {
+    // Post-v41 the branch lives in a `branches` JSON array. These tests model
+    // each (branch, relative_path) as a distinct content-row, so give every row
+    // a unique `file_hash` — otherwise the UNIQUE(watch, relative_path, file_hash)
+    // constraint would collapse the same path on two branches into one row.
+    let branches = serde_json::to_string(&[branch]).unwrap();
+    let file_hash = format!("hash-{branch}-{relative_path}");
     sqlx::query(
         "INSERT INTO tracked_files \
-         (watch_folder_id, branch, file_mtime, file_hash, relative_path, collection, created_at, updated_at) \
-         VALUES (?1, ?2, '2025-01-01T00:00:00Z', 'hash', ?3, 'projects', \
+         (watch_folder_id, branches, file_mtime, file_hash, relative_path, collection, created_at, updated_at) \
+         VALUES (?1, ?2, '2025-01-01T00:00:00Z', ?4, ?3, 'projects', \
          '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
     )
     .bind(watch_id)
-    .bind(branch)
+    .bind(&branches)
     .bind(relative_path)
+    .bind(&file_hash)
     .execute(pool)
     .await
     .unwrap();

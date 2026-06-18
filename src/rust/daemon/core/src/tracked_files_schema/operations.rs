@@ -11,6 +11,30 @@ use super::types::{ChunkType, ProcessingStatus, TrackedFile};
 // Re-export hashing functions from wqm-common
 pub use wqm_common::hashing::{compute_content_hash, compute_file_hash};
 
+/// Parse the `branches` JSON-array column (Layer 2 stage 2) into a Vec.
+///
+/// Tolerates NULL / empty / malformed JSON by returning an empty set, so a
+/// corrupt row degrades to "no branches" rather than failing the whole decode.
+pub(crate) fn parse_branches(raw: Option<String>) -> Vec<String> {
+    match raw {
+        Some(s) if !s.is_empty() => serde_json::from_str(&s).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Merge `branch` into an existing `branches` JSON array, returning the new
+/// JSON string. No-op (returns the set unchanged) when `branch` is None or
+/// already present.
+pub(crate) fn merge_branch(existing_json: Option<String>, branch: Option<&str>) -> String {
+    let mut set = parse_branches(existing_json);
+    if let Some(b) = branch {
+        if !set.iter().any(|x| x.as_str() == b) {
+            set.push(b.to_string());
+        }
+    }
+    serde_json::to_string(&set).unwrap_or_else(|_| "[]".to_string())
+}
+
 /// Build a TrackedFile from a SQLite row.
 ///
 /// Post-v37: the row carries a single relative path column (`relative_path`).
@@ -39,7 +63,7 @@ pub(crate) fn tracked_file_from_row(r: &SqliteRow) -> TrackedFile {
         file_id: r.get("file_id"),
         watch_folder_id: r.get("watch_folder_id"),
         relative_path,
-        branch: r.get("branch"),
+        branches: parse_branches(r.try_get::<String, _>("branches").ok()),
         file_type: r.get("file_type"),
         language: r.get("language"),
         file_mtime: r.get("file_mtime"),
@@ -117,14 +141,16 @@ pub async fn lookup_tracked_file(
     let row = match branch {
         Some(b) => {
             sqlx::query(
-                "SELECT file_id, watch_folder_id, relative_path, branch, file_type, language,
+                "SELECT file_id, watch_folder_id, relative_path, branches, file_type, language,
                         file_mtime, file_hash, chunk_count, chunking_method, chunker_version,
                         lsp_status, treesitter_status, last_error,
                         needs_reconcile, reconcile_reason, extension, is_test,
                         collection, base_point, incremental,
                         component, created_at, updated_at
                  FROM tracked_files
-                 WHERE watch_folder_id = ?1 AND relative_path = ?2 AND branch = ?3",
+                 WHERE watch_folder_id = ?1 AND relative_path = ?2
+                   AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?3)
+                 ORDER BY updated_at DESC LIMIT 1",
             )
             .bind(watch_folder_id)
             .bind(relative_path)
@@ -134,14 +160,15 @@ pub async fn lookup_tracked_file(
         }
         None => {
             sqlx::query(
-                "SELECT file_id, watch_folder_id, relative_path, branch, file_type, language,
+                "SELECT file_id, watch_folder_id, relative_path, branches, file_type, language,
                         file_mtime, file_hash, chunk_count, chunking_method, chunker_version,
                         lsp_status, treesitter_status, last_error,
                         needs_reconcile, reconcile_reason, extension, is_test,
                         collection, base_point, incremental,
                         component, created_at, updated_at
                  FROM tracked_files
-                 WHERE watch_folder_id = ?1 AND relative_path = ?2 AND branch IS NULL",
+                 WHERE watch_folder_id = ?1 AND relative_path = ?2
+                 ORDER BY updated_at DESC LIMIT 1",
             )
             .bind(watch_folder_id)
             .bind(relative_path)
@@ -179,34 +206,78 @@ pub async fn insert_tracked_file(
 ) -> Result<i64, sqlx::Error> {
     let now = timestamps::now_utc();
     let collection = collection.unwrap_or(COLLECTION_PROJECTS);
-    let result = sqlx::query(
-        "INSERT INTO tracked_files (watch_folder_id, relative_path, branch, file_type, language,
-         file_mtime, file_hash, chunk_count, chunking_method, lsp_status, treesitter_status,
-         extension, is_test, collection, base_point, component, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+
+    // Layer 2 stage 2: one row per (watch_folder, relative_path, file_hash).
+    // Merge `branch` into the existing content-row's `branches` set, or insert a
+    // fresh row. The merge is done Rust-side (see `merge_branch`) to keep the SQL
+    // simple and handle a NULL branch (libraries) cleanly.
+    let existing: Option<(i64, String)> = sqlx::query_as(
+        "SELECT file_id, branches FROM tracked_files
+         WHERE watch_folder_id = ?1 AND relative_path = ?2 AND file_hash = ?3",
     )
     .bind(watch_folder_id)
     .bind(relative_path)
-    .bind(branch)
-    .bind(file_type)
-    .bind(language)
-    .bind(file_mtime)
     .bind(file_hash)
-    .bind(chunk_count)
-    .bind(chunking_method)
-    .bind(lsp_status.to_string())
-    .bind(treesitter_status.to_string())
-    .bind(extension)
-    .bind(is_test as i32)
-    .bind(collection)
-    .bind(base_point)
-    .bind(component)
-    .bind(&now)
-    .bind(&now)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
 
-    Ok(result.last_insert_rowid())
+    if let Some((file_id, branches_json)) = existing {
+        let new_branches = merge_branch(Some(branches_json), branch);
+        sqlx::query(
+            "UPDATE tracked_files SET branches = ?1, file_type = ?2, language = ?3,
+             file_mtime = ?4, chunk_count = ?5, chunking_method = ?6, lsp_status = ?7,
+             treesitter_status = ?8, extension = ?9, is_test = ?10, collection = ?11,
+             base_point = ?12, component = ?13, updated_at = ?14
+             WHERE file_id = ?15",
+        )
+        .bind(&new_branches)
+        .bind(file_type)
+        .bind(language)
+        .bind(file_mtime)
+        .bind(chunk_count)
+        .bind(chunking_method)
+        .bind(lsp_status.to_string())
+        .bind(treesitter_status.to_string())
+        .bind(extension)
+        .bind(is_test as i32)
+        .bind(collection)
+        .bind(base_point)
+        .bind(component)
+        .bind(&now)
+        .bind(file_id)
+        .execute(pool)
+        .await?;
+        Ok(file_id)
+    } else {
+        let branches = merge_branch(None, branch);
+        let result = sqlx::query(
+            "INSERT INTO tracked_files (watch_folder_id, relative_path, branches, file_type, language,
+             file_mtime, file_hash, chunk_count, chunking_method, lsp_status, treesitter_status,
+             extension, is_test, collection, base_point, component, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        )
+        .bind(watch_folder_id)
+        .bind(relative_path)
+        .bind(&branches)
+        .bind(file_type)
+        .bind(language)
+        .bind(file_mtime)
+        .bind(file_hash)
+        .bind(chunk_count)
+        .bind(chunking_method)
+        .bind(lsp_status.to_string())
+        .bind(treesitter_status.to_string())
+        .bind(extension)
+        .bind(is_test as i32)
+        .bind(collection)
+        .bind(base_point)
+        .bind(component)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
 }
 
 /// Update an existing tracked file record
@@ -252,6 +323,44 @@ pub async fn delete_tracked_file(pool: &SqlitePool, file_id: i64) -> Result<(), 
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Remove `branch` from a content-row's `branches` set (Layer 2 stage 2).
+///
+/// If the set becomes empty the content is no longer held by any branch in this
+/// watch folder, so the row is deleted (CASCADE drops its `qdrant_chunks`);
+/// otherwise the set is updated in place. Returns the number of branches
+/// REMAINING (0 ⇒ the row was deleted).
+pub async fn remove_branch_from_tracked_file(
+    pool: &SqlitePool,
+    file_id: i64,
+    branch: &str,
+) -> Result<usize, sqlx::Error> {
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT branches FROM tracked_files WHERE file_id = ?1")
+            .bind(file_id)
+            .fetch_optional(pool)
+            .await?;
+    let mut set = parse_branches(current);
+    set.retain(|b| b.as_str() != branch);
+
+    if set.is_empty() {
+        sqlx::query("DELETE FROM tracked_files WHERE file_id = ?1")
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+        Ok(0)
+    } else {
+        let json = serde_json::to_string(&set).unwrap_or_else(|_| "[]".to_string());
+        let now = timestamps::now_utc();
+        sqlx::query("UPDATE tracked_files SET branches = ?1, updated_at = ?2 WHERE file_id = ?3")
+            .bind(&json)
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+        Ok(set.len())
+    }
 }
 
 /// Maximum chunks per batch insert. With 9 params per chunk, 100 * 9 = 900,
@@ -425,7 +534,7 @@ pub async fn get_tracked_file_paths(
     watch_folder_id: &str,
 ) -> Result<Vec<(i64, String, Option<String>)>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT file_id, relative_path, branch FROM tracked_files WHERE watch_folder_id = ?1",
+        "SELECT file_id, relative_path, branches FROM tracked_files WHERE watch_folder_id = ?1",
     )
     .bind(watch_folder_id)
     .fetch_all(pool)
@@ -433,7 +542,7 @@ pub async fn get_tracked_file_paths(
 
     Ok(rows
         .iter()
-        .map(|r| (r.get("file_id"), r.get("relative_path"), r.get("branch")))
+        .map(|r| (r.get("file_id"), r.get("relative_path"), r.get("branches")))
         .collect())
 }
 
@@ -477,7 +586,7 @@ pub async fn get_tracked_files_by_prefix(
     };
 
     let rows = sqlx::query(
-        "SELECT file_id, relative_path, branch FROM tracked_files
+        "SELECT file_id, relative_path, branches FROM tracked_files
          WHERE watch_folder_id = ?1 AND (relative_path LIKE ?2 OR relative_path = ?3)",
     )
     .bind(watch_folder_id)
@@ -488,7 +597,7 @@ pub async fn get_tracked_files_by_prefix(
 
     Ok(rows
         .iter()
-        .map(|r| (r.get("file_id"), r.get("relative_path"), r.get("branch")))
+        .map(|r| (r.get("file_id"), r.get("relative_path"), r.get("branches")))
         .collect())
 }
 

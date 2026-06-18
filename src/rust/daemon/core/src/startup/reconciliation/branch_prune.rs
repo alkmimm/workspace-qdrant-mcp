@@ -155,9 +155,10 @@ async fn prune_project_branches(
     // never the bulk. Never prune the corpus branch — this is the primary guard
     // against deleting a mislabeled main index.
     let counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT branch, COUNT(*) AS n FROM tracked_files \
-         WHERE watch_folder_id = ?1 AND branch IS NOT NULL AND branch <> '' \
-         GROUP BY branch",
+        "SELECT je.value AS branch, COUNT(*) AS n \
+         FROM tracked_files, json_each(branches) je \
+         WHERE watch_folder_id = ?1 \
+         GROUP BY je.value",
     )
     .bind(watch_id)
     .fetch_all(pool)
@@ -222,7 +223,8 @@ async fn enqueue_branch_deletes(
 ) -> Result<u64, String> {
     let paths: Vec<String> = sqlx::query_scalar(
         "SELECT relative_path FROM tracked_files \
-         WHERE watch_folder_id = ?1 AND branch = ?2",
+         WHERE watch_folder_id = ?1 \
+           AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?2)",
     )
     .bind(watch_id)
     .bind(branch)

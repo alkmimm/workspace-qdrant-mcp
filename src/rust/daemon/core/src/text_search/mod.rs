@@ -40,3 +40,4 @@ pub use types::{RegexLiterals, SearchMatch, SearchOptions, SearchResults};
 
 // Crate-internal API (used by grep_search)
 pub(crate) use escaping::{compile_glob_matcher, resolve_path_filter};
+pub(crate) use types::display_branch;

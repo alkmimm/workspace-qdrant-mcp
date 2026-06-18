@@ -144,15 +144,22 @@ impl SearchDbManager {
     /// gauge label is non-empty (Prometheus dislikes empty label values in
     /// aggregations) and matches the convention used elsewhere in the daemon.
     pub async fn file_metadata_stats_by_tenant_branch(&self) -> Result<Vec<FileMetadataStats>> {
-        let rows: Vec<(String, Option<String>, i64, i64, i64)> = sqlx::query_as(
+        // Layer 2 stage 2: `branches` is a JSON set, so a file shared by N
+        // branches counts once per branch (same per-(tenant,branch) semantics as
+        // the old per-branch rows). `json_each` expands the set; a LEFT JOIN keeps
+        // rows with an EMPTY set (e.g. libraries, or a NULL-branch upsert) so they
+        // still contribute to the gauge under the literal "(none)" branch label —
+        // dropping them would silently undercount indexed files.
+        let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
             "SELECT \
-                 tenant_id, \
-                 branch, \
+                 fm.tenant_id, \
+                 COALESCE(je.value, '(none)') AS branch, \
                  COUNT(*) AS file_count, \
-                 COALESCE(SUM(size_bytes), 0) AS total_bytes, \
-                 COALESCE(SUM(CASE WHEN fts5_skipped = 1 THEN 1 ELSE 0 END), 0) AS skipped_count \
-             FROM file_metadata \
-             GROUP BY tenant_id, branch",
+                 COALESCE(SUM(fm.size_bytes), 0) AS total_bytes, \
+                 COALESCE(SUM(CASE WHEN fm.fts5_skipped = 1 THEN 1 ELSE 0 END), 0) AS skipped_count \
+             FROM file_metadata fm \
+             LEFT JOIN json_each(fm.branches) je \
+             GROUP BY fm.tenant_id, COALESCE(je.value, '(none)')",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -161,13 +168,33 @@ impl SearchDbManager {
             .map(
                 |(tenant_id, branch, file_count, total_bytes, skipped_count)| FileMetadataStats {
                     tenant_id,
-                    branch: branch.unwrap_or_else(|| "(none)".to_string()),
+                    branch,
                     file_count,
                     total_bytes,
                     skipped_count,
                 },
             )
             .collect())
+    }
+
+    /// Drop a single branch from a file's `file_metadata` `branches` set without
+    /// deleting its `code_lines` (Layer 2 stage 2 — other branches still hold the
+    /// content). No-op if the branch is absent.
+    pub async fn remove_branch_from_file_metadata(
+        &self,
+        file_id: i64,
+        branch: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE file_metadata
+             SET branches = (SELECT json_group_array(value) FROM json_each(branches) WHERE value != ?2)
+             WHERE file_id = ?1",
+        )
+        .bind(file_id)
+        .bind(branch)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     // ========================================================================

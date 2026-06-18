@@ -13,7 +13,9 @@ pub struct SearchMatch {
     pub file_path: String,
     /// Tenant ID from file_metadata.
     pub tenant_id: String,
-    /// Branch from file_metadata (may be empty).
+    /// Branch(es) holding this content, from `file_metadata.branches` (Layer 2).
+    /// A clean display value (e.g. `"dev"` or `"dev,main"`), NOT the raw JSON
+    /// array — see [`display_branch`]. `None` when the content has no branch.
     pub branch: Option<String>,
     /// Lines before the match (populated when context_lines > 0).
     pub context_before: Vec<String>,
@@ -24,6 +26,20 @@ pub struct SearchMatch {
     /// response so the MCP server can compute real `bytes_in` for the
     /// token-economy metric (spec 20 §3.2).
     pub file_size: Option<i64>,
+}
+
+/// Convert a `file_metadata.branches` JSON-array string (Layer 2 stage 2) into a
+/// clean value for the user-facing `branch` result field: the branches joined by
+/// `,` (`["dev"] → "dev"`, `["dev","main"] → "dev,main"`), or `None` for an empty
+/// set. A non-array legacy value is returned verbatim (tolerates mixed data
+/// during a reembed window). Keeps `branch` a plain name, not a raw JSON array.
+pub(crate) fn display_branch(raw: Option<String>) -> Option<String> {
+    let raw = raw?;
+    match serde_json::from_str::<Vec<String>>(&raw) {
+        Ok(branches) if !branches.is_empty() => Some(branches.join(",")),
+        Ok(_) => None,
+        Err(_) => Some(raw),
+    }
 }
 
 /// Search options for scoping and filtering.

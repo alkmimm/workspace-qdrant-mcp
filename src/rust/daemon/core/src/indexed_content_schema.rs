@@ -169,7 +169,7 @@ mod tests {
             .unwrap();
 
         // Create tracked_files
-        sqlx::query(crate::tracked_files_schema::CREATE_TRACKED_FILES_V37_SQL)
+        sqlx::query(crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL)
             .execute(pool)
             .await
             .unwrap();

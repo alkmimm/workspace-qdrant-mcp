@@ -3,8 +3,9 @@
 /// Result of a branch switch operation
 #[derive(Debug, Clone, Default)]
 pub struct BranchSwitchStats {
-    /// Files batch-updated (branch metadata only, no re-ingestion)
-    pub batch_updated: u64,
+    /// Unchanged files enqueued for cross-branch dedup re-key (Add op; the
+    /// dedup fast-path copies existing Qdrant points + FTS5 rows, no re-embed)
+    pub enqueued_unchanged: u64,
     /// Files enqueued for re-ingestion (content changed)
     pub enqueued_changed: u64,
     /// Files enqueued for addition (new on target branch)
