@@ -151,6 +151,98 @@ Bigger lift; requires schema migration.
 
 This eliminates storage duplication entirely. ~500 lines + migration.
 
+## Layer 2 — concrete implementation plan (drafted 2026-06-18)
+
+**Status: planned, not yet implemented.** Deep cross-language impact analysis is
+done (below). This is a single coherent breaking change: `base_point` becomes
+branch-agnostic, so identical content on N branches maps to ONE physical Qdrant
+point and ONE DB row, with the branch set carried alongside. Because the
+identity hash changes, **a full reembed is inherent** (every existing point_id
+changes) — acceptable here (pre-release, no users; "NO MIGRATION EFFORT").
+
+### Data model
+
+- `compute_base_point` → `SHA256(tenant_id | relative_path | file_hash)` (drop
+  `branch`). Mirror in TS `utils/base-point.ts`. Golden vectors:
+  `compute_base_point("test_tenant","src/example.rs","abc123hash")` =
+  `d08103c2d8f553544dabeb4737fd32b4`; `compute_point_id(bp,0)` =
+  `72deff25f27560ca51dcab1c6b373b8b`.
+- **Qdrant payload**: scalar `branch` → `branches: [string]` array. Search filter
+  `payload.branch == X` → `Condition::matches("branches", X)` (Qdrant keyword
+  match against an array is "contains").
+- **SQLite (`tracked_files`, `file_metadata`)**: one row per *content version* of
+  a path, with a JSON `branches` array column mirroring the Qdrant payload.
+  `UNIQUE(watch_folder_id, relative_path, file_hash)` (was `…, branch`). Drop the
+  scalar `branch` column + `idx_*_branch`. Branch-scoped reads use
+  `EXISTS(SELECT 1 FROM json_each(branches) WHERE value = ?)`.
+- **Ingest of identical content on a new branch** = append the branch to the
+  existing point's `branches[]` (`set_payload`) + add it to the row's `branches`
+  JSON. No vector copy (replaces the Layer-1 scroll-and-copy in `branch_dedup`).
+- **Branch delete** = remove the branch from every `branches[]`/JSON set; GC the
+  point + row only when the set becomes empty.
+
+### Cross-language impact map (file:line — verified 2026-06-18)
+
+`compute_base_point` callers (drop `branch` arg): `common/src/hashing.rs:155`
+(def + tests), `daemon/core/.../file/ingest.rs:449`, `update_preamble.rs:39`,
+`zero_byte.rs:52`, `branch_dedup.rs:154`, `ingestion.rs:86`,
+`schema_version/v19.rs:62`, `tests/base_point_property_tests.rs:33`,
+`branch_switch/tests.rs:73`. TS: `utils/base-point.ts` (+ its golden test).
+
+Qdrant payload `branch` writers → `branches[]`: `file/chunk_embed/payload.rs:41`,
+`shared/payload_builder.rs:53`, `branch_dedup.rs:445` (rekey),
+`strategies/processing/text.rs:{101,224,236,309,324}`, `url.rs:269`,
+`tenant/library.rs:202`.
+
+SQLite `tracked_files.branch`: schema `tracked_files_schema/schema.rs:{177,200,212}`
+(v37 DDL + UNIQUE + idx); `operations.rs` (`lookup_tracked_file:111`,
+`insert_tracked_file:161`, `get_tracked_file_paths:423`,
+`get_tracked_files_by_prefix:467`, row decoder:42); `transactions.rs:{16,47}`;
+`reconcile.rs:{35,78}`; `branch_dedup.rs:{88,204}`; `delete.rs:{47,368,453}`;
+`store_track.rs:{71,375}`; `file/mod.rs:{453,527}`; `zero_byte.rs:{96,130}`;
+`types.rs:123` (`TrackedFile.branch`). Migration: add v41 (rebuild table to new
+shape + `branches` JSON; register in `schema_version`).
+
+search.db `file_metadata.branch`: `code_lines_schema.rs:{158,203,223,313}`
+(schema, idx, UPSERT, `FTS5_SEARCH_BY_PROJECT_BRANCH_SQL`); query builders
+`text_search/exact_search/query_builder.rs:73`, `text_search/regex_search/query.rs:67`;
+FTS writer in `branch_dedup.rs:247` + the batch writer; metrics
+`monitoring/metrics_core.rs:215` + `file_metadata_stats_by_tenant_branch`. Bump
+search.db schema version + migration.
+
+Branch lifecycle / delete: `startup/reconciliation/branch_prune.rs:{157,223,252}`
+(per-branch enqueue-delete → "remove branch from set + GC when empty"); ref-count
+`file/delete.rs:{105,174}` (`has_other_references` by base_point already exists —
+extend to count branch-set membership). proto `workspace_daemon.proto:1496`
+(`ProjectPayload.branch` → `repeated branches`) + TextSearch branch field.
+
+TS MCP server: `tools/branch-scope.ts`, `tools/search-filters.ts`,
+`tools/search-qdrant.ts` (filter `branch` → `branches` contains), payload reads,
+`utils/base-point.ts`.
+
+### Ordered, compile-green stages (each ends validate-green)
+
+1. **Vector-dedup core (deployable on its own):** `base_point` branch-agnostic +
+   Qdrant `branches[]` payload + dedup-by-append (`set_payload`, no copy) +
+   search filter `branches∈X` (TS) + delete removes-from-array + proto. Keeps
+   per-branch `tracked_files`/`file_metadata` rows (all now sharing one
+   `base_point`). This alone stops the **vector** storage doubling.
+2. **One-row collapse:** `tracked_files` + `file_metadata` keyed by content with
+   `branches` JSON; lookups/inserts/prune/metrics via `json_each`; v41 + search.db
+   migration. This delivers the literal "one row, many branches" model and stops
+   FTS5 text duplication.
+
+### Verification
+
+- Rust: `docker build --target validate -f docker/Dockerfile.memexd` (clippy
+  `--lib --bins --tests -D warnings`) + targeted `cargo test` for hashing /
+  tracked_files / branch_switch / search_db.
+- TS: `npm run typecheck` + the base-point + search-filter vitest suites.
+- Live: `make redeploy`, then a forced reembed, then assert (a) `points_count`
+  no longer grows when checking out a second branch with identical content, and
+  (b) `search`/`grep` on each branch return that branch's files and **not** files
+  that exist only on the other branch (branch isolation preserved).
+
 ## Recommendation
 
 ~~Implement **Layer 1** first.~~ **Done** — see [What shipped](#what-shipped).
