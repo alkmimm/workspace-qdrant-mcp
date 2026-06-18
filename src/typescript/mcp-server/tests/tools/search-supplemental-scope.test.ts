@@ -15,7 +15,10 @@ import { FIELD_BASE_POINT, FIELD_BRANCH, FIELD_TENANT_ID } from '../../src/commo
 
 const TENANT = 'tenant-1';
 
-function pt(id: string, payload: Record<string, unknown>): { id: string; payload: Record<string, unknown> } {
+function pt(
+  id: string,
+  payload: Record<string, unknown>
+): { id: string; payload: Record<string, unknown> } {
   return { id, payload };
 }
 const onMain = (id: string, extra: Record<string, unknown> = {}) =>
@@ -72,5 +75,20 @@ describe('filterSupplementalPointsToScope', () => {
       { tenantId: undefined, branch: undefined, basePoints: undefined }
     );
     expect(kept.map((p) => p.id)).toEqual(['a', 'b']);
+  });
+
+  it('covers the post-#124 array branch payload (point shared across branches)', () => {
+    // Post-#124 the `branch` payload is an ARRAY (one Qdrant point shared across
+    // branches). A scalar `!==` against the effective branch is ALWAYS true and
+    // would silently drop EVERY supplemental hit on a branch-scoped search.
+    const arr = (id: string, branches: string[]) =>
+      pt(id, { [FIELD_TENANT_ID]: TENANT, [FIELD_BRANCH]: branches });
+    const kept = filterSupplementalPointsToScope(
+      [arr('a', ['main']), arr('b', ['feature/x']), arr('c', ['main', 'feature/x'])],
+      { tenantId: TENANT, branch: 'main', basePoints: undefined }
+    );
+    // 'a' is on main; 'c' is shared across main+feature so it still covers main;
+    // 'b' is feature-only → dropped. Pre-fix the scalar compare dropped all three.
+    expect(kept.map((p) => p.id)).toEqual(['a', 'c']);
   });
 });

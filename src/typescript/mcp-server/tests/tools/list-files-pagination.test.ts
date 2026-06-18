@@ -73,6 +73,9 @@ function makeStateManager(
   return {
     getWatchFolderIdByTenantId: vi.fn().mockReturnValue('watch-1'),
     getProjectById: vi.fn().mockReturnValue({ data: { project_path: '/proj' } }),
+    // Base-branch fallback lookup (#118). null = no base branch → no fallback,
+    // which keeps these single-branch pagination cases on the explicit branch.
+    getBaseBranch: vi.fn().mockReturnValue(null),
     listTrackedFiles: vi.fn().mockImplementation(listTrackedFiles),
     countTrackedFiles: vi.fn().mockImplementation(countTrackedFiles),
     listSubmodules: vi.fn().mockReturnValue({ data: [] }),
