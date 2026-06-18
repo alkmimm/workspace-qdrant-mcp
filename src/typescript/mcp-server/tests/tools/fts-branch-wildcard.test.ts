@@ -35,9 +35,9 @@ function makeStateManager(): SqliteStateManager {
 function makeProjectDetector(projectId: string | undefined): ProjectDetector {
   return {
     findProjectRoot: vi.fn().mockReturnValue('/some/path'),
-    getProjectInfo: vi.fn().mockResolvedValue(
-      projectId ? { projectId, projectPath: '/some/path' } : null
-    ),
+    getProjectInfo: vi
+      .fn()
+      .mockResolvedValue(projectId ? { projectId, projectPath: '/some/path' } : null),
   } as unknown as ProjectDetector;
 }
 
@@ -56,21 +56,45 @@ function lastTextSearchRequest(daemon: DaemonClient): Record<string, unknown> {
   return (daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[0][0];
 }
 
+// FTS path only — Qdrant client is used by the non-`projects` scroll route.
+function makeQdrant(): Parameters<typeof searchExact>[0] {
+  return { scroll: vi.fn().mockResolvedValue({ points: [] }) } as unknown as Parameters<
+    typeof searchExact
+  >[0];
+}
+
 function makeOptions(overrides: Partial<SearchOptions> = {}): SearchOptions {
-  return { query: 'SERVICE_STATUS_HEALTHY', scope: 'project', projectId: 'project-a', ...overrides };
+  return {
+    query: 'SERVICE_STATUS_HEALTHY',
+    scope: 'project',
+    projectId: 'project-a',
+    ...overrides,
+  };
 }
 
 describe('searchExact — branch "*" wildcard', () => {
   it('defaults project searches to the current git branch', async () => {
     const daemon = makeDaemonClient();
-    await searchExact(daemon, makeStateManager(), makeProjectDetector(undefined), makeOptions());
+    await searchExact(
+      makeQdrant(),
+      daemon,
+      makeStateManager(),
+      makeProjectDetector(undefined),
+      makeOptions()
+    );
 
     expect(lastTextSearchRequest(daemon).branch).toBe('main');
   });
 
   it('omits branch from the daemon request when branch="*"', async () => {
     const daemon = makeDaemonClient();
-    await searchExact(daemon, makeStateManager(), makeProjectDetector(undefined), makeOptions({ branch: '*' }));
+    await searchExact(
+      makeQdrant(),
+      daemon,
+      makeStateManager(),
+      makeProjectDetector(undefined),
+      makeOptions({ branch: '*' })
+    );
 
     const request = lastTextSearchRequest(daemon);
     expect(request.branch).toBeUndefined();
@@ -80,7 +104,13 @@ describe('searchExact — branch "*" wildcard', () => {
 
   it('forwards a concrete branch name unchanged', async () => {
     const daemon = makeDaemonClient();
-    await searchExact(daemon, makeStateManager(), makeProjectDetector(undefined), makeOptions({ branch: 'main' }));
+    await searchExact(
+      makeQdrant(),
+      daemon,
+      makeStateManager(),
+      makeProjectDetector(undefined),
+      makeOptions({ branch: 'main' })
+    );
 
     expect(lastTextSearchRequest(daemon).branch).toBe('main');
   });

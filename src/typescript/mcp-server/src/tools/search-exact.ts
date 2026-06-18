@@ -2,12 +2,15 @@
  * FTS5 exact/substring search via daemon's TextSearchService.
  */
 
+import type { QdrantClient } from '@qdrant/js-client-rest';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
-import type { SearchOptions, SearchResult, SearchResponse } from './search-types.js';
+import type { SearchOptions, SearchResult, SearchResponse, FilterParams } from './search-types.js';
 import { PROJECTS_COLLECTION } from './search-types.js';
 import { attachIndexingProgress } from './search-helpers.js';
+import { buildFilter } from './search-filters.js';
+import { FIELD_CONTENT, FIELD_TITLE } from '../common/native-bridge.js';
 import {
   applyEffectiveBranch,
   resolveEffectiveBranch,
@@ -39,8 +42,7 @@ async function resolveExactSearchTenant(
       kind: 'tenant',
       tenantId: identity.projectId,
       projectPath:
-        identity.projectPath ??
-        stateManager.getProjectById(identity.projectId).data?.project_path,
+        identity.projectPath ?? stateManager.getProjectById(identity.projectId).data?.project_path,
     };
   }
   return { kind: 'unresolved' };
@@ -135,10 +137,99 @@ function unresolvedTenantResponse(options: SearchOptions): SearchResponse {
 }
 
 /**
+ * Exact/substring search over a NON-`projects` collection (scratchpad,
+ * libraries) via a tenant-scoped Qdrant scroll + substring match.
+ *
+ * The daemon's FTS5 index only covers project CODE lines, so the normal exact
+ * path silently searched `projects` and returned nothing for a phrase that
+ * lives in, e.g., the scratchpad (`collections_searched:["projects"]`). Honour
+ * the requested `collection` instead: scroll it under the same tenant filter the
+ * semantic path builds, then substring-match `content`/`title` case-sensitively
+ * (same case semantics as the FTS path). scratchpad/libraries are NOT
+ * branch-scoped, so no branch condition is applied.
+ */
+async function exactSearchInCollection(
+  qdrantClient: QdrantClient,
+  collection: string,
+  options: SearchOptions,
+  tenantId: string | undefined,
+  eventId: string,
+  stateManager: SqliteStateManager,
+  startTime: number
+): Promise<SearchResponse> {
+  const scope = options.scope ?? 'project';
+  const filterParams: FilterParams = {
+    collection,
+    scope,
+    projectId: tenantId,
+    branch: undefined, // scratchpad/libraries are not branch-scoped
+    fileType: options.fileType,
+    libraryName: options.libraryName,
+    tag: options.tag,
+    tags: options.tags,
+    pathGlob: options.pathGlob,
+    component: options.component,
+    basePoints: undefined,
+  };
+  const filter = buildFilter(filterParams);
+  const limit = options.limit ?? 100;
+  const needle = options.query;
+  const results: SearchResult[] = [];
+  try {
+    const scrolled = await qdrantClient.scroll(collection, {
+      // Over-fetch: the substring filter runs locally over the scrolled page.
+      limit: Math.max(limit * 4, 100),
+      with_payload: true,
+      ...(filter ? { filter } : {}),
+    });
+    for (const point of scrolled.points) {
+      const content = (point.payload?.[FIELD_CONTENT] as string) ?? '';
+      const title = (point.payload?.[FIELD_TITLE] as string) ?? '';
+      if (!content.includes(needle) && !title.includes(needle)) continue;
+      const result: SearchResult = {
+        id: String(point.id),
+        score: 1.0 - results.length * 0.001,
+        collection,
+        content,
+        metadata: { ...point.payload, _search_type: 'exact' },
+      };
+      if (title) result.title = title;
+      results.push(result);
+      if (results.length >= limit) break;
+    }
+  } catch (error) {
+    stateManager.updateSearchEvent(eventId, { resultCount: 0, latencyMs: Date.now() - startTime });
+    return {
+      results: [],
+      total: 0,
+      query: options.query,
+      mode: 'keyword',
+      scope,
+      collections_searched: [],
+      status: 'uncertain',
+      status_reason: `Exact search failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+    };
+  }
+  stateManager.updateSearchEvent(eventId, {
+    resultCount: results.length,
+    latencyMs: Date.now() - startTime,
+  });
+  return {
+    results,
+    total: results.length,
+    query: options.query,
+    mode: 'keyword',
+    scope,
+    collections_searched: [collection],
+  };
+}
+
+/**
  * Execute FTS5 exact/substring search via daemon's TextSearchService.
  * Maps TextSearchResponse to the standard SearchResponse format.
  */
 export async function searchExact(
+  qdrantClient: QdrantClient,
   daemonClient: DaemonClient,
   stateManager: SqliteStateManager,
   projectDetector: ProjectDetector,
@@ -188,6 +279,21 @@ export async function searchExact(
         : undefined,
   });
 
+  // The daemon FTS5 index only covers `projects` code lines. When the caller
+  // explicitly targets another collection (scratchpad/libraries), honour it via
+  // a scoped Qdrant scroll instead of silently searching `projects`.
+  if (options.collection && options.collection !== PROJECTS_COLLECTION) {
+    return exactSearchInCollection(
+      qdrantClient,
+      options.collection,
+      effectiveOptions,
+      tenantId,
+      eventId,
+      stateManager,
+      startTime
+    );
+  }
+
   return executeAndLogSearch(
     daemonClient,
     stateManager,
@@ -223,12 +329,7 @@ async function executeAndLogSearch(
       scope: options.scope ?? 'project',
       collections_searched: [PROJECTS_COLLECTION],
     };
-    await attachIndexingProgress(
-      successResponse,
-      daemonClient,
-      successResponse.scope,
-      tenantId
-    );
+    await attachIndexingProgress(successResponse, daemonClient, successResponse.scope, tenantId);
     return successResponse;
   } catch (error) {
     stateManager.updateSearchEvent(eventId, { resultCount: 0, latencyMs: Date.now() - startTime });
