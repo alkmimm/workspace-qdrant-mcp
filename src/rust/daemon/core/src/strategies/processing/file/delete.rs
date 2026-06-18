@@ -136,7 +136,7 @@ pub(super) async fn delete_tracked_file(
     if let Some(bp) = bp {
         if delete_points {
             if let Err(e) =
-                delete_qdrant_points(ctx, item, pool, relative_path, abs_file_path, existing).await
+                delete_qdrant_points(ctx, item, pool, relative_path, existing).await
             {
                 timings.push(PhaseTiming {
                     phase: "qdrant_delete",
@@ -232,7 +232,6 @@ async fn delete_qdrant_points(
     item: &UnifiedQueueItem,
     pool: &SqlitePool,
     relative_path: &str,
-    abs_file_path: &str,
     existing: &tracked_files_schema::TrackedFile,
 ) -> UnifiedProcessorResult<()> {
     let point_ids = tracked_files_schema::get_chunk_point_ids(pool, existing.file_id)
@@ -243,8 +242,15 @@ async fn delete_qdrant_points(
         return Ok(());
     }
 
+    // Layer 2: delete by the EXACT shared point IDs for this content-row, NOT by
+    // a `file_path` filter. Two branches can hold the same path with different
+    // content (different base_point ⇒ different points, identical file_path
+    // payload); a path filter would wipe the other branch's vectors. This branch
+    // only runs when `has_other_references == false`, so the base_point is truly
+    // orphaned and deleting exactly these IDs is correct. F-035: Qdrant errors
+    // propagate so the queue row retries (delete_points_by_ids errors on fault).
     ctx.storage_client
-        .delete_points_by_filter(&item.collection, abs_file_path, &item.tenant_id)
+        .delete_points_by_ids(&item.collection, &point_ids)
         .await
         .map_err(|e| {
             UnifiedProcessorError::Storage(format!(

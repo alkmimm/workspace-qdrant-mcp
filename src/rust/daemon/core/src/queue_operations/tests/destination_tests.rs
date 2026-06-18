@@ -128,6 +128,73 @@ async fn test_has_other_references_two_watches() {
     );
 }
 
+/// Regression for the Layer 2 over-delete bug: two branches holding the SAME
+/// `relative_path` with DIFFERENT content are distinct content-rows with
+/// distinct `base_point`s (hence distinct Qdrant point sets). Deleting one
+/// branch's content must NOT touch the other's points — which is exactly why
+/// `delete_qdrant_points` deletes by the content-row's precise point IDs, never
+/// by the shared `file_path` filter (both rows carry `file_path = src/a.rs`, so
+/// a path-scoped delete would wipe both versions).
+#[tokio::test]
+async fn test_divergent_content_same_path_has_no_cross_reference() {
+    let temp_dir = tempdir().unwrap();
+    let db_path = temp_dir.path().join("test_divergent.db");
+
+    let config = QueueConnectionConfig::with_database_path(&db_path);
+    let pool = config.create_pool().await.unwrap();
+
+    apply_sql_script(&pool, include_str!("../../schema/watch_folders_schema.sql"))
+        .await
+        .unwrap();
+
+    use crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL;
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let manager = QueueManager::new(pool.clone());
+
+    sqlx::query(
+        "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, created_at, updated_at)
+         VALUES ('w1', '/tmp/project', 'projects', 't1', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
+    ).execute(&pool).await.unwrap();
+
+    // Same path, DIFFERENT content (file_hash) on two branches => two rows with
+    // two distinct base_points. UNIQUE(watch, relative_path, file_hash) permits
+    // both to coexist (the whole point of Layer 2's per-content rows).
+    sqlx::query(
+        "INSERT INTO tracked_files (watch_folder_id, branches, file_mtime, file_hash, collection, base_point, relative_path, created_at, updated_at)
+         VALUES ('w1', '[\"main\"]', '2025-01-01T00:00:00Z', 'hash_v1', 'projects', 'bp_v1', 'src/a.rs', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
+    ).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO tracked_files (watch_folder_id, branches, file_mtime, file_hash, collection, base_point, relative_path, created_at, updated_at)
+         VALUES ('w1', '[\"feature\"]', '2025-01-01T00:00:00Z', 'hash_v2', 'projects', 'bp_v2', 'src/a.rs', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
+    ).execute(&pool).await.unwrap();
+
+    let v1_fid: i64 =
+        sqlx::query_scalar("SELECT file_id FROM tracked_files WHERE base_point = 'bp_v1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let v2_fid: i64 =
+        sqlx::query_scalar("SELECT file_id FROM tracked_files WHERE base_point = 'bp_v2'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Each version's base_point is referenced ONLY by its own row: removing one
+    // orphans its base_point (so delete_points fires) while the other survives.
+    assert!(
+        !manager.has_other_references("bp_v1", v1_fid).await.unwrap(),
+        "v1's base_point must be orphaned when v1's row is removed -- it is NOT shared with v2"
+    );
+    assert!(
+        !manager.has_other_references("bp_v2", v2_fid).await.unwrap(),
+        "v2's base_point is independent of v1"
+    );
+}
+
 #[tokio::test]
 async fn test_store_queue_decision() {
     let temp_dir = tempdir().unwrap();
