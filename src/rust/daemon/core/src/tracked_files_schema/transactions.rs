@@ -35,36 +35,80 @@ pub async fn insert_tracked_file_tx(
 ) -> Result<i64, sqlx::Error> {
     let now = timestamps::now_utc();
     let collection = collection.unwrap_or(COLLECTION_PROJECTS);
-    let result = sqlx::query(
-        "INSERT INTO tracked_files (watch_folder_id, relative_path, branch, file_type, language,
-         file_mtime, file_hash, chunk_count, chunking_method, chunker_version, lsp_status,
-         treesitter_status, extension, is_test, collection, base_point, component,
-         created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+
+    // Layer 2 stage 2: one row per (watch_folder, relative_path, file_hash).
+    // Merge `branch` into the content-row's `branches` set, or insert a fresh
+    // row. (See `operations::merge_branch`.)
+    let existing: Option<(i64, String)> = sqlx::query_as(
+        "SELECT file_id, branches FROM tracked_files
+         WHERE watch_folder_id = ?1 AND relative_path = ?2 AND file_hash = ?3",
     )
     .bind(watch_folder_id)
     .bind(relative_path)
-    .bind(branch)
-    .bind(file_type)
-    .bind(language)
-    .bind(file_mtime)
     .bind(file_hash)
-    .bind(chunk_count)
-    .bind(chunking_method)
-    .bind(chunker_version)
-    .bind(lsp_status.to_string())
-    .bind(treesitter_status.to_string())
-    .bind(extension)
-    .bind(is_test as i32)
-    .bind(collection)
-    .bind(base_point)
-    .bind(component)
-    .bind(&now)
-    .bind(&now)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
-    Ok(result.last_insert_rowid())
+    if let Some((file_id, branches_json)) = existing {
+        let new_branches = super::operations::merge_branch(Some(branches_json), branch);
+        sqlx::query(
+            "UPDATE tracked_files SET branches = ?1, file_type = ?2, language = ?3,
+             file_mtime = ?4, chunk_count = ?5, chunking_method = ?6, chunker_version = ?7,
+             lsp_status = ?8, treesitter_status = ?9, extension = ?10, is_test = ?11,
+             collection = ?12, base_point = ?13, component = ?14, updated_at = ?15
+             WHERE file_id = ?16",
+        )
+        .bind(&new_branches)
+        .bind(file_type)
+        .bind(language)
+        .bind(file_mtime)
+        .bind(chunk_count)
+        .bind(chunking_method)
+        .bind(chunker_version)
+        .bind(lsp_status.to_string())
+        .bind(treesitter_status.to_string())
+        .bind(extension)
+        .bind(is_test as i32)
+        .bind(collection)
+        .bind(base_point)
+        .bind(component)
+        .bind(&now)
+        .bind(file_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(file_id)
+    } else {
+        let branches = super::operations::merge_branch(None, branch);
+        let result = sqlx::query(
+            "INSERT INTO tracked_files (watch_folder_id, relative_path, branches, file_type, language,
+             file_mtime, file_hash, chunk_count, chunking_method, chunker_version, lsp_status,
+             treesitter_status, extension, is_test, collection, base_point, component,
+             created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        )
+        .bind(watch_folder_id)
+        .bind(relative_path)
+        .bind(&branches)
+        .bind(file_type)
+        .bind(language)
+        .bind(file_mtime)
+        .bind(file_hash)
+        .bind(chunk_count)
+        .bind(chunking_method)
+        .bind(chunker_version)
+        .bind(lsp_status.to_string())
+        .bind(treesitter_status.to_string())
+        .bind(extension)
+        .bind(is_test as i32)
+        .bind(collection)
+        .bind(base_point)
+        .bind(component)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut **tx)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
 }
 
 /// Update an existing tracked file record within a transaction

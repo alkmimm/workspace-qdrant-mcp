@@ -33,12 +33,12 @@ pub async fn fetch_unchanged_relative_paths(
         "SELECT t.relative_path
          FROM tracked_files t
          WHERE t.watch_folder_id = ?1
-           AND t.branch = ?2
+           AND EXISTS (SELECT 1 FROM json_each(t.branches) WHERE value = ?2)
            AND NOT EXISTS (
-               SELECT 1 FROM tracked_files n
+               SELECT 1 FROM tracked_files n, json_each(n.branches) nb
                WHERE n.watch_folder_id = t.watch_folder_id
                  AND n.relative_path = t.relative_path
-                 AND n.branch = ?3
+                 AND nb.value = ?3
            )",
     )
     .bind(watch_folder_id)

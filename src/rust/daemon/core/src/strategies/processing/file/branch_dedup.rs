@@ -59,22 +59,18 @@ pub(super) async fn try_branch_dedup(
     let file_hash = tracked_files_schema::compute_file_hash(file_path)
         .map_err(|e| UnifiedProcessorError::ProcessingFailed(e.to_string()))?;
 
-    // ── 1. Does another branch already hold this exact content? ──
-    type DedupRow = (
-        i64,
-        String,
-        i32,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
+    // ── 1. Is this content already indexed (any branch)? ──
+    // Layer 2 stage 2: one content-row per (watch, relative_path, file_hash). If
+    // it exists, the shared Qdrant points exist too — we add this branch to them
+    // instead of re-embedding. (prepare_update already skipped the case where
+    // THIS branch holds the content with a current chunker fingerprint.)
+    type DedupRow = (i32, Option<String>, Option<String>, Option<String>);
     let existing: Option<DedupRow> = sqlx::query_as(
-        "SELECT file_id, branch, chunk_count, file_type, language, chunker_version
+        "SELECT chunk_count, file_type, language, chunker_version
              FROM tracked_files
              WHERE watch_folder_id = ?1
                AND relative_path = ?2
                AND file_hash = ?3
-               AND branch != ?4
                AND base_point IS NOT NULL
              ORDER BY updated_at DESC
              LIMIT 1",
@@ -82,14 +78,11 @@ pub(super) async fn try_branch_dedup(
     .bind(watch_folder_id)
     .bind(relative_path)
     .bind(&file_hash)
-    .bind(&item.branch)
     .fetch_optional(&ctx.pool)
     .await
     .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("dedup lookup: {e}")))?;
 
-    let Some((src_file_id, old_branch, chunk_count, file_type, language, src_chunker_version)) =
-        existing
-    else {
+    let Some((chunk_count, file_type, language, src_chunker_version)) = existing else {
         return Ok(None);
     };
 
@@ -107,8 +100,8 @@ pub(super) async fn try_branch_dedup(
         &current_fp,
     ) {
         info!(
-            "branch_dedup: source row for {} (branch={}) was chunked with stale configuration {:?} (current {}) — falling back to full ingest",
-            relative_path, old_branch, src_chunker_version, current_fp
+            "branch_dedup: source row for {} was chunked with stale configuration {:?} (current {}) — falling back to full ingest",
+            relative_path, src_chunker_version, current_fp
         );
         return Ok(None);
     }
@@ -126,8 +119,8 @@ pub(super) async fn try_branch_dedup(
         // tracked_files claims chunks but Qdrant has none — stale row / partial
         // cleanup. Fall back to a full ingest so the file is embedded fresh.
         warn!(
-            "branch_dedup: source entry for {} (branch={}) has base_point {} but Qdrant returned 0 points — falling back to normal ingest",
-            relative_path, old_branch, base_point
+            "branch_dedup: content row for {} has base_point {} but Qdrant returned 0 points — falling back to normal ingest",
+            relative_path, base_point
         );
         return Ok(None);
     }
@@ -175,9 +168,8 @@ pub(super) async fn try_branch_dedup(
     .await
     .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("insert_tracked_file: {e}")))?;
 
-    copy_qdrant_chunks(&mut tx, src_file_id, file_id)
-        .await
-        .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("copy_qdrant_chunks: {e}")))?;
+    // No qdrant_chunks copy: insert_tracked_file_tx merged this branch into the
+    // EXISTING content-row, whose mirror already references the shared points.
     tx.commit()
         .await
         .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("dedup tx commit: {e}")))?;
@@ -257,8 +249,8 @@ pub(super) async fn try_branch_dedup(
         .await;
 
     info!(
-        "branch_dedup hit: {} ({} += {}) skipped embed, shared {} points at base_point {}",
-        relative_path, old_branch, item.branch, point_count, base_point
+        "branch_dedup hit: {} (+= {}) skipped embed, shared {} points at base_point {}",
+        relative_path, item.branch, point_count, base_point
     );
 
     // Suppress unused warnings on payload — kept in the signature to mirror the
@@ -267,27 +259,6 @@ pub(super) async fn try_branch_dedup(
     Ok(Some(DedupHit))
 }
 
-/// Copy the `qdrant_chunks` mirror rows from `src_file_id` to `new_file_id`.
-///
-/// The point_ids are identical across the copy: the base_point — hence every
-/// `compute_point_id(base_point, chunk_index)` — is shared across branches, so
-/// the new branch's row mirrors the very same physical points.
-async fn copy_qdrant_chunks(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    src_file_id: i64,
-    new_file_id: i64,
-) -> Result<(), sqlx::Error> {
-    let now = wqm_common::timestamps::now_utc();
-    sqlx::query(
-        "INSERT INTO qdrant_chunks
-             (file_id, point_id, chunk_index, content_hash, chunk_type, symbol_name, start_line, end_line, created_at)
-         SELECT ?1, point_id, chunk_index, content_hash, chunk_type, symbol_name, start_line, end_line, ?2
-             FROM qdrant_chunks WHERE file_id = ?3",
-    )
-    .bind(new_file_id)
-    .bind(&now)
-    .bind(src_file_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
+// (copy_qdrant_chunks removed in Layer 2 stage 2: the content-row is shared, so
+// `insert_tracked_file_tx` merges the branch into the existing row whose mirror
+// already references the shared points — there is nothing to copy.)

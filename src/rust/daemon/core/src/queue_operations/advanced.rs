@@ -156,4 +156,33 @@ impl QueueManager {
 
         Ok(count > 0)
     }
+
+    /// Whether any tracked_files row OTHER than `exclude_file_id` still holds
+    /// `branch` in its `branches` set for `base_point` (Layer 2 stage 2).
+    ///
+    /// Used on delete: a single physical Qdrant point is shared across branches
+    /// AND clones, so its `branch` array must keep a branch until NO row anywhere
+    /// holds it. This answers "does another row still need this branch?".
+    pub async fn branch_held_by_other(
+        &self,
+        base_point: &str,
+        exclude_file_id: i64,
+        branch: &str,
+    ) -> QueueResult<bool> {
+        let count: i32 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM tracked_files
+            WHERE base_point = ?1
+              AND file_id != ?2
+              AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?3)
+            "#,
+        )
+        .bind(base_point)
+        .bind(exclude_file_id)
+        .bind(branch)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count > 0)
+    }
 }

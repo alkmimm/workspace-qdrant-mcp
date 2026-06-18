@@ -8,13 +8,13 @@
 use std::time::Instant;
 
 use sqlx::SqlitePool;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::context::ProcessingContext;
 use crate::processing_timings::{self, PhaseTiming};
 use crate::tracked_files_schema;
 use crate::tree_sitter::detect_language;
-use crate::unified_queue_processor::{UnifiedProcessorError, UnifiedProcessorResult};
+use crate::unified_queue_processor::UnifiedProcessorResult;
 use crate::unified_queue_schema::{FilePayload, UnifiedQueueItem};
 
 /// Execute the deletion part of an update operation (reference-counted).
@@ -36,11 +36,13 @@ pub(super) async fn execute_update_deletion(
 ) -> UnifiedProcessorResult<()> {
     let preamble_start = Instant::now();
 
-    let _ = watch_folder_id; // ref-counting is now keyed by file_id, not watch folder
     let new_base_point =
         wqm_common::hashing::compute_base_point(&item.tenant_id, relative_path, new_hash);
 
-    let delete_old = resolve_delete_old(ctx, existing).await;
+    // Content changed (hash differs) iff the new base_point differs from the old
+    // one. A pure re-chunk (same hash) keeps the same base_point — nothing to
+    // delete; the ingest re-upserts the same points.
+    let delete_old = existing.base_point.as_deref() != Some(new_base_point.as_str());
 
     let decision = wqm_common::queue_types::QueueDecision {
         delete_old,
@@ -49,7 +51,6 @@ pub(super) async fn execute_update_deletion(
         old_file_hash: Some(existing.file_hash.clone()),
         new_file_hash: new_hash.to_string(),
     };
-
     if let Err(e) = ctx
         .queue_manager
         .store_queue_decision(&item.queue_id, &decision)
@@ -58,61 +59,28 @@ pub(super) async fn execute_update_deletion(
         warn!("Failed to store QueueDecision for {}: {}", item.queue_id, e);
     }
 
+    // Layer 2 stage 2: the content changed on item.branch, so drop item.branch
+    // from the OLD content-row and GC its row/points only when no branch/clone
+    // still holds the old content (the unified branch-set delete). The ingest
+    // pipeline then adds item.branch to the NEW content-row.
     if delete_old {
-        let old_point_ids = tracked_files_schema::get_chunk_point_ids(pool, existing.file_id)
-            .await
-            .unwrap_or_default();
-        if !old_point_ids.is_empty() {
-            ctx.storage_client
-                .delete_points_by_filter(&item.collection, abs_file_path, &item.tenant_id)
-                .await
-                .map_err(|e| UnifiedProcessorError::Storage(e.to_string()))?;
-        }
-    } else if let Some(old_bp) = existing.base_point.as_deref() {
-        // Layer 2: the old content is still held by another branch/clone, so the
-        // shared points stay — but this branch no longer holds the old content,
-        // so drop it from the points' `branch` array. Skip when the content is
-        // unchanged (same base_point); that is handled by the upsert below.
-        if old_bp != new_base_point {
-            if let Err(e) = ctx
-                .storage_client
-                .remove_branch_from_base_point(&item.collection, old_bp, &item.branch)
-                .await
-            {
-                warn!(
-                    "Failed to drop branch {} from old base_point {}: {}",
-                    item.branch, old_bp, e
-                );
-            }
-        }
+        let mut timings: Vec<PhaseTiming> = Vec::new();
+        super::delete::delete_tracked_file(
+            ctx,
+            item,
+            pool,
+            watch_folder_id,
+            relative_path,
+            abs_file_path,
+            existing,
+            &mut timings,
+            Instant::now(),
+        )
+        .await?;
     }
 
     record_preamble_timing(pool, item, payload, abs_file_path, preamble_start).await;
     Ok(())
-}
-
-/// Determine whether old Qdrant points should be deleted (reference-counted by
-/// file_id — Layer 2 shares one point across branches/clones).
-async fn resolve_delete_old(
-    ctx: &ProcessingContext,
-    existing: &tracked_files_schema::TrackedFile,
-) -> bool {
-    if let Some(ref old_bp) = existing.base_point {
-        let has_refs = ctx
-            .queue_manager
-            .has_other_references(old_bp, existing.file_id)
-            .await
-            .unwrap_or(false);
-        if has_refs {
-            info!(
-                "Old base_point {} still referenced by another branch/clone, keeping shared points",
-                old_bp
-            );
-        }
-        !has_refs
-    } else {
-        true
-    }
 }
 
 async fn record_preamble_timing(

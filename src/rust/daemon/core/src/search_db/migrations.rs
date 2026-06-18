@@ -216,6 +216,53 @@ pub(super) async fn migrate_v9(pool: &SqlitePool) -> SearchDbResult<()> {
     Ok(())
 }
 
+/// Search DB migration v10 (Layer 2 stage 2): collapse `file_metadata` to a
+/// content-keyed row with a `branches` JSON set, dropping the scalar `branch`.
+///
+/// Mirrors the state.db v41 rebuild. Pre-release "NO MIGRATION EFFORT": the rows
+/// are discarded (the Layer 2 reembed repopulates one row per content with its
+/// branch set). Stale `code_lines` for the old file_ids become inert — `grep`
+/// JOINs `file_metadata`, so rows without a metadata match never surface.
+/// Idempotent: skips when `file_metadata` already carries the `branches` column.
+pub(super) async fn migrate_v10(pool: &SqlitePool) -> SearchDbResult<()> {
+    use crate::code_lines_schema::{
+        CREATE_FILE_METADATA_BASE_POINT_INDEX_SQL, CREATE_FILE_METADATA_CHURN_INDEX_SQL,
+        CREATE_FILE_METADATA_FTS5_SKIPPED_INDEX_SQL, CREATE_FILE_METADATA_V10_SQL,
+    };
+
+    info!("Search DB migration v10: file_metadata content-keyed with branches JSON set");
+
+    let has_branches: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('file_metadata') WHERE name = 'branches'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_branches {
+        return Ok(());
+    }
+
+    sqlx::query("DROP TABLE IF EXISTS file_metadata")
+        .execute(pool)
+        .await?;
+    sqlx::query(CREATE_FILE_METADATA_V10_SQL)
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_file_metadata_tenant ON file_metadata(tenant_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query(CREATE_FILE_METADATA_BASE_POINT_INDEX_SQL)
+        .execute(pool)
+        .await?;
+    sqlx::query(CREATE_FILE_METADATA_FTS5_SKIPPED_INDEX_SQL)
+        .execute(pool)
+        .await?;
+    sqlx::query(CREATE_FILE_METADATA_CHURN_INDEX_SQL)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
 /// Dispatch a single migration by version number.
 pub(super) async fn run_migration(pool: &SqlitePool, version: i32) -> SearchDbResult<()> {
     match version {
@@ -228,6 +275,7 @@ pub(super) async fn run_migration(pool: &SqlitePool, version: i32) -> SearchDbRe
         7 => migrate_v7(pool).await,
         8 => migrate_v8(pool).await,
         9 => migrate_v9(pool).await,
+        10 => migrate_v10(pool).await,
         _ => Err(SearchDbError::Migration(format!(
             "Unknown search DB migration version: {}",
             version

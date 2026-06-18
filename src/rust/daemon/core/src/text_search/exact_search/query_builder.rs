@@ -56,7 +56,7 @@ WITH matching AS (
     let mut sql = format!(
         "{}
 SELECT m.line_id, m.file_id, m.line_number, m.content,
-       fm.file_path, fm.tenant_id, fm.branch, fm.size_bytes
+       fm.file_path, fm.tenant_id, fm.branches AS branch, fm.size_bytes
 FROM matching m
 JOIN file_metadata fm ON m.file_id = fm.file_id
 WHERE 1=1",
@@ -70,7 +70,10 @@ WHERE 1=1",
         next_param += 1;
     }
     if options.branch.is_some() {
-        sql.push_str(&format!(" AND fm.branch = ?{}", next_param));
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM json_each(fm.branches) WHERE value = ?{})",
+            next_param
+        ));
         next_param += 1;
     }
     if options.path_prefix.is_some() {

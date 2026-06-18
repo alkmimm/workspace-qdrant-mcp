@@ -91,7 +91,7 @@ pub(super) async fn process_file_delete(
 /// `Err` is returned so the queue row gets retry metadata. Without this guard,
 /// stale vectors stayed in Qdrant while local tracking was already wiped.
 #[allow(clippy::too_many_arguments)]
-async fn delete_tracked_file(
+pub(super) async fn delete_tracked_file(
     ctx: &ProcessingContext,
     item: &UnifiedQueueItem,
     pool: &SqlitePool,
@@ -102,36 +102,65 @@ async fn delete_tracked_file(
     timings: &mut Vec<PhaseTiming>,
     delete_start: Instant,
 ) -> UnifiedProcessorResult<()> {
-    let delete_from_qdrant =
-        check_qdrant_deletion_needed(ctx, watch_folder_id, relative_path, existing).await;
+    let _ = watch_folder_id; // ref-counting is keyed by file_id / base_point now
+    let bp = existing.base_point.as_deref();
+
+    // Post-delete predicates (computed before mutating; the queries exclude THIS
+    // row). Layer 2 stage 2: one row per content with a `branches` set; the
+    // physical point is shared across branches AND clones.
+    //   - r_new_empty: dropping item.branch empties THIS row's set (row vanishes).
+    //   - other_refs_bp: another row (clone) still references base_point.
+    //   - other_holds_x: another row still holds item.branch for base_point.
+    let r_new_empty = existing
+        .branches
+        .iter()
+        .all(|b| b.as_str() == item.branch.as_str());
+    let (other_refs_bp, other_holds_x) = match bp {
+        Some(bp) => (
+            ctx.queue_manager
+                .has_other_references(bp, existing.file_id)
+                .await
+                .unwrap_or(false),
+            ctx.queue_manager
+                .branch_held_by_other(bp, existing.file_id, &item.branch)
+                .await
+                .unwrap_or(false),
+        ),
+        None => (false, false),
+    };
+    // Delete the physical points only when this row vanishes AND no other row
+    // references the base_point.
+    let delete_points = r_new_empty && !other_refs_bp;
 
     let t0 = Instant::now();
-    if delete_from_qdrant {
-        if let Err(e) =
-            delete_qdrant_points(ctx, item, pool, relative_path, abs_file_path, existing).await
-        {
-            timings.push(PhaseTiming {
-                phase: "qdrant_delete",
-                duration_ms: t0.elapsed().as_millis() as u64,
-            });
-            warn!(
-                "Qdrant delete failed for {} — leaving tracked_files row intact and queuing retry: {}",
-                relative_path, e
-            );
-            return Err(e);
-        }
-    } else if let Some(bp) = existing.base_point.as_deref() {
-        // Layer 2: another branch/clone still holds this content, so the shared
-        // points stay — just drop this branch from their `branch` array.
-        if let Err(e) = ctx
-            .storage_client
-            .remove_branch_from_base_point(&item.collection, bp, &item.branch)
-            .await
-        {
-            warn!(
-                "Failed to drop branch {} from base_point {} on delete of {}: {}",
-                item.branch, bp, relative_path, e
-            );
+    if let Some(bp) = bp {
+        if delete_points {
+            if let Err(e) =
+                delete_qdrant_points(ctx, item, pool, relative_path, abs_file_path, existing).await
+            {
+                timings.push(PhaseTiming {
+                    phase: "qdrant_delete",
+                    duration_ms: t0.elapsed().as_millis() as u64,
+                });
+                warn!(
+                    "Qdrant delete failed for {} — leaving tracked_files row intact and queuing retry: {}",
+                    relative_path, e
+                );
+                return Err(e);
+            }
+        } else if !other_holds_x {
+            // Content stays (another row/clone references it), but this branch is
+            // no longer held by any row — drop it from the shared point's array.
+            if let Err(e) = ctx
+                .storage_client
+                .remove_branch_from_base_point(&item.collection, bp, &item.branch)
+                .await
+            {
+                warn!(
+                    "Failed to drop branch {} from base_point {} on delete of {}: {}",
+                    item.branch, bp, relative_path, e
+                );
+            }
         }
     }
     timings.push(PhaseTiming {
@@ -139,67 +168,58 @@ async fn delete_tracked_file(
         duration_ms: t0.elapsed().as_millis() as u64,
     });
 
+    // SQLite: remove the branch from the content-row's set (deletes the row when
+    // its set empties; CASCADE drops qdrant_chunks).
     let t0 = Instant::now();
-    let sqlite_ok = delete_tracked_file_sqlite(pool, relative_path, existing, timings, t0).await;
+    let remaining =
+        tracked_files_schema::remove_branch_from_tracked_file(pool, existing.file_id, &item.branch)
+            .await;
+    timings.push(PhaseTiming {
+        phase: "sqlite_cleanup",
+        duration_ms: t0.elapsed().as_millis() as u64,
+    });
+    let row_deleted = matches!(remaining, Ok(0));
+    if let Err(e) = &remaining {
+        warn!(
+            "SQLite branch-remove failed for {}: {}. Marked for reconciliation.",
+            relative_path, e
+        );
+        let _ = tracked_files_schema::mark_needs_reconcile(
+            pool,
+            existing.file_id,
+            &format!("branch_remove_failed: {}", e),
+        )
+        .await;
+        return Ok(());
+    }
 
-    if sqlite_ok {
+    if row_deleted {
+        // Content fully gone for this watch folder — purge FTS5, graph, keywords.
         let t0 = Instant::now();
         cleanup_fts5(ctx, existing).await;
         timings.push(PhaseTiming {
             phase: "fts5_cleanup",
             duration_ms: t0.elapsed().as_millis() as u64,
         });
-
-        let t0 = Instant::now();
         super::graph_ingest::delete_graph_edges(ctx, &item.tenant_id, relative_path).await;
-        timings.push(PhaseTiming {
-            phase: "graph_cleanup",
-            duration_ms: t0.elapsed().as_millis() as u64,
-        });
-
-        let t0 = Instant::now();
         let doc_id = crate::generate_document_id(&item.tenant_id, abs_file_path);
         super::keyword_persist::delete_extraction(pool, &doc_id).await;
-        timings.push(PhaseTiming {
-            phase: "keyword_cleanup",
-            duration_ms: t0.elapsed().as_millis() as u64,
-        });
-
-        info!(
-            "Deleted tracked file for: {} in {}ms (qdrant_delete={})",
-            relative_path,
-            delete_start.elapsed().as_millis(),
-            delete_from_qdrant
-        );
-    }
-    Ok(())
-}
-
-/// Determine whether Qdrant points should be deleted (reference-count check by
-/// file_id — Layer 2 shares one point across branches/clones).
-async fn check_qdrant_deletion_needed(
-    ctx: &ProcessingContext,
-    watch_folder_id: &str,
-    relative_path: &str,
-    existing: &tracked_files_schema::TrackedFile,
-) -> bool {
-    let _ = watch_folder_id; // ref-counting is keyed by file_id now
-    if let Some(ref bp) = existing.base_point {
-        let has_refs = ctx
-            .queue_manager
-            .has_other_references(bp, existing.file_id)
-            .await
-            .unwrap_or(false);
-        if has_refs {
-            info!(
-                "base_point {} still referenced by another branch/clone, skipping Qdrant deletion for: {}",
-                bp, relative_path
-            );
-        }
-        !has_refs
     } else {
-        true
+        // Branch removed but content remains — drop the branch from FTS5 metadata
+        // so `grep` on this branch no longer matches, keeping code_lines for the
+        // other branches.
+        remove_branch_from_fts5(ctx, existing.file_id, &item.branch).await;
     }
+
+    info!(
+        "Removed branch {} for: {} in {}ms (row_deleted={}, delete_points={})",
+        item.branch,
+        relative_path,
+        delete_start.elapsed().as_millis(),
+        row_deleted,
+        delete_points
+    );
+    Ok(())
 }
 
 /// Delete Qdrant points for a tracked file.
@@ -237,54 +257,7 @@ async fn delete_qdrant_points(
     Ok(())
 }
 
-/// Delete the tracked_files row in a transaction. Returns `true` on success.
-async fn delete_tracked_file_sqlite(
-    pool: &SqlitePool,
-    relative_path: &str,
-    existing: &tracked_files_schema::TrackedFile,
-    timings: &mut Vec<PhaseTiming>,
-    t0: Instant,
-) -> bool {
-    let tx_result: Result<(), UnifiedProcessorError> = async {
-        let mut tx = pool.begin().await.map_err(|e| {
-            UnifiedProcessorError::QueueOperation(format!("Failed to begin transaction: {}", e))
-        })?;
-        tracked_files_schema::delete_tracked_file_tx(&mut tx, existing.file_id)
-            .await
-            .map_err(|e| {
-                UnifiedProcessorError::QueueOperation(format!("tracked_files delete failed: {}", e))
-            })?;
-        tx.commit().await.map_err(|e| {
-            UnifiedProcessorError::QueueOperation(format!("Transaction commit failed: {}", e))
-        })?;
-        Ok(())
-    }
-    .await;
-
-    timings.push(PhaseTiming {
-        phase: "sqlite_cleanup",
-        duration_ms: t0.elapsed().as_millis() as u64,
-    });
-
-    match tx_result {
-        Ok(()) => true,
-        Err(e) => {
-            warn!(
-                "SQLite transaction failed after Qdrant delete for {}: {}. Marked for reconciliation on next startup.",
-                relative_path, e
-            );
-            let _ = tracked_files_schema::mark_needs_reconcile(
-                pool,
-                existing.file_id,
-                &format!("delete_tx_failed: {}", e),
-            )
-            .await;
-            false
-        }
-    }
-}
-
-/// Clean up FTS5 code_lines for a deleted file (non-fatal).
+/// Clean up FTS5 code_lines for a fully-removed file (non-fatal).
 async fn cleanup_fts5(ctx: &ProcessingContext, existing: &tracked_files_schema::TrackedFile) {
     if let Some(sdb) = &ctx.search_db {
         let processor = FtsBatchProcessor::new(sdb, FtsBatchConfig::default());
@@ -295,6 +268,19 @@ async fn cleanup_fts5(ctx: &ProcessingContext, existing: &tracked_files_schema::
             );
         } else {
             debug!("FTS5: deleted code_lines for file_id={}", existing.file_id);
+        }
+    }
+}
+
+/// Drop a single branch from a file's FTS5 `file_metadata` row WITHOUT deleting
+/// its `code_lines` (Layer 2 stage 2 — other branches still hold the content).
+async fn remove_branch_from_fts5(ctx: &ProcessingContext, file_id: i64, branch: &str) {
+    if let Some(sdb) = &ctx.search_db {
+        if let Err(e) = sdb.remove_branch_from_file_metadata(file_id, branch).await {
+            warn!(
+                "FTS5: failed to drop branch {} from file_id={}: {} (non-fatal)",
+                branch, file_id, e
+            );
         }
     }
 }
@@ -385,91 +371,26 @@ pub(super) async fn cleanup_missing_file(
     .await
     {
         debug!(
-            "File no longer exists, cleaning up tracked record and Qdrant points: {}",
-            relative_path
+            "File no longer exists, removing branch {} from tracked record: {}",
+            item.branch, relative_path
         );
-
-        // Get point IDs from qdrant_chunks before deletion
-        let point_ids = tracked_files_schema::get_chunk_point_ids(pool, existing.file_id)
-            .await
-            .unwrap_or_default();
-
-        // Layer 2: if another branch/clone still holds this content, keep the
-        // shared points and just drop this branch from their `branch` array.
-        let has_other = match existing.base_point.as_deref() {
-            Some(bp) => ctx
-                .queue_manager
-                .has_other_references(bp, existing.file_id)
-                .await
-                .unwrap_or(false),
-            None => false,
-        };
-
-        if has_other {
-            if let Some(bp) = existing.base_point.as_deref() {
-                if let Err(e) = ctx
-                    .storage_client
-                    .remove_branch_from_base_point(&item.collection, bp, &item.branch)
-                    .await
-                {
-                    warn!(
-                        "Failed to drop branch {} from base_point {} (missing file {}): {}",
-                        item.branch, bp, relative_path, e
-                    );
-                }
-            }
-        } else if !point_ids.is_empty() {
-            // Delete Qdrant points first (irreversible), scoped to tenant.
-            // F-035: surface Qdrant errors so the queue row can retry with metadata.
-            ctx.storage_client
-                .delete_points_by_filter(&item.collection, abs_file_path, &item.tenant_id)
-                .await
-                .map_err(|e| {
-                    UnifiedProcessorError::Storage(format!(
-                        "Qdrant delete for missing file {} failed: {}",
-                        relative_path, e
-                    ))
-                })?;
-        }
-
-        // Clean up SQLite records in a transaction (CASCADE handles qdrant_chunks)
-        let tx_result: Result<(), UnifiedProcessorError> = async {
-            let mut tx = pool.begin().await.map_err(|e| {
-                UnifiedProcessorError::QueueOperation(format!("Failed to begin transaction: {}", e))
-            })?;
-            tracked_files_schema::delete_tracked_file_tx(&mut tx, existing.file_id)
-                .await
-                .map_err(|e| {
-                    UnifiedProcessorError::QueueOperation(format!(
-                        "tracked_files delete failed: {}",
-                        e
-                    ))
-                })?;
-            tx.commit().await.map_err(|e| {
-                UnifiedProcessorError::QueueOperation(format!("Transaction commit failed: {}", e))
-            })?;
-            Ok(())
-        }
-        .await;
-
-        if let Err(e) = tx_result {
-            warn!(
-                "SQLite transaction failed during file-not-found cleanup for {}: {}. Marked for reconciliation on next startup.",
-                relative_path, e
-            );
-            let _ = tracked_files_schema::mark_needs_reconcile(
-                pool,
-                existing.file_id,
-                &format!("file_not_found_cleanup_tx_failed: {}", e),
-            )
-            .await;
-        } else {
-            debug!(
-                "Cleaned up {} Qdrant points and tracked record for missing file: {}",
-                point_ids.len(),
-                relative_path
-            );
-        }
+        // Reuse the branch-set delete path (Layer 2 stage 2): drop this branch
+        // from the content-row's set, GC the row + shared points only when no
+        // branch/clone holds the content anymore. Preserves F-035 (a Qdrant
+        // failure returns Err, leaving the row for retry).
+        let mut timings: Vec<PhaseTiming> = Vec::new();
+        delete_tracked_file(
+            ctx,
+            item,
+            pool,
+            watch_folder_id,
+            relative_path,
+            abs_file_path,
+            &existing,
+            &mut timings,
+            Instant::now(),
+        )
+        .await?;
     }
     Ok(())
 }
