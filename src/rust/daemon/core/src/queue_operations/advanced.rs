@@ -127,25 +127,30 @@ impl QueueManager {
         Ok(())
     }
 
-    /// Check if any OTHER tracked_file still references the same base_point.
+    /// Check if any OTHER tracked_files row references the same base_point,
+    /// excluding the row identified by `exclude_file_id`.
     ///
-    /// Used for reference-counting deletion: before deleting old Qdrant points,
-    /// check whether another watch folder instance still uses that base_point.
-    /// Returns true if at least one other reference exists.
+    /// Used for reference-counted deletion: before deleting the Qdrant points
+    /// for a row, check whether anyone else still needs them. Layer 2 makes a
+    /// single physical point shared across branches (and across multi-clone
+    /// watch folders) — every row holding the same content shares ONE
+    /// `base_point`. So the guard must exclude the specific row being removed
+    /// (by `file_id`), NOT a whole watch folder: another BRANCH's row in the
+    /// SAME watch folder still references the point and must keep it alive.
     pub async fn has_other_references(
         &self,
         base_point: &str,
-        our_watch_folder_id: &str,
+        exclude_file_id: i64,
     ) -> QueueResult<bool> {
         let count: i32 = sqlx::query_scalar(
             r#"
             SELECT COUNT(*) FROM tracked_files
             WHERE base_point = ?1
-              AND watch_folder_id != ?2
+              AND file_id != ?2
             "#,
         )
         .bind(base_point)
-        .bind(our_watch_folder_id)
+        .bind(exclude_file_id)
         .fetch_one(&self.pool)
         .await?;
 

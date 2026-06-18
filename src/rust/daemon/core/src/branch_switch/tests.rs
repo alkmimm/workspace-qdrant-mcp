@@ -70,9 +70,7 @@ async fn insert_tracked_file(
     file_hash: &str,
     relative_path: &str,
 ) {
-    let base_point = wqm_common::hashing::compute_base_point(
-        "t1", branch, relative_path, file_hash,
-    );
+    let base_point = wqm_common::hashing::compute_base_point("t1", relative_path, file_hash);
     sqlx::query(
         "INSERT INTO tracked_files (watch_folder_id, relative_path, branch, file_mtime, file_hash,
          collection, base_point, created_at, updated_at)

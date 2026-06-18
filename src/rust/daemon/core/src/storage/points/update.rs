@@ -158,4 +158,90 @@ impl StorageClient {
 
         Ok(())
     }
+
+    /// Read the `branch` payload array shared by all points of a `base_point`.
+    ///
+    /// Layer 2: one physical point per (tenant, path, content), shared across
+    /// branches via an array in the `branch` payload field. Tolerates a legacy
+    /// scalar `branch` (decoded as a one-element set) for mixed data during the
+    /// reembed window. Empty when no point matches.
+    async fn read_branch_set(
+        &self,
+        collection_name: &str,
+        base_point: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        use qdrant_client::qdrant::{value::Kind, Condition, Filter};
+        let filter = Filter::must([Condition::matches("base_point", base_point.to_string())]);
+        let points = self
+            .scroll_with_filter(collection_name, filter, 1, None)
+            .await?;
+        let Some(p) = points.into_iter().next() else {
+            return Ok(Vec::new());
+        };
+        let set = match p.payload.get("branch").and_then(|v| v.kind.as_ref()) {
+            Some(Kind::ListValue(list)) => list
+                .values
+                .iter()
+                .filter_map(|v| match v.kind.as_ref() {
+                    Some(Kind::StringValue(s)) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect(),
+            Some(Kind::StringValue(s)) => vec![s.clone()],
+            _ => Vec::new(),
+        };
+        Ok(set)
+    }
+
+    /// Add `branch` to the shared `branch` array of every point under
+    /// `base_point`. Returns the number of points sharing the base_point
+    /// (0 ⇒ none exist; the caller should fall back to a full ingest).
+    /// Idempotent — a no-op if the branch is already present.
+    pub async fn add_branch_to_base_point(
+        &self,
+        collection_name: &str,
+        base_point: &str,
+        branch: &str,
+    ) -> Result<usize, StorageError> {
+        use qdrant_client::qdrant::{Condition, Filter};
+        let filter = Filter::must([Condition::matches("base_point", base_point.to_string())]);
+        let count = self
+            .count_points_with_filter(collection_name, filter.clone())
+            .await? as usize;
+        if count == 0 {
+            return Ok(0);
+        }
+        let mut set = self.read_branch_set(collection_name, base_point).await?;
+        if !set.iter().any(|b| b == branch) {
+            set.push(branch.to_string());
+            let mut payload = std::collections::HashMap::new();
+            payload.insert("branch".to_string(), serde_json::json!(set));
+            self.set_payload_by_filter(collection_name, filter, payload)
+                .await?;
+        }
+        Ok(count)
+    }
+
+    /// Remove `branch` from the shared `branch` array of every point under
+    /// `base_point`. Returns the number of branches REMAINING (0 ⇒ the points
+    /// are orphaned and the caller should delete them). No-op if absent.
+    pub async fn remove_branch_from_base_point(
+        &self,
+        collection_name: &str,
+        base_point: &str,
+        branch: &str,
+    ) -> Result<usize, StorageError> {
+        use qdrant_client::qdrant::{Condition, Filter};
+        let mut set = self.read_branch_set(collection_name, base_point).await?;
+        let before = set.len();
+        set.retain(|b| b != branch);
+        if set.len() != before {
+            let filter = Filter::must([Condition::matches("base_point", base_point.to_string())]);
+            let mut payload = std::collections::HashMap::new();
+            payload.insert("branch".to_string(), serde_json::json!(set));
+            self.set_payload_by_filter(collection_name, filter, payload)
+                .await?;
+        }
+        Ok(set.len())
+    }
 }

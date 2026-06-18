@@ -34,15 +34,14 @@ async fn test_has_other_references_single_watch() {
          VALUES ('w1', 'main', '2025-01-01T00:00:00Z', 'hash1', 'projects', 'bp_abc123', 'src/main.rs', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
     ).execute(&pool).await.unwrap();
 
-    // Single watch folder -- no other references
-    let has_refs = manager
-        .has_other_references("bp_abc123", "w1")
-        .await
-        .unwrap();
-    assert!(
-        !has_refs,
-        "Single watch folder should have no other references"
-    );
+    // Only this row references the base_point -- no OTHER references.
+    let fid: i64 =
+        sqlx::query_scalar("SELECT file_id FROM tracked_files WHERE base_point = 'bp_abc123'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let has_refs = manager.has_other_references("bp_abc123", fid).await.unwrap();
+    assert!(!has_refs, "Single row should have no other references");
 }
 
 #[tokio::test]
@@ -87,33 +86,45 @@ async fn test_has_other_references_two_watches() {
          VALUES ('w2', 'main', '2025-01-01T00:00:00Z', 'hash1', 'projects', 'bp_shared', 'src/main.rs', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
     ).execute(&pool).await.unwrap();
 
-    // w1 should see w2 as another reference
+    let w1_fid: i64 = sqlx::query_scalar(
+        "SELECT file_id FROM tracked_files WHERE watch_folder_id = 'w1' AND base_point = 'bp_shared'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let w2_fid: i64 = sqlx::query_scalar(
+        "SELECT file_id FROM tracked_files WHERE watch_folder_id = 'w2' AND base_point = 'bp_shared'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Excluding w1's row, w2's row still references the shared base_point.
     let has_refs = manager
-        .has_other_references("bp_shared", "w1")
+        .has_other_references("bp_shared", w1_fid)
         .await
         .unwrap();
-    assert!(has_refs, "Should detect w2 as another reference");
+    assert!(has_refs, "Should detect w2's row as another reference");
 
-    // w2 should see w1 as another reference
     let has_refs2 = manager
-        .has_other_references("bp_shared", "w2")
+        .has_other_references("bp_shared", w2_fid)
         .await
         .unwrap();
-    assert!(has_refs2, "Should detect w1 as another reference");
+    assert!(has_refs2, "Should detect w1's row as another reference");
 
-    // Now delete w2's tracked file -- w1 should have no more references
+    // Now delete w2's tracked file -- excluding w1's row, nothing else refs it.
     sqlx::query("DELETE FROM tracked_files WHERE watch_folder_id = 'w2'")
         .execute(&pool)
         .await
         .unwrap();
 
     let has_refs3 = manager
-        .has_other_references("bp_shared", "w1")
+        .has_other_references("bp_shared", w1_fid)
         .await
         .unwrap();
     assert!(
         !has_refs3,
-        "After removing w2's file, w1 should have no other references"
+        "After removing w2's row, w1's row has no other references"
     );
 }
 

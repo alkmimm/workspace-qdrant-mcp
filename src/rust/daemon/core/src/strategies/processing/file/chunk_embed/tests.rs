@@ -74,7 +74,7 @@ fn test_build_chunk_payload_required_fields() {
     assert_eq!(payload["content"], serde_json::json!("fn main() {}"));
     assert_eq!(payload["chunk_index"], serde_json::json!(0));
     assert_eq!(payload["tenant_id"], serde_json::json!("tenant-abc"));
-    assert_eq!(payload["branch"], serde_json::json!("main"));
+    assert_eq!(payload["branch"], serde_json::json!(["main"]));
     assert_eq!(payload["base_point"], serde_json::json!("bp-abc"));
     assert_eq!(payload["relative_path"], serde_json::json!("src/main.rs"));
     assert_eq!(payload["file_hash"], serde_json::json!("hash-xyz"));
@@ -304,7 +304,7 @@ fn test_build_chunk_payload_feature_branch() {
         &HashMap::new(),
     );
 
-    assert_eq!(payload["branch"], serde_json::json!("feature/auth"));
+    assert_eq!(payload["branch"], serde_json::json!(["feature/auth"]));
 }
 
 // ---- ChunkRecord construction tests ----

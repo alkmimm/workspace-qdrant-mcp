@@ -120,6 +120,19 @@ async fn delete_tracked_file(
             );
             return Err(e);
         }
+    } else if let Some(bp) = existing.base_point.as_deref() {
+        // Layer 2: another branch/clone still holds this content, so the shared
+        // points stay — just drop this branch from their `branch` array.
+        if let Err(e) = ctx
+            .storage_client
+            .remove_branch_from_base_point(&item.collection, bp, &item.branch)
+            .await
+        {
+            warn!(
+                "Failed to drop branch {} from base_point {} on delete of {}: {}",
+                item.branch, bp, relative_path, e
+            );
+        }
     }
     timings.push(PhaseTiming {
         phase: "qdrant_delete",
@@ -162,22 +175,24 @@ async fn delete_tracked_file(
     Ok(())
 }
 
-/// Determine whether Qdrant points should be deleted (reference-count check).
+/// Determine whether Qdrant points should be deleted (reference-count check by
+/// file_id — Layer 2 shares one point across branches/clones).
 async fn check_qdrant_deletion_needed(
     ctx: &ProcessingContext,
     watch_folder_id: &str,
     relative_path: &str,
     existing: &tracked_files_schema::TrackedFile,
 ) -> bool {
+    let _ = watch_folder_id; // ref-counting is keyed by file_id now
     if let Some(ref bp) = existing.base_point {
         let has_refs = ctx
             .queue_manager
-            .has_other_references(bp, watch_folder_id)
+            .has_other_references(bp, existing.file_id)
             .await
             .unwrap_or(false);
         if has_refs {
             info!(
-                "base_point {} still referenced by another watch folder, skipping Qdrant deletion for: {}",
+                "base_point {} still referenced by another branch/clone, skipping Qdrant deletion for: {}",
                 bp, relative_path
             );
         }
@@ -379,9 +394,33 @@ pub(super) async fn cleanup_missing_file(
             .await
             .unwrap_or_default();
 
-        // Delete Qdrant points first (irreversible), scoped to tenant.
-        // F-035: surface Qdrant errors so the queue row can retry with metadata.
-        if !point_ids.is_empty() {
+        // Layer 2: if another branch/clone still holds this content, keep the
+        // shared points and just drop this branch from their `branch` array.
+        let has_other = match existing.base_point.as_deref() {
+            Some(bp) => ctx
+                .queue_manager
+                .has_other_references(bp, existing.file_id)
+                .await
+                .unwrap_or(false),
+            None => false,
+        };
+
+        if has_other {
+            if let Some(bp) = existing.base_point.as_deref() {
+                if let Err(e) = ctx
+                    .storage_client
+                    .remove_branch_from_base_point(&item.collection, bp, &item.branch)
+                    .await
+                {
+                    warn!(
+                        "Failed to drop branch {} from base_point {} (missing file {}): {}",
+                        item.branch, bp, relative_path, e
+                    );
+                }
+            }
+        } else if !point_ids.is_empty() {
+            // Delete Qdrant points first (irreversible), scoped to tenant.
+            // F-035: surface Qdrant errors so the queue row can retry with metadata.
             ctx.storage_client
                 .delete_points_by_filter(&item.collection, abs_file_path, &item.tenant_id)
                 .await

@@ -36,14 +36,11 @@ pub(super) async fn execute_update_deletion(
 ) -> UnifiedProcessorResult<()> {
     let preamble_start = Instant::now();
 
-    let new_base_point = wqm_common::hashing::compute_base_point(
-        &item.tenant_id,
-        &item.branch,
-        relative_path,
-        new_hash,
-    );
+    let _ = watch_folder_id; // ref-counting is now keyed by file_id, not watch folder
+    let new_base_point =
+        wqm_common::hashing::compute_base_point(&item.tenant_id, relative_path, new_hash);
 
-    let delete_old = resolve_delete_old(ctx, existing, watch_folder_id).await;
+    let delete_old = resolve_delete_old(ctx, existing).await;
 
     let decision = wqm_common::queue_types::QueueDecision {
         delete_old,
@@ -71,27 +68,44 @@ pub(super) async fn execute_update_deletion(
                 .await
                 .map_err(|e| UnifiedProcessorError::Storage(e.to_string()))?;
         }
+    } else if let Some(old_bp) = existing.base_point.as_deref() {
+        // Layer 2: the old content is still held by another branch/clone, so the
+        // shared points stay — but this branch no longer holds the old content,
+        // so drop it from the points' `branch` array. Skip when the content is
+        // unchanged (same base_point); that is handled by the upsert below.
+        if old_bp != new_base_point {
+            if let Err(e) = ctx
+                .storage_client
+                .remove_branch_from_base_point(&item.collection, old_bp, &item.branch)
+                .await
+            {
+                warn!(
+                    "Failed to drop branch {} from old base_point {}: {}",
+                    item.branch, old_bp, e
+                );
+            }
+        }
     }
 
     record_preamble_timing(pool, item, payload, abs_file_path, preamble_start).await;
     Ok(())
 }
 
-/// Determine whether old Qdrant points should be deleted (reference-counted).
+/// Determine whether old Qdrant points should be deleted (reference-counted by
+/// file_id — Layer 2 shares one point across branches/clones).
 async fn resolve_delete_old(
     ctx: &ProcessingContext,
     existing: &tracked_files_schema::TrackedFile,
-    watch_folder_id: &str,
 ) -> bool {
     if let Some(ref old_bp) = existing.base_point {
         let has_refs = ctx
             .queue_manager
-            .has_other_references(old_bp, watch_folder_id)
+            .has_other_references(old_bp, existing.file_id)
             .await
             .unwrap_or(false);
         if has_refs {
             info!(
-                "Old base_point {} still referenced by another watch folder, skipping Qdrant deletion",
+                "Old base_point {} still referenced by another branch/clone, keeping shared points",
                 old_bp
             );
         }
