@@ -546,24 +546,24 @@ function dispatchTsAction(
       return runListBranches(projectArgs);
     case 'agent_branch_status': {
       const branchName = stringArg(args, 'branchName', ['branch']);
-      if (!branchName) throw new Error('branchName obrigatorio');
+      if (!branchName) throw new Error('branchName is required');
       const arg: BranchArgs = { ...projectArgs, branchName };
       return runAgentBranchStatus(arg);
     }
     case 'start_agent_branch': {
       const branchName = stringArg(args, 'branchName', ['branch']);
-      if (!branchName) throw new Error('branchName obrigatorio');
+      if (!branchName) throw new Error('branchName is required');
       return runStartAgentBranch(buildStartAgentBranchArgs(projectArgs, args, branchName));
     }
     case 'finish_agent_branch': {
       const branchName = stringArg(args, 'branchName', ['branch']);
-      if (!branchName) throw new Error('branchName obrigatorio');
+      if (!branchName) throw new Error('branchName is required');
       const arg: BranchArgs = { ...projectArgs, branchName };
       return runFinishAgentBranch(arg);
     }
     case 'abandon_agent_branch': {
       const branchName = stringArg(args, 'branchName', ['branch']);
-      if (!branchName) throw new Error('branchName obrigatorio');
+      if (!branchName) throw new Error('branchName is required');
       const rmWtRaw = boolArg(args, 'removeWorktree');
       const removeWorktree =
         rmWtRaw === 'true' || rmWtRaw === '1' || rmWtRaw === 'yes' || rmWtRaw === 'y';
