@@ -113,8 +113,8 @@ function buildLocationNotFoundHint(filePath: string, lineNumber?: number): strin
     : 'If this came from a search/list result, pass the result `id` field to `retrieve`.';
   const fallback =
     lineNumber !== undefined
-      ? `The tool already retried via \`filter: { file_path: "${filePath}" }\` automatically.`
-      : `To retrieve all chunks for this file, use \`filter: { file_path: "${filePath}" }\` instead.`;
+      ? `The locator already matched both the absolute \`file_path\` and the repo-relative \`relative_path\` automatically; verify the path and line number exist.`
+      : `To retrieve all chunks for this file, use \`filter: { file_path: "${filePath}" }\` (or \`relative_path\`) instead.`;
   return `${base} ${fallback}`;
 }
 
@@ -431,11 +431,15 @@ export class RetrieveTool {
       libraryName,
     } = params;
 
-    const mergedFilter = { ...(filter ?? {}), file_path: filePath };
+    // The exact-search `id` field carries the ABSOLUTE file_path, but agents
+    // often copy the repo-relative `relative_path` from a result instead. Match
+    // either field so the documented locator resolves regardless of which path
+    // form was passed, rather than silently scrolling the whole tenant.
     const fallback = await this.retrieveByFilter({
       collectionName,
       collection,
-      filter: mergedFilter,
+      ...(filter ? { filter } : {}),
+      pathLocator: filePath,
       limit: lineNumber !== undefined ? Math.max(limit, 1000) : limit,
       offset,
       projectId,
@@ -587,15 +591,17 @@ export class RetrieveTool {
     collectionName: string;
     collection: RetrieveCollectionType;
     filter?: Record<string, string>;
+    pathLocator?: string;
     limit: number;
     offset: number;
     projectId: string | undefined;
     libraryName: string | undefined;
   }): Promise<RetrieveResponse> {
-    const { collectionName, collection, filter, limit, offset, projectId, libraryName } = params;
+    const { collectionName, collection, filter, pathLocator, limit, offset, projectId, libraryName } =
+      params;
 
     try {
-      const qdrantFilter = this.buildFilter(collection, filter, projectId, libraryName);
+      const qdrantFilter = this.buildFilter(collection, filter, projectId, libraryName, pathLocator);
       const scrollRequest: {
         limit: number;
         offset?: number;
@@ -648,7 +654,8 @@ export class RetrieveTool {
     collection: RetrieveCollectionType,
     filter?: Record<string, string>,
     projectId?: string,
-    libraryName?: string
+    libraryName?: string,
+    pathLocator?: string
   ): Record<string, unknown> | null {
     const mustConditions: Record<string, unknown>[] = [];
 
@@ -662,6 +669,18 @@ export class RetrieveTool {
       for (const [key, value] of Object.entries(filter)) {
         mustConditions.push({ key, match: { value } });
       }
+    }
+
+    // A file locator matches against either the absolute `file_path` or the
+    // repo-relative `relative_path` payload field, so an agent can pass whichever
+    // path form a search/list result surfaced.
+    if (pathLocator) {
+      mustConditions.push({
+        should: [
+          { key: 'file_path', match: { value: pathLocator } },
+          { key: 'relative_path', match: { value: pathLocator } },
+        ],
+      });
     }
 
     return mustConditions.length > 0 ? { must: mustConditions } : null;
