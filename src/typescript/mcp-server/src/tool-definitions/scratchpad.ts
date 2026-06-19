@@ -4,6 +4,10 @@
 
 export const scratchpadToolDefinition = {
   name: 'scratchpad',
+  annotations: {
+    title: 'Manage scratchpad notes (list/update/delete)',
+    openWorldHint: false,
+  },
   description:
     'Manage existing scratchpad notes: list, update, or delete. Create notes with store(type:"scratchpad"). Notes are project-scoped — pass projectId (the tenant_id seen in a search/list result) to target a specific project, or cwd to auto-detect it. update/delete identify a note by its CURRENT content (content-addressed), which must match VERBATIM — get it from `scratchpad list` (returns full, untruncated content), NOT from a `search` hit (whose content may be truncated). If no entry matches exactly, the op fails with a clear error instead of silently doing nothing. Required args per action: update → content + newContent; delete → content; list → none.',
   inputSchema: {

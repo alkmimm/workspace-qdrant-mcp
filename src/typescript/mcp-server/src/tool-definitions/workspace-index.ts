@@ -9,6 +9,10 @@
 
 export const workspaceIndexToolDefinition = {
   name: 'workspace_index',
+  annotations: {
+    title: 'Observe & manage indexing (mostly read-only)',
+    openWorldHint: false,
+  },
   description:
     'Observe and manage workspace-qdrant indexing: project registry, agent-branch lifecycle, and worktrees. Most actions are READ-ONLY observability and run by default. The 8 MUTATING actions require DOUBLE opt-in — `allowMutation: true` AND the server env `WQM_INDEX_MANAGER_ALLOW_MUTATION=1` (which you cannot observe from here, so a mutating call fails with a clear error until the operator sets it) — plus explicit user confirmation. See the `action` enum for the per-action read-only/mutating split.',
   inputSchema: {
