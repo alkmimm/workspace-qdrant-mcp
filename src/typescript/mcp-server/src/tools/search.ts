@@ -213,12 +213,10 @@ export class SearchTool {
     return shaped;
   }
 
-  private async executeSearch(
-    options: SearchOptions,
-    eventId: string
-  ): Promise<SearchResponse> {
+  private async executeSearch(options: SearchOptions, eventId: string): Promise<SearchResponse> {
     if (options.exact) {
       return searchExact(
+        this.qdrantClient,
         this.daemonClient,
         this._stateManager,
         this.projectDetector,
@@ -226,7 +224,7 @@ export class SearchTool {
         eventId
       );
     }
-    const mode = options.mode ?? 'hybrid';
+    const mode = options.mode ?? 'semantic';
     const limit = options.limit ?? DEFAULT_LIMIT;
     const scope = options.scope ?? 'project';
     const collectionsToSearch = determineCollections(
@@ -298,7 +296,7 @@ export class SearchTool {
     basePoints: string[] | undefined,
     denseEmbedding: number[] | undefined,
     sparseVector: Record<number, number> | undefined
-  ) {
+  ): ReturnType<typeof searchAllCollections> {
     const scoreThreshold = options.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD;
     return searchAllCollections(this.qdrantClient, {
       stateManager: this.stateManager,

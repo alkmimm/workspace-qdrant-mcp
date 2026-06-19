@@ -122,13 +122,15 @@ Returns an array of result objects. Each object includes:
 
 ## retrieve
 
-Retrieve documents by ID or metadata filter. Use `retrieve` when you already know the document ID. Use `search` for discovery.
+Retrieve documents by point ID, exact-search file locator, or metadata filter. Use `retrieve` when you already know the point ID. Use `search` for discovery.
 
 ### Parameters
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `documentId` | string | No | — | Document ID to retrieve |
+| `filePath` | string | No | — | Exact-search file locator |
+| `lineNumber` | number | No | — | 1-based line number for an exact-search hit |
 | `collection` | string | No | `projects` | Collection to retrieve from: `projects`, `libraries`, `rules`, `scratchpad` |
 | `filter` | object | No | — | Metadata filter as key-value pairs. Values must be strings. |
 | `limit` | number | No | `10` | Maximum number of results |
@@ -136,7 +138,16 @@ Retrieve documents by ID or metadata filter. Use `retrieve` when you already kno
 | `projectId` | string | No | — | Project ID for the `projects` collection |
 | `libraryName` | string | No | — | Library name for the `libraries` collection |
 
-At least one of `documentId` or `filter` should be provided.
+At least one of `documentId`, `filePath`, or `filter` should be provided.
+
+If you are retrieving something returned by `search` or `list`, pass the
+result `id` field to `documentId`. If the hit came from exact search, pass
+`filePath` + `lineNumber` from the result metadata instead. The metadata field
+`document_id` is not a Qdrant point id; use `filter: { "document_id": "..." }`
+for that case. The tool will also try that metadata filter automatically if the
+direct point id lookup misses.
+
+Failures may include a short `hint` with the recommended recovery step.
 
 ### Examples
 
@@ -145,6 +156,16 @@ Retrieve a document by its known ID:
 ```json
 {
   "documentId": "abc123def456",
+  "collection": "projects"
+}
+```
+
+Retrieve a chunk by exact-search locator:
+
+```json
+{
+  "filePath": "src/auth/validator.rs",
+  "lineNumber": 42,
   "collection": "projects"
 }
 ```

@@ -28,7 +28,7 @@ import { TENANT_GLOBAL } from '../constants/tenants.js';
 import { FIELD_CONTENT, FIELD_PROJECT_ID } from '../common/native-bridge.js';
 import { addRule, updateRule, removeRule } from './rules-mutations.js';
 import { listRules } from './rules-list.js';
-import { resolveProjectScopeId } from './rules-mutation-helpers.js';
+import { findExactContentRuleId, resolveProjectScopeId } from './rules-mutation-helpers.js';
 
 const DEFAULT_DUPLICATION_THRESHOLD = 0.7;
 
@@ -153,27 +153,14 @@ export class RulesTool {
     scope: RuleScope,
     projectId: string | undefined
   ): Promise<{ id: string; label?: string } | null> {
-    const target = content.trim();
-    if (!target) return null;
-    try {
-      const filter = buildExactScopeFilter(scope, projectId);
-      const scrollResult = await this.qdrantClient.scroll(RULES_COLLECTION, {
-        limit: 256,
-        with_payload: true,
-        ...(filter ? { filter } : {}),
-      });
-      for (const point of scrollResult.points) {
-        const existing = (point.payload?.[FIELD_CONTENT] as string | undefined)?.trim();
-        if (existing === target) {
-          const label = point.payload?.['label'] as string | undefined;
-          return { id: String(point.id), ...(label ? { label } : {}) };
-        }
-      }
-      return null;
-    } catch {
-      // Qdrant unavailable — let the add proceed rather than block it.
-      return null;
-    }
+    // Paginated, fail-open scroll lives in rules-mutation-helpers so the
+    // >256-rows-per-bucket regression is covered by a unit test with a
+    // multi-page scroll mock (the class wiring is awkward to build in a test).
+    return findExactContentRuleId(
+      this.qdrantClient,
+      buildExactScopeFilter(scope, projectId),
+      content
+    );
   }
 
   /**

@@ -29,55 +29,64 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use workspace_qdrant_core::embedding::provider::{DenseProvider, FastEmbedProvider};
 use workspace_qdrant_core::storage::StorageClient;
-use wqm_common::constants::{COLLECTION_LIBRARIES, COLLECTION_PROJECTS};
+use wqm_common::constants::{COLLECTION_LIBRARIES, COLLECTION_PROJECTS, COLLECTION_RULES};
 use wqm_common::timestamps;
-
-pub use embedding::{EmbeddingCacheMetrics, CACHE_METRICS};
 
 use crate::proto::{
     document_service_server::DocumentService, DeleteDocumentRequest, IngestTextRequest,
     IngestTextResponse, UpdateDocumentRequest, UpdateDocumentResponse,
 };
 
-/// DocumentService implementation with text chunking and embedding generation
+/// DocumentService implementation with text chunking and embedding generation.
+///
+/// Dense embeddings are produced by the injected `dense_provider` — the daemon's
+/// configured provider (e.g. 768d CodeRankEmbed), the same one `EmbeddingService`
+/// uses — so `ingest_text` writes match the collections' vector dimensionality.
 pub struct DocumentServiceImpl {
     storage_client: Arc<StorageClient>,
+    dense_provider: Arc<dyn DenseProvider>,
     chunk_size: usize,
     chunk_overlap: usize,
 }
 
 impl DocumentServiceImpl {
-    /// Create a new DocumentService with the provided storage client
-    pub fn new(storage_client: Arc<StorageClient>) -> Self {
+    /// Create a new DocumentService with the provided storage client and dense
+    /// embedding provider.
+    pub fn new(storage_client: Arc<StorageClient>, dense_provider: Arc<dyn DenseProvider>) -> Self {
         Self {
             storage_client,
+            dense_provider,
             chunk_size: ingestion::DEFAULT_CHUNK_SIZE,
             chunk_overlap: ingestion::DEFAULT_CHUNK_OVERLAP,
         }
     }
 
-    /// Create with default storage client
+    /// Create with default storage client and a local FastEmbed provider.
+    ///
+    /// Test/standalone convenience only — production wiring injects the
+    /// daemon's configured provider via [`Self::new`].
     pub fn default() -> Self {
-        Self::new(Arc::new(StorageClient::new()))
+        Self::new(
+            Arc::new(StorageClient::new()),
+            Arc::new(FastEmbedProvider::new(32, None, None)),
+        )
     }
 
     /// Create with custom chunking configuration
     pub fn with_config(
         storage_client: Arc<StorageClient>,
+        dense_provider: Arc<dyn DenseProvider>,
         chunk_size: usize,
         chunk_overlap: usize,
     ) -> Self {
         Self {
             storage_client,
+            dense_provider,
             chunk_size,
             chunk_overlap,
         }
-    }
-
-    /// Get embedding cache metrics for monitoring
-    pub fn get_cache_metrics() -> (u64, u64, u64, f64) {
-        embedding::get_cache_metrics()
     }
 }
 
@@ -122,9 +131,20 @@ impl DocumentService for DocumentServiceImpl {
             "collection_basename".to_string(),
             req.collection_basename.clone(),
         );
+        // Routing tags the rules collection's tenant under `project_id` (used by
+        // the MCP list/dedup filters), but the daemon's rule remove/update and the
+        // startup rules_mirror backfill key on `tenant_id`. Without it, rules added
+        // here are never removable/updatable (the delete filter matches 0 points).
+        // Write both so the rule is discoverable AND mutable.
+        if collection_name == COLLECTION_RULES {
+            enriched_metadata
+                .entry("tenant_id".to_string())
+                .or_insert_with(|| tenant_value.clone());
+        }
 
         let response = ingestion::ingest_text_internal(
             &self.storage_client,
+            &self.dense_provider,
             req.content,
             collection_name,
             document_id,
@@ -187,6 +207,7 @@ impl DocumentService for DocumentServiceImpl {
 
         let response = ingestion::ingest_text_internal(
             &self.storage_client,
+            &self.dense_provider,
             req.content,
             collection_name,
             req.document_id.clone(),

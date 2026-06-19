@@ -9,8 +9,9 @@
  *   (the set of known names is derived from the published input schema,
  *   so `cwd` — consumed by the transport layer — is never flagged).
  * - `RetrieveTool.retrieve` refuses such calls with an explanatory
- *   message BEFORE any scope resolution or Qdrant read, hinting at the
- *   `search` tool when the stray argument is `query`.
+ *   message BEFORE any scope resolution or Qdrant read, and returns a
+ *   recovery `hint` that points the agent back to `search` or
+ *   `filter.document_id` depending on the stray argument.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -96,6 +97,7 @@ describe('RetrieveTool — unknown argument refusal', () => {
     expect(result.message).toContain('Unknown retrieve parameter(s): query');
     expect(result.message).toContain('use the `search` tool');
     expect(result.message).toContain('documentId');
+    expect(result.hint).toContain('search');
     expect(retrieveFn).not.toHaveBeenCalled();
     expect(scrollFn).not.toHaveBeenCalled();
     expect(detector.getProjectInfo).not.toHaveBeenCalled();
@@ -111,6 +113,8 @@ describe('RetrieveTool — unknown argument refusal', () => {
     expect(result.success).toBe(false);
     expect(result.message).toContain('Unknown retrieve parameter(s): documentID');
     expect(result.message).not.toContain('use the `search` tool');
+    expect(result.hint).toContain('documentId');
+    expect(result.hint).toContain('filter');
     expect(retrieveFn).not.toHaveBeenCalled();
     expect(scrollFn).not.toHaveBeenCalled();
   });

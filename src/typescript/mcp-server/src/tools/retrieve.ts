@@ -69,34 +69,152 @@ export function computeRetrieveEconomy(documents: RetrievedDocument[]): {
   return { bytesOut, bytesIn: bytesOut };
 }
 
+const RETRIEVE_ID_FILTER_HINT =
+  'If you only have `metadata.document_id`, use `filter: { document_id: "<value>" }` instead.';
+const RETRIEVE_LOCATION_HINT =
+  'For exact-search hits, pass `filePath` + `lineNumber` from the result metadata.';
+
+function looksLikeContentHash(documentId: string): boolean {
+  return /^[a-f0-9]{64}$/i.test(documentId);
+}
+
+function buildUnknownArgsHint(unknownArgs: string[]): string {
+  if (unknownArgs.includes('query')) {
+    return '`retrieve` does not search by content. Use `search` for discovery, then pass the hit `id` field to `retrieve`.';
+  }
+
+  if (
+    unknownArgs.some((arg) => {
+      const normalized = arg.toLowerCase();
+      return normalized === 'documentid' || normalized === 'document_id' || normalized === 'metadata';
+    })
+  ) {
+    return `Use \`documentId\` for point IDs, \`filePath\` + \`lineNumber\` for exact-search locators, and \`filter\` for metadata lookups. ${RETRIEVE_ID_FILTER_HINT}`;
+  }
+
+  return `Use only the documented retrieve parameters. For point IDs, pass \`documentId\`; for exact-search hits, use \`filePath\` + \`lineNumber\`; for metadata lookups, use \`filter\`. ${RETRIEVE_ID_FILTER_HINT}`;
+}
+
+function buildNotFoundHint(documentId: string): string {
+  const base = 'If this came from `search` or `list`, pass the result `id` field to `retrieve`.';
+  const lineScopedId = parseLineScopedDocumentId(documentId);
+  if (lineScopedId) {
+    return `${base} The requested value looks like a line-scoped exact-search result, so pass \`filePath\` + \`lineNumber\` instead. ${RETRIEVE_LOCATION_HINT}`;
+  }
+  if (looksLikeContentHash(documentId)) {
+    return `${base} The requested value looks like a metadata \`document_id\` hash, so use \`filter: { document_id: "${documentId}" }\` instead.`;
+  }
+  return `${base} ${RETRIEVE_ID_FILTER_HINT}`;
+}
+
+function buildLocationNotFoundHint(filePath: string, lineNumber?: number): string {
+  const base = lineNumber !== undefined
+    ? `If this came from an exact-search result, pass \`filePath\` + \`lineNumber\` from the metadata.`
+    : 'If this came from a search/list result, pass the result `id` field to `retrieve`.';
+  const fallback =
+    lineNumber !== undefined
+      ? `The locator already matched both the absolute \`file_path\` and the repo-relative \`relative_path\` automatically; verify the path and line number exist.`
+      : `To retrieve all chunks for this file, use \`filter: { file_path: "${filePath}" }\` (or \`relative_path\`) instead.`;
+  return `${base} ${fallback}`;
+}
+
+function buildFallbackDocumentIdFilter(documentId: string): Record<string, string> {
+  return { document_id: documentId };
+}
+
+function parseLineScopedDocumentId(documentId: string): { filePath: string; lineNumber: number } | null {
+  const match = documentId.match(/^(.*):(\d+)$/);
+  if (!match) return null;
+  const lineNumber = Number(match[2]);
+  if (!Number.isInteger(lineNumber) || lineNumber <= 0) return null;
+  const filePath = match[1];
+  if (!filePath) return null;
+  return { filePath, lineNumber };
+}
+
+function formatLocation(filePath: string, lineNumber?: number): string {
+  return lineNumber !== undefined ? `${filePath}:${lineNumber}` : filePath;
+}
+
+function metadataNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function selectChunkForLine(
+  documents: RetrievedDocument[],
+  lineNumber: number
+): RetrievedDocument | undefined {
+  let bestBefore: { doc: RetrievedDocument; start: number } | undefined;
+
+  for (const doc of documents) {
+    const metadata = doc.metadata ?? {};
+    const exactLine = metadataNumber(metadata['line_number']);
+    if (exactLine === lineNumber) return doc;
+
+    const chunkStart = metadataNumber(metadata['chunk_start_line']);
+    const chunkEnd = metadataNumber(metadata['chunk_end_line']);
+    if (
+      chunkStart !== undefined &&
+      chunkEnd !== undefined &&
+      lineNumber >= chunkStart &&
+      lineNumber <= chunkEnd
+    ) {
+      return doc;
+    }
+
+    if (chunkStart !== undefined && chunkStart <= lineNumber) {
+      if (!bestBefore || chunkStart > bestBefore.start) {
+        bestBefore = { doc, start: chunkStart };
+      }
+    }
+  }
+
+  return bestBefore?.doc;
+}
+
+function failureResponse(message: string, hint?: string): RetrieveResponse {
+  const response: RetrieveResponse = {
+    success: false,
+    documents: [],
+    total: 0,
+    hasMore: false,
+    message,
+  };
+  if (hint !== undefined) {
+    response.hint = hint;
+  }
+  return response;
+}
+
 /** Returned when the caller passes argument names retrieve does not accept. */
 function invalidArgsResponse(unknownArgs: string[]): RetrieveResponse {
   const searchHint = unknownArgs.includes('query')
     ? ' `retrieve` does not search by content — use the `search` tool for queries.'
     : '';
-  return {
-    success: false,
-    documents: [],
-    total: 0,
-    hasMore: false,
-    message:
-      `Unknown retrieve parameter(s): ${unknownArgs.join(', ')}.${searchHint} ` +
+  return failureResponse(
+    `Unknown retrieve parameter(s): ${unknownArgs.join(', ')}.${searchHint} ` +
       `Valid parameters: ${RETRIEVE_ARG_KEYS.join(', ')}.`,
-  };
+    buildUnknownArgsHint(unknownArgs)
+  );
 }
 
 /** Returned when the caller passes scope but it cannot be resolved. */
 function unresolvedTenantResponse(collection: RetrieveCollectionType): RetrieveResponse {
-  return {
-    success: false,
-    documents: [],
-    total: 0,
-    hasMore: false,
-    message:
-      `Cannot retrieve from "${collection}" without a resolvable scope. ` +
+  const scopeHint =
+    collection === 'libraries'
+      ? 'Pass `libraryName` for libraries.'
+      : 'Pass `cwd` (to auto-detect the project) or `projectId` (for projects and scratchpad).';
+  return failureResponse(
+    `Cannot retrieve from "${collection}" without a resolvable scope. ` +
       'Pass `cwd` (to auto-detect the project) or `projectId` (for projects), ' +
       'or `libraryName` (for libraries).',
-  };
+    scopeHint
+  );
 }
 
 /**
@@ -159,6 +277,8 @@ export class RetrieveTool {
   async retrieve(options: RetrieveOptions): Promise<RetrieveResponse> {
     const {
       documentId,
+      filePath,
+      lineNumber,
       collection = 'projects',
       filter,
       limit = 10,
@@ -172,16 +292,24 @@ export class RetrieveTool {
     const eventId = randomUUID();
 
     const collectionName = getCollectionName(collection);
+    const queryText =
+      documentId ??
+      (filePath
+        ? formatLocation(filePath, lineNumber)
+        : filter
+          ? JSON.stringify(filter).slice(0, 500)
+          : `:${collection}`);
 
-    // Log start. queryText carries documentId for by-id lookups, or a
-    // compact filter summary for by-filter scans, so retrieve events
-    // remain self-describing under `wqm admin token-savings`.
+    // Log start. queryText carries documentId for by-id lookups, a
+    // filePath/lineNumber locator for exact-search hits, or a compact
+    // filter summary for by-filter scans, so retrieve events remain
+    // self-describing under `wqm admin token-savings`.
     logSearchEvent(this.daemonClient, {
       id: eventId,
       actor: 'claude',
       tool: 'mcp_qdrant',
       op: 'retrieve',
-      queryText: documentId ?? (filter ? JSON.stringify(filter).slice(0, 500) : `:${collection}`),
+      queryText,
       topK: limit,
       projectId: projectId,
     });
@@ -195,6 +323,15 @@ export class RetrieveTool {
       return result;
     }
 
+    if (lineNumber !== undefined && !filePath) {
+      const result = failureResponse(
+        'lineNumber requires filePath.',
+        'Pass `filePath` together with `lineNumber` for exact-search hits.'
+      );
+      this.finishRetrieve(eventId, result, startTime, 'invalid_args');
+      return result;
+    }
+
     // F-002 / F-011: resolve the tenant context up front so that BOTH
     // by-id verification AND by-filter scoping share the same answer.
     const resolvedProjectId =
@@ -202,13 +339,32 @@ export class RetrieveTool {
         ? (projectId ?? (await this.resolveProjectId()))
         : undefined;
 
+    if (filePath) {
+      const locationParams = {
+        collectionName,
+        collection,
+        filePath,
+        limit,
+        offset,
+        projectId: resolvedProjectId,
+        libraryName,
+        ...(filter ? { filter } : {}),
+        ...(lineNumber !== undefined ? { lineNumber } : {}),
+      };
+      const result = await this.retrieveByLocation(locationParams);
+      this.finishRetrieve(eventId, result, startTime);
+      return result;
+    }
+
     if (documentId) {
       const result = await this.retrieveById(
         collectionName,
         collection,
         documentId,
         resolvedProjectId,
-        libraryName
+        libraryName,
+        limit,
+        offset
       );
       this.finishRetrieve(eventId, result, startTime);
       return result;
@@ -238,16 +394,80 @@ export class RetrieveTool {
       filter?: Record<string, string>;
       limit: number;
       offset: number;
-      projectId?: string;
-      libraryName?: string;
-    } = { collectionName, collection, limit, offset };
+      projectId: string | undefined;
+      libraryName: string | undefined;
+    } = { collectionName, collection, limit, offset, projectId: resolvedProjectId, libraryName };
     if (filter) filterParams.filter = filter;
-    if (resolvedProjectId) filterParams.projectId = resolvedProjectId;
-    if (libraryName) filterParams.libraryName = libraryName;
 
     const result = await this.retrieveByFilter(filterParams);
     this.finishRetrieve(eventId, result, startTime);
     return result;
+  }
+
+  /**
+   * Retrieve by file locator. This is the canonical path for exact-search
+   * hits, which carry file_path + line_number rather than a Qdrant point id.
+   */
+  private async retrieveByLocation(params: {
+    collectionName: string;
+    collection: RetrieveCollectionType;
+    filePath: string;
+    lineNumber?: number;
+    filter?: Record<string, string>;
+    limit: number;
+    offset: number;
+    projectId: string | undefined;
+    libraryName: string | undefined;
+  }): Promise<RetrieveResponse> {
+    const {
+      collectionName,
+      collection,
+      filePath,
+      lineNumber,
+      filter,
+      limit,
+      offset,
+      projectId,
+      libraryName,
+    } = params;
+
+    // The exact-search `id` field carries the ABSOLUTE file_path, but agents
+    // often copy the repo-relative `relative_path` from a result instead. Match
+    // either field so the documented locator resolves regardless of which path
+    // form was passed, rather than silently scrolling the whole tenant.
+    const fallback = await this.retrieveByFilter({
+      collectionName,
+      collection,
+      ...(filter ? { filter } : {}),
+      pathLocator: filePath,
+      limit: lineNumber !== undefined ? Math.max(limit, 1000) : limit,
+      offset,
+      projectId,
+      libraryName,
+    });
+
+    if (!fallback.success) {
+      return fallback;
+    }
+
+    if (lineNumber === undefined) {
+      return fallback;
+    }
+
+    const selected = selectChunkForLine(fallback.documents, lineNumber);
+    if (selected) {
+      return {
+        ...fallback,
+        documents: [selected],
+        total: 1,
+        hasMore: false,
+      };
+    }
+
+    return failureResponse(
+      `Document not found: ${formatLocation(filePath, lineNumber)}`,
+      buildLocationNotFoundHint(filePath, lineNumber)
+    );
   }
 
   /** Record post-execution metrics for a retrieve call. */
@@ -280,7 +500,9 @@ export class RetrieveTool {
     collection: RetrieveCollectionType,
     documentId: string,
     resolvedProjectId: string | undefined,
-    libraryName: string | undefined
+    libraryName: string | undefined,
+    limit: number,
+    offset: number
   ): Promise<RetrieveResponse> {
     // F-002: project-scope and library-scope lookups MUST resolve their
     // scope before reading. Without it, the verification step below
@@ -295,6 +517,20 @@ export class RetrieveTool {
       return unresolvedTenantResponse('libraries');
     }
 
+    const lineScopedId = parseLineScopedDocumentId(documentId);
+    if (lineScopedId) {
+      return this.retrieveByLocation({
+        collectionName,
+        collection,
+        filePath: lineScopedId.filePath,
+        lineNumber: lineScopedId.lineNumber,
+        limit,
+        offset,
+        projectId: resolvedProjectId,
+        libraryName,
+      });
+    }
+
     try {
       const result = await this.qdrantClient.retrieve(collectionName, {
         ids: [documentId],
@@ -304,13 +540,36 @@ export class RetrieveTool {
 
       const point = result[0];
       if (!point) {
-        return { success: false, documents: [], message: `Document not found: ${documentId}` };
+        const fallback = await this.retrieveByFilter({
+          collectionName,
+          collection,
+          filter: buildFallbackDocumentIdFilter(documentId),
+          limit: 10,
+          offset: 0,
+          projectId: resolvedProjectId,
+          libraryName,
+        });
+
+        if (fallback.success && fallback.documents.length > 0) {
+          return fallback;
+        }
+        if (!fallback.success) {
+          return fallback;
+        }
+
+        return failureResponse(
+          `Document not found: ${documentId}`,
+          buildNotFoundHint(documentId)
+        );
       }
 
       // F-002: ownership check. A mismatch is reported as not-found —
       // we MUST NOT leak that the ID exists in a foreign tenant.
       if (!payloadMatchesScope(point.payload, collection, resolvedProjectId, libraryName)) {
-        return { success: false, documents: [], message: `Document not found: ${documentId}` };
+        return failureResponse(
+          `Document not found: ${documentId}`,
+          buildNotFoundHint(documentId)
+        );
       }
 
       const document: RetrievedDocument = {
@@ -321,11 +580,10 @@ export class RetrieveTool {
 
       return { success: true, documents: [document], total: 1, hasMore: false };
     } catch (error) {
-      return {
-        success: false,
-        documents: [],
-        message: `Failed to retrieve document: ${error instanceof Error ? error.message : 'unknown error'}`,
-      };
+      return failureResponse(
+        `Failed to retrieve document: ${error instanceof Error ? error.message : 'unknown error'}`,
+        'Check Qdrant connectivity and confirm the collection name. If this started from `search` or `list`, make sure you passed the result `id` field.'
+      );
     }
   }
 
@@ -333,15 +591,17 @@ export class RetrieveTool {
     collectionName: string;
     collection: RetrieveCollectionType;
     filter?: Record<string, string>;
+    pathLocator?: string;
     limit: number;
     offset: number;
-    projectId?: string;
-    libraryName?: string;
+    projectId: string | undefined;
+    libraryName: string | undefined;
   }): Promise<RetrieveResponse> {
-    const { collectionName, collection, filter, limit, offset, projectId, libraryName } = params;
+    const { collectionName, collection, filter, pathLocator, limit, offset, projectId, libraryName } =
+      params;
 
     try {
-      const qdrantFilter = this.buildFilter(collection, filter, projectId, libraryName);
+      const qdrantFilter = this.buildFilter(collection, filter, projectId, libraryName, pathLocator);
       const scrollRequest: {
         limit: number;
         offset?: number;
@@ -375,11 +635,10 @@ export class RetrieveTool {
           message: 'Collection not found or empty',
         };
       }
-      return {
-        success: false,
-        documents: [],
-        message: `Failed to retrieve documents: ${errorMessage}`,
-      };
+      return failureResponse(
+        `Failed to retrieve documents: ${errorMessage}`,
+        'Check Qdrant connectivity and confirm the collection name.'
+      );
     }
   }
 
@@ -395,7 +654,8 @@ export class RetrieveTool {
     collection: RetrieveCollectionType,
     filter?: Record<string, string>,
     projectId?: string,
-    libraryName?: string
+    libraryName?: string,
+    pathLocator?: string
   ): Record<string, unknown> | null {
     const mustConditions: Record<string, unknown>[] = [];
 
@@ -409,6 +669,18 @@ export class RetrieveTool {
       for (const [key, value] of Object.entries(filter)) {
         mustConditions.push({ key, match: { value } });
       }
+    }
+
+    // A file locator matches against either the absolute `file_path` or the
+    // repo-relative `relative_path` payload field, so an agent can pass whichever
+    // path form a search/list result surfaced.
+    if (pathLocator) {
+      mustConditions.push({
+        should: [
+          { key: 'file_path', match: { value: pathLocator } },
+          { key: 'relative_path', match: { value: pathLocator } },
+        ],
+      });
     }
 
     return mustConditions.length > 0 ? { must: mustConditions } : null;

@@ -122,8 +122,21 @@ export interface GraphContext {
 
 export interface SearchResult {
   id: string;
+  /** Pre-rerank similarity: raw cosine for the dense/semantic lane (same scale
+   *  as `scoreThreshold`), or the RRF-fused score for hybrid. Stays comparable
+   *  across queries. NOT overwritten by the reranker. */
   score: number;
+  /** Present only when the cross-encoder reranker ran: the per-query, min-max
+   *  blended rank in [0,1] that determined this result's order (1 = top of the
+   *  pool, the pool minimum is 0). Use this to understand ordering; use `score`
+   *  for absolute similarity. Absent when rerank is off. */
+  rerankScore?: number;
   collection: string;
+  /** Convenience `relative_path:line` (or bare path when no line) locator,
+   *  lifted out of `metadata` so an agent reads the hit's location like a grep
+   *  line without digging into the metadata bag. Absent when the hit has no
+   *  path. Item 4 of the agent-ergonomics work. */
+  location?: string;
   content: string;
   title?: string;
   metadata: Record<string, unknown>;
@@ -163,6 +176,12 @@ export interface SearchResponse {
   collections_searched: string[];
   status?: 'ok' | 'uncertain';
   status_reason?: string;
+  /** One-line in-band teaching hint, attached only when the results contain
+   *  code symbols — points the agent at the `graph` tool for callers/impact.
+   *  Subagents never receive the server's MCP `instructions`, so a hint carried
+   *  in the result body is the only channel that reliably teaches the next
+   *  tool. Absent otherwise. Item 3 of the agent-ergonomics work. */
+  hint?: string;
   /** Attached only when `scope === 'project'` and the daemon queue
    *  still has work for the current tenant. Absent otherwise. */
   indexing?: IndexingProgress;

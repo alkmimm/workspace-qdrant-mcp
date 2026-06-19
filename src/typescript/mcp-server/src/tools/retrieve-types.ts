@@ -20,6 +20,10 @@ export type RetrieveCollectionType = 'projects' | 'libraries' | 'rules' | 'scrat
 
 export interface RetrieveOptions {
   documentId?: string;
+  /** Explicit file locator for exact-search hits. Use with `lineNumber`. */
+  filePath?: string;
+  /** 1-based line number for an exact-search hit. Requires `filePath`. */
+  lineNumber?: number;
   collection?: RetrieveCollectionType;
   filter?: Record<string, string>;
   limit?: number;
@@ -47,6 +51,8 @@ export interface RetrieveResponse {
   total?: number;
   hasMore?: boolean;
   message?: string;
+  /** Short, actionable recovery guidance for the caller. */
+  hint?: string;
 }
 
 export interface RetrieveToolConfig {

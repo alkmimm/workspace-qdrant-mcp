@@ -5,7 +5,7 @@
     { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
   ],
   "annotations": { "list": [] },
-  "description": "Qdrant health: collection counts, resource saturation, REST/gRPC throughput and latency.",
+  "description": "Qdrant health + Layer 2 cross-branch storage efficiency: collection counts, physical vs logical (branch) growth, resource saturation, REST/gRPC throughput and latency, optimizer/update-queue internals.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -22,114 +22,63 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 10 },
-              { "color": "red", "value": 50 }
-            ]
-          },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
           "mappings": []
         },
         "overrides": []
       },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
+        "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "none", "justifyMode": "auto"
       },
       "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "collections_total",
-          "legendFormat": "collections",
-          "refId": "A",
-          "instant": true
-        }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "collections_total", "legendFormat": "collections", "refId": "A", "instant": true }
       ]
     },
     {
       "id": 2,
-      "title": "Total Vectors",
-      "description": "Total vectors stored across all collections.",
+      "title": "Projects Points",
+      "description": "Physical points in the `projects` collection. Under Layer 2 this reflects UNIQUE content — it does NOT grow when the same content is checked out on another branch.",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 1000000 },
-              { "color": "red", "value": 10000000 }
-            ]
-          },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1000000 }, { "color": "red", "value": 10000000 }] },
           "mappings": []
         },
         "overrides": []
       },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
+        "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto"
       },
       "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "collections_vector_total",
-          "legendFormat": "vectors",
-          "refId": "A",
-          "instant": true
-        }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "collection_points{id=\"projects\"}", "legendFormat": "points", "refId": "A", "instant": true }
       ]
     },
     {
       "id": 3,
-      "title": "Total Points",
-      "description": "Approximate number of points across all collections.",
+      "title": "Branches Indexed",
+      "description": "Distinct (tenant, branch) pairs with indexed files. Each branch that shares content with another reuses the same physical points (Layer 2) — so more branches here without Projects Points rising = dedup working.",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 10000 },
-              { "color": "red", "value": 100000 }
-            ]
-          },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
           "mappings": []
         },
         "overrides": []
       },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
+        "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "none", "justifyMode": "auto"
       },
       "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(collection_points)",
-          "legendFormat": "points",
-          "refId": "A",
-          "instant": true
-        }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "count(count by (tenant_id, branch) (memexd_indexed_files_count))", "legendFormat": "branches", "refId": "A", "instant": true }
       ]
     },
     {
@@ -146,32 +95,16 @@
             { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" } } },
             { "type": "value", "options": { "1": { "text": "UP", "color": "green" } } }
           ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
-            ]
-          }
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
         },
         "overrides": []
       },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
+        "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "none", "justifyMode": "auto"
       },
       "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "up{job=\"qdrant\"}",
-          "legendFormat": "{{job}} @ {{instance}}",
-          "refId": "A",
-          "instant": true
-        }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "up{job=\"qdrant\"}", "legendFormat": "{{job}} @ {{instance}}", "refId": "A", "instant": true }
       ]
     },
     {
@@ -184,34 +117,17 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 536870912 },
-              { "color": "red", "value": 1073741824 }
-            ]
-          },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 536870912 }, { "color": "red", "value": 1073741824 }] },
           "mappings": []
         },
         "overrides": []
       },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto"
+        "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto"
       },
       "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "memory_resident_bytes",
-          "legendFormat": "resident bytes",
-          "refId": "A",
-          "instant": true
-        }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "memory_resident_bytes", "legendFormat": "resident bytes", "refId": "A", "instant": true }
       ]
     },
     {
@@ -224,34 +140,100 @@
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 0.7 },
-              { "color": "red", "value": 0.9 }
-            ]
-          },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.7 }, { "color": "red", "value": 0.9 }] },
           "mappings": []
         },
         "overrides": []
       },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto"
+        "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "none", "justifyMode": "auto"
       },
       "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "process_open_fds / clamp_min(process_max_fds, 1)", "legendFormat": "fd saturation", "refId": "A", "instant": true }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Storage efficiency — Layer 2 cross-branch dedup",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 4 },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "title": "Physical points per collection (over time)",
+      "description": "Qdrant points per collection. Layer 2 shares ONE physical point across every branch that holds identical content, so after a reembed `projects` reflects unique content and stays flat as feature branches come and go — instead of growing per branch (Layer 1).",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": true, "stacking": { "mode": "none" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "collection_points", "legendFormat": "{{id}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Logical file×branch entries per project (FTS5)",
+      "description": "Files registered in search.db per (project, branch) — this DOES grow with every branch. Contrast with physical points staying flat: the gap is the storage Layer 2 no longer duplicates.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 8, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (tenant_id) (memexd_indexed_files_count)", "legendFormat": "{{tenant_id}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 23,
+      "title": "Per-project: tracked files vs Qdrant points",
+      "description": "Join of memexd_indexed_project_tracked_files and memexd_indexed_project_points by watch_id. 'Points/File' is the chunk-density × branch-amplification factor — high values flag projects whose points are inflated by per-branch copies (a reembed under Layer 2 collapses them).",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "displayMode": "auto", "filterable": true }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Points/File" }, "properties": [{ "id": "decimals", "value": 1 }, { "id": "custom.displayMode", "value": "color-text" }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 20 }, { "color": "red", "value": 40 }] } }] }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "Qdrant Points", "desc": true }], "footer": { "show": true, "reducer": ["sum"], "fields": ["Tracked Files", "Qdrant Points"] } },
+      "transformations": [
+        { "id": "joinByField", "options": { "byField": "watch_id", "mode": "outerTabular" } },
+        { "id": "calculateField", "options": { "mode": "binary", "binary": { "left": "Value #B", "operator": "/", "right": "Value #A" }, "alias": "Points/File", "replaceFields": false } },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "process_open_fds / clamp_min(process_max_fds, 1)",
-          "legendFormat": "fd saturation",
-          "refId": "A",
-          "instant": true
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true, "Metric": true, "__name__": true, "job": true, "instance": true,
+              "enabled": true, "git_remote": true, "is_active": true, "is_archived": true,
+              "is_git_tracked": true, "is_paused": true, "is_worktree": true, "tenant_id": true, "watch_id": true
+            },
+            "renameByName": { "path": "Project", "Value #A": "Tracked Files", "Value #B": "Qdrant Points" },
+            "indexByName": { "path": 0, "Value #A": 1, "Value #B": 2, "Points/File": 3 }
+          }
         }
+      ],
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "memexd_indexed_project_tracked_files{enabled=\"true\"}", "legendFormat": "{{path}}", "refId": "A", "instant": true, "format": "table" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "memexd_indexed_project_points", "legendFormat": "{{watch_id}}", "refId": "B", "instant": true, "format": "table" }
       ]
     },
     {
@@ -259,35 +241,15 @@
       "title": "REST Request Rate",
       "description": "HTTP request throughput served by Qdrant.",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{ "color": "green", "value": null }]
-          }
-        },
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 8, "showPoints": "never", "spanNulls": true }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
         "overrides": []
       },
-      "options": {
-        "tooltip": { "mode": "multi", "sort": "desc" },
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
-      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
       "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (endpoint) (rate(rest_responses_total[2m]))",
-          "legendFormat": "{{endpoint}}",
-          "refId": "A"
-        }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (endpoint) (rate(rest_responses_total[2m]))", "legendFormat": "{{endpoint}}", "refId": "A" }
       ]
     },
     {
@@ -295,39 +257,15 @@
       "title": "REST P99 Latency",
       "description": "99th-percentile REST response latency.",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 6,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 0.1 },
-              { "color": "red", "value": 1 }
-            ]
-          }
-        },
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 6, "showPoints": "never", "spanNulls": true }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 1 }] } },
         "overrides": []
       },
-      "options": {
-        "tooltip": { "mode": "multi", "sort": "desc" },
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
-      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
       "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (endpoint, le) (rate(rest_responses_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{endpoint}} p99",
-          "refId": "A"
-        }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.99, sum by (endpoint, le) (rate(rest_responses_duration_seconds_bucket[5m])))", "legendFormat": "{{endpoint}} p99", "refId": "A" }
       ]
     },
     {
@@ -335,35 +273,15 @@
       "title": "gRPC Request Rate",
       "description": "gRPC call throughput.",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{ "color": "green", "value": null }]
-          }
-        },
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2, "fillOpacity": 8, "showPoints": "never", "spanNulls": true }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
         "overrides": []
       },
-      "options": {
-        "tooltip": { "mode": "multi", "sort": "desc" },
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
-      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
       "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (endpoint) (rate(grpc_responses_total[2m]))",
-          "legendFormat": "{{endpoint}}",
-          "refId": "A"
-        }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (endpoint) (rate(grpc_responses_total[2m]))", "legendFormat": "{{endpoint}}", "refId": "A" }
       ]
     },
     {
@@ -371,39 +289,51 @@
       "title": "gRPC P99 Latency",
       "description": "99th-percentile gRPC response latency.",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 6,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 0.05 },
-              { "color": "red", "value": 0.5 }
-            ]
-          }
-        },
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 6, "showPoints": "never", "spanNulls": true }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.05 }, { "color": "red", "value": 0.5 }] } },
         "overrides": []
       },
-      "options": {
-        "tooltip": { "mode": "multi", "sort": "desc" },
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] }
-      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
       "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (endpoint, le) (rate(grpc_responses_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{endpoint}} p99",
-          "refId": "A"
-        }
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.99, sum by (endpoint, le) (rate(grpc_responses_duration_seconds_bucket[5m])))", "legendFormat": "{{endpoint}} p99", "refId": "A" }
+      ]
+    },
+    {
+      "id": 24,
+      "title": "Update Queue & Deferred Points",
+      "description": "Pending write operations per collection (`collection_update_queue_length`) and points hidden from indexed-only reads until optimized (`collection_update_queue_deferred_points`). Sustained non-zero = indexing backlog; deferred points can make recent ingests temporarily invisible to search.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 6, "showPoints": "never", "spanNulls": true }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 1000 }] } },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "collection_update_queue_length", "legendFormat": "queue {{id}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "collection_update_queue_deferred_points", "legendFormat": "deferred {{id}}", "refId": "B" }
+      ]
+    },
+    {
+      "id": 25,
+      "title": "Qdrant Memory Breakdown",
+      "description": "Allocator memory split: active (in-use pages), allocated (app total), resident (physically mapped), retained (held by the allocator, not returned to the OS). A growing retained/resident gap signals allocator fragmentation rather than real growth.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "lineWidth": 2, "fillOpacity": 6, "showPoints": "never", "spanNulls": true }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "memory_active_bytes", "legendFormat": "active", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "memory_allocated_bytes", "legendFormat": "allocated", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "memory_resident_bytes", "legendFormat": "resident", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "memory_retained_bytes", "legendFormat": "retained", "refId": "D" }
       ]
     },
     {
@@ -411,39 +341,49 @@
       "title": "Running Optimisations",
       "description": "Currently running optimisation tasks per collection.",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 6, "showPoints": "never", "spanNulls": true }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 }] } },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "last"] } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (id) (collection_running_optimizations)", "legendFormat": "{{id}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Collection Inventory",
+      "description": "Per-collection points, dense vectors, running optimisations and indexed-only excluded points.",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 54 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 6,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 5 }
-            ]
-          }
+          "custom": { "align": "auto", "displayMode": "auto", "filterable": true },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 10000 }, { "color": "red", "value": 100000 }] }
         },
         "overrides": []
       },
-      "options": {
-        "tooltip": { "mode": "multi", "sort": "desc" },
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "last"] }
-      },
-      "targets": [
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "Points", "desc": true }], "footer": { "show": true, "reducer": ["sum"], "fields": ["Points", "Vectors (dense)"] } },
+      "transformations": [
+        { "id": "joinByField", "options": { "byField": "collection", "mode": "outerTabular" } },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (id) (collection_running_optimizations)",
-          "legendFormat": "{{id}}",
-          "refId": "A"
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "Metric": true, "__name__": true, "job": true, "instance": true, "vector": true },
+            "renameByName": { "Value #A": "Points", "Value #B": "Vectors (dense)", "Value #C": "Running Optimisations", "Value #D": "Excluded Points" },
+            "indexByName": { "collection": 0, "Value #A": 1, "Value #B": 2, "Value #C": 3, "Value #D": 4 }
+          }
         }
+      ],
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "label_replace(sum by (id) (collection_points), \"collection\", \"$1\", \"id\", \"(.+)\")", "legendFormat": "{{collection}}", "refId": "A", "instant": true, "format": "table" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (collection) (collection_vectors{vector=\"dense\"})", "legendFormat": "{{collection}}", "refId": "B", "instant": true, "format": "table" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "label_replace(sum by (id) (collection_running_optimizations), \"collection\", \"$1\", \"id\", \"(.+)\")", "legendFormat": "{{collection}}", "refId": "C", "instant": true, "format": "table" },
+        { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "label_replace(sum by (id) (collection_indexed_only_excluded_points), \"collection\", \"$1\", \"id\", \"(.+)\")", "legendFormat": "{{collection}}", "refId": "D", "instant": true, "format": "table" }
       ]
     },
     {
@@ -451,122 +391,19 @@
       "title": "Collection Catalog",
       "description": "Canonical Qdrant collection names and the registry sources used for project/branch/worktree observability.",
       "type": "text",
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 28 },
-      "mode": "markdown",
-      "content": "## Qdrant collection catalog\n\n| Collection | Purpose | Notes |\n|---|---|---|\n| `projects` | Project-scoped documents and search corpus. | Shows the main project knowledge base. |\n| `libraries` | Reference docs and shared libraries. | Useful for docs and reusable references. |\n| `rules` | Behavioral rules and policy snippets. | Used by the MCP rule layer. |\n| `scratchpad` | Temporary notes and scratch content. | Short-lived working memory. |\n| `images` | Image embeddings and image search payloads. | Supports image lookups. |\n\n> Projects, branches and worktrees are tracked in `watch_folders` and `.wqm-fork/indexed-projects.json`, not as Qdrant collections.\n",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 62 },
+      "options": { "mode": "markdown", "content": "## Qdrant collection catalog\n\n| Collection | Purpose | Notes |\n|---|---|---|\n| `projects` | Project-scoped documents and search corpus. | Main knowledge base. **Layer 2**: one physical point per (path, content); the branches holding it live in the point's `branch` array payload. |\n| `libraries` | Reference docs and shared libraries. | Useful for docs and reusable references. |\n| `rules` | Behavioral rules and policy snippets. | Used by the MCP rule layer. |\n| `scratchpad` | Temporary notes and scratch content. | Short-lived working memory. |\n| `images` | Image embeddings and image search payloads. | Supports image lookups. |\n\n> Projects, branches and worktrees are tracked in `watch_folders` + `.wqm-fork/indexed-projects.json`, not as Qdrant collections.\n> The Storage-efficiency row above contrasts **physical points** (shared across branches) with **logical file×branch entries** — the gap is what Layer 2 no longer duplicates.\n" },
       "transparent": false
-    },
-    {
-      "id": 13,
-      "title": "Collection Inventory",
-      "description": "Per-collection point, vector, optimisation and excluded-point counts for the current Qdrant tenant set.",
-      "type": "table",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 37 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "displayMode": "auto",
-            "filterable": true
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 10000 },
-              { "color": "red", "value": 100000 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          { "displayName": "Points", "desc": true }
-        ],
-        "footer": { "show": false }
-      },
-      "transformations": [
-        {
-          "id": "joinByField",
-          "options": {
-            "byField": "collection",
-            "mode": "outerTabular"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "Metric": true,
-              "__name__": true,
-              "job": true,
-              "instance": true
-            },
-            "renameByName": {
-              "Value #A": "Points",
-              "Value #B": "Vectors",
-              "Value #C": "Running Optimisations",
-              "Value #D": "Excluded Points"
-            },
-            "indexByName": {
-              "collection": 0,
-              "Points": 1,
-              "Vectors": 2,
-              "Running Optimisations": 3,
-              "Excluded Points": 4
-            }
-          }
-        }
-      ],
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "label_replace(sum by (id) (collection_points), \"collection\", \"$1\", \"id\", \"(.+)\")",
-          "legendFormat": "{{collection}}",
-          "refId": "A",
-          "instant": true,
-          "format": "table"
-        },
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (collection) (collection_vectors)",
-          "legendFormat": "{{collection}}",
-          "refId": "B",
-          "instant": true,
-          "format": "table"
-        },
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "label_replace(sum by (id) (collection_running_optimizations), \"collection\", \"$1\", \"id\", \"(.+)\")",
-          "legendFormat": "{{collection}}",
-          "refId": "C",
-          "instant": true,
-          "format": "table"
-        },
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "label_replace(sum by (id) (collection_indexed_only_excluded_points), \"collection\", \"$1\", \"id\", \"(.+)\")",
-          "legendFormat": "{{collection}}",
-          "refId": "D",
-          "instant": true,
-          "format": "table"
-        }
-      ]
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
   "tags": ["wqm", "qdrant"],
   "templating": { "list": [] },
-  "time": { "from": "now-1h", "to": "now" },
+  "time": { "from": "now-6h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
   "title": "WQM — Qdrant",
   "uid": "wqm-qdrant",
-  "version": 1
+  "version": 2
 }

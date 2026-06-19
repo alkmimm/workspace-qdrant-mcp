@@ -89,6 +89,11 @@ struct Cli {
 }
 
 /// CLI commands — hidden from default help (rendered by custom template)
+// The enum is parsed exactly once at startup and never moved in a hot path, so
+// the size gap from the largest variant (`Benchmark`) is irrelevant. Boxing a
+// variant's field fights clap's `Subcommand` derive (`Box<T>` is not `Args`),
+// so allow the lint here rather than distort the command surface.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     // --- Search & Content ---

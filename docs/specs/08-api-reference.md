@@ -102,7 +102,7 @@ search({ query: "auth", collection: "projects", scope: "other", project_id: "abc
 
 Each hit ships its `content` (and `parent_context.unit_text` when context expansion is on) as inline text. Without a cap, a broad 10-hit response can exceed an MCP client's per-tool-result token budget, forcing the client to offload the response to disk and breaking the agent's flow. The server applies a per-hit cap at the outer boundary of `search` so callers don't have to think about budgets:
 
-- Default behavior (`maxBytesPerHit: 1500`): hits longer than the cap are truncated with a marker: `... [truncated at 1500 chars; full chunk via retrieve(documentId="<id>", collection="<col>")]`. The agent can call `retrieve` to fetch the full body.
+- Default behavior (`maxBytesPerHit: 1500`): hits longer than the cap are truncated with a marker: `... [truncated at 1500 chars; full chunk via retrieve(documentId="<id>", collection="<col>")]` for point-id hits, or `... [truncated at 1500 chars; full chunk via retrieve(filePath="<path>", lineNumber=<n>, collection="<col>")]` for exact-search hits. The agent can call `retrieve` to fetch the full body.
 - `maxBytesPerHit: 0` — disable truncation entirely (caller takes responsibility for the budget).
 - `summary: true` — drop chunk bodies entirely; keep only `id`, `score`, `collection`, `title`, and structural metadata (path, symbol, line range, tags). Intended for "which doc do I want?" discovery before a follow-up `retrieve`. A 10-hit summary response typically fits under 5k chars.
 
@@ -119,15 +119,19 @@ Direct document access for chunk-by-chunk retrieval.
 
 ```typescript
 retrieve({
-    document_id?: string,              // Specific document ID
-    collection?: "projects" | "libraries" | "rules", // default: "projects"
-    metadata?: Record<string, unknown>, // Metadata filters
+    documentId?: string,               // Qdrant point id (from search/list result `id`)
+    filePath?: string,                 // Exact-search file locator
+    lineNumber?: number,               // 1-based line number for exact-search hits
+    collection?: "projects" | "libraries" | "rules" | "scratchpad", // default: "projects"
+    filter?: Record<string, string>,    // Metadata filters, e.g. { document_id: "..." }
     limit?: number,                    // default: 10
     offset?: number,                   // default: 0, for pagination
 });
 ```
 
-**Use case:** Retrieving specific documents by ID or metadata filter for chunk-by-chunk access without overwhelming context. Use `search` for discovery by query, and `retrieve` for direct access when you know the document ID or metadata.
+**Use case:** Retrieving specific documents by point ID, exact-search locator, or metadata filter for chunk-by-chunk access without overwhelming context. Use `search` for discovery by query, and `retrieve` for direct access when you know the Qdrant point `id` from a result or when you need a metadata lookup. If you are handling an exact-search hit, pass `filePath` + `lineNumber` from the result metadata. If you only have `metadata.document_id`, pass it through `filter.document_id` instead of `documentId`. The tool will also try that metadata filter automatically when the direct point lookup misses.
+
+**Recovery hint:** Error responses may include a `hint` field with the next action to try.
 
 #### rules
 
@@ -737,4 +741,3 @@ Code relationship graph queries and algorithms. Operates on the embedded graph d
 - Returns export/import counts and validation (nodes_match, edges_match)
 
 ---
-

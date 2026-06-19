@@ -23,6 +23,7 @@ import {
   applyEffectiveBranch,
   concreteBranchFilter,
   resolveEffectiveBranch,
+  resolveFallbackBranch,
   resolveProjectIdentity,
 } from '../branch-scope.js';
 
@@ -148,9 +149,21 @@ export class ListFilesTool {
     });
     this.logListStart(eventId, basePath, format, limit, projectId, effectiveBranch);
     const effectiveOptions = applyEffectiveBranch(options, effectiveBranch);
+    // On a feature branch, also surface base-branch files that are unchanged
+    // there (the daemon only tags changed files under a feature branch). The
+    // base branch is the branch the daemon tagged the bulk under, read from
+    // the data — not git's local default, which can differ.
+    const concreteEffective = concreteBranchFilter(effectiveBranch);
+    const baseBranch = concreteEffective
+      ? this.stateManager.getBaseBranch(watchFolderId, concreteEffective)
+      : null;
+    const fallbackBranch = resolveFallbackBranch({ effectiveBranch, baseBranch });
+    const scopedOptions = fallbackBranch
+      ? { ...effectiveOptions, fallbackBranch }
+      : effectiveOptions;
 
     const response = this.buildListResult(
-      effectiveOptions,
+      scopedOptions,
       watchFolderId,
       projectPath,
       basePath,
@@ -327,6 +340,7 @@ export class ListFilesTool {
     if (options.pattern) baseOpts.glob = options.pattern;
     const branch = concreteBranchFilter(options.branch);
     if (branch) baseOpts.branch = branch;
+    if (branch && options.fallbackBranch) baseOpts.fallbackBranch = options.fallbackBranch;
     if (componentBasePaths && componentBasePaths.length > 0)
       baseOpts.componentBasePaths = componentBasePaths;
 

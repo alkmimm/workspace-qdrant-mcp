@@ -15,7 +15,11 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 
 import type { ServerConfig } from './types/index.js';
 import { logInfo, logError, logDebug } from './utils/logger.js';
-import { resolveBodyCwdOverride, runWithRequestContext } from './utils/request-context.js';
+import {
+  getRequestContext,
+  resolveStickyCwd,
+  runWithRequestContext,
+} from './utils/request-context.js';
 import {
   SERVER_NAME,
   SERVER_VERSION,
@@ -63,6 +67,7 @@ export class WorkspaceQdrantMcpServer {
     sessionId: '',
     projectId: null,
     projectPath: null,
+    lastHostCwd: null,
     watchPath: null,
     isWorktree: false,
     currentBranch: null,
@@ -103,9 +108,9 @@ export class WorkspaceQdrantMcpServer {
         instructions: [
           "This server exposes the user's indexed codebase, libraries, behavioral rules, scratchpad, and project/branch registry.",
           'Start of session: call `rules` with action="list" to load behavioral preferences before any non-trivial work. When you discover a durable project convention (build/test commands, preferred libraries, patterns to follow or avoid), record it with `rules` action="add" so it persists — reserve the scratchpad for one-off task context.',
-          'Discovery — call `search` FIRST for any question about this codebase, project structure, or library docs; do not answer from training data. Defaults: scope="project", limit=10. Widen to scope="all" or includeLibraries=true only after a project-scoped query returns nothing useful. Use mode="semantic" for concept queries; for a known identifier or exact string use exact=true (FTS5 substring) or the `grep` tool — NOT mode="keyword", which is sparse BM25 relevance and will not reliably match a verbatim token.',
-          'Query formulation — write `search` queries in ENGLISH regardless of the conversation language. The embedding model is multilingual, but code identifiers and comments are overwhelmingly English and cross-lingual recall for *code* is weak: a non-English query matches same-language prose/docs instead of the code and recall collapses. Use vocabulary close to the expected identifiers/comments. When you want the implementation rather than docs or tests, add fileType="code" (other values: docs, text, config, data, build, web, slides) or a pathGlob like "src/**/*.rs" — documentation and test files often outrank the implementation otherwise.',
-          'Exact lookups — use `grep` for regex / exact substring across the project (faster and cheaper than `search` with exact=true for known strings). Use `list` (start with format="summary") to understand layout before drilling in. Use `retrieve` when you already know the document ID/metadata — do not re-search.',
+          'Discovery — call `search` FIRST for any question about this codebase, project structure, or library docs; do not answer from training data. Defaults: scope="project", limit=10. Widen to scope="all" or includeLibraries=true only after a project-scoped query returns nothing useful. Use mode="semantic" for concept queries; for a known identifier or exact string use exact=true (FTS5 substring) or the `grep` tool, not a search mode (the only modes are "semantic" and "hybrid"; there is no keyword mode).',
+          'Query formulation — write `search` queries in ENGLISH regardless of the conversation language. The embedding model is multilingual, but code identifiers and comments are overwhelmingly English and cross-lingual recall for *code* is weak: a non-English query matches same-language prose/docs instead of the code and recall collapses. Use vocabulary close to the expected identifiers/comments. When you want the implementation rather than docs or tests, add fileType="code" (other values: text, config, data, docs, web, slides, build) or a pathGlob like "src/**/*.rs" — documentation and test files often outrank the implementation otherwise. Note: prose documentation and Markdown are classified "text"; fileType="docs" is for binary document formats (PDF, Office), so to bias toward project docs use "text", not "docs".',
+          'Exact lookups — use `grep` for regex / exact substring across the project (faster and cheaper than `search` with exact=true for known strings). Use `list` (start with format="summary") to understand layout before drilling in. Use `retrieve` when you already know the Qdrant point id from a `search`/`list` result or a metadata filter. The `documentId` argument must be the result `id` field, not `metadata.document_id`; if you only have the metadata hash, use `filter: { document_id: "..." }`. For exact-search hits, pass `filePath` + `lineNumber` from the result metadata. When `retrieve` returns `success:false`, read its `hint` before retrying.',
           'Project context — `search`, `grep`, `list`, `retrieve`, and `rules` auto-detect the current project from your working directory. Over HTTP the server cannot observe it, so pass your absolute working directory in the `cwd` argument on each such call (unless you already pass an explicit `projectId`). Omitting both can yield "Could not detect project".',
           'Writes — `store` writes to `scratchpad` (notes, snippets) or `libraries` (only when the user explicitly asks). The server does NOT write project code to the `projects` collection — that is daemon-owned via file watching. To register/activate a project, use `store` with type="project".',
           'Project memory (scratchpad) — as you work, proactively record durable project knowledge with `store` type="scratchpad": decisions and their rationale, non-obvious gotchas, conventions, and anything worth recalling in a later session. Keep each note self-contained. Notes are project-scoped and resurface AUTOMATICALLY — the project-scoped `search` recall lane appends the most relevant notes after the code hits, so you need not query the scratchpad explicitly. To revise or remove a note, use the `scratchpad` tool (update/delete) rather than creating near-duplicates.',
@@ -148,19 +153,22 @@ export class WorkspaceQdrantMcpServer {
     components: ServerComponents,
     sessionState: SessionState
   ): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
-    // Body-level host-CWD fallback. The HTTP transport binds the host cwd from
-    // the `x-mcp-host-cwd` header, which always wins. But a client may be
+    // Session-sticky host-CWD resolution. The HTTP transport binds the host cwd
+    // from the `x-mcp-host-cwd` header, which always wins. But a client may be
     // unable to send that header per session (e.g. Claude Code over HTTP has no
-    // dynamic header for the cwd). In that case an agent can pass its working
-    // directory in the tool's `cwd` argument; bind it into the request context
-    // so getEffectiveCwd() — and thus project auto-detection — picks it up
-    // exactly as if it were the header. Precedence stays:
-    //   header > body `cwd` > WQM_DEFAULT_HOST_CWD > process.cwd().
-    const override = resolveBodyCwdOverride(
-      typeof args?.['cwd'] === 'string' ? (args['cwd'] as string) : undefined
-    );
-    if (override) {
-      return runWithRequestContext({ hostCwd: override }, () =>
+    // dynamic header for the cwd). In that case an agent passes its working
+    // directory in the tool's `cwd` argument — and we remember it on the session
+    // so SUBSEQUENT calls that omit `cwd` still resolve the project, instead of
+    // every cwd-less call failing with "Could not detect project". Precedence:
+    //   header > body `cwd` > session sticky cwd > WQM_DEFAULT_HOST_CWD > process.cwd().
+    const { bind, sticky } = resolveStickyCwd({
+      headerCwd: getRequestContext()?.hostCwd,
+      bodyCwd: typeof args?.['cwd'] === 'string' ? (args['cwd'] as string) : undefined,
+      stickyCwd: sessionState.lastHostCwd,
+    });
+    if (sticky) sessionState.lastHostCwd = sticky;
+    if (bind) {
+      return runWithRequestContext({ hostCwd: bind }, () =>
         dispatchToolCall(toolName, args, components, sessionState)
       );
     }
@@ -172,6 +180,7 @@ export class WorkspaceQdrantMcpServer {
       sessionId: '',
       projectId: null,
       projectPath: null,
+      lastHostCwd: null,
       watchPath: null,
       isWorktree: false,
       currentBranch: null,

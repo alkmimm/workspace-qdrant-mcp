@@ -35,9 +35,11 @@ import {
 import { expandGraphContext } from './search-graph-context.js';
 import { logDebug } from '../utils/logger.js';
 import {
+  concreteBranchFilter,
   resolveEffectiveBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
+import { FIELD_BASE_POINT, FIELD_BRANCH, FIELD_TENANT_ID } from '../common/native-bridge.js';
 
 /** Maximum active base_points we still attach as a Qdrant filter. Above
  * this the filter clause would blow past server-side limits; we instead
@@ -153,7 +155,9 @@ export async function resolveProjectContext(
     currentProjectId = identity.projectId;
     projectPath =
       identity.projectPath ??
-      (currentProjectId ? stateManager.getProjectById(currentProjectId).data?.project_path : undefined);
+      (currentProjectId
+        ? stateManager.getProjectById(currentProjectId).data?.project_path
+        : undefined);
   }
 
   const currentBranch = resolveEffectiveBranch({
@@ -316,7 +320,11 @@ function unique(values: Iterable<string>): string[] {
 }
 
 function normalizeNeedle(value: string): string {
-  return value.trim().replace(/[_\s]+/g, '-').replace(/-+/g, '-').toLowerCase();
+  return value
+    .trim()
+    .replace(/[_\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .toLowerCase();
 }
 
 function isDistinctiveIdentifier(token: string): boolean {
@@ -329,7 +337,11 @@ function addConceptualSupplementalNeedles(query: string, needles: Set<string>): 
   const has = (token: string): boolean => tokens.includes(token);
   const starts = (prefix: string): boolean => tokens.some((token) => token.startsWith(prefix));
 
-  if ((has('rrf') || (has('reciprocal') && has('rank') && has('fusion'))) && has('dense') && has('sparse')) {
+  if (
+    (has('rrf') || (has('reciprocal') && has('rank') && has('fusion'))) &&
+    has('dense') &&
+    has('sparse')
+  ) {
     needles.add('applyRRFFusion');
     needles.add('search-qdrant.ts');
   }
@@ -366,6 +378,62 @@ function qdrantPointId(pointId: string): string {
   return pointId;
 }
 
+/** True when a point's `branch` payload covers `branch`. Post-#124 the payload
+ * is an ARRAY of branch names (one Qdrant point shared across branches), so a
+ * scalar `!==` against the effective branch is ALWAYS true and silently drops
+ * every point. Older points (pre-reembed) may still carry a scalar string, so
+ * accept both shapes. */
+function branchPayloadCovers(value: unknown, branch: string): boolean {
+  if (Array.isArray(value)) return value.includes(branch);
+  return value === branch;
+}
+
+/**
+ * Scope-guard for supplemental symbol candidates. The candidate point ids come
+ * from the SQLite `qdrant_chunks` mirror, which (a) is filtered only by
+ * watch_folder + needle and (b) is known to drift from Qdrant. Re-check each
+ * retrieved point's payload against the SAME scope the normal search path
+ * enforces — tenant, concrete branch (mirroring `buildBranchCondition`), and
+ * active base_points (multi-clone disambiguation) — so a symbol match can never
+ * surface a chunk from another branch or another clone of the project. Qdrant
+ * payload is the source of truth here, not the drifting mirror.
+ *
+ * Exported for unit testing.
+ */
+export function filterSupplementalPointsToScope<
+  T extends { payload?: Record<string, unknown> | null },
+>(
+  points: T[],
+  scope: {
+    tenantId: string | undefined;
+    branch: string | undefined;
+    basePoints: string[] | undefined;
+  }
+): T[] {
+  const effectiveBranch = concreteBranchFilter(scope.branch);
+  const basePoints =
+    scope.basePoints && scope.basePoints.length > 0 ? new Set(scope.basePoints) : undefined;
+  return points.filter((point) => {
+    const payload = point.payload ?? {};
+    if (scope.tenantId !== undefined && payload[FIELD_TENANT_ID] !== scope.tenantId) {
+      return false;
+    }
+    if (
+      effectiveBranch !== undefined &&
+      !branchPayloadCovers(payload[FIELD_BRANCH], effectiveBranch)
+    ) {
+      return false;
+    }
+    if (basePoints !== undefined) {
+      const basePoint = payload[FIELD_BASE_POINT];
+      if (typeof basePoint !== 'string' || !basePoints.has(basePoint)) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
 async function searchSupplementalSymbolCandidates(
   qdrantClient: QdrantClient,
   coll: string,
@@ -379,10 +447,12 @@ async function searchSupplementalSymbolCandidates(
   const watchFolderId = params.stateManager.getWatchFolderIdByTenantId(params.currentProjectId);
   if (!watchFolderId) return [];
 
+  const effectiveBranch = concreteBranchFilter(params.branch);
   const candidates = params.stateManager.listChunkCandidates({
     watchFolderId,
     needles,
     ...(params.fileType ? { fileType: params.fileType } : {}),
+    ...(effectiveBranch !== undefined ? { branch: effectiveBranch } : {}),
     limit: SUPPLEMENTAL_SYMBOL_LIMIT,
   });
   if (candidates.data.length === 0) return [];
@@ -392,7 +462,15 @@ async function searchSupplementalSymbolCandidates(
       ids: candidates.data.map((candidate) => qdrantPointId(candidate.pointId)),
       with_payload: true,
     });
-    return points.map((point, index) => ({
+    // Candidate ids come from the SQLite mirror (watch_folder + needle only,
+    // and known to drift); re-verify each point's payload against the caller's
+    // full scope so a match can't leak across branches or clones.
+    const scopedPoints = filterSupplementalPointsToScope(points, {
+      tenantId: params.currentProjectId,
+      branch: params.branch,
+      basePoints: params.basePoints,
+    });
+    return scopedPoints.map((point, index) => ({
       id: String(point.id),
       score: SUPPLEMENTAL_SYMBOL_SCORE - index * 0.001,
       collection: coll,
@@ -1011,12 +1089,15 @@ async function rerankResults(
         leftover.push(item);
         return;
       }
-      // Surface the blended score so the final ordering and the reported
-      // score agree.
-      item.score = score;
+      // Order by the blended (rerank) signal, but KEEP `item.score` as the
+      // pre-rerank similarity for display — it stays comparable across queries
+      // and on the same scale as `scoreThreshold` (raw cosine), instead of the
+      // min-max-normalized pool rank that forces the pool minimum to a
+      // misleading 0.0. Expose the ordering signal separately as `rerankScore`.
+      item.rerankScore = score;
       scored.push(item);
     });
-    scored.sort((a, b) => b.score - a.score);
+    scored.sort((a, b) => (b.rerankScore ?? 0) - (a.rerankScore ?? 0));
     return [...scored, ...leftover, ...results.slice(poolSize)];
   } catch (err) {
     logDebug('Rerank failed; using pre-rerank order', {
@@ -1034,6 +1115,16 @@ export async function finalizeResults(
   params: FinalizeResultsParams
 ): Promise<SearchResponse> {
   const fusedResults = applyRRFFusion(params.allResults, params.mode);
+  // Snapshot the pre-boost score per result (raw cosine for semantic, RRF for
+  // hybrid) so it can be RESTORED for display after ranking. The path-relevance
+  // boost and the cross-encoder rerank below are RANKING signals ONLY — they
+  // must not inflate the `score` the caller sees, which has to stay on the same
+  // scale as `scoreThreshold` (raw cosine) for a threshold set against a visible
+  // score to behave. Restores the #119 contract that the in-place boost broke:
+  // a ~0.55-cosine hit was displaying ~0.99 after a ×1.8 path boost, so
+  // scoreThreshold=0.85 returned nothing despite "0.99" scores on screen.
+  const displayScore = new Map<SearchResult, number>();
+  for (const r of fusedResults) displayScore.set(r, r.score);
   // Promote results whose file path/symbol matches the query before ranking
   // — surfaces the precisely-named file over content-term magnets, and shapes
   // which candidates enter the rerank pool below.
@@ -1089,6 +1180,16 @@ export async function finalizeResults(
       ? await rerankResults(daemonClient, params.query, deduped, params.limit, rerankWeight)
       : deduped;
   const finalResults = ranked.slice(0, params.limit);
+
+  // Restore the display score: the ordering above used the path-boosted (and,
+  // when enabled, reranked) score, but the number we RETURN is the pre-boost
+  // similarity so it stays comparable across queries and aligned with
+  // scoreThreshold. When reranking ran, the ordering signal lives on
+  // `rerankScore`; `score` is always the raw similarity.
+  for (const r of finalResults) {
+    const ds = displayScore.get(r);
+    if (ds !== undefined) r.score = ds;
+  }
 
   // Context expansion applies to the code results only — scratchpad notes carry
   // no parent unit or graph node, so they are appended afterwards untouched.

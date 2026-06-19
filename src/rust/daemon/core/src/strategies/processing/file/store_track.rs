@@ -286,6 +286,18 @@ async fn run_tracking_transaction(
         }
     };
 
+    // The Qdrant upsert beside this mirror write is idempotent (identical
+    // base_point ⇒ identical point IDs that overwrite), so the mirror must be
+    // too. `file_id` can already carry chunk rows — an in-place update OR a
+    // Layer 2 upsert-merge that returned an EXISTING content-row's file_id — so
+    // clear them first; otherwise the re-insert collides on
+    // UNIQUE(file_id, chunk_index). A harmless no-op for a brand-new file_id.
+    tracked_files_schema::delete_qdrant_chunks_tx(&mut tx, file_id)
+        .await
+        .map_err(|e| {
+            UnifiedProcessorError::QueueOperation(format!("qdrant_chunks delete failed: {}", e))
+        })?;
+
     if !chunk_tuples.is_empty() {
         tracked_files_schema::insert_qdrant_chunks_tx(&mut tx, file_id, chunk_tuples)
             .await
@@ -305,7 +317,9 @@ async fn run_tracking_transaction(
     Ok(file_id)
 }
 
-/// Update an existing `tracked_files` row and delete its old chunks within `tx`.
+/// Update an existing `tracked_files` row within `tx`. The chunk mirror is
+/// cleared unconditionally by the caller right before the re-insert, so this
+/// does not touch `qdrant_chunks`.
 #[allow(clippy::too_many_arguments)]
 async fn upsert_existing_tracked_file(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -337,12 +351,6 @@ async fn upsert_existing_tracked_file(
     .map_err(|e| {
         UnifiedProcessorError::QueueOperation(format!("tracked_files update failed: {}", e))
     })?;
-
-    tracked_files_schema::delete_qdrant_chunks_tx(tx, existing_file.file_id)
-        .await
-        .map_err(|e| {
-            UnifiedProcessorError::QueueOperation(format!("qdrant_chunks delete failed: {}", e))
-        })?;
 
     Ok(existing_file.file_id)
 }

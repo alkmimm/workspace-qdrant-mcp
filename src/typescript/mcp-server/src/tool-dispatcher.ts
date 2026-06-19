@@ -1,5 +1,5 @@
 /**
- * Tool dispatcher ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â executes a named MCP tool and returns its result.
+ * Tool dispatcher — executes a named MCP tool and returns its result.
  *
  * Extracted from WorkspaceQdrantMcpServer.handleToolCall to keep server.ts
  * within the 300-line file-size limit.

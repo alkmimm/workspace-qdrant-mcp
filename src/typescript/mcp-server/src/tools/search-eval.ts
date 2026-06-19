@@ -15,6 +15,7 @@ import { join } from 'node:path';
 
 import type { ProjectDetector } from '../utils/project-detector.js';
 import type { SearchScope } from './search-types.js';
+import { tuningFromEnv } from './search-types.js';
 import { resolveProjectIdentity } from './branch-scope.js';
 import {
   loadSemanticSearchBenchmarkDataset,
@@ -106,6 +107,9 @@ export interface SearchEvalResult {
   datasetSource?: string;
   queryCount?: number;
   projectId?: string;
+  /** The effective rerank settings actually applied (resolving the deployment
+   *  env defaults), so an A/B caller can see what ran without redeploying. */
+  applied?: { rerank: boolean; rerankWeight: number };
   verdict?: { grade: string; reasons: string[] };
   modes?: Record<string, Record<string, number>>;
   /** Hit rates per dataset category (query-id prefix: pt/sym/impl/doc/real,
@@ -177,6 +181,11 @@ export async function runSearchEval(
   const includeTopPaths = (args?.['includeTopPaths'] as boolean | undefined) ?? false;
   const rerank = args?.['rerank'] as boolean | undefined;
   const rerankWeight = args?.['rerankWeight'] as number | undefined;
+  // Resolve the EFFECTIVE rerank settings so the env-dependent deployment
+  // default is observable in the result — otherwise an A/B caller cannot tell
+  // what actually ran. Mirrors the resolution in search-helpers.
+  const appliedRerank = rerank ?? (process.env['WQM_SEARCH_RERANK'] === '1');
+  const appliedRerankWeight = Math.min(rerankWeight ?? tuningFromEnv('WQM_SEARCH_RERANK_WEIGHT', 0.05), 1);
 
   const report = await runSemanticSearchBenchmark(runner, dataset, {
     // relative_path on each hit carries the repo-relative path, so the
@@ -215,6 +224,7 @@ export async function runSearchEval(
     success: true,
     datasetSource,
     queryCount: report.summary.queryCount,
+    applied: { rerank: appliedRerank, rerankWeight: appliedRerankWeight },
     ...(tenant.tenantId ? { projectId: tenant.tenantId } : {}),
     verdict: {
       grade: report.summary.semanticVerdict.grade,

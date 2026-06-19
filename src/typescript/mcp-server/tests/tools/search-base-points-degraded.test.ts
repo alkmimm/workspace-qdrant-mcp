@@ -24,6 +24,7 @@ function makeStateManager(activeCount: number, cloneCount: number): SqliteStateM
   const points = Array.from({ length: activeCount }, (_, i) => `bp-${i}`);
   return {
     getWatchFolderIdByTenantId: vi.fn().mockReturnValue(WATCH_FOLDER),
+    getProjectById: vi.fn().mockReturnValue({ data: null }),
     countWatchFoldersByTenantId: vi.fn().mockReturnValue(cloneCount),
     getActiveBasePoints: vi.fn().mockReturnValue(points),
   } as unknown as SqliteStateManager;

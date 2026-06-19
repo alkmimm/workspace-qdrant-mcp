@@ -60,6 +60,7 @@ function createMockStateManager(): SqliteStateManager {
     listTags: vi.fn().mockReturnValue([]),
     getTagHierarchy: vi.fn().mockReturnValue([]),
     getWatchFolderIdByTenantId: vi.fn().mockReturnValue(null),
+    getProjectById: vi.fn().mockReturnValue({ data: null }),
     getActiveBasePoints: vi.fn().mockReturnValue([]),
   } as unknown as SqliteStateManager;
 }
@@ -132,10 +133,10 @@ describe('SearchTool — search modes and scope', () => {
       });
     });
 
-    it('should use default hybrid mode when not specified', async () => {
+    it('should use default semantic mode when not specified', async () => {
       const result = await searchTool.search({ query: 'test query' });
 
-      expect(result.mode).toBe('hybrid');
+      expect(result.mode).toBe('semantic');
     });
   });
 

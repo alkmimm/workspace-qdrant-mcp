@@ -72,6 +72,36 @@ pub async fn enqueue_changed_file(
     Ok(op)
 }
 
+/// Enqueue an unchanged file (byte-identical to another branch) as an `Add` op
+/// on the target branch.
+///
+/// The cross-branch dedup fast-path ([`branch_dedup`](crate::strategies::processing::file))
+/// then re-keys the file's existing Qdrant points + FTS5 rows under the new
+/// branch without re-embedding. `Add` (not `Update`) is deliberate: the Update
+/// pre-flight issues a defensive `delete_points_by_filter(path, tenant)` for
+/// paths untracked on the current branch, which is **not** branch-scoped and
+/// would wipe the source branch's points before dedup can scroll them. `Add`
+/// skips that defensive delete.
+pub async fn enqueue_unchanged_file(
+    queue_manager: &QueueManager,
+    tenant_id: &str,
+    collection: &str,
+    relative_path: &str,
+    branch: &str,
+) -> Result<(), String> {
+    let rel = RelativePath::from_user_input(relative_path)
+        .map_err(|e| format!("invalid relative_path {:?}: {}", relative_path, e))?;
+    enqueue_file_op_rel(
+        queue_manager,
+        tenant_id,
+        collection,
+        &rel,
+        QueueOperation::Add,
+        branch,
+    )
+    .await
+}
+
 /// Enqueue a file operation to the unified queue (absolute path entry point).
 ///
 /// `abs_file_path` MUST live under a watch_folder root whose path matches

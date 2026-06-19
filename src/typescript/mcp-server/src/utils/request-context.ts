@@ -56,26 +56,59 @@ export function getEffectiveCwd(): string {
   return process.cwd();
 }
 
+/** Outcome of {@link resolveStickyCwd}. */
+export interface StickyCwdResolution {
+  /**
+   * The cwd to bind into the request context via {@link runWithRequestContext}
+   * before dispatch, or `undefined` to leave the context unchanged (because an
+   * authoritative header is already bound, or there is nothing to bind).
+   */
+  bind?: string;
+  /**
+   * The cwd to persist as the session's sticky value, or `undefined` to leave
+   * the existing sticky value untouched. Only set when an explicit source
+   * (header or body `cwd`) was present this call.
+   */
+  sticky?: string;
+}
+
 /**
- * Decide whether a tool-body `cwd` argument should override the request's host
- * cwd. The `X-MCP-Host-Cwd` header (already bound into the request context by
- * the HTTP transport) always wins; the body value is only used when the header
- * is absent. Returns the cwd to bind via {@link runWithRequestContext}, or
- * `undefined` to leave the context unchanged.
+ * Resolve the effective host cwd for one tool call, with session stickiness.
  *
- * This lets an agent pass its working directory in a tool call when the client
- * cannot send the header per session (e.g. Claude Code over HTTP), without
- * letting a body value shadow an authoritative header. The detection
- * resolution order thus stays: header > body `cwd` > `WQM_DEFAULT_HOST_CWD` >
- * `process.cwd()`.
+ * The `X-MCP-Host-Cwd` header (already bound into the request context by the
+ * HTTP transport) always wins. When it is absent — the Claude-Code-over-HTTP
+ * case, which cannot send the header per session — an agent passes its working
+ * directory in the tool-body `cwd`. We remember the last explicit cwd on the
+ * session (`stickyCwd`) so a later call that omits `cwd` still resolves the
+ * project instead of failing with "Could not detect project".
+ *
+ * Precedence: header > body `cwd` > session sticky cwd > `WQM_DEFAULT_HOST_CWD`
+ * > `process.cwd()` (the last two handled downstream by {@link getEffectiveCwd}).
+ *
+ * Pure and side-effect-free: the caller persists `sticky` onto session state
+ * and binds `bind` into the request context.
  */
-export function resolveBodyCwdOverride(bodyCwd: string | undefined): string | undefined {
-  if (!bodyCwd || bodyCwd.length === 0) {
-    return undefined;
-  }
-  const ctx = storage.getStore();
-  if (ctx?.hostCwd && ctx.hostCwd.length > 0) {
-    return undefined;
-  }
-  return bodyCwd;
+export function resolveStickyCwd(opts: {
+  headerCwd?: string | undefined;
+  bodyCwd?: string | undefined;
+  stickyCwd?: string | null | undefined;
+}): StickyCwdResolution {
+  const header = opts.headerCwd && opts.headerCwd.length > 0 ? opts.headerCwd : undefined;
+  const body = opts.bodyCwd && opts.bodyCwd.length > 0 ? opts.bodyCwd : undefined;
+  const sticky = opts.stickyCwd && opts.stickyCwd.length > 0 ? opts.stickyCwd : undefined;
+
+  const result: StickyCwdResolution = {};
+
+  // An explicit source (header or body) becomes the session's sticky cwd.
+  const explicit = header ?? body;
+  if (explicit) result.sticky = explicit;
+
+  // The header is already bound by the transport and wins — never rebind it.
+  if (header) return result;
+
+  // No header: bind the body cwd if given, else fall back to the sticky value
+  // remembered from an earlier call in this session.
+  const effective = body ?? sticky;
+  if (effective) result.bind = effective;
+  return result;
 }

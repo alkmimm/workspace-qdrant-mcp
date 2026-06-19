@@ -295,6 +295,11 @@ export class SqliteStateManager {
     return trackedFilesQueries.countTrackedFiles(this.db, options);
   }
 
+  /** De-facto base branch for a project (majority-tracked branch != excludeBranch). */
+  getBaseBranch(watchFolderId: string, excludeBranch: string): string | null {
+    return trackedFilesQueries.getBaseBranch(this.db, watchFolderId, excludeBranch);
+  }
+
   listChunkCandidates(options: trackedFilesQueries.ListChunkCandidatesOptions) {
     return trackedFilesQueries.listChunkCandidates(this.db, options);
   }

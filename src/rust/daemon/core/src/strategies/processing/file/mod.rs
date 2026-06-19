@@ -927,6 +927,17 @@ mod tests {
             let file_abs = project.path().join("src/lib.rs");
             std::fs::write(&file_abs, "pub fn answer() -> u32 { 42 }\n").unwrap();
             let real_hash = crate::tracked_files_schema::compute_file_hash(&file_abs).unwrap();
+            // Seed a REALISTIC base_point — the same value the update preamble
+            // recomputes for unchanged content (`compute_base_point(tenant,
+            // relative_path, hash)`). With a fake value, the stale-fingerprint
+            // re-chunk (which runs first below) sees a base_point mismatch in
+            // `execute_update_deletion`, concludes the content changed, and
+            // deletes the row — so the later skip assertions find no row and the
+            // gate Proceeds instead of Skips. A matching base_point makes
+            // `delete_old` false (content is genuinely unchanged), so the row
+            // survives across the three sub-cases.
+            let gate_bp =
+                wqm_common::hashing::compute_base_point("tenant-gate", "src/lib.rs", &real_hash);
             let base_path = project.path().to_string_lossy().to_string();
             let abs_str = file_abs.to_string_lossy().to_string();
 
@@ -935,7 +946,7 @@ mod tests {
             let pool = SqlitePool::connect(&format!("sqlite://{}?mode=rwc", db_path.display()))
                 .await
                 .expect("create sqlite pool");
-            sqlx::query(crate::tracked_files_schema::CREATE_TRACKED_FILES_V37_SQL)
+            sqlx::query(crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL)
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -982,7 +993,7 @@ mod tests {
                 None,
                 None,
                 false,
-                Some("bp-gate"),
+                Some(gate_bp.as_str()),
                 None,
             )
             .await

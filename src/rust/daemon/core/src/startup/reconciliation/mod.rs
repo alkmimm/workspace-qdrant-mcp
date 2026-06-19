@@ -245,10 +245,10 @@ async fn enqueue_delete_for_missing_tracked_files(
     info!("Enqueueing Delete ops for tracked files missing on disk (F-036)...");
     let tracked_rows = sqlx::query(
         "SELECT tf.file_id, tf.relative_path, wf.path AS watch_path, \
-                wf.tenant_id, wf.collection, \
-                COALESCE(tf.branch, 'main') AS branch \
+                wf.tenant_id, wf.collection, je.value AS branch \
          FROM tracked_files tf \
-         JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id",
+         JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id, \
+              json_each(tf.branches) je",
     )
     .fetch_all(pool)
     .await
@@ -350,10 +350,11 @@ async fn remove_stale_tracked_files(pool: &SqlitePool) -> Result<u64, String> {
     info!("Checking tracked files against filesystem...");
     let tracked_rows = sqlx::query(
         "SELECT tf.file_id, tf.relative_path, wf.path AS watch_path, \
-                wf.tenant_id, COALESCE(tf.branch, 'main') AS branch, \
+                wf.tenant_id, je.value AS branch, \
                 wf.collection \
          FROM tracked_files tf \
-         JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id",
+         JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id, \
+              json_each(tf.branches) je",
     )
     .fetch_all(pool)
     .await

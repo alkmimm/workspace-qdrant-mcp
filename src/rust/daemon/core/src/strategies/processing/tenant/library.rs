@@ -199,7 +199,7 @@ fn build_library_content_payload(
         serde_json::json!(payload.source_type),
     );
     p.insert("item_type".to_string(), serde_json::json!("content"));
-    p.insert("branch".to_string(), serde_json::json!(item.branch));
+    p.insert("branch".to_string(), serde_json::json!([item.branch]));
 
     if let Some(metadata) = &payload.metadata {
         for (k, v) in metadata.iter() {

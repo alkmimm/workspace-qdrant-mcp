@@ -66,6 +66,22 @@ describe('shapeHitPayloads', () => {
       expect(shapedContent).toContain('retrieve');
     });
 
+    it('points exact-search hits at filePath + lineNumber instead of documentId', () => {
+      const longText = 'x'.repeat(5000);
+      const r = makeResult({
+        id: 'src/foo.ts:42',
+        collection: 'projects',
+        content: longText,
+        metadata: { file_path: 'src/foo.ts', line_number: 42 },
+      });
+      const { response: shaped } = shapeHitPayloads(makeResponse([r]), baseOptions());
+      const shapedContent = shaped.results[0].content;
+      expect(shapedContent).toContain(
+        'retrieve(filePath="src/foo.ts", lineNumber=42, collection="projects")'
+      );
+      expect(shapedContent).not.toContain('retrieve(documentId=');
+    });
+
     it('keeps the 10-hit response well under 25k chars on broad results', () => {
       // Simulate a worst-case broad search: 10 hits of ~10kB chunk text.
       const hits = Array.from({ length: 10 }, (_, i) =>
@@ -182,7 +198,10 @@ describe('shapeHitPayloads', () => {
           chunk_text: 'a'.repeat(5000),
         },
       });
-      const { response: shaped } = shapeHitPayloads(makeResponse([r]), baseOptions({ summary: true }));
+      const { response: shaped } = shapeHitPayloads(
+        makeResponse([r]),
+        baseOptions({ summary: true })
+      );
       expect(shaped.results[0].content).toBe('');
       expect(shaped.results[0].id).toBe('doc-7');
       expect(shaped.results[0].score).toBe(0.7);
@@ -205,10 +224,17 @@ describe('shapeHitPayloads', () => {
           id: `doc-${i}`,
           title: `Hit ${i}`,
           content: 'a'.repeat(20_000),
-          metadata: { file_path: `src/file${i}.ts`, chunk_start_line: i, content: 'a'.repeat(20_000) },
+          metadata: {
+            file_path: `src/file${i}.ts`,
+            chunk_start_line: i,
+            content: 'a'.repeat(20_000),
+          },
         })
       );
-      const { response: shaped } = shapeHitPayloads(makeResponse(hits), baseOptions({ summary: true }));
+      const { response: shaped } = shapeHitPayloads(
+        makeResponse(hits),
+        baseOptions({ summary: true })
+      );
       const serialized = JSON.stringify(shaped);
       expect(serialized.length).toBeLessThan(5000);
     });
@@ -236,10 +262,7 @@ describe('shapeHitPayloads', () => {
   describe('shaping metrics (token economy)', () => {
     it('reports mode "none" with bytes_in == bytes_out when cap is disabled', () => {
       const r = makeResult({ content: 'a'.repeat(800) });
-      const { metrics } = shapeHitPayloads(
-        makeResponse([r]),
-        baseOptions({ maxBytesPerHit: 0 })
-      );
+      const { metrics } = shapeHitPayloads(makeResponse([r]), baseOptions({ maxBytesPerHit: 0 }));
       expect(metrics.mode).toBe('none');
       expect(metrics.bytesInShaped).toBe(800);
       expect(metrics.bytesOutShaped).toBe(800);
@@ -292,10 +315,7 @@ describe('shapeHitPayloads', () => {
 
     it('reports mode "summary" with bytes_out == 0 when summary is requested', () => {
       const r = makeResult({ content: 'a'.repeat(4000) });
-      const { metrics } = shapeHitPayloads(
-        makeResponse([r]),
-        baseOptions({ summary: true })
-      );
+      const { metrics } = shapeHitPayloads(makeResponse([r]), baseOptions({ summary: true }));
       expect(metrics.mode).toBe('summary');
       expect(metrics.bytesInShaped).toBe(4000);
       expect(metrics.bytesOutShaped).toBe(0);
@@ -309,5 +329,83 @@ describe('shapeHitPayloads', () => {
       expect(metrics.bytesOutShaped).toBe(0);
       expect(metrics.hitsTruncated).toBe(0);
     });
+  });
+});
+
+describe('grep-like location locator (item 4)', () => {
+  it('lifts relative_path:line into a top-level location in truncate mode', () => {
+    const r = makeResult({ metadata: { relative_path: 'src/a.ts', line_number: 5 } });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions());
+    expect(response.results[0].location).toBe('src/a.ts:5');
+  });
+
+  it('prefers relative_path over the absolute file_path', () => {
+    const r = makeResult({
+      metadata: { relative_path: 'src/a.ts', file_path: '/abs/src/a.ts', line_number: 9 },
+    });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions());
+    expect(response.results[0].location).toBe('src/a.ts:9');
+  });
+
+  it('falls back to file_path and chunk_start_line when those are all that exist', () => {
+    const r = makeResult({ metadata: { file_path: 'src/b.ts', chunk_start_line: 42 } });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions());
+    expect(response.results[0].location).toBe('src/b.ts:42');
+  });
+
+  it('emits a bare path when no line number is known', () => {
+    const r = makeResult({ metadata: { relative_path: 'README.md' } });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions());
+    expect(response.results[0].location).toBe('README.md');
+  });
+
+  it('omits location entirely when the hit carries no path', () => {
+    const r = makeResult({ metadata: {} });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions());
+    expect(response.results[0].location).toBeUndefined();
+  });
+
+  it('sets location in summary mode', () => {
+    const r = makeResult({ metadata: { relative_path: 'src/c.ts', chunk_start_line: 1 } });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions({ summary: true }));
+    expect(response.results[0].location).toBe('src/c.ts:1');
+  });
+
+  it('sets location even when truncation is disabled (cap=0) without altering content', () => {
+    const r = makeResult({
+      content: 'a'.repeat(50),
+      metadata: { file_path: 'src/d.ts', line_number: 7 },
+    });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions({ maxBytesPerHit: 0 }));
+    expect(response.results[0].location).toBe('src/d.ts:7');
+    expect(response.results[0].content).toBe('a'.repeat(50));
+  });
+});
+
+describe('in-band graph hint (item 3)', () => {
+  it('attaches a graph hint when at least one hit is a named code symbol', () => {
+    const r = makeResult({ metadata: { file_path: 'src/a.ts', chunk_symbol_name: 'fooFn' } });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions());
+    expect(response.hint).toBeDefined();
+    expect(response.hint).toContain('graph');
+  });
+
+  it('omits the hint when no result is a code symbol', () => {
+    const r = makeResult({ metadata: { file_path: 'README.md' } });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions());
+    expect(response.hint).toBeUndefined();
+  });
+
+  it('attaches the hint in summary mode too (symbol name survives the allowlist)', () => {
+    const r = makeResult({ metadata: { file_path: 'src/a.ts', chunk_symbol_name: 'barFn' } });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions({ summary: true }));
+    expect(response.hint).toBeDefined();
+  });
+
+  it('does not mutate the input response when adding a hint', () => {
+    const r = makeResult({ metadata: { file_path: 'src/a.ts', chunk_symbol_name: 'bazFn' } });
+    const response = makeResponse([r]);
+    shapeHitPayloads(response, baseOptions());
+    expect(response.hint).toBeUndefined();
   });
 });

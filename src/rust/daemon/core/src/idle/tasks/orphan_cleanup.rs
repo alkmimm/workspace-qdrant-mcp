@@ -345,7 +345,7 @@ pub(crate) mod tests_support {
             .execute(&pool)
             .await
             .expect("create watch_folders");
-        sqlx::query(tracked_files_schema::CREATE_TRACKED_FILES_V37_SQL)
+        sqlx::query(tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL)
             .execute(&pool)
             .await
             .expect("create tracked_files");

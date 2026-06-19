@@ -16,6 +16,30 @@ pub(super) fn matches_any(kind: &str, types: &[String]) -> bool {
     types.iter().any(|t| t == kind)
 }
 
+/// The definition body when the grammar attaches it as a *following sibling* of
+/// the signature node rather than nesting it (Dart's `function_signature` /
+/// `method_signature` followed by `function_body`). Returns `None` for every
+/// grammar with an empty `paired_body_node_types` — i.e. the body is nested and
+/// handled the usual way.
+pub(super) fn paired_body_sibling<'a>(
+    patterns: &SemanticPatterns,
+    node: &Node<'a>,
+) -> Option<Node<'a>> {
+    if patterns.paired_body_node_types.is_empty() {
+        return None;
+    }
+    let sibling = node.next_sibling()?;
+    if patterns
+        .paired_body_node_types
+        .iter()
+        .any(|t| t == sibling.kind())
+    {
+        Some(sibling)
+    } else {
+        None
+    }
+}
+
 /// Map an AST node kind to a `ChunkType` using the configured patterns.
 ///
 /// Returns `None` if the kind is not in any pattern group.
@@ -77,7 +101,7 @@ pub(super) fn walk_children<F1, F2>(
     extract_definition_fn: &F2,
 ) where
     F1: Fn(&Node, &str, &str, ChunkType) -> Vec<SemanticChunk>,
-    F2: Fn(&Node, &str, &str, ChunkType, Option<&str>) -> SemanticChunk,
+    F2: Fn(&Node, &str, &str, ChunkType, Option<&str>, Option<&Node>) -> SemanticChunk,
 {
     let decorated_wrapper = patterns.decorated_wrapper.as_deref();
     let wrappers = &patterns.root_wrappers;
@@ -110,8 +134,14 @@ pub(super) fn walk_children<F1, F2>(
                     chunks.extend(extract_container_fn(&child, source, file_path, chunk_type));
                 }
                 _ => {
+                    let body = paired_body_sibling(patterns, &child);
                     chunks.push(extract_definition_fn(
-                        &child, source, file_path, chunk_type, None,
+                        &child,
+                        source,
+                        file_path,
+                        chunk_type,
+                        None,
+                        body.as_ref(),
                     ));
                 }
             }
@@ -149,7 +179,7 @@ fn handle_decorated_node<F1, F2>(
     extract_definition_fn: &F2,
 ) where
     F1: Fn(&Node, &str, &str, ChunkType) -> Vec<SemanticChunk>,
-    F2: Fn(&Node, &str, &str, ChunkType, Option<&str>) -> SemanticChunk,
+    F2: Fn(&Node, &str, &str, ChunkType, Option<&str>, Option<&Node>) -> SemanticChunk,
 {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -161,7 +191,7 @@ fn handle_decorated_node<F1, F2>(
                 }
                 _ => {
                     chunks.push(extract_definition_fn(
-                        &child, source, file_path, chunk_type, None,
+                        &child, source, file_path, chunk_type, None, None,
                     ));
                 }
             }
@@ -180,7 +210,7 @@ fn handle_call_node<F1, F2>(
     extract_definition_fn: &F2,
 ) where
     F1: Fn(&Node, &str, &str, ChunkType) -> Vec<SemanticChunk>,
-    F2: Fn(&Node, &str, &str, ChunkType, Option<&str>) -> SemanticChunk,
+    F2: Fn(&Node, &str, &str, ChunkType, Option<&str>, Option<&Node>) -> SemanticChunk,
 {
     let text = node_text(node, source);
     let first_word = text.split_whitespace().next().unwrap_or("");
@@ -201,6 +231,7 @@ fn handle_call_node<F1, F2>(
             file_path,
             ChunkType::Function,
             None,
+            None,
         ));
     } else if matches_any("call", &patterns.macro_def.node_types)
         && matches!(first_word, "defmacro" | "defmacrop")
@@ -210,6 +241,7 @@ fn handle_call_node<F1, F2>(
             source,
             file_path,
             ChunkType::Macro,
+            None,
             None,
         ));
     }

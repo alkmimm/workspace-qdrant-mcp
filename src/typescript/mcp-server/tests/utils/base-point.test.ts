@@ -30,47 +30,49 @@ describe('normalizePathForId', () => {
 
 describe('computeBasePoint', () => {
   it('should be deterministic', () => {
-    const bp1 = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'deadbeef');
-    const bp2 = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'deadbeef');
+    const bp1 = computeBasePoint('tenant_abc', 'src/main.rs', 'deadbeef');
+    const bp2 = computeBasePoint('tenant_abc', 'src/main.rs', 'deadbeef');
     expect(bp1).toBe(bp2);
     expect(bp1).toHaveLength(32);
     expect(bp1).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it('should differ with different file_hash', () => {
-    const bp1 = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'hash_v1');
-    const bp2 = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'hash_v2');
+    const bp1 = computeBasePoint('tenant_abc', 'src/main.rs', 'hash_v1');
+    const bp2 = computeBasePoint('tenant_abc', 'src/main.rs', 'hash_v2');
     expect(bp1).not.toBe(bp2);
   });
 
-  it('should differ with different branch', () => {
-    const bp1 = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'deadbeef');
-    const bp2 = computeBasePoint('tenant_abc', 'feature', 'src/main.rs', 'deadbeef');
-    expect(bp1).not.toBe(bp2);
+  it('is branch-agnostic (Layer 2: branch is not part of the identity)', () => {
+    // Same (tenant, path, content) → same base_point regardless of branch.
+    // The branch set lives in the point's `branch` array payload, not the hash.
+    const bp1 = computeBasePoint('tenant_abc', 'src/main.rs', 'deadbeef');
+    const bp2 = computeBasePoint('tenant_abc', 'src/main.rs', 'deadbeef');
+    expect(bp1).toBe(bp2);
   });
 
   it('should differ with different path', () => {
-    const bp1 = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'deadbeef');
-    const bp2 = computeBasePoint('tenant_abc', 'main', 'src/lib.rs', 'deadbeef');
+    const bp1 = computeBasePoint('tenant_abc', 'src/main.rs', 'deadbeef');
+    const bp2 = computeBasePoint('tenant_abc', 'src/lib.rs', 'deadbeef');
     expect(bp1).not.toBe(bp2);
   });
 
   it('should differ with different tenant', () => {
-    const bp1 = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'deadbeef');
-    const bp2 = computeBasePoint('tenant_xyz', 'main', 'src/main.rs', 'deadbeef');
+    const bp1 = computeBasePoint('tenant_abc', 'src/main.rs', 'deadbeef');
+    const bp2 = computeBasePoint('tenant_xyz', 'src/main.rs', 'deadbeef');
     expect(bp1).not.toBe(bp2);
   });
 
   it('should normalize path (backslash parity)', () => {
-    const bp1 = computeBasePoint('t', 'main', 'src/main.rs', 'h');
-    const bp2 = computeBasePoint('t', 'main', 'src\\main.rs', 'h');
+    const bp1 = computeBasePoint('t', 'src/main.rs', 'h');
+    const bp2 = computeBasePoint('t', 'src\\main.rs', 'h');
     expect(bp1).toBe(bp2);
   });
 });
 
 describe('computePointId', () => {
   it('should be deterministic', () => {
-    const bp = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'deadbeef');
+    const bp = computeBasePoint('tenant_abc', 'src/main.rs', 'deadbeef');
     const pid1 = computePointId(bp, 0);
     const pid2 = computePointId(bp, 0);
     expect(pid1).toBe(pid2);
@@ -78,7 +80,7 @@ describe('computePointId', () => {
   });
 
   it('should differ with different chunk_index', () => {
-    const bp = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'deadbeef');
+    const bp = computeBasePoint('tenant_abc', 'src/main.rs', 'deadbeef');
     const pid0 = computePointId(bp, 0);
     const pid1 = computePointId(bp, 1);
     const pid2 = computePointId(bp, 2);
@@ -88,8 +90,8 @@ describe('computePointId', () => {
   });
 
   it('should differ with different base_point', () => {
-    const bp1 = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'hash_v1');
-    const bp2 = computeBasePoint('tenant_abc', 'main', 'src/main.rs', 'hash_v2');
+    const bp1 = computeBasePoint('tenant_abc', 'src/main.rs', 'hash_v1');
+    const bp2 = computeBasePoint('tenant_abc', 'src/main.rs', 'hash_v2');
     const pid1 = computePointId(bp1, 0);
     const pid2 = computePointId(bp2, 0);
     expect(pid1).not.toBe(pid2);
@@ -98,16 +100,17 @@ describe('computePointId', () => {
 
 describe('cross-language parity with Rust', () => {
   // These test vectors are from wqm-common/src/hashing.rs
-  // Input: compute_base_point("test_tenant", "main", "src/example.rs", "abc123hash")
+  // Input: compute_base_point("test_tenant", "src/example.rs", "abc123hash")
+  // Layer 2 formula: SHA256(tenant_id|relative_path|file_hash).
 
   it('should match Rust base_point output', () => {
-    const bp = computeBasePoint('test_tenant', 'main', 'src/example.rs', 'abc123hash');
-    expect(bp).toBe('fb8f745c24089bb3c094002a25e4762d');
+    const bp = computeBasePoint('test_tenant', 'src/example.rs', 'abc123hash');
+    expect(bp).toBe('d08103c2d8f553544dabeb4737fd32b4');
   });
 
   it('should match Rust point_id output (chunk 0)', () => {
-    const bp = computeBasePoint('test_tenant', 'main', 'src/example.rs', 'abc123hash');
+    const bp = computeBasePoint('test_tenant', 'src/example.rs', 'abc123hash');
     const pid = computePointId(bp, 0);
-    expect(pid).toBe('29f8fee936e7f18423f871d91da964fa');
+    expect(pid).toBe('72deff25f27560ca51dcab1c6b373b8b');
   });
 });

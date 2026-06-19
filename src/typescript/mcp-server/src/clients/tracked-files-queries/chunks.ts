@@ -15,6 +15,10 @@ export interface ListChunkCandidatesOptions {
   watchFolderId: string;
   needles: string[];
   fileType?: string;
+  /** Restrict candidates to one git branch (the search path's effective
+   *  branch). Omit / pass undefined to span branches — mirrors the normal
+   *  search filter, which only constrains branch when it is concrete (not `*`). */
+  branch?: string;
   limit?: number;
 }
 
@@ -33,6 +37,13 @@ export function listChunkCandidates(
       conditions.push('tf.file_type = ?');
       params.push(options.fileType);
     }
+    if (options.branch) {
+      // Branch scope: this candidate query only constrained watch_folder +
+      // needle, so it used to span EVERY indexed branch of the project. Apply
+      // the same branch filter the normal search path applies.
+      conditions.push('EXISTS (SELECT 1 FROM json_each(tf.branches) WHERE value = ?)');
+      params.push(options.branch);
+    }
 
     const needleClauses: string[] = [];
     for (const needle of options.needles) {
@@ -43,7 +54,7 @@ export function listChunkCandidates(
     params.push(limit);
 
     const rows = db.prepare(`
-      SELECT qc.point_id, tf.relative_path, tf.branch, qc.symbol_name, qc.chunk_type, qc.start_line
+      SELECT qc.point_id, tf.relative_path, (SELECT value FROM json_each(tf.branches) LIMIT 1) AS branch, qc.symbol_name, qc.chunk_type, qc.start_line
       FROM qdrant_chunks qc
       JOIN tracked_files tf ON tf.file_id = qc.file_id
       WHERE ${conditions.join(' AND ')}

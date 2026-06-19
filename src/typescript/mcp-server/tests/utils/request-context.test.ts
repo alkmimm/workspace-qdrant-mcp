@@ -10,7 +10,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   runWithRequestContext,
   getEffectiveCwd,
-  resolveBodyCwdOverride,
+  resolveStickyCwd,
 } from '../../src/utils/request-context.js';
 
 describe('request-context', () => {
@@ -41,21 +41,44 @@ describe('request-context', () => {
     });
   });
 
-  describe('resolveBodyCwdOverride', () => {
-    it('returns the body cwd when no header host cwd is bound', () => {
-      expect(resolveBodyCwdOverride('C:\\Users\\x\\proj')).toBe('C:\\Users\\x\\proj');
+  describe('resolveStickyCwd', () => {
+    it('binds the body cwd and remembers it when no header is present', () => {
+      expect(resolveStickyCwd({ bodyCwd: 'C:\\Users\\x\\proj' })).toEqual({
+        bind: 'C:\\Users\\x\\proj',
+        sticky: 'C:\\Users\\x\\proj',
+      });
     });
 
-    it('returns undefined (header wins) when a header host cwd is bound', () => {
-      const got = runWithRequestContext({ hostCwd: '/from/header' }, () =>
-        resolveBodyCwdOverride('C:\\Users\\x\\proj')
-      );
-      expect(got).toBeUndefined();
+    it('header wins: never rebinds, but still becomes the sticky value', () => {
+      // The header is already bound by the transport, so `bind` stays undefined;
+      // it is recorded as sticky so later header-less calls reuse it.
+      expect(
+        resolveStickyCwd({ headerCwd: '/from/header', bodyCwd: 'C:\\Users\\x\\proj' })
+      ).toEqual({ sticky: '/from/header' });
     });
 
-    it('returns undefined for an empty or missing body cwd', () => {
-      expect(resolveBodyCwdOverride(undefined)).toBeUndefined();
-      expect(resolveBodyCwdOverride('')).toBeUndefined();
+    it('falls back to the session sticky cwd when header and body are absent', () => {
+      // No explicit source this call, so it does not overwrite the sticky value;
+      // it only rebinds the remembered one for project detection.
+      expect(resolveStickyCwd({ stickyCwd: '/remembered/proj' })).toEqual({
+        bind: '/remembered/proj',
+      });
+    });
+
+    it('body cwd overrides a stale sticky value and refreshes it', () => {
+      expect(resolveStickyCwd({ bodyCwd: '/new/proj', stickyCwd: '/old/proj' })).toEqual({
+        bind: '/new/proj',
+        sticky: '/new/proj',
+      });
+    });
+
+    it('returns an empty resolution when nothing is available (clean miss → fail-fast)', () => {
+      expect(resolveStickyCwd({})).toEqual({});
+      expect(resolveStickyCwd({ bodyCwd: '', stickyCwd: null })).toEqual({});
+    });
+
+    it('ignores empty strings for every source', () => {
+      expect(resolveStickyCwd({ headerCwd: '', bodyCwd: '', stickyCwd: '' })).toEqual({});
     });
   });
 });

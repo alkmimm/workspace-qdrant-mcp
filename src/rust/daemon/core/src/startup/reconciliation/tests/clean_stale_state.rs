@@ -406,8 +406,8 @@ async fn test_f036_enqueue_delete_keeps_row_while_in_flight() {
     // File that does NOT exist on disk.
     sqlx::query(
         "INSERT INTO tracked_files \
-         (watch_folder_id, relative_path, file_mtime, file_hash, created_at, updated_at) \
-         VALUES ('wf1', 'gone.rs', '2025-01-01T00:00:00Z', 'hash1', \
+         (watch_folder_id, relative_path, branches, file_mtime, file_hash, created_at, updated_at) \
+         VALUES ('wf1', 'gone.rs', '[\"main\"]', '2025-01-01T00:00:00Z', 'hash1', \
          '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
     )
     .execute(&pool)
@@ -487,8 +487,8 @@ async fn test_f036_enqueue_delete_is_idempotent() {
 
     sqlx::query(
         "INSERT INTO tracked_files \
-         (watch_folder_id, relative_path, file_mtime, file_hash, created_at, updated_at) \
-         VALUES ('wf1', 'gone.rs', '2025-01-01T00:00:00Z', 'hash1', \
+         (watch_folder_id, relative_path, branches, file_mtime, file_hash, created_at, updated_at) \
+         VALUES ('wf1', 'gone.rs', '[\"main\"]', '2025-01-01T00:00:00Z', 'hash1', \
          '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
     )
     .execute(&pool)

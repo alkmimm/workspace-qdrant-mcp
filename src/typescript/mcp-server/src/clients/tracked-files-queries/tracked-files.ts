@@ -27,6 +27,14 @@ export interface ListTrackedFilesOptions {
   extension?: string;
   includeTests?: boolean;
   branch?: string;
+  /**
+   * Base/default branch to fall back to for files unchanged on `branch`.
+   * When set (and different from `branch`), the query returns rows on `branch`
+   * PLUS rows on `fallbackBranch` whose `relative_path` is not already present
+   * on `branch` — i.e. the project as it appears on the feature branch, without
+   * surfacing the stale default-branch copy of a file changed on `branch`.
+   */
+  fallbackBranch?: string;
   limit?: number;
   /** Glob pattern (e.g. "*.rs") — translated to SQLite GLOB */
   glob?: string;
@@ -49,6 +57,8 @@ function buildFilterClause(options: Omit<ListTrackedFilesOptions, 'limit'>): Fil
   const params: (string | number)[] = [options.watchFolderId];
   const { path, fileType, language, extension, branch, glob, componentBasePaths, afterPath } =
     options;
+  const fallbackBranch =
+    options.fallbackBranch && options.fallbackBranch !== branch ? options.fallbackBranch : undefined;
   const includeTests = options.includeTests ?? true;
 
   if (path) {
@@ -70,7 +80,15 @@ function buildFilterClause(options: Omit<ListTrackedFilesOptions, 'limit'>): Fil
   if (!includeTests) {
     conditions.push('is_test = 0');
   }
-  if (branch) {
+  if (branch && fallbackBranch) {
+    // Feature-branch view: rows on `branch`, plus rows on the default branch
+    // whose path is NOT overridden by a same-path entry on `branch`.
+    conditions.push(
+      '(EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?) OR (EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?) AND relative_path NOT IN ' +
+        '(SELECT relative_path FROM tracked_files WHERE watch_folder_id = ? AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?))))'
+    );
+    params.push(branch, fallbackBranch, options.watchFolderId, branch);
+  } else if (branch) {
     conditions.push('EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?)');
     params.push(branch);
   }
@@ -166,6 +184,37 @@ export function countTrackedFiles(
     return row.cnt;
   } catch {
     return 0;
+  }
+}
+
+/**
+ * Resolve the de-facto base branch for a project: the branch under which the
+ * most files are tracked, excluding `excludeBranch`. This matches whatever
+ * branch the daemon tagged the bulk of (unchanged) files under — the daemon
+ * defaults unchanged files to the project's base branch regardless of the
+ * repo's local git naming (e.g. files end up under "main" even when the git
+ * default is "master") — so it is the correct fallback target for a
+ * feature-branch view. Returns `null` when no other branch has tracked files.
+ */
+export function getBaseBranch(
+  db: DatabaseType | null,
+  watchFolderId: string,
+  excludeBranch: string
+): string | null {
+  if (!db) return null;
+  try {
+    const row = db
+      .prepare(
+        `SELECT je.value AS branch FROM tracked_files tf, json_each(tf.branches) je
+         WHERE tf.watch_folder_id = ? AND je.value IS NOT NULL AND je.value != ?
+         GROUP BY je.value
+         ORDER BY COUNT(*) DESC
+         LIMIT 1`
+      )
+      .get(watchFolderId, excludeBranch) as { branch: string } | undefined;
+    return row?.branch ?? null;
+  } catch {
+    return null;
   }
 }
 

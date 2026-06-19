@@ -4,8 +4,13 @@
 
 export const listToolDefinition = {
   name: 'list',
+  annotations: {
+    title: 'List indexed project structure',
+    readOnlyHint: true,
+    openWorldHint: false,
+  },
   description:
-    'List project files and folder structure. Shows only indexed files (excludes gitignored, node_modules, etc). Use format "summary" first to understand project layout, then drill into specific folders with the path parameter.',
+    'List the project file/folder structure from the index the daemon maintains (only indexed files — excludes gitignored, node_modules, etc; this is the daemon\'s indexed view, not a live filesystem walk). Use format "summary" first to understand project layout, then drill into specific folders with the path parameter.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -52,7 +57,8 @@ export const listToolDefinition = {
       },
       branch: {
         type: 'string',
-        description: 'Filter by branch name. Defaults to the current Git branch; use "*" for all branches.',
+        description:
+          'Filter by branch name. Defaults to the current Git branch; use "*" for all branches.',
       },
       cwd: {
         type: 'string',

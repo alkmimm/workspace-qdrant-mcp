@@ -4,6 +4,11 @@
 
 export const searchEvalToolDefinition = {
   name: 'search_eval',
+  annotations: {
+    title: 'Benchmark search quality',
+    readOnlyHint: true,
+    openWorldHint: false,
+  },
   description:
     "Benchmark semantic-search quality. Runs known-item queries (each with the file(s) that SHOULD rank) through the live search pipeline and returns hit@1/3/10, recall@10, MRR, and duplicate-rate per mode (semantic/hybrid/exact) plus a quality verdict. Use it to measure the effect of a search-ranking change — the measure→edit→measure loop. Pass `cases` for an ad-hoc eval set, or omit to use the project's bundled dataset when available. Runs in-process against the real index (no extra setup).",
   inputSchema: {

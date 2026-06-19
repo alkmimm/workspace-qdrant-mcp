@@ -119,8 +119,11 @@ pub struct TrackedFile {
     /// Replaces both the legacy absolute `file_path` and the prior optional
     /// `relative_path` string.
     pub relative_path: RelativePath,
-    /// Git branch (NULL for libraries or non-git contexts)
-    pub branch: Option<String>,
+    /// Branches that hold this exact content (Layer 2 stage 2). One row per
+    /// `(watch_folder, relative_path, file_hash)`; the branch set lives here and
+    /// in the shared Qdrant point's `branch` array payload. Empty for libraries
+    /// or non-git contexts.
+    pub branches: Vec<String>,
     /// Detected file type (e.g., "code", "markdown", "config")
     pub file_type: Option<String>,
     /// Detected programming language (e.g., "rust", "python")

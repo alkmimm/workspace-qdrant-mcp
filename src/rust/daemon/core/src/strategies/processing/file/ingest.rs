@@ -56,12 +56,14 @@ pub(crate) async fn ingest_file_content(
         .await;
     }
 
-    // === CROSS-BRANCH DEDUP FAST-PATH ===
-    // If another branch already indexed an identical file (same watch +
-    // path + file_hash), copy its Qdrant points under the new base_point
-    // instead of re-running parse + embed. See branch_dedup.rs and
-    // docs/specs/21-cross-branch-dedup.md. The probe is one SQL hit on
-    // the idx_tracked_files_dedup index — cheap when there's no match.
+    // === CROSS-BRANCH DEDUP FAST-PATH (Layer 2: share one point) ===
+    // If another branch already indexed identical content (same watch + path +
+    // file_hash), the base_point — and every point_id — is identical (branch is
+    // no longer in the hash). So instead of re-embedding, we just add this
+    // branch to the shared points' `branch` array and reuse the chunk set in
+    // place: no new vectors. See branch_dedup.rs and
+    // docs/specs/21-cross-branch-dedup.md. The probe is one SQL hit on the
+    // idx_tracked_files_dedup index — cheap when there's no match.
     match super::branch_dedup::try_branch_dedup(
         ctx,
         item,
@@ -446,12 +448,8 @@ async fn parse_document(
     let file_document_id = crate::generate_document_id(&item.tenant_id, abs_file_path);
     let file_hash = tracked_files_schema::compute_file_hash(file_path)
         .unwrap_or_else(|_| "unknown".to_string());
-    let base_point = wqm_common::hashing::compute_base_point(
-        &item.tenant_id,
-        &item.branch,
-        relative_path,
-        &file_hash,
-    );
+    let base_point =
+        wqm_common::hashing::compute_base_point(&item.tenant_id, relative_path, &file_hash);
 
     Ok((document_content, file_document_id, file_hash, base_point))
 }

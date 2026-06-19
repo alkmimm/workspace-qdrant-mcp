@@ -25,6 +25,17 @@ impl SqliteGraphStore {
         Self { pool }
     }
 
+    /// Whether a `symbol_type` string names a *container* kind — one that can
+    /// hold members via a CONTAINS edge (class, struct, interface, trait, impl,
+    /// module, enum). Used when resolving a CONTAINS parent stub so a same-named
+    /// constructor/method never wins over the enclosing type.
+    fn is_container_node_type(symbol_type: &str) -> bool {
+        matches!(
+            symbol_type,
+            "class" | "struct" | "interface" | "trait" | "impl" | "module" | "enum"
+        )
+    }
+
     /// Get a reference to the pool (for advanced queries in tests).
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
@@ -377,10 +388,19 @@ impl GraphStore for SqliteGraphStore {
     async fn resolve_stub_edges(&self, tenant_id: &str) -> GraphDbResult<u64> {
         use std::collections::HashMap;
 
-        // 1. All dangling edges: target is a stub node (empty file_path).
-        let dangling = sqlx::query(
+        // Dangling edges come in two orientations, both keyed on a file-less
+        // stub node:
+        //   - target-stub: CALLS / IMPORTS / USES_TYPE point at a name-only
+        //     callee / module / type whose defining file is unknown.
+        //   - source-stub: CONTAINS is authored from a file-less *parent
+        //     container* stub — the class/struct node is created file-anchored
+        //     from its OWN chunk, so the CONTAINS edge otherwise never lands on
+        //     it (this is why `relations(class, filePath)` listed no members).
+        // Both are repointed by name to the real project node; the file-less
+        // stub is dropped once it has no edges left.
+        let target_dangling = sqlx::query(
             "SELECT e.edge_id, e.source_node_id, e.edge_type, e.source_file,
-                    e.weight, e.metadata_json, t.symbol_name AS target_name
+                    e.weight, e.metadata_json, t.symbol_name AS peer_name
              FROM graph_edges e
              JOIN graph_nodes t ON e.target_node_id = t.node_id
              WHERE e.tenant_id = ?1 AND (t.file_path IS NULL OR t.file_path = '')",
@@ -389,58 +409,78 @@ impl GraphStore for SqliteGraphStore {
         .fetch_all(&self.pool)
         .await?;
 
-        if dangling.is_empty() {
+        let source_dangling = sqlx::query(
+            "SELECT e.edge_id, e.target_node_id, e.edge_type, e.source_file,
+                    e.weight, e.metadata_json, s.symbol_name AS peer_name
+             FROM graph_edges e
+             JOIN graph_nodes s ON e.source_node_id = s.node_id
+             WHERE e.tenant_id = ?1 AND (s.file_path IS NULL OR s.file_path = '')",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if target_dangling.is_empty() && source_dangling.is_empty() {
             return Ok(0);
         }
 
-        // 2. Real candidate nodes (resolved file_path, not file-typed), indexed
-        //    by symbol_name -> [(node_id, file_path)].
+        // Real candidate nodes (resolved file_path, not file-typed), indexed by
+        // symbol_name -> [(node_id, file_path, symbol_type)].
         let real_rows = sqlx::query(
-            "SELECT node_id, symbol_name, file_path FROM graph_nodes
+            "SELECT node_id, symbol_name, file_path, symbol_type FROM graph_nodes
              WHERE tenant_id = ?1 AND file_path <> '' AND symbol_type <> 'file'",
         )
         .bind(tenant_id)
         .fetch_all(&self.pool)
         .await?;
 
-        let mut by_name: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        let mut by_name: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
         for r in &real_rows {
             let name: String = r.get("symbol_name");
             let nid: String = r.get("node_id");
             let fp: String = r.get("file_path");
-            by_name.entry(name).or_default().push((nid, fp));
+            let ty: String = r.get("symbol_type");
+            by_name.entry(name).or_default().push((nid, fp, ty));
         }
 
-        // 3. Repoint each resolvable dangling edge to its real node.
+        // Pick the real node for a stub of the given name: prefer a definition
+        // in the edge's own file, else a unique tenant-wide match (ambiguous
+        // names are skipped). `container_only` restricts the pool to container
+        // kinds — used for CONTAINS parents.
+        let pick = |name: &str, own_file: &str, container_only: bool| -> Option<String> {
+            let candidates = by_name.get(name)?;
+            // (node_id, file_path) of eligible candidates.
+            let pool: Vec<(&str, &str)> = candidates
+                .iter()
+                .filter(|(_, _, ty)| !container_only || Self::is_container_node_type(ty))
+                .map(|(nid, fp, _)| (nid.as_str(), fp.as_str()))
+                .collect();
+            // Prefer a definition in the edge's own file.
+            if let Some((nid, _)) = pool.iter().find(|(_, fp)| *fp == own_file) {
+                return Some((*nid).to_string());
+            }
+            // Else accept a unique tenant-wide match; ambiguous names are skipped.
+            match pool.as_slice() {
+                [(nid, _)] => Some((*nid).to_string()),
+                _ => None,
+            }
+        };
+
         let now = now_utc();
         let mut repointed: u64 = 0;
         let mut tx = self.pool.begin().await?;
-        for d in &dangling {
-            let target_name: String = d.get("target_name");
-            let Some(candidates) = by_name.get(&target_name) else {
-                continue; // external/stdlib — no project node with this name.
-            };
+
+        // Pass 1 — target-stub edges: repoint the TARGET to the real node.
+        for d in &target_dangling {
+            let peer_name: String = d.get("peer_name");
             let source_file: String = d.get("source_file");
-            // Prefer a definition in the caller's own file; else require a
-            // unique tenant-wide match. Ambiguous (>1 file) names are skipped.
-            let chosen: Option<&String> = candidates
-                .iter()
-                .find(|(_, fp)| *fp == source_file)
-                .map(|(nid, _)| nid)
-                .or_else(|| {
-                    if candidates.len() == 1 {
-                        Some(&candidates[0].0)
-                    } else {
-                        None
-                    }
-                });
-            let Some(new_target) = chosen else {
-                continue;
+            let Some(new_target) = pick(&peer_name, &source_file, false) else {
+                continue; // external/stdlib, ambiguous, or unresolved.
             };
             let source_node_id: String = d.get("source_node_id");
-            // Skip self-loops (e.g. direct recursion) — they don't add
-            // relationship signal and skew centrality measures.
-            if &source_node_id == new_target {
+            // Skip self-loops (e.g. direct recursion) — they add no signal and
+            // skew centrality.
+            if source_node_id == new_target {
                 continue;
             }
             let edge_type_str: String = d.get("edge_type");
@@ -450,7 +490,7 @@ impl GraphStore for SqliteGraphStore {
             let old_edge_id: String = d.get("edge_id");
             let weight: f64 = d.get("weight");
             let metadata_json: Option<String> = d.get("metadata_json");
-            let new_edge_id = compute_edge_id(&source_node_id, new_target, edge_type);
+            let new_edge_id = compute_edge_id(&source_node_id, &new_target, edge_type);
 
             sqlx::query(
                 "INSERT OR IGNORE INTO graph_edges
@@ -461,7 +501,7 @@ impl GraphStore for SqliteGraphStore {
             .bind(&new_edge_id)
             .bind(tenant_id)
             .bind(&source_node_id)
-            .bind(new_target)
+            .bind(&new_target)
             .bind(edge_type.as_str())
             .bind(&source_file)
             .bind(weight)
@@ -477,9 +517,57 @@ impl GraphStore for SqliteGraphStore {
                 .await?;
             repointed += 1;
         }
+
+        // Pass 2 — source-stub edges (CONTAINS from a file-less container stub):
+        // repoint the SOURCE to the real container node of the same name.
+        for d in &source_dangling {
+            let peer_name: String = d.get("peer_name");
+            let source_file: String = d.get("source_file");
+            let Some(new_source) = pick(&peer_name, &source_file, true) else {
+                continue;
+            };
+            let target_node_id: String = d.get("target_node_id");
+            if target_node_id == new_source {
+                continue;
+            }
+            let edge_type_str: String = d.get("edge_type");
+            let Some(edge_type) = EdgeType::from_str(&edge_type_str) else {
+                continue;
+            };
+            let old_edge_id: String = d.get("edge_id");
+            let weight: f64 = d.get("weight");
+            let metadata_json: Option<String> = d.get("metadata_json");
+            let new_edge_id = compute_edge_id(&new_source, &target_node_id, edge_type);
+
+            sqlx::query(
+                "INSERT OR IGNORE INTO graph_edges
+                    (edge_id, tenant_id, source_node_id, target_node_id, edge_type,
+                     source_file, weight, metadata_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )
+            .bind(&new_edge_id)
+            .bind(tenant_id)
+            .bind(&new_source)
+            .bind(&target_node_id)
+            .bind(edge_type.as_str())
+            .bind(&source_file)
+            .bind(weight)
+            .bind(&metadata_json)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query("DELETE FROM graph_edges WHERE edge_id = ?1 AND tenant_id = ?2")
+                .bind(&old_edge_id)
+                .bind(tenant_id)
+                .execute(&mut *tx)
+                .await?;
+            repointed += 1;
+        }
+
         tx.commit().await?;
 
-        // 4. Drop stub nodes that no longer have any edges.
+        // Drop stub nodes that no longer have any edges.
         sqlx::query(
             "DELETE FROM graph_nodes
              WHERE tenant_id = ?1 AND file_path = ''
@@ -494,10 +582,11 @@ impl GraphStore for SqliteGraphStore {
         .await?;
 
         debug!(
-            "Resolved {} stub edges for tenant {} ({} dangling examined)",
+            "Resolved {} stub edges for tenant {} ({} target + {} source dangling examined)",
             repointed,
             tenant_id,
-            dangling.len()
+            target_dangling.len(),
+            source_dangling.len()
         );
         Ok(repointed)
     }

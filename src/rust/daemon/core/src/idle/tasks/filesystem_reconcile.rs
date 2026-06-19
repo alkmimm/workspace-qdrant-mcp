@@ -63,7 +63,7 @@ impl MaintenanceTask for FilesystemReconcileTask {
         cancel: &CancellationToken,
     ) -> MaintenanceResult {
         let rows = sqlx::query(
-            "SELECT tf.file_id, tf.relative_path, tf.branch, tf.collection,
+            "SELECT tf.file_id, tf.relative_path, tf.branches, tf.collection,
                     wf.tenant_id, wf.path AS watch_path
              FROM tracked_files tf
              JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id
@@ -120,8 +120,14 @@ impl MaintenanceTask for FilesystemReconcileTask {
             // File is missing from disk
             self.files_missing += 1;
             let tenant_id: String = row.try_get("tenant_id").unwrap_or_default();
-            let branch: String = row.try_get("branch").unwrap_or_default();
+            let branches_json: String = row.try_get("branches").unwrap_or_default();
             let collection: String = row.try_get("collection").unwrap_or_default();
+            // One content-row carries the full branch set; a file missing on disk
+            // needs a Delete enqueued per branch it was tracked on so the
+            // branch-set delete handler can drop each from the set (GC'ing the
+            // row and its shared point once the set empties).
+            let branches: Vec<String> =
+                serde_json::from_str(&branches_json).unwrap_or_default();
 
             let abs_path_str = abs_path.to_string_lossy();
             // FilePayload.file_path is a validating RelativePath — ship the
@@ -130,25 +136,30 @@ impl MaintenanceTask for FilesystemReconcileTask {
             // logs; enqueueing it would fail the consumer's parse as a
             // permanent InvalidPayload.
             let payload = build_missing_file_delete_payload(relative_path);
-            if let Err(e) = ctx
-                .queue_manager
-                .enqueue_unified(
-                    ItemType::File,
-                    QueueOperation::Delete,
-                    &tenant_id,
-                    &collection,
-                    &payload,
-                    Some(&branch),
-                    None,
-                )
-                .await
-            {
-                warn!(
-                    "Failed to enqueue delete for missing file {}: {}",
-                    abs_path_str, e
-                );
-            } else {
-                info!("Enqueued delete for missing file: {}", abs_path_str);
+            for branch in &branches {
+                if let Err(e) = ctx
+                    .queue_manager
+                    .enqueue_unified(
+                        ItemType::File,
+                        QueueOperation::Delete,
+                        &tenant_id,
+                        &collection,
+                        &payload,
+                        Some(branch),
+                        None,
+                    )
+                    .await
+                {
+                    warn!(
+                        "Failed to enqueue delete for missing file {} (branch {}): {}",
+                        abs_path_str, branch, e
+                    );
+                } else {
+                    info!(
+                        "Enqueued delete for missing file: {} (branch {})",
+                        abs_path_str, branch
+                    );
+                }
             }
         }
 

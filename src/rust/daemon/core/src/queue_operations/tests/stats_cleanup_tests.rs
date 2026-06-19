@@ -1,7 +1,7 @@
 //! Delete, stats, cleanup, and queue depth tests.
 
 use super::*;
-use crate::tracked_files_schema::CREATE_TRACKED_FILES_V37_SQL;
+use crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL;
 
 #[tokio::test]
 async fn test_unified_queue_delete_item() {
@@ -382,7 +382,7 @@ async fn test_delete_unified_item_tracked_files_scoped_by_tenant() {
     apply_sql_script(&pool, include_str!("../../schema/watch_folders_schema.sql"))
         .await
         .unwrap();
-    sqlx::query(CREATE_TRACKED_FILES_V37_SQL)
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
         .execute(&pool)
         .await
         .unwrap();
@@ -421,9 +421,9 @@ async fn test_delete_unified_item_tracked_files_scoped_by_tenant() {
 
     sqlx::query(
         "INSERT INTO tracked_files \
-         (watch_folder_id, relative_path, branch, needs_reconcile, file_mtime, file_hash, \
+         (watch_folder_id, relative_path, branches, needs_reconcile, file_mtime, file_hash, \
           collection, created_at, updated_at) \
-         VALUES ('wf-t1', ?1, 'main', 0, '2025-01-01T00:00:00Z', 'hash1', \
+         VALUES ('wf-t1', ?1, '[\"main\"]', 0, '2025-01-01T00:00:00Z', 'hash1', \
                  'projects', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
     )
     .bind(rel_path)
@@ -433,9 +433,9 @@ async fn test_delete_unified_item_tracked_files_scoped_by_tenant() {
 
     sqlx::query(
         "INSERT INTO tracked_files \
-         (watch_folder_id, relative_path, branch, needs_reconcile, file_mtime, file_hash, \
+         (watch_folder_id, relative_path, branches, needs_reconcile, file_mtime, file_hash, \
           collection, created_at, updated_at) \
-         VALUES ('wf-t2', ?1, 'main', 0, '2025-01-01T00:00:00Z', 'hash1', \
+         VALUES ('wf-t2', ?1, '[\"main\"]', 0, '2025-01-01T00:00:00Z', 'hash1', \
                  'projects', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
     )
     .bind(rel_path)

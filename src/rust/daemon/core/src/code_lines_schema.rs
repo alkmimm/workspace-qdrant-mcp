@@ -164,6 +164,28 @@ CREATE TABLE IF NOT EXISTS file_metadata (
 )
 "#;
 
+/// Post-v10 DDL for `file_metadata`: branches JSON set (Layer 2 stage 2).
+///
+/// Replaces the scalar `branch` with a `branches` JSON array — the set of
+/// branches that hold this content (one shared, content-keyed row, mirroring
+/// `tracked_files`). Carries every column added by v5–v9 so the v10 rebuild
+/// lands on the current shape directly.
+pub const CREATE_FILE_METADATA_V10_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS file_metadata (
+    file_id INTEGER PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    branches TEXT NOT NULL DEFAULT '[]',
+    file_path TEXT NOT NULL,
+    size_bytes INTEGER,
+    fts5_skipped INTEGER NOT NULL DEFAULT 0,
+    reindex_count INTEGER NOT NULL DEFAULT 0,
+    first_indexed_at TEXT,
+    base_point TEXT,
+    relative_path TEXT,
+    file_hash TEXT
+)
+"#;
+
 /// SQL to add base_point columns to file_metadata (search.db v5).
 ///
 /// Adds base_point, relative_path, and file_hash to align with the
@@ -220,11 +242,13 @@ pub const CREATE_FILE_METADATA_INDEXES_SQL: &[&str] = &[
 /// age(first_indexed_at)` gives a churn rate used to flag IDE/build-generated
 /// files as ignore candidates.
 pub const UPSERT_FILE_METADATA_SQL: &str = r#"
-INSERT INTO file_metadata (file_id, tenant_id, branch, file_path, base_point, relative_path, file_hash, size_bytes, fts5_skipped, reindex_count, first_indexed_at)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+INSERT INTO file_metadata (file_id, tenant_id, branches, file_path, base_point, relative_path, file_hash, size_bytes, fts5_skipped, reindex_count, first_indexed_at)
+VALUES (?1, ?2, CASE WHEN ?3 IS NULL THEN '[]' ELSE json_array(?3) END, ?4, ?5, ?6, ?7, ?8, ?9, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ON CONFLICT(file_id) DO UPDATE SET
     tenant_id = excluded.tenant_id,
-    branch = excluded.branch,
+    branches = CASE WHEN ?3 IS NULL THEN file_metadata.branches ELSE
+        (SELECT json_group_array(value) FROM
+            (SELECT value FROM json_each(file_metadata.branches) UNION SELECT ?3)) END,
     file_path = excluded.file_path,
     base_point = excluded.base_point,
     relative_path = excluded.relative_path,
@@ -299,7 +323,7 @@ pub const SELECT_FILE_ID_BY_BASE_POINT_SQL: &str =
 ///
 /// `?1` = search pattern, `?2` = tenant_id.
 pub const FTS5_SEARCH_BY_PROJECT_SQL: &str = r#"
-SELECT cl.line_id, cl.file_id, cl.seq, cl.content, fm.tenant_id, fm.file_path, fm.branch
+SELECT cl.line_id, cl.file_id, cl.seq, cl.content, fm.tenant_id, fm.file_path, fm.branches AS branch
 FROM code_lines cl
 JOIN code_lines_fts fts ON cl.line_id = fts.rowid
 JOIN file_metadata fm ON cl.file_id = fm.file_id
@@ -311,11 +335,12 @@ ORDER BY cl.file_id, cl.seq
 ///
 /// `?1` = search pattern, `?2` = tenant_id, `?3` = branch.
 pub const FTS5_SEARCH_BY_PROJECT_BRANCH_SQL: &str = r#"
-SELECT cl.line_id, cl.file_id, cl.seq, cl.content, fm.tenant_id, fm.file_path, fm.branch
+SELECT cl.line_id, cl.file_id, cl.seq, cl.content, fm.tenant_id, fm.file_path, fm.branches AS branch
 FROM code_lines cl
 JOIN code_lines_fts fts ON cl.line_id = fts.rowid
 JOIN file_metadata fm ON cl.file_id = fm.file_id
-WHERE fts.content MATCH ?1 AND fm.tenant_id = ?2 AND fm.branch = ?3
+WHERE fts.content MATCH ?1 AND fm.tenant_id = ?2
+  AND EXISTS (SELECT 1 FROM json_each(fm.branches) WHERE value = ?3)
 ORDER BY cl.file_id, cl.seq
 "#;
 
@@ -323,7 +348,7 @@ ORDER BY cl.file_id, cl.seq
 ///
 /// `?1` = search pattern, `?2` = path prefix (use `prefix%` with LIKE).
 pub const FTS5_SEARCH_BY_PATH_PREFIX_SQL: &str = r#"
-SELECT cl.line_id, cl.file_id, cl.seq, cl.content, fm.tenant_id, fm.file_path, fm.branch
+SELECT cl.line_id, cl.file_id, cl.seq, cl.content, fm.tenant_id, fm.file_path, fm.branches AS branch
 FROM code_lines cl
 JOIN code_lines_fts fts ON cl.line_id = fts.rowid
 JOIN file_metadata fm ON cl.file_id = fm.file_id
@@ -335,7 +360,7 @@ ORDER BY cl.file_id, cl.seq
 ///
 /// `?1` = search pattern, `?2` = tenant_id, `?3` = path prefix (use `prefix%` with LIKE).
 pub const FTS5_SEARCH_BY_PROJECT_PATH_SQL: &str = r#"
-SELECT cl.line_id, cl.file_id, cl.seq, cl.content, fm.tenant_id, fm.file_path, fm.branch
+SELECT cl.line_id, cl.file_id, cl.seq, cl.content, fm.tenant_id, fm.file_path, fm.branches AS branch
 FROM code_lines cl
 JOIN code_lines_fts fts ON cl.line_id = fts.rowid
 JOIN file_metadata fm ON cl.file_id = fm.file_id
@@ -567,7 +592,8 @@ mod tests {
     fn test_fts5_search_by_project_branch_sql_valid() {
         assert!(FTS5_SEARCH_BY_PROJECT_BRANCH_SQL.contains("MATCH ?1"));
         assert!(FTS5_SEARCH_BY_PROJECT_BRANCH_SQL.contains("fm.tenant_id = ?2"));
-        assert!(FTS5_SEARCH_BY_PROJECT_BRANCH_SQL.contains("fm.branch = ?3"));
+        // Post-v10 the branch filter scans the `branches` JSON set.
+        assert!(FTS5_SEARCH_BY_PROJECT_BRANCH_SQL.contains("json_each(fm.branches)"));
     }
 
     #[test]

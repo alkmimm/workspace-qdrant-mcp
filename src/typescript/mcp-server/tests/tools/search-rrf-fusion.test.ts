@@ -2,12 +2,12 @@
  * Tests for dense-primary RRF fusion (applyRRFFusion) and the shared file key.
  *
  * Hybrid fusion must keep the dense (semantic) leg as the primary ranking
- * signal: chunks retrieved by BOTH legs sum their votes at full strength
- * (same-chunk agreement is the high-precision signal behind hybrid's top-1/3
- * edge), while chunks only the sparse BM25 leg retrieved are down-weighted to
- * backfill — on natural-language queries the sparse leg is noise-heavy and
- * its unconfirmed votes would otherwise displace semantically-found code
- * from the final top-k.
+ * signal: the keyword (BM25) leg is globally down-weighted (KEYWORD_WEIGHT) so
+ * chunks retrieved by BOTH legs still get a confirming boost (same-chunk
+ * agreement is the high-precision signal behind hybrid's top-1/3 edge), while
+ * chunks only the sparse BM25 leg retrieved are demoted further to backfill —
+ * on natural-language queries the sparse leg is noise-heavy and its unconfirmed
+ * votes would otherwise displace semantically-found code from the final top-k.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -28,8 +28,12 @@ function chunk(id: string, searchType: 'semantic' | 'keyword', score = 0.5): Sea
 
 const vote = (rank: number): number => 1 / (RRF_K + rank);
 
+// Mirror the dense-dominant fusion weights in search-qdrant.ts.
+const KEYWORD_WEIGHT = 0.25;
+const SPARSE_ONLY_WEIGHT = 0.5;
+
 describe('applyRRFFusion (dense-primary)', () => {
-  it('sums full-strength votes for chunks confirmed by both legs', () => {
+  it('boosts chunks confirmed by both legs with a down-weighted keyword vote', () => {
     const results = [
       chunk('A', 'semantic'),
       chunk('B', 'semantic'),
@@ -40,9 +44,9 @@ describe('applyRRFFusion (dense-primary)', () => {
     const fused = applyRRFFusion(results, 'hybrid');
 
     const byId = new Map(fused.map((r) => [r.id, r]));
-    // B confirmed by both legs: dense rank 2 + sparse rank 1, no demotion.
-    expect(byId.get('B')?.score).toBeCloseTo(vote(2) + vote(1), 10);
-    // The double vote outranks the dense leg's own #1.
+    // B confirmed by both legs: full dense rank 2 + down-weighted sparse rank 1.
+    expect(byId.get('B')?.score).toBeCloseTo(vote(2) + vote(1) * KEYWORD_WEIGHT, 10);
+    // The confirming vote still lifts B above the dense leg's own #1.
     expect(byId.get('B')!.score).toBeGreaterThan(byId.get('A')!.score);
     expect(fused.every((r) => r.metadata['_search_type'] === 'hybrid')).toBe(true);
   });
@@ -62,9 +66,9 @@ describe('applyRRFFusion (dense-primary)', () => {
 
     const a = fused.find((r) => r.id === 'A');
     const b = fused.find((r) => r.id === 'B');
-    // Sparse-only entries carry the demoted vote so unconfirmed keyword
-    // matches backfill instead of displacing dense results.
-    expect(b?.score).toBeCloseTo(vote(1) * 0.5, 10);
+    // Sparse-only entries carry the doubly-demoted vote (global keyword weight ×
+    // sparse-only weight) so unconfirmed keyword matches backfill below dense.
+    expect(b?.score).toBeCloseTo(vote(1) * KEYWORD_WEIGHT * SPARSE_ONLY_WEIGHT, 10);
     expect(a!.score).toBeGreaterThan(b!.score);
   });
 

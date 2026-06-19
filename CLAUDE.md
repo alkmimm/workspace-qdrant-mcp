@@ -180,10 +180,13 @@ SystemService, CollectionService, DocumentService, EmbeddingService, ProjectServ
 
 **Embeddings (full reference: `docs/deployment/embeddings.md`):**
 - The reference deployment uses `WQM_EMBEDDING_PROVIDER=openai_compatible`
-  with `intfloat/multilingual-e5-large` (1024d) served by in-stack backends:
-  GPU (Infinity, preferred) + CPU (TEI, warm standby), selected via
+  with the code-specialized `nomic-ai/CodeRankEmbed` (768d) served by in-stack
+  **Infinity** backends: GPU (preferred) + CPU (`--device cpu`, warm standby —
+  TEI can't serve this NomicBERT safetensors model), selected via
   `COMPOSE_PROFILES=embeddings-cpu[,embeddings-gpu]` in `docker/.env` with
-  automatic daemon-side failover (`embedding.fallback_base_url`).
+  automatic daemon-side failover (`embedding.fallback_base_url`). The query
+  carries an instruction prefix (`query_prefix`); documents get none. (Earlier
+  profiles: `multilingual-e5-large` then `BAAI/bge-m3`, both 1024d.)
 - The GPU backend requires the NVIDIA Container Toolkit on the Docker
   engine (containers cannot see the GPU otherwise — `nvidia-smi` working in
   WSL is not sufficient). Switching CPU↔GPU never requires a reembed —

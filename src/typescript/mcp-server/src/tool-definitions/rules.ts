@@ -4,8 +4,12 @@
 
 export const rulesToolDefinition = {
   name: 'rules',
+  annotations: {
+    title: 'Behavioral rules (list/add/update/remove)',
+    openWorldHint: false,
+  },
   description:
-    "Manage behavioral rules (add, update, remove, list). Check active rules at the start of each session to load the user's behavioral preferences. Rules persist across sessions and guide how you should work.",
+    "Manage behavioral rules (add, update, remove, list). Check active rules at the start of each session to load the user's behavioral preferences. Rules persist across sessions and guide how you should work. Required args per action: add/update → label + content; remove → label; list → none.",
   inputSchema: {
     type: 'object' as const,
     properties: {

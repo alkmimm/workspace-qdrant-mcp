@@ -211,7 +211,7 @@ export function findProject(registry: Registry, sel: ProjectSelector): RegistryP
     const exact = projects.filter((p) => toAbs(p.root) === target);
     if (exact.length === 1) return exact[0] as RegistryProject;
     if (exact.length > 1) {
-      throw new Error(`Projeto ambiguo (root match): ${sel.projectDir}`);
+      throw new Error(`Ambiguous project (root match): ${sel.projectDir}`);
     }
     // Fall through to name/id matching if root didn't pin it.
   }
@@ -224,16 +224,16 @@ export function findProject(registry: Registry, sel: ProjectSelector): RegistryP
   }
 
   if (!sel.projectName && !sel.projectId && !sel.projectDir) {
-    throw new Error('Informe projectName, projectId ou projectDir.');
+    throw new Error('Provide projectName, projectId, or projectDir.');
   }
   if (candidates.length === 0) {
     throw new Error(
-      `Projeto indexado nao encontrado: ${sel.projectName ?? ''} ${sel.projectId ?? ''} ${sel.projectDir ?? ''}`.trim()
+      `Indexed project not found: ${sel.projectName ?? ''} ${sel.projectId ?? ''} ${sel.projectDir ?? ''}`.trim()
     );
   }
   if (candidates.length > 1) {
     throw new Error(
-      `Projeto ambiguo: ${sel.projectName ?? ''} ${sel.projectId ?? ''} ${sel.projectDir ?? ''}`.trim()
+      `Ambiguous project: ${sel.projectName ?? ''} ${sel.projectId ?? ''} ${sel.projectDir ?? ''}`.trim()
     );
   }
   return candidates[0] as RegistryProject;
@@ -272,7 +272,7 @@ export function upsertBranch(
   branch: RegistryBranch
 ): void {
   const project = registry.projects.find((p) => p.name === projectName);
-  if (!project) throw new Error(`Projeto nao encontrado: ${projectName}`);
+  if (!project) throw new Error(`Project not found: ${projectName}`);
   if (!project.branches) project.branches = [];
   const idx = project.branches.findIndex((b) => b.name === branch.name);
   if (idx >= 0) {
@@ -451,7 +451,7 @@ export function runAgentBranchStatus(args: BranchArgs): unknown {
   const registry = readRegistry(args.registryPath);
   const project = findProject(registry, args);
   const branch = findBranch(project, args.branchName);
-  if (!branch) throw new Error(`Branch nao registrada: ${args.branchName}`);
+  if (!branch) throw new Error(`Branch not registered: ${args.branchName}`);
   // Match PS shape: include the live git snapshot from the branch's working
   // tree. `path` may be a worktree separate from project.root, so we snapshot
   // that path directly. When the path no longer exists, surface ok=false with
@@ -647,7 +647,7 @@ function normalizeProjectExport(p: RegistryProject): RegistryProject {
 }
 
 export function runStartAgentBranch(args: StartAgentBranchArgs): unknown {
-  if (!args.branchName) throw new Error('branchName obrigatorio');
+  if (!args.branchName) throw new Error('branchName is required');
 
   const registry = readRegistry(args.registryPath);
 
@@ -700,7 +700,7 @@ export function runStartAgentBranch(args: StartAgentBranchArgs): unknown {
       // Backfill: worktree already exists on disk. Just register it.
       if (!isGitRepository(wtPath)) {
         throw new Error(
-          `worktreePath existe mas nao e um worktree git valido: ${wtPath}`
+          `worktreePath exists but is not a valid git worktree: ${wtPath}`
         );
       }
       baseCommit = gitRevParse(repo, baseBranch);
@@ -708,7 +708,7 @@ export function runStartAgentBranch(args: StartAgentBranchArgs): unknown {
     } else {
       // Fresh worktree creation.
       baseCommit = gitRevParse(repo, baseBranch);
-      if (!baseCommit) throw new Error(`baseBranch nao encontrada: ${baseBranch}`);
+      if (!baseCommit) throw new Error(`baseBranch not found: ${baseBranch}`);
       if (branchExists(repo, args.branchName)) {
         execFileSync('git', ['-C', repo, 'worktree', 'add', wtPath, args.branchName], {
           stdio: 'inherit',
@@ -739,7 +739,7 @@ export function runStartAgentBranch(args: StartAgentBranchArgs): unknown {
       timeout: 5000,
     });
     if (status.trim().length > 0) {
-      throw new Error('working tree nao esta limpo; commit ou stash antes');
+      throw new Error('working tree is not clean; commit or stash first');
     }
     execFileSync('git', ['-C', repo, 'checkout', baseBranch], {
       stdio: 'inherit',
@@ -791,16 +791,16 @@ export function runStartAgentBranch(args: StartAgentBranchArgs): unknown {
     project: project.name,
     branch,
     message:
-      'Branch de agente registrada. Daemon registration acontece via hook ou sync_current_branch.',
+      'Agent branch registered. Daemon registration happens via git hook or sync_current_branch.',
   };
 }
 
 export function runFinishAgentBranch(args: BranchArgs): unknown {
-  if (!args.branchName) throw new Error('branchName obrigatorio');
+  if (!args.branchName) throw new Error('branchName is required');
   const registry = readRegistry(args.registryPath);
   const project = findProject(registry, args);
   const branch = findBranch(project, args.branchName);
-  if (!branch) throw new Error(`Branch nao registrada: ${args.branchName}`);
+  if (!branch) throw new Error(`Branch not registered: ${args.branchName}`);
 
   const path = toAbs(branch.path);
   if (existsSync(path)) {
@@ -809,7 +809,7 @@ export function runFinishAgentBranch(args: BranchArgs): unknown {
   }
   branch.lastSeenAt = utcNow();
   branch.status = 'ready_for_review';
-  branch.note = 'Pronta para revisao humana. Merge nao executado.';
+  branch.note = 'Ready for human review. Merge not performed.';
 
   upsertBranch(registry, project.name, branch);
   writeRegistry(args.registryPath, registry);
@@ -819,20 +819,20 @@ export function runFinishAgentBranch(args: BranchArgs): unknown {
     action: 'finish_agent_branch',
     project: project.name,
     branch,
-    message: 'Marcada como ready_for_review sem merge.',
+    message: 'Marked as ready_for_review without merge.',
   };
 }
 
 export function runAbandonAgentBranch(args: AbandonAgentBranchArgs): unknown {
-  if (!args.branchName) throw new Error('branchName obrigatorio');
+  if (!args.branchName) throw new Error('branchName is required');
   const registry = readRegistry(args.registryPath);
   const project = findProject(registry, args);
   const branch = findBranch(project, args.branchName);
-  if (!branch) throw new Error(`Branch nao registrada: ${args.branchName}`);
+  if (!branch) throw new Error(`Branch not registered: ${args.branchName}`);
 
   branch.status = 'abandoned';
   branch.lastSeenAt = utcNow();
-  branch.note = 'Abandonada no registry. Worktree/branch nao deletados automaticamente.';
+  branch.note = 'Abandoned in the registry. Worktree/branch not deleted automatically.';
 
   if (args.removeWorktree === true && branch.useWorktree) {
     try {
@@ -841,9 +841,9 @@ export function runAbandonAgentBranch(args: AbandonAgentBranchArgs): unknown {
         ['-C', toAbs(project.root), 'worktree', 'remove', toAbs(branch.path)],
         { stdio: 'inherit', timeout: 30000 }
       );
-      branch.note = 'Abandonada e worktree removida por solicitacao explicita.';
+      branch.note = 'Abandoned and worktree removed by explicit request.';
     } catch (err) {
-      branch.note = `Abandonada; worktree remove falhou: ${(err as Error).message}`;
+      branch.note = `Abandoned; worktree remove failed: ${(err as Error).message}`;
     }
   }
 

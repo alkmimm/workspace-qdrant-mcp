@@ -212,3 +212,57 @@ pub const CREATE_TRACKED_FILES_V37_INDEXES_SQL: &[&str] = &[
     r#"CREATE INDEX IF NOT EXISTS idx_tracked_files_branch
        ON tracked_files(watch_folder_id, branch)"#,
 ];
+
+// ---------------------------------------------------------------------------
+// Migration SQL — v41 (Layer 2 stage 2): collapse to one content-row.
+//
+// The per-branch `branch` column is replaced by a `branches` JSON array — the
+// set of branches that hold this exact content (one shared Qdrant point, since
+// `base_point` is already branch-agnostic after stage 1). The UNIQUE constraint
+// moves from `(watch_folder_id, relative_path, branch)` to
+// `(watch_folder_id, relative_path, file_hash)`: one row per content version of
+// a path, regardless of how many branches share it. Branch-scoped reads use
+// `EXISTS(SELECT 1 FROM json_each(branches) WHERE value = ?)`.
+// See docs/specs/21-cross-branch-dedup.md (Stage 2 blueprint).
+// ---------------------------------------------------------------------------
+
+/// Post-v41 DDL for `tracked_files`: content-keyed, with a `branches` JSON set.
+pub const CREATE_TRACKED_FILES_V41_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS tracked_files (
+    file_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watch_folder_id TEXT NOT NULL,
+    branches TEXT NOT NULL DEFAULT '[]',
+    file_type TEXT,
+    language TEXT,
+    file_mtime TEXT NOT NULL,
+    file_hash TEXT NOT NULL,
+    chunk_count INTEGER DEFAULT 0,
+    chunking_method TEXT,
+    chunker_version TEXT,
+    lsp_status TEXT DEFAULT 'none' CHECK (lsp_status IN ('none', 'done', 'failed', 'skipped')),
+    treesitter_status TEXT DEFAULT 'none' CHECK (treesitter_status IN ('none', 'done', 'failed', 'skipped')),
+    last_error TEXT,
+    needs_reconcile INTEGER DEFAULT 0,
+    reconcile_reason TEXT,
+    extension TEXT,
+    is_test INTEGER DEFAULT 0,
+    collection TEXT NOT NULL DEFAULT 'projects',
+    base_point TEXT,
+    relative_path TEXT NOT NULL,
+    incremental INTEGER DEFAULT 0,
+    component TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (watch_folder_id) REFERENCES watch_folders(watch_id),
+    UNIQUE(watch_folder_id, relative_path, file_hash)
+)
+"#;
+
+/// Post-v41 indexes for `tracked_files`. The branch index is dropped (no scalar
+/// branch column); `relative_path` + `base_point` + reconcile indexes remain.
+pub const CREATE_TRACKED_FILES_V41_INDEXES_SQL: &[&str] = &[
+    r#"CREATE INDEX IF NOT EXISTS idx_tracked_files_watch
+       ON tracked_files(watch_folder_id)"#,
+    r#"CREATE INDEX IF NOT EXISTS idx_tracked_files_relative
+       ON tracked_files(watch_folder_id, relative_path)"#,
+];

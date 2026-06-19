@@ -15,6 +15,12 @@ This guide covers how to configure, instruct, and get the most from the workspac
 
 ## MCP Server Setup
 
+> **This fork is container-first.** The reference deployment builds and runs
+> everything in Docker and serves MCP over **HTTP** — `make redeploy` (Linux/WSL)
+> or `make -f Makefile.win redeploy` (Windows); see the repo `Makefile` and
+> `docker/.env`. The stdio `node …/dist/index.js` registration below is for a
+> local non-container build and still works, but is not how this fork is run.
+
 ### Prerequisites
 
 Before connecting Claude to the MCP server, ensure the daemon and Qdrant are running:
@@ -98,6 +104,13 @@ claude mcp list
 | `WQM_DATABASE_PATH` | No | `~/.local/share/workspace-qdrant/state.db` | Override SQLite state path |
 | `WQM_LOG_LEVEL` | No | `INFO` | Log level: DEBUG, INFO, WARN, ERROR |
 
+> **Reference deployment (this fork).** The recommended setup is **container-first
+> over HTTP** (`make redeploy` / `docker compose`), with the daemon using the
+> code-specialized **CodeRankEmbed** (768-dim) via an OpenAI-compatible backend —
+> see `docs/deployment/embeddings.md`. `FASTEMBED_MODEL` above is the in-process
+> zero-dependency fallback (`all-MiniLM-L6-v2`, 384-dim). The stdio
+> `node dist/index.js` examples below apply to a local non-container build.
+
 ---
 
 ## Instructing LLMs to Use Tools Effectively
@@ -129,8 +142,14 @@ At the start of every session:
   function names, import paths, specific constants, error messages
 - `list` — browse project structure. Use to orient yourself before diving in,
   or to find files by type/language
-- `retrieve` — direct access to a known document ID or metadata filter.
-  Use after `search` to paginate through large documents chunk-by-chunk
+- `retrieve` — direct access to a known Qdrant point id or metadata filter.
+  Use the `id` field from `search`/`list` results; if you only have
+  `metadata.document_id`, use `filter: { document_id: "..." }`. If the hit
+  came from exact search, pass `filePath` + `lineNumber` from the result
+  metadata. Read the returned `hint` when `success=false` before retrying,
+  especially when you are paginating through large documents chunk-by-chunk
+  after a `search`. The tool will also try the metadata filter automatically if
+  the direct point lookup misses.
 - `store` — persist reference documentation, notes, or web pages to the
   libraries collection. Also used to register new projects
 - `rules` — read and write behavioral rules that persist across sessions
@@ -140,7 +159,7 @@ At the start of every session:
 - Prefer `scope="project"` (default) for current-project work
 - Use `scope="all"` only when looking for patterns across multiple projects
 - Use `collection="libraries"` when looking for reference documentation
-- Use `include_libraries=true` to search project code and reference docs together
+- Use `includeLibraries=true` to search project code and reference docs together
 
 ### Rules as memory
 
@@ -165,6 +184,19 @@ persist ("always use X", "never do Y", "for this project, prefer Z"):
 
 ## Search Strategies
 
+### Project Detection (`cwd`)
+
+Every project-scoped call (`search`, `grep`, `list`, `retrieve`, `rules`) must
+resolve which project you mean. Over **stdio** that comes from the process CWD.
+Over **HTTP** (the container deployment) the server cannot observe your location,
+so pass your absolute working directory in the `cwd` argument — or an explicit
+`projectId`. Omitting both yields `"Could not detect project"`.
+
+The server remembers the last `cwd` you passed **per session**, so you only need
+to send it once (e.g. on your first call); later calls in the same session may
+omit it. Prefer `projectId` when you have it (from a previous result) — it is
+exact and needs no detection.
+
 ### Choosing the Right Tool
 
 | Situation | Tool | Reason |
@@ -179,7 +211,7 @@ persist ("always use X", "never do Y", "for this project, prefer Z"):
 
 #### When to use `search`
 
-Use `search` for questions and concepts where you do not know the exact text. The hybrid search engine combines dense vector similarity (semantic) with BM25 keyword scoring for the best of both approaches.
+Use `search` for questions and concepts where you do not know the exact text. By default it ranks by meaning using dense vector similarity (`mode: "semantic"`); pass `mode: "hybrid"` to additionally fuse BM25 keyword scoring when the query centers on an exact identifier or symbol.
 
 ```
 # Good search queries
@@ -264,20 +296,27 @@ search({
 
 | Value | Behavior |
 |-------|----------|
-| `"hybrid"` (default) | Semantic + keyword with Reciprocal Rank Fusion |
-| `"semantic"` | Pure vector similarity (dense embeddings only) |
-| `"keyword"` | Keyword/exact matching (sparse BM25 only) |
+| `"semantic"` (default) | Pure dense-vector similarity — ranks by meaning. The strongest general mode on the benchmark; the right default for concept queries. |
+| `"hybrid"` | Dense + sparse (BM25) fused with Reciprocal Rank Fusion. Mainly helps queries built around an exact identifier/symbol. |
 
-#### `file_type` parameter
+`keyword` (sparse-only) is **not** an advertised mode — for a literal token or substring use the `grep` tool or `exact: true`, not a search mode.
+
+#### `fileType` parameter
+
+The classification enum is: `code`, `docs`, `text`, `config`, `data`, `build`, `web`, `slides`.
 
 | Value | Files included |
 |-------|----------------|
 | `"code"` | Source code (.rs, .py, .ts, .go, etc.) |
-| `"doc"` | Documentation (.md, .txt, .rst) |
-| `"test"` | Test files (test_*, *_test.*, spec.*) |
+| `"docs"` | Binary document formats (PDF, Office) — **not** Markdown |
+| `"text"` | Prose and lightweight markup, including Markdown (`.md`) and plain text |
 | `"config"` | Configuration (.yaml, .json, .toml, .env) |
-| `"note"` | User notes and scratch content |
-| `"artifact"` | Build outputs, generated files |
+| `"data"` | Data files (.csv, .parquet, fixtures) |
+| `"build"` | Build manifests/scripts (Makefile, Cargo.toml, package.json) |
+| `"web"` | Web assets (.html, .css) |
+| `"slides"` | Presentation / slide content |
+
+There is no `test` file type — test files are `code`; target them with a `pathGlob` like `"**/*.test.*"`.
 
 ### Result Limit Tuning
 
@@ -287,7 +326,7 @@ The default limit is 10 results. Adjust based on task:
 - **Exploration** (understanding a subsystem): `limit=10` to `limit=20`
 - **Exhaustive review** (audit, refactoring): `limit=20` to `limit=50`
 
-Higher limits increase latency. Prefer filtering (scope, file_type, component) over high limits to keep results focused.
+Higher limits increase latency. Prefer filtering (scope, fileType, component) over high limits to keep results focused.
 
 ---
 
@@ -490,13 +529,13 @@ await store({
 search({
   query: "spawning tasks and cancellation",
   collection: "libraries",
-  scope: "tokio"
+  libraryName: "tokio"
 })
 
 // Or search project code and library docs together
 search({
   query: "async task spawning pattern",
-  include_libraries: true
+  includeLibraries: true
 })
 ```
 
@@ -511,8 +550,8 @@ grep({ pattern: "validate_token", contextLines: 2 })
 // 2. Understand callers and dependents semantically
 search({ query: "validate_token authentication flow", includeGraphContext: true })
 
-// 3. Check for related tests
-search({ query: "token validation test cases", file_type: "test" })
+// 3. Check for related tests (tests are `code`; target them with a path glob)
+search({ query: "token validation test cases", pathGlob: "**/*{test,spec}*" })
 
 // 4. Find configuration that may reference the symbol
 grep({ pattern: "validate_token", pathGlob: "**/*.toml" })
@@ -608,11 +647,11 @@ search({ query: "queue retry logic", component: "daemon.core" })
 
 ### Avoid Redundant Cross-Collection Searches
 
-The `include_libraries=true` parameter executes a second search against the `libraries` collection and fuses the results with RRF. Only use it when you genuinely need both project code and reference documentation in the same result set. Otherwise, make two separate targeted queries.
+The `includeLibraries=true` parameter executes a second search against the `libraries` collection and fuses the results with RRF. Only use it when you genuinely need both project code and reference documentation in the same result set. Otherwise, make two separate targeted queries.
 
 ```typescript
 // Use when you need both together
-search({ query: "gRPC client setup", include_libraries: true })
+search({ query: "gRPC client setup", includeLibraries: true })
 
 // Prefer separate targeted queries when you know which you need
 search({ query: "daemon gRPC client implementation" })

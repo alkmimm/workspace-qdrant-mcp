@@ -350,16 +350,16 @@ async fn handle_single_git_event(
 ) {
     match workspace_qdrant_core::branch_switch::handle_git_event(event, pool, qm).await {
         Ok(stats) => {
-            let total = stats.batch_updated
+            let total = stats.enqueued_unchanged
                 + stats.enqueued_changed
                 + stats.enqueued_added
                 + stats.enqueued_deleted;
             if total > 0 {
                 info!(
-                    "Git event {:?} processed: {} batch-updated, \
+                    "Git event {:?} processed: {} unchanged re-keyed, \
                      {} changed, {} added, {} deleted",
                     event.event_type,
-                    stats.batch_updated,
+                    stats.enqueued_unchanged,
                     stats.enqueued_changed,
                     stats.enqueued_added,
                     stats.enqueued_deleted

@@ -4,8 +4,13 @@
 
 export const grepToolDefinition = {
   name: 'grep',
+  annotations: {
+    title: 'Exact/regex search over the project index',
+    readOnlyHint: true,
+    openWorldHint: false,
+  },
   description:
-    'Search code with exact substring or regex pattern matching. Uses FTS5 trigram index for fast line-level search across indexed files.',
+    'Exact substring or regex search over the FTS5 trigram index the daemon builds across the whole indexed project — branch-aware and covering files you have not opened, complementing a native working-tree grep. Use it for a known literal: identifier, import path, env var, or error string. For concept/meaning queries use the search tool; for caller/impact relationships use the graph tool.',
   inputSchema: {
     type: 'object' as const,
     properties: {

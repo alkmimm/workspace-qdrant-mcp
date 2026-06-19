@@ -44,9 +44,58 @@ const TEXT_BODY_KEYS: readonly string[] = [
   'body',
 ];
 
-function truncateText(text: string, cap: number, id: string, collection: string): string {
+function metadataNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function metadataString(metadata: Record<string, unknown>, key: string): string | undefined {
+  const v = metadata[key];
+  return typeof v === 'string' && v.trim() !== '' ? v : undefined;
+}
+
+/** Build a grep-like `path:line` (or bare `path`) locator from a hit's
+ *  metadata. Prefers the repo-relative path (clickable, what an agent wants)
+ *  and the most specific line available (exact-search `line_number`, else the
+ *  tree-sitter chunk's `chunk_start_line`). Returns undefined when the hit
+ *  carries no path at all (e.g. some library/scratchpad entries). Item 4. */
+function deriveLocation(metadata: Record<string, unknown>): string | undefined {
+  const path = metadataString(metadata, 'relative_path') ?? metadataString(metadata, 'file_path');
+  if (path === undefined) return undefined;
+  const line =
+    metadataNumber(metadata['line_number']) ?? metadataNumber(metadata['chunk_start_line']);
+  return line !== undefined ? `${path}:${line}` : path;
+}
+
+/** One-line hint that teaches the `graph` tool in-band. Emitted only when at
+ *  least one hit is a named code symbol, so non-code searches pay no token
+ *  cost. The subagent channel: these agents never get the server's MCP
+ *  `instructions`, so the result body is the only place that can teach them
+ *  the next tool. Item 3. */
+const GRAPH_HINT =
+  'Tip: for callers, usages, or change-impact of a symbol in these results, ' +
+  'call the `graph` tool (e.g. graph(action="impact", symbol="<name>")) instead of re-searching.';
+
+function hasSymbolHit(results: readonly SearchResult[]): boolean {
+  return results.some((r) => metadataString(r.metadata, 'chunk_symbol_name') !== undefined);
+}
+
+function buildRetrieveReference(r: SearchResult): string {
+  const filePath = r.metadata['file_path'] as string | undefined;
+  const lineNumber = metadataNumber(r.metadata['line_number']);
+  if (filePath !== undefined && filePath !== '' && lineNumber !== undefined) {
+    return `retrieve(filePath=${JSON.stringify(filePath)}, lineNumber=${lineNumber}, collection=${JSON.stringify(r.collection)})`;
+  }
+  return `retrieve(documentId=${JSON.stringify(r.id)}, collection=${JSON.stringify(r.collection)})`;
+}
+
+function truncateText(text: string, cap: number, reference: string): string {
   if (text.length <= cap) return text;
-  const marker = ` ... [truncated at ${cap} chars; full chunk via retrieve(documentId="${id}", collection="${collection}")]`;
+  const marker = ` ... [truncated at ${cap} chars; full chunk via ${reference}]`;
   const keep = Math.max(0, cap - marker.length);
   return text.slice(0, keep) + marker;
 }
@@ -110,26 +159,27 @@ function shapeAsSummary(r: SearchResult): SearchResult {
     // structural fields and drops the rest (keyword_baskets/keywords/etc.).
     metadata: pickSummaryMetadata(r.metadata),
   };
-  if (r.title) out.title = r.title;
+  if (r.title !== undefined && r.title !== '') out.title = r.title;
+  // Carry the rerank ordering signal through the summary allowlist (the
+  // truncate path keeps it via spread; summary rebuilds, so add it explicitly).
+  if (r.rerankScore !== undefined) out.rerankScore = r.rerankScore;
+  const location = deriveLocation(r.metadata);
+  if (location !== undefined) out.location = location;
   return out;
 }
 
-function shapeParentContext(
-  parent: ParentContext,
-  cap: number,
-  id: string,
-  collection: string
-): ParentContext {
+function shapeParentContext(parent: ParentContext, cap: number, reference: string): ParentContext {
   return {
     ...parent,
-    unit_text: truncateText(parent.unit_text ?? '', cap, id, collection),
+    unit_text: truncateText(parent.unit_text ?? '', cap, reference),
   };
 }
 
 function shapeAsTruncated(r: SearchResult, cap: number): SearchResult {
+  const retrieveReference = buildRetrieveReference(r);
   const out: SearchResult = {
     ...r,
-    content: truncateText(r.content ?? '', cap, r.id, r.collection),
+    content: truncateText(r.content ?? '', cap, retrieveReference),
     // Drop content duplication AND the daemon's ranking-aid fields from
     // metadata: without this we'd ship the body twice for any sub-cap hit,
     // and carry ~1.5–2k tokens of keywords/baskets noise per hit that the
@@ -137,8 +187,10 @@ function shapeAsTruncated(r: SearchResult, cap: number): SearchResult {
     metadata: stripBulkMetadata(r.metadata),
   };
   if (r.parent_context) {
-    out.parent_context = shapeParentContext(r.parent_context, cap, r.id, r.collection);
+    out.parent_context = shapeParentContext(r.parent_context, cap, retrieveReference);
   }
+  const location = deriveLocation(r.metadata);
+  if (location !== undefined) out.location = location;
   return out;
 }
 
@@ -159,24 +211,38 @@ export function shapeHitPayloads(
   response: SearchResponse,
   options: SearchOptions
 ): { response: SearchResponse; metrics: ShapingMetrics } {
-  if (options.summary) {
+  // Computed from the ORIGINAL hits so it is independent of which shaping
+  // branch runs (every branch preserves chunk_symbol_name). Folded into the
+  // response by `finalize` below.
+  const hint = hasSymbolHit(response.results) ? GRAPH_HINT : undefined;
+  const finalize = (base: SearchResponse, results: SearchResult[]): SearchResponse => {
+    const out: SearchResponse = { ...base, results };
+    if (hint !== undefined && out.hint === undefined) out.hint = hint;
+    return out;
+  };
+
+  if (options.summary === true) {
     const metrics = emptyMetrics('summary');
     const results = response.results.map((r) => {
       metrics.bytesInShaped += hitShapedBytes(r);
       return shapeAsSummary(r);
     });
     // bytesOutShaped stays 0 — summary mode drops bodies entirely.
-    return { response: { ...response, results }, metrics };
+    return { response: finalize(response, results), metrics };
   }
   const cap = options.maxBytesPerHit ?? DEFAULT_MAX_BYTES_PER_HIT;
   if (cap <= 0) {
     const metrics = emptyMetrics('none');
-    for (const r of response.results) {
+    // Cap disabled: bodies pass through untouched, but still lift `location`
+    // out of metadata so the grep-like locator is uniform across all modes.
+    const results = response.results.map((r) => {
       const bytes = hitShapedBytes(r);
       metrics.bytesInShaped += bytes;
       metrics.bytesOutShaped += bytes;
-    }
-    return { response, metrics };
+      const location = deriveLocation(r.metadata);
+      return location !== undefined ? { ...r, location } : r;
+    });
+    return { response: finalize(response, results), metrics };
   }
   const metrics = emptyMetrics('truncate');
   const results = response.results.map((r) => {
@@ -190,5 +256,5 @@ export function shapeHitPayloads(
     metrics.bytesOutShaped += hitShapedBytes(shaped);
     return shaped;
   });
-  return { response: { ...response, results }, metrics };
+  return { response: finalize(response, results), metrics };
 }

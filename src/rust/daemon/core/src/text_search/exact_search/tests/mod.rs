@@ -40,11 +40,13 @@ pub(super) async fn insert_file_content(
     sqlx::query(UPSERT_FILE_METADATA_SQL)
         .bind(file_id)
         .bind(tenant_id)
-        .bind(branch)
+        .bind(branch) // ?3 — wrapped into the branches JSON set by the UPSERT
         .bind(file_path)
-        .bind(None::<&str>)
-        .bind(None::<&str>)
-        .bind(None::<&str>)
+        .bind(None::<&str>) // ?5 base_point
+        .bind(None::<&str>) // ?6 relative_path
+        .bind(None::<&str>) // ?7 file_hash
+        .bind(None::<i64>) // ?8 size_bytes
+        .bind(0_i64) // ?9 fts5_skipped
         .execute(pool)
         .await
         .unwrap();
