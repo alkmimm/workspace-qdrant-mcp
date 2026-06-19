@@ -24,7 +24,7 @@ export const retrieveToolDefinition = {
       filePath: {
         type: 'string',
         description:
-          'Exact-search file locator. Use together with `lineNumber` to retrieve the chunk covering that line. Prefer this for line-scoped exact-search hits instead of overloading `documentId`.',
+          'Exact-search file locator — accepts either the absolute `file_path` or the repo-relative `relative_path` from a result. Use together with `lineNumber` to retrieve the chunk covering that line. Prefer this for line-scoped exact-search hits instead of overloading `documentId`.',
       },
       lineNumber: {
         type: 'number',

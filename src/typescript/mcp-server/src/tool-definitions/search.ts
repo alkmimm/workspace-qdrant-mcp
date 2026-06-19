@@ -61,7 +61,7 @@ export const searchToolDefinition = {
       fileType: {
         type: 'string',
         description:
-          'Filter by content classification: "code", "docs", "text", "config", "data", "build", "web", "slides". Use "code" when seeking an implementation so documentation and test-adjacent files do not crowd out source files.',
+          'Filter by content classification: "code", "text", "config", "data", "docs", "web", "slides", "build". Prose documentation and Markdown are classified "text"; "docs" is for binary document formats (PDF, Office), so to bias toward project docs use "text", not "docs". Use "code" when seeking an implementation so documentation and test-adjacent files do not crowd out source files.',
       },
       scoreThreshold: {
         type: 'number',

@@ -308,8 +308,8 @@ The classification enum is: `code`, `docs`, `text`, `config`, `data`, `build`, `
 | Value | Files included |
 |-------|----------------|
 | `"code"` | Source code (.rs, .py, .ts, .go, etc.) |
-| `"docs"` | Documentation (.md, .rst, etc.) |
-| `"text"` | Plain text / prose not classified as docs |
+| `"docs"` | Binary document formats (PDF, Office) — **not** Markdown |
+| `"text"` | Prose and lightweight markup, including Markdown (`.md`) and plain text |
 | `"config"` | Configuration (.yaml, .json, .toml, .env) |
 | `"data"` | Data files (.csv, .parquet, fixtures) |
 | `"build"` | Build manifests/scripts (Makefile, Cargo.toml, package.json) |
