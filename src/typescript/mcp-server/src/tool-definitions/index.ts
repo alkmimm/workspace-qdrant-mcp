@@ -27,10 +27,30 @@ import { workspaceIndexToolDefinition } from './workspace-index.js';
 import { searchEvalToolDefinition } from './search-eval.js';
 import { graphToolDefinition } from './graph.js';
 
+/** Shape shared by every MCP tool definition assembled below. `annotations`
+ *  is optional in the MCP spec but every tool here carries one (read-only /
+ *  closed-world hints + a display title) — see `tests/tool-definitions.test.ts`. */
+export interface McpToolDefinition {
+  name: string;
+  description: string;
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    openWorldHint?: boolean;
+    idempotentHint?: boolean;
+    destructiveHint?: boolean;
+  };
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, unknown>;
+    required?: readonly string[];
+  };
+}
+
 /**
  * Returns the full list of tool definitions for the ListTools MCP response
  */
-export function getToolDefinitions() {
+export function getToolDefinitions(): McpToolDefinition[] {
   return [
     searchToolDefinition,
     retrieveToolDefinition,

@@ -5,6 +5,11 @@
 
 export const graphToolDefinition = {
   name: 'graph',
+  annotations: {
+    title: 'Navigate code-relationship graph',
+    readOnlyHint: true,
+    openWorldHint: false,
+  },
   description:
     'Navigate the code-relationship graph: callers/callees, change-impact, importance ranking, and module clusters. ' +
     'Built from symbol relations (calls, contains, uses-type, imports) extracted during indexing. ' +

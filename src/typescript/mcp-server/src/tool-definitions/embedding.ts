@@ -8,6 +8,11 @@
 
 export const embeddingToolDefinition = {
   name: 'embedding',
+  annotations: {
+    title: 'Report active embedding provider',
+    readOnlyHint: true,
+    openWorldHint: false,
+  },
   description:
     'Report the active embedding provider used by the daemon: provider id, model, configured output dimensionality, base URL (for remote providers), and the live probe status.',
   inputSchema: {

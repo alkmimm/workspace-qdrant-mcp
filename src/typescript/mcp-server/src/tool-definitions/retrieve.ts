@@ -11,8 +11,13 @@ import {
 
 export const retrieveToolDefinition = {
   name: 'retrieve',
+  annotations: {
+    title: 'Retrieve indexed document by id or locator',
+    readOnlyHint: true,
+    openWorldHint: false,
+  },
   description:
-    "Retrieve documents by their point id, by an exact-search file locator, or by a metadata filter. Pass `documentId` = the `id` field from a search/list result (NOT the metadata `document_id`). For exact-search hits, pass `filePath` + `lineNumber` from the result metadata. To look up by the `document_id` metadata field instead, use `filter: {\"document_id\": \"...\"}`; the tool will also try that filter automatically if the point id lookup misses. Prefer `search` for discovery, `retrieve` for known points.",
+    'Retrieve documents by their point id, by an exact-search file locator, or by a metadata filter. Pass `documentId` = the `id` field from a search/list result (NOT the metadata `document_id`). For exact-search hits, pass `filePath` + `lineNumber` from the result metadata. To look up by the `document_id` metadata field instead, use `filter: {"document_id": "..."}`; the tool will also try that filter automatically if the point id lookup misses. Prefer `search` for discovery, `retrieve` for known points.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -28,8 +33,7 @@ export const retrieveToolDefinition = {
       },
       lineNumber: {
         type: 'number',
-        description:
-          '1-based line number for an exact-search hit. Use together with `filePath`.',
+        description: '1-based line number for an exact-search hit. Use together with `filePath`.',
       },
       collection: {
         type: 'string',
