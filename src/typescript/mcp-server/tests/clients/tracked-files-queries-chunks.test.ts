@@ -12,7 +12,7 @@ CREATE TABLE tracked_files (
   watch_folder_id TEXT NOT NULL,
   file_path TEXT NOT NULL,
   relative_path TEXT,
-  branch TEXT,
+  branches TEXT NOT NULL DEFAULT '[]',
   file_type TEXT,
   file_mtime TEXT NOT NULL,
   file_hash TEXT NOT NULL,
@@ -37,13 +37,13 @@ CREATE TABLE qdrant_chunks (
 function seedFile(db: DatabaseType, relativePath: string, fileType = 'code', branch = 'main'): number {
   const info = db.prepare(`
     INSERT INTO tracked_files
-      (watch_folder_id, file_path, relative_path, branch, file_type, file_mtime, file_hash, created_at, updated_at)
+      (watch_folder_id, file_path, relative_path, branches, file_type, file_mtime, file_hash, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     WATCH_ID,
     `/repo/${relativePath}`,
     relativePath,
-    branch,
+    JSON.stringify([branch]),
     fileType,
     NOW,
     `hash-${relativePath}-${branch}`,

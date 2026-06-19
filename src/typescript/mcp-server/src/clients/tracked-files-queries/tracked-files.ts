@@ -84,12 +84,12 @@ function buildFilterClause(options: Omit<ListTrackedFilesOptions, 'limit'>): Fil
     // Feature-branch view: rows on `branch`, plus rows on the default branch
     // whose path is NOT overridden by a same-path entry on `branch`.
     conditions.push(
-      '(branch = ? OR (branch = ? AND relative_path NOT IN ' +
-        '(SELECT relative_path FROM tracked_files WHERE watch_folder_id = ? AND branch = ?)))'
+      '(EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?) OR (EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?) AND relative_path NOT IN ' +
+        '(SELECT relative_path FROM tracked_files WHERE watch_folder_id = ? AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?))))'
     );
     params.push(branch, fallbackBranch, options.watchFolderId, branch);
   } else if (branch) {
-    conditions.push('branch = ?');
+    conditions.push('EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?)');
     params.push(branch);
   }
   if (glob) {
@@ -205,9 +205,9 @@ export function getBaseBranch(
   try {
     const row = db
       .prepare(
-        `SELECT branch FROM tracked_files
-         WHERE watch_folder_id = ? AND branch IS NOT NULL AND branch != ?
-         GROUP BY branch
+        `SELECT je.value AS branch FROM tracked_files tf, json_each(tf.branches) je
+         WHERE tf.watch_folder_id = ? AND je.value IS NOT NULL AND je.value != ?
+         GROUP BY je.value
          ORDER BY COUNT(*) DESC
          LIMIT 1`
       )
