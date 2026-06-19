@@ -246,8 +246,7 @@ async function handleSyncCurrentBranch(
   const hookIsWorktreeRaw = boolArg(args, 'isWorktree', ['is_worktree']);
   const hookRemote = stringArg(args, 'gitRemote', ['git_remote']);
   const hookName = hookNameEarly;
-  const projectName =
-    stringArg(args, 'projectName', ['name']) ?? (basename(repoDir) || 'unknown');
+  const projectName = stringArg(args, 'projectName', ['name']) ?? (basename(repoDir) || 'unknown');
 
   // Best-effort local detection. Returns null when the MCP server can't see
   // the path (e.g. container without bind mount). Hook values still apply.
@@ -259,7 +258,7 @@ async function handleSyncCurrentBranch(
   const isWorktree =
     hookIsWorktreeRaw === 'true' || hookIsWorktreeRaw === '1' || hookIsWorktreeRaw === 'yes'
       ? true
-      : localState?.isWorktree ?? false;
+      : (localState?.isWorktree ?? false);
   const worktreePath = hookWorktreePath ?? localState?.worktreePath ?? null;
 
   const watchPath = isWorktree && worktreePath ? worktreePath : repoDir;
@@ -402,9 +401,21 @@ async function handleIndexingStatus(
     const inFlight = pending + inProgress;
     const eta = typeof status.eta_seconds === 'number' ? status.eta_seconds : undefined;
     const etaSummary =
-      eta === undefined
-        ? 'ETA unknown (warming up)'
-        : `ETA ~${formatEtaSeconds(eta)}`;
+      eta === undefined ? 'ETA unknown (warming up)' : `ETA ~${formatEtaSeconds(eta)}`;
+    const indexingState =
+      status.is_active === false && inFlight > 0
+        ? 'inactive_with_pending_queue'
+        : inFlight > 0
+          ? 'indexing'
+          : failed > 0
+            ? 'complete_with_failures'
+            : 'complete';
+    const statusReason =
+      indexingState === 'inactive_with_pending_queue'
+        ? 'Watcher is inactive but the daemon still reports queued indexing work.'
+        : indexingState === 'complete_with_failures'
+          ? 'Indexing queue is drained but some files failed.'
+          : undefined;
     const summary =
       inFlight === 0
         ? `Indexing complete (${done} files indexed; ${failed} failed)`
@@ -417,8 +428,9 @@ async function handleIndexingStatus(
       done: number;
       total: number;
       percent: number;
+      state: string;
       eta_seconds?: number;
-    } = { pending, in_progress: inProgress, failed, done, total, percent };
+    } = { pending, in_progress: inProgress, failed, done, total, percent, state: indexingState };
     if (eta !== undefined) indexing.eta_seconds = eta;
 
     return {
@@ -430,6 +442,7 @@ async function handleIndexingStatus(
       is_active: status.is_active,
       indexing,
       summary,
+      ...(statusReason !== undefined ? { status_reason: statusReason } : {}),
     };
   } catch (err) {
     return {
@@ -543,7 +556,24 @@ function dispatchTsAction(
       // indexes but that aren't in indexed-projects.json (eval item #5).
       return runListProjects(base, daemonClient);
     case 'list_branches':
-      return runListBranches(projectArgs);
+      return (async () => {
+        try {
+          return runListBranches(projectArgs);
+        } catch (e) {
+          if (daemonClient === undefined || projectArgs.projectId === undefined) throw e;
+          const p = (await daemonClient.listProjects({})).projects.find(
+            (x) => x.project_id === projectArgs.projectId
+          );
+          if (p === undefined) throw e;
+          return {
+            success: true,
+            project: p.project_name,
+            projectId: p.project_id,
+            registryFound: false,
+            branches: [],
+          };
+        }
+      })();
     case 'agent_branch_status': {
       const branchName = stringArg(args, 'branchName', ['branch']);
       if (!branchName) throw new Error('branchName is required');
@@ -607,18 +637,14 @@ export async function handleWorkspaceIndex(
   const action = stringArg(args, 'action');
   if (action === 'sync_current_branch') {
     if (!daemonClient) {
-      throw new Error(
-        'sync_current_branch requires a connected daemon client (gRPC unavailable)'
-      );
+      throw new Error('sync_current_branch requires a connected daemon client (gRPC unavailable)');
     }
     return handleSyncCurrentBranch(args, daemonClient);
   }
 
   if (action === 'indexing_status') {
     if (!daemonClient) {
-      throw new Error(
-        'indexing_status requires a connected daemon client (gRPC unavailable)'
-      );
+      throw new Error('indexing_status requires a connected daemon client (gRPC unavailable)');
     }
     return handleIndexingStatus(args, daemonClient, 'indexing_status', projectDetector);
   }
