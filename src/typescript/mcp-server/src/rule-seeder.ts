@@ -146,14 +146,18 @@ export const DEFAULT_RULES: ReadonlyArray<DefaultRule> = [
 ];
 
 /**
- * Seed the default global rule set, idempotently PER LABEL.
+ * Seed the default global rule set, idempotently by label AND content.
  *
  * A fresh install gets all defaults; an install already holding some of them
- * gets only the missing labels backfilled. Dedup-by-label is the guard: it can
- * never create a duplicate of an existing default, even if invoked repeatedly or
- * after a partial earlier run (the failure mode that left duplicate rows in
- * production). If the list call fails we skip entirely — without the existing
- * set we cannot dedup safely.
+ * gets only the missing ones backfilled. Two guards prevent duplicate rows:
+ *  - by label: a default whose label already exists is skipped.
+ *  - by content: a default whose trimmed content already exists is skipped too.
+ *    This matters because a bulk import/restore (or an older, label-less seeder)
+ *    can leave global rules WITHOUT a `label`; those are invisible to a
+ *    label-only guard, so without the content check the seeder would re-add a
+ *    labeled copy and create the exact duplicate pair this guard exists to
+ *    prevent. If the list call fails we skip entirely — without the existing
+ *    set we cannot dedup safely.
  */
 export async function seedDefaultRule(rulesTool: RulesTool): Promise<void> {
   try {
@@ -161,13 +165,20 @@ export async function seedDefaultRule(rulesTool: RulesTool): Promise<void> {
     if (!listResult.success) {
       return; // list failed — skip seeding (cannot safely dedup)
     }
+    const existing = listResult.rules ?? [];
     const existingLabels = new Set(
-      (listResult.rules ?? []).map((r) => r.label).filter((l): l is string => Boolean(l))
+      existing.map((r) => r.label).filter((l): l is string => Boolean(l))
+    );
+    // Label-less rows (from an import/restore) carry no label but do carry
+    // content — dedup on trimmed content so they are not re-added under a label.
+    const existingContents = new Set(
+      existing.map((r) => r.content?.trim()).filter((c): c is string => Boolean(c))
     );
 
     let seeded = 0;
     for (const rule of DEFAULT_RULES) {
-      if (existingLabels.has(rule.label)) continue; // already present — never duplicate
+      if (existingLabels.has(rule.label)) continue; // already present by label
+      if (existingContents.has(rule.content.trim())) continue; // present label-less (import/restore)
       const addResult = await rulesTool.execute({
         action: 'add',
         label: rule.label,
