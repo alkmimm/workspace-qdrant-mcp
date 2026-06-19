@@ -206,6 +206,14 @@ function mapGrepMatches(matches: TextSearchMatch[]): GrepMatch[] {
   });
 }
 
+function branchWideningMessage(branch: string): string {
+  return (
+    'No matches found on branch "' +
+    branch +
+    '", but matches exist in another indexed branch. Try branch:"*" to search all branches, or pass the indexed branch explicitly.'
+  );
+}
+
 /** Build an empty failure GrepResponse. */
 function grepError(message: string, latency_ms: number): GrepResponse {
   return { success: false, matches: [], total_matches: 0, truncated: false, latency_ms, message };
@@ -344,6 +352,17 @@ export class GrepTool {
       const rawMatches = mapGrepMatches(response.matches);
       const matches = dedupGrepMatches(rawMatches);
       const duplicatesDropped = rawMatches.length - matches.length;
+      const message =
+        matches.length === 0
+          ? await this.probeBranchWideningHint(
+              pattern,
+              regex,
+              caseSensitive,
+              tenantId,
+              branch,
+              pathGlob
+            )
+          : undefined;
       const economy = computeGrepEconomy(matches);
       const latencyMs = Date.now() - startTime;
       finishToolEvent(this.daemonClient, eventId, {
@@ -364,6 +383,7 @@ export class GrepTool {
           : matches.length,
         truncated: response.truncated,
         latency_ms: latencyMs,
+        ...(message ? { message } : {}),
       };
     } catch (error) {
       const latencyMs = Date.now() - startTime;
@@ -379,6 +399,26 @@ export class GrepTool {
         `Grep failed: ${error instanceof Error ? error.message : 'unknown error'}`,
         latencyMs
       );
+    }
+  }
+
+  private async probeBranchWideningHint(
+    pattern: string,
+    regex: boolean,
+    caseSensitive: boolean,
+    tenantId: string | undefined,
+    branch: string | undefined,
+    pathGlob: string | undefined
+  ): Promise<string | undefined> {
+    const concreteBranch = concreteBranchFilter(branch);
+    if (!tenantId || !concreteBranch) return undefined;
+    try {
+      const probe = await this.daemonClient.textSearch(
+        buildGrepRequest(pattern, regex, caseSensitive, 0, 1, tenantId, '*', pathGlob)
+      );
+      return probe.matches.length > 0 ? branchWideningMessage(concreteBranch) : undefined;
+    } catch {
+      return undefined;
     }
   }
 

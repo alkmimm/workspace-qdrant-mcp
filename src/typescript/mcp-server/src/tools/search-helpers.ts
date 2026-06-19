@@ -922,6 +922,12 @@ export function queryHasImplementationIntent(query: string): boolean {
   ) {
     return true;
   }
+  if (
+    /\b[A-Z][A-Za-z0-9]{5,}\b/.test(query) ||
+    /\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b/.test(query)
+  ) {
+    return true;
+  }
   const tokens = queryContentTokens(query);
   if (!tokens.some((token) => IMPLEMENTATION_INTENT_TERMS.has(token))) return false;
   return /\b(where|which|what|how|onde|qual|como)\b/.test(lowered);
