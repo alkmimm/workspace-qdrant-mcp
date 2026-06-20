@@ -44,15 +44,13 @@ export function extractGlobPrefix(glob: string): string {
 export function determineCollections(
   collection: string | undefined,
   scope: SearchScope,
-  includeLibraries: boolean,
+  includeLibraries: boolean
 ): string[] {
   if (collection) return [collection];
 
   switch (scope) {
     case 'project':
-      return includeLibraries
-        ? [PROJECTS_COLLECTION, LIBRARIES_COLLECTION]
-        : [PROJECTS_COLLECTION];
+      return includeLibraries ? [PROJECTS_COLLECTION, LIBRARIES_COLLECTION] : [PROJECTS_COLLECTION];
     case 'global':
       return [PROJECTS_COLLECTION];
     case 'all':
@@ -76,6 +74,14 @@ function buildBasePointCondition(params: FilterParams): Record<string, unknown> 
 
 function buildBranchCondition(params: FilterParams): Record<string, unknown> | null {
   if (!params.branch || params.branch === '*') return null;
+  if (params.fallbackBranch && params.fallbackBranch !== params.branch) {
+    return {
+      should: [
+        { key: FIELD_BRANCH, match: { value: params.branch } },
+        { key: FIELD_BRANCH, match: { value: params.fallbackBranch } },
+      ],
+    };
+  }
   return { key: FIELD_BRANCH, match: { value: params.branch } };
 }
 

@@ -1,6 +1,7 @@
 //! Resurrection, stale-lease recovery, and resurrection-count tracking tests.
 
 use super::*;
+use chrono::{DateTime, Utc};
 use serde_json;
 use sqlx::Row;
 
@@ -252,14 +253,22 @@ async fn test_resurrect_increments_resurrection_count() {
         "resurrection_count should be 1 after first resurrection"
     );
 
-    // Verify item is pending
-    let row = sqlx::query("SELECT status FROM unified_queue WHERE queue_id=?1")
+    // Verify item is pending and parked behind a fresh lease backoff.
+    let row = sqlx::query("SELECT status, lease_until FROM unified_queue WHERE queue_id=?1")
         .bind(&id)
         .fetch_one(manager.pool())
         .await
         .unwrap();
     let status: String = row.try_get("status").unwrap();
+    let lease_until: String = row.try_get("lease_until").unwrap();
+    let lease_until = DateTime::parse_from_rfc3339(&lease_until)
+        .unwrap()
+        .with_timezone(&Utc);
     assert_eq!(status, "pending");
+    assert!(
+        lease_until > Utc::now(),
+        "resurrected item should be leased into the future"
+    );
 }
 
 #[tokio::test]

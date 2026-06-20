@@ -58,7 +58,7 @@ function createTools(
     rulesConfig.duplicationThreshold = config.rules.duplicationThreshold;
   }
   const rulesTool = new RulesTool(rulesConfig, daemonClient, stateManager, projectDetector);
-  const grepTool = new GrepTool(daemonClient, projectDetector);
+  const grepTool = new GrepTool(daemonClient, projectDetector, stateManager);
   const storeTool = new StoreTool({}, stateManager);
   const scratchpadTool = new ScratchpadTool(qdrantConfig, stateManager, projectDetector);
   const listTool = new ListFilesTool(stateManager, projectDetector);

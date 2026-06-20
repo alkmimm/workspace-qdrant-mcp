@@ -5,7 +5,7 @@ import type { DaemonClient } from '../../src/clients/daemon-client.js';
 import type { ProjectDetector } from '../../src/utils/project-detector.js';
 import { runWithRequestContext } from '../../src/utils/request-context.js';
 
-function makeStatus(projectId: string) {
+function makeStatus(projectId: string, overrides: Record<string, unknown> = {}) {
   return {
     found: true,
     project_id: projectId,
@@ -18,6 +18,7 @@ function makeStatus(projectId: string) {
     done_count: 1933,
     total_count: 1933,
     percent_complete: 100,
+    ...overrides,
   };
 }
 
@@ -113,11 +114,98 @@ describe('workspace_index status resolution', () => {
     });
   });
 
+  it('reports session activity separately from indexing activity', async () => {
+    const getProjectStatus = vi.fn().mockResolvedValue(
+      makeStatus('9634ef90c02d', {
+        project_name: 'bws-engineer',
+        project_root: '/home/alkmimm/respositorios/bws-engineer',
+        is_active: false,
+        pending_count: 596,
+        done_count: 2459,
+        total_count: 3055,
+        percent_complete: 80.49,
+      })
+    );
+    const daemon = {
+      getProjectStatus,
+      listProjects: vi.fn(),
+    } as unknown as DaemonClient;
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'project_status', projectId: '9634ef90c02d' },
+      daemon
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      success: true,
+      action: 'project_status',
+      project_id: '9634ef90c02d',
+      is_active: false,
+      session_active: false,
+      indexing_active: true,
+      indexing: {
+        pending: 596,
+        done: 2459,
+        total: 3055,
+      },
+    });
+  });
+
+  it('list_branches falls back to daemon-indexed projects missing from the registry', async () => {
+    const listProjects = vi.fn().mockResolvedValue({
+      projects: [
+        {
+          project_id: '9634ef90c02d',
+          project_name: 'bws-engineer',
+          project_root: '/tmp/no-such-bws-engineer',
+          priority: 'high',
+          is_active: false,
+        },
+      ],
+      total_count: 1,
+    });
+    const daemon = {
+      getProjectStatus: vi.fn(),
+      listProjects,
+    } as unknown as DaemonClient;
+
+    const result = (await handleWorkspaceIndex(
+      {
+        action: 'list_branches',
+        projectId: '9634ef90c02d',
+        registryPath: '/tmp/workspace-qdrant-missing-registry.json',
+      },
+      daemon
+    )) as Record<string, unknown>;
+
+    expect(listProjects).toHaveBeenCalledWith({});
+    expect(result).toMatchObject({
+      success: true,
+      project: 'bws-engineer',
+      projectId: '9634ef90c02d',
+      source: 'indexed',
+      branches: [
+        {
+          name: 'main',
+          kind: 'primary',
+          path: '/tmp/no-such-bws-engineer',
+          status: 'inactive',
+          watchEnabled: true,
+          indexed: true,
+        },
+      ],
+    });
+  });
+
   it('falls back to the first active project when cwd cannot be resolved', async () => {
     const { daemon, getProjectStatus, listProjects } = makeDaemon('fallback-active');
     const { detector } = makeDetector(null);
 
-    await handleWorkspaceIndex({ action: 'indexing_status', cwd: '/unregistered' }, daemon, detector);
+    await handleWorkspaceIndex(
+      { action: 'indexing_status', cwd: '/unregistered' },
+      daemon,
+      detector
+    );
 
     expect(listProjects).toHaveBeenCalledWith({ active_only: true });
     expect(getProjectStatus).toHaveBeenCalledWith({ project_id: 'fallback-active' });

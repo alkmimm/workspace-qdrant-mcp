@@ -300,6 +300,7 @@ export interface SearchAllCollectionsParams {
   currentProjectId: string | undefined;
   basePoints: string[] | undefined;
   branch: string | undefined;
+  fallbackBranch: string | undefined;
   fileType: string | undefined;
   libraryName: string | undefined;
   tag: string | undefined;
@@ -315,8 +316,8 @@ export interface SearchAllCollectionsParams {
 const SUPPLEMENTAL_SYMBOL_LIMIT = 8;
 const SUPPLEMENTAL_SYMBOL_SCORE = 1.2;
 
-function unique(values: Iterable<string>): string[] {
-  return Array.from(new Set(Array.from(values).filter(Boolean)));
+function unique(values: Iterable<string | undefined>): string[] {
+  return Array.from(new Set(Array.from(values).filter((v): v is string => Boolean(v))));
 }
 
 function normalizeNeedle(value: string): string {
@@ -407,10 +408,12 @@ export function filterSupplementalPointsToScope<
   scope: {
     tenantId: string | undefined;
     branch: string | undefined;
+    fallbackBranch?: string | undefined;
     basePoints: string[] | undefined;
   }
 ): T[] {
   const effectiveBranch = concreteBranchFilter(scope.branch);
+  const fallbackBranch = concreteBranchFilter(scope.fallbackBranch);
   const basePoints =
     scope.basePoints && scope.basePoints.length > 0 ? new Set(scope.basePoints) : undefined;
   return points.filter((point) => {
@@ -418,11 +421,12 @@ export function filterSupplementalPointsToScope<
     if (scope.tenantId !== undefined && payload[FIELD_TENANT_ID] !== scope.tenantId) {
       return false;
     }
-    if (
-      effectiveBranch !== undefined &&
-      !branchPayloadCovers(payload[FIELD_BRANCH], effectiveBranch)
-    ) {
-      return false;
+    if (effectiveBranch !== undefined) {
+      const branchPayload = payload[FIELD_BRANCH];
+      const coversEffective = branchPayloadCovers(branchPayload, effectiveBranch);
+      const coversFallback =
+        fallbackBranch !== undefined && branchPayloadCovers(branchPayload, fallbackBranch);
+      if (!coversEffective && !coversFallback) return false;
     }
     if (basePoints !== undefined) {
       const basePoint = payload[FIELD_BASE_POINT];
@@ -448,11 +452,13 @@ async function searchSupplementalSymbolCandidates(
   if (!watchFolderId) return [];
 
   const effectiveBranch = concreteBranchFilter(params.branch);
+  const fallbackBranch = concreteBranchFilter(params.fallbackBranch);
+  const branches = unique([effectiveBranch, fallbackBranch]);
   const candidates = params.stateManager.listChunkCandidates({
     watchFolderId,
     needles,
     ...(params.fileType ? { fileType: params.fileType } : {}),
-    ...(effectiveBranch !== undefined ? { branch: effectiveBranch } : {}),
+    ...(branches.length > 0 ? { branches } : {}),
     limit: SUPPLEMENTAL_SYMBOL_LIMIT,
   });
   if (candidates.data.length === 0) return [];
@@ -468,6 +474,7 @@ async function searchSupplementalSymbolCandidates(
     const scopedPoints = filterSupplementalPointsToScope(points, {
       tenantId: params.currentProjectId,
       branch: params.branch,
+      fallbackBranch: params.fallbackBranch,
       basePoints: params.basePoints,
     });
     return scopedPoints.map((point, index) => ({
@@ -496,6 +503,7 @@ function buildCollectionSearchParams(
     scope: params.scope,
     projectId: params.currentProjectId,
     branch: params.branch,
+    fallbackBranch: params.fallbackBranch,
     fileType: params.fileType,
     libraryName: params.libraryName,
     tag: params.tag,
@@ -576,6 +584,7 @@ export async function searchScratchpadLane(
     scope: 'project',
     projectId: params.projectId,
     branch: undefined,
+    fallbackBranch: undefined,
     fileType: undefined,
     libraryName: undefined,
     tag: undefined,

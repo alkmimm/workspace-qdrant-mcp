@@ -156,12 +156,13 @@ async fn insert_watch_folder(pool: &sqlx::SqlitePool, tenant: &str, path: &str) 
     .unwrap();
 }
 
-async fn fetch_scan_payload(pool: &sqlx::SqlitePool, tenant: &str) -> String {
+async fn fetch_folder_payload(pool: &sqlx::SqlitePool, tenant: &str, op: &str) -> String {
     sqlx::query_scalar::<_, String>(
         "SELECT payload_json FROM unified_queue \
-         WHERE tenant_id = ?1 AND item_type = 'folder' AND op = 'scan'",
+         WHERE tenant_id = ?1 AND item_type = 'folder' AND op = ?2",
     )
     .bind(tenant)
+    .bind(op)
     .fetch_one(pool)
     .await
     .unwrap()
@@ -182,7 +183,7 @@ async fn reembed_tenant_default_is_repair_scan_without_uplift() {
 
     assert_eq!(result.files_enqueued, 1);
     assert!(result.message.contains("repair"), "{}", result.message);
-    let payload = fetch_scan_payload(&pool, "t-repair").await;
+    let payload = fetch_folder_payload(&pool, "t-repair", "scan").await;
     // The non-forced payload must stay byte-compatible with the historical
     // encoding (idempotency keys hash the payload verbatim).
     assert!(
@@ -206,10 +207,10 @@ async fn reembed_tenant_force_enqueues_uplift_scans() {
 
     assert_eq!(result.files_enqueued, 1);
     assert!(result.message.contains("forced"), "{}", result.message);
-    let payload = fetch_scan_payload(&pool, "t-force").await;
+    let payload = fetch_folder_payload(&pool, "t-force", "uplift").await;
     assert!(
         payload.contains(r#""uplift":true"#),
-        "forced scan payload must carry uplift:true: {payload}"
+        "forced uplift payload must carry uplift:true: {payload}"
     );
     // The flag must round-trip through FolderPayload so the folder strategy
     // sees it at dequeue time.

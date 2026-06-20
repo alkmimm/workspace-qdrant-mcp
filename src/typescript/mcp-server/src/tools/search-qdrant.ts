@@ -358,6 +358,7 @@ function buildFallbackFilter(
     scope,
     projectId: context.currentProjectId,
     branch: options.branch,
+    fallbackBranch: options.fallbackBranch,
     fileType: options.fileType,
     libraryName: options.libraryName,
     tag: options.tag,

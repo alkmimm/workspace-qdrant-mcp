@@ -224,7 +224,7 @@ pub(crate) async fn enqueue_submodule(
     }
 }
 
-/// Enqueue a regular subdirectory as a Folder/Scan item.
+/// Enqueue a regular subdirectory as a Folder/Scan or Folder/Uplift item.
 ///
 /// `last_scan` is embedded in the payload so the child scan can prune
 /// unchanged entries without an extra DB query.
@@ -290,14 +290,20 @@ async fn enqueue_subdirectory(
         }
     };
 
+    let op = if uplift {
+        QueueOperation::Uplift
+    } else {
+        QueueOperation::Scan
+    };
+
     match queue_manager
         .enqueue_unified(
             ItemType::Folder,
-            QueueOperation::Scan,
+            op,
             &item.tenant_id,
             &item.collection,
             &payload_json,
-            None,
+            Some(&item.branch),
             None,
         )
         .await
@@ -554,5 +560,43 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(op_uplift, "uplift");
+    }
+
+    #[tokio::test]
+    async fn enqueue_subdirectory_preserves_branch_and_uplift_op() {
+        let project = tempfile::tempdir().unwrap();
+        let child = project.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let root =
+            CanonicalPath::from_user_input(&project.path().to_string_lossy()).unwrap();
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let qm = Arc::new(QueueManager::new(pool.clone()));
+        qm.init_unified_queue().await.unwrap();
+
+        let mut item = scan_item("t-subdir");
+        item.branch = "dev-clean".to_string();
+        let queued = enqueue_subdirectory(
+            &child,
+            &root,
+            &item,
+            &qm,
+            Some("2026-06-20T20:34:32.253Z"),
+            true,
+        )
+        .await;
+        assert_eq!(queued, 1);
+
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT op, branch, payload_json FROM unified_queue WHERE tenant_id = 't-subdir'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, "uplift");
+        assert_eq!(row.1, "dev-clean");
+        assert!(row.2.contains(r#""folder_path":"child""#));
+        assert!(row.2.contains(r#""uplift":true"#));
     }
 }

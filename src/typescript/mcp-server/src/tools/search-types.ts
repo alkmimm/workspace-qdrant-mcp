@@ -74,6 +74,8 @@ export interface SearchOptions {
   pathGlob?: string;
   /** Filter by project component (e.g., "daemon", "daemon.core"). Supports prefix matching. */
   component?: string;
+  /** Internal: base branch to include for files unchanged on a feature branch. */
+  fallbackBranch?: string;
   /** When true, use FTS5 exact/substring search instead of semantic search */
   exact?: boolean;
   /** Lines of context before/after matches (only for exact mode, default: 0) */
@@ -235,6 +237,8 @@ export interface FilterParams {
   component: string | undefined;
   /** Task 15: base_point values for instance-aware filtering */
   basePoints: string[] | undefined;
+  /** Base branch to include for files unchanged on a feature branch. */
+  fallbackBranch: string | undefined;
 }
 
 export interface SearchCollectionParams {

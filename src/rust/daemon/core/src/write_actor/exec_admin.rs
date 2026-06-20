@@ -192,6 +192,12 @@ impl WriteActor {
             // `uplift` is included only when forcing, keeping the non-forced
             // payload (and its idempotency key) identical to the historical
             // encoding — mirrors FolderPayload's skip_serializing_if.
+            //
+            // When forcing, enqueue the folder item as `Uplift` rather than
+            // `Scan`: the folder processor treats both as a rescan, but
+            // `Uplift` has a higher dequeue priority and also changes the
+            // idempotency key, so a fresh re-embed can cut through an existing
+            // backlog instead of being silently deduped against an older scan.
             let mut payload_value = serde_json::json!({
                 "recursive": true,
                 "recursive_depth": 10,
@@ -217,10 +223,15 @@ impl WriteActor {
             } else {
                 None
             };
+            let queue_op = if data.force {
+                crate::unified_queue_schema::QueueOperation::Uplift
+            } else {
+                crate::unified_queue_schema::QueueOperation::Scan
+            };
             let (_, is_new) = queue_manager
                 .enqueue_unified(
                     crate::unified_queue_schema::ItemType::Folder,
-                    crate::unified_queue_schema::QueueOperation::Scan,
+                    queue_op,
                     tenant_id,
                     collection,
                     &payload,

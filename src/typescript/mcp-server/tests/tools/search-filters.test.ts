@@ -3,7 +3,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildFilter, extractGlobPrefix, determineCollections } from '../../src/tools/search-filters.js';
+import {
+  buildFilter,
+  extractGlobPrefix,
+  determineCollections,
+} from '../../src/tools/search-filters.js';
 import type { FilterParams } from '../../src/tools/search-types.js';
 import { PROJECTS_COLLECTION, LIBRARIES_COLLECTION } from '../../src/tools/search-types.js';
 
@@ -14,6 +18,7 @@ function makeParams(overrides: Partial<FilterParams> = {}): FilterParams {
     scope: 'project',
     projectId: undefined,
     branch: undefined,
+    fallbackBranch: undefined,
     fileType: undefined,
     libraryName: undefined,
     includeDeleted: false,
@@ -66,12 +71,14 @@ describe('buildFilter — component filter', () => {
   });
 
   it('should combine component filter with other filters', () => {
-    const filter = buildFilter(makeParams({
-      component: 'mcp-server',
-      projectId: 'proj-123',
-      scope: 'project',
-      branch: 'main',
-    }));
+    const filter = buildFilter(
+      makeParams({
+        component: 'mcp-server',
+        projectId: 'proj-123',
+        scope: 'project',
+        branch: 'main',
+      })
+    );
     expect(filter).not.toBeNull();
     const must = filter!.must as Record<string, unknown>[];
     // Should have: tenant_id, branch, component (at minimum)
@@ -84,10 +91,25 @@ describe('buildFilter — component filter', () => {
     expect(componentCondition).toBeDefined();
 
     // Branch condition present
-    const branchCondition = must.find(
-      (c) => (c as Record<string, unknown>).key === 'branch'
-    );
+    const branchCondition = must.find((c) => (c as Record<string, unknown>).key === 'branch');
     expect(branchCondition).toBeDefined();
+  });
+
+  it('includes the base branch as a fallback for feature-branch project searches', () => {
+    const filter = buildFilter(makeParams({ branch: 'feature/current', fallbackBranch: 'main' }));
+    expect(filter).not.toBeNull();
+    const must = filter!.must as Record<string, unknown>[];
+    expect(must).toContainEqual({
+      should: [
+        { key: 'branch', match: { value: 'feature/current' } },
+        { key: 'branch', match: { value: 'main' } },
+      ],
+    });
+  });
+
+  it('does not add a branch filter for branch="*" even when fallbackBranch is present', () => {
+    const filter = buildFilter(makeParams({ branch: '*', fallbackBranch: 'main' }));
+    expect(filter).toBeNull();
   });
 });
 
@@ -96,21 +118,19 @@ describe('buildFilter — existing filters preserved', () => {
     const filter = buildFilter(makeParams({ tag: 'error-handling' }));
     expect(filter).not.toBeNull();
     const must = filter!.must as Record<string, unknown>[];
-    const tagCondition = must.find(
-      (c) => (c as Record<string, unknown>).key === 'concept_tags'
-    );
+    const tagCondition = must.find((c) => (c as Record<string, unknown>).key === 'concept_tags');
     expect(tagCondition).toBeDefined();
   });
 
   it('should add multi-tag filter as should condition', () => {
-    const filter = buildFilter(makeParams({
-      tags: ['async', 'error-handling'],
-    }));
+    const filter = buildFilter(
+      makeParams({
+        tags: ['async', 'error-handling'],
+      })
+    );
     expect(filter).not.toBeNull();
     const must = filter!.must as Record<string, unknown>[];
-    const shouldCondition = must.find(
-      (c) => (c as Record<string, unknown>).should !== undefined
-    );
+    const shouldCondition = must.find((c) => (c as Record<string, unknown>).should !== undefined);
     expect(shouldCondition).toBeDefined();
     const should = (shouldCondition as Record<string, unknown>).should as unknown[];
     expect(should).toHaveLength(2);
@@ -120,23 +140,21 @@ describe('buildFilter — existing filters preserved', () => {
     const filter = buildFilter(makeParams({ pathGlob: 'src/tools/**/*.ts' }));
     expect(filter).not.toBeNull();
     const must = filter!.must as Record<string, unknown>[];
-    const pathCondition = must.find(
-      (c) => (c as Record<string, unknown>).key === 'file_path'
-    );
+    const pathCondition = must.find((c) => (c as Record<string, unknown>).key === 'file_path');
     expect(pathCondition).toBeDefined();
   });
 
   it('should exclude deleted for libraries collection', () => {
-    const filter = buildFilter(makeParams({
-      collection: LIBRARIES_COLLECTION,
-      includeDeleted: false,
-    }));
+    const filter = buildFilter(
+      makeParams({
+        collection: LIBRARIES_COLLECTION,
+        includeDeleted: false,
+      })
+    );
     expect(filter).not.toBeNull();
     const mustNot = filter!.must_not as Record<string, unknown>[];
     expect(mustNot).toBeDefined();
-    const deletedCondition = mustNot.find(
-      (c) => (c as Record<string, unknown>).key === 'deleted'
-    );
+    const deletedCondition = mustNot.find((c) => (c as Record<string, unknown>).key === 'deleted');
     expect(deletedCondition).toBeDefined();
   });
 });

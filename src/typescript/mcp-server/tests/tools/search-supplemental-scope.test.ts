@@ -45,6 +45,16 @@ describe('filterSupplementalPointsToScope', () => {
     expect(kept.map((p) => p.id)).toEqual(['a', 'b']);
   });
 
+  it('keeps base-branch points when a feature branch has a fallback branch', () => {
+    const kept = filterSupplementalPointsToScope([onMain('a'), onFeature('b')], {
+      tenantId: TENANT,
+      branch: 'feature/x',
+      fallbackBranch: 'main',
+      basePoints: undefined,
+    });
+    expect(kept.map((p) => p.id)).toEqual(['a', 'b']);
+  });
+
   it('drops points from a foreign tenant (mirror-drift defense)', () => {
     const foreign = pt('x', { [FIELD_TENANT_ID]: 'other-tenant', [FIELD_BRANCH]: 'main' });
     const kept = filterSupplementalPointsToScope([onMain('a'), foreign], {
