@@ -947,7 +947,11 @@ function resultPath(result: SearchResult): string {
 
 export function implementationIntentMultiplier(result: SearchResult): number {
   const path = resultPath(result).toLowerCase();
-  const fileType = ((result.metadata['file_type'] as string | undefined) ?? '').toLowerCase();
+  const fileType = (
+    (result.metadata['file_type'] as string | undefined) ??
+    (result.metadata['document_type'] as string | undefined) ??
+    ''
+  ).toLowerCase();
   if (NON_IMPL_PATH_RE.test(path) || fileType === 'docs' || fileType === 'text') {
     return IMPLEMENTATION_INTENT_NON_CODE_PENALTY;
   }

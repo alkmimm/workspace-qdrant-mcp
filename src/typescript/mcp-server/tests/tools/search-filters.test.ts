@@ -114,6 +114,18 @@ describe('buildFilter — component filter', () => {
 });
 
 describe('buildFilter — existing filters preserved', () => {
+  it('should match fileType against both legacy file_type and document_type payloads', () => {
+    const filter = buildFilter(makeParams({ fileType: 'code' }));
+    expect(filter).not.toBeNull();
+    const must = filter!.must as Record<string, unknown>[];
+    expect(must).toContainEqual({
+      should: [
+        { key: 'file_type', match: { value: 'code' } },
+        { key: 'document_type', match: { value: 'code' } },
+      ],
+    });
+  });
+
   it('should add tag filter', () => {
     const filter = buildFilter(makeParams({ tag: 'error-handling' }));
     expect(filter).not.toBeNull();

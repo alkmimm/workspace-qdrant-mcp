@@ -5,7 +5,7 @@ import {
 } from '../../src/tools/search-helpers.js';
 import type { SearchResult } from '../../src/tools/search-types.js';
 
-function hit(relativePath: string, fileType?: string): SearchResult {
+function hit(relativePath: string, fileType?: string, documentType?: string): SearchResult {
   return {
     id: relativePath,
     score: 1,
@@ -14,6 +14,7 @@ function hit(relativePath: string, fileType?: string): SearchResult {
     metadata: {
       relative_path: relativePath,
       ...(fileType ? { file_type: fileType } : {}),
+      ...(documentType ? { document_type: documentType } : {}),
     },
   };
 }
@@ -50,5 +51,11 @@ describe('implementation intent ranking nudge', () => {
     expect(implementationIntentMultiplier(hit('assets/default_configuration.yaml', 'config'))).toBe(
       1
     );
+    expect(
+      implementationIntentMultiplier(hit('generated/no-extension', undefined, 'code'))
+    ).toBeGreaterThan(1);
+    expect(
+      implementationIntentMultiplier(hit('guide/no-extension', undefined, 'text'))
+    ).toBeLessThan(1);
   });
 });

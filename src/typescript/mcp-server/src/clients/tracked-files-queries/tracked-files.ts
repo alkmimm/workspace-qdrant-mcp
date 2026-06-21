@@ -55,6 +55,117 @@ interface FilterClause {
   params: (string | number)[];
 }
 
+const LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  ts: 'typescript',
+  tsx: 'typescript',
+  'd.ts': 'typescript',
+  'd.mts': 'typescript',
+  'd.cts': 'typescript',
+  js: 'javascript',
+  jsx: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  rs: 'rust',
+  py: 'python',
+  java: 'java',
+  go: 'go',
+  rb: 'ruby',
+  php: 'php',
+  cs: 'csharp',
+  c: 'c',
+  h: 'c',
+  cpp: 'cpp',
+  cc: 'cpp',
+  cxx: 'cpp',
+  hpp: 'cpp',
+  kt: 'kotlin',
+  kts: 'kotlin',
+  swift: 'swift',
+  scala: 'scala',
+  sh: 'shell',
+  bash: 'shell',
+  zsh: 'shell',
+  ps1: 'powershell',
+  lua: 'lua',
+  dart: 'dart',
+  zig: 'zig',
+  d: 'd',
+  proto: 'protobuf',
+  graphql: 'graphql',
+  gql: 'graphql',
+  html: 'html',
+  htm: 'html',
+  css: 'css',
+  scss: 'scss',
+  less: 'less',
+};
+
+const FILE_TYPE_EXTENSIONS: Record<string, string[]> = {
+  code: [
+    'ts',
+    'tsx',
+    'd.ts',
+    'd.mts',
+    'd.cts',
+    'js',
+    'jsx',
+    'mjs',
+    'cjs',
+    'rs',
+    'py',
+    'java',
+    'go',
+    'rb',
+    'php',
+    'cs',
+    'c',
+    'h',
+    'cpp',
+    'cc',
+    'cxx',
+    'hpp',
+    'kt',
+    'kts',
+    'swift',
+    'scala',
+    'sh',
+    'bash',
+    'zsh',
+    'ps1',
+    'lua',
+    'dart',
+    'zig',
+    'd',
+    'proto',
+    'graphql',
+    'gql',
+    'vue',
+    'svelte',
+    'astro',
+  ],
+  text: ['txt', 'md', 'rst', 'org', 'adoc', 'tex'],
+  docs: ['pdf', 'epub', 'docx', 'doc', 'odt', 'rtf', 'pages', 'mobi'],
+  web: ['html', 'htm', 'xhtml', 'css', 'scss', 'less', 'xml'],
+  slides: ['ppt', 'pptx', 'key', 'odp'],
+  config: ['yaml', 'yml', 'toml', 'ini', 'env'],
+  data: ['json', 'csv', 'tsv', 'parquet', 'xlsx', 'xls', 'sqlite', 'db', 'npy', 'ipynb'],
+  build: [
+    'zip',
+    'so',
+    'dll',
+    'dylib',
+    'whl',
+    'jar',
+    'war',
+    'ear',
+    'tar',
+    'gz',
+    'bz2',
+    'xz',
+    'lock',
+  ],
+};
+
 /** Build WHERE conditions and params from filter options. */
 function buildFilterClause(options: Omit<ListTrackedFilesOptions, 'limit'>): FilterClause {
   const conditions: string[] = ['watch_folder_id = ?'];
@@ -72,16 +183,27 @@ function buildFilterClause(options: Omit<ListTrackedFilesOptions, 'limit'>): Fil
     params.push(`${path}/%`);
   }
   if (fileType) {
-    conditions.push('file_type = ?');
-    params.push(fileType);
+    addNullableMetadataCondition(
+      conditions,
+      params,
+      'file_type',
+      fileType,
+      extensionsForFileType(fileType)
+    );
   }
   if (language) {
-    conditions.push('language = ?');
-    params.push(language);
+    addNullableMetadataCondition(
+      conditions,
+      params,
+      'language',
+      language,
+      extensionsForLanguage(language)
+    );
   }
   if (extension) {
-    conditions.push('extension = ?');
-    params.push(extension);
+    addNullableMetadataCondition(conditions, params, 'extension', normalizeExtension(extension), [
+      extension,
+    ]);
   }
   if (!includeTests) {
     conditions.push('is_test = 0');
@@ -267,7 +389,6 @@ function listSearchMetadataFallbackRows(
   extension: string | null;
   is_test: number;
 }> {
-  if (options.fileType || options.language || options.includeTests === false) return [];
   if (!ensureSearchDbAttached(db, options.searchDbPath)) return [];
 
   const { conditions, params } = buildSearchMetadataFilterClause(options);
@@ -297,13 +418,16 @@ function listSearchMetadataFallbackRows(
     const rows = db.prepare(sql).all(options.watchFolderId, ...params) as Array<{
       relative_path: string;
     }>;
-    return rows.map((row) => ({
-      relative_path: row.relative_path,
-      file_type: null,
-      language: null,
-      extension: inferExtension(row.relative_path),
-      is_test: 0,
-    }));
+    return rows.map((row) => {
+      const inferred = inferFallbackMetadata(row.relative_path);
+      return {
+        relative_path: row.relative_path,
+        file_type: inferred.fileType,
+        language: inferred.language,
+        extension: inferred.extension,
+        is_test: inferred.isTest ? 1 : 0,
+      };
+    });
   } catch {
     return [];
   }
@@ -313,7 +437,6 @@ function countSearchMetadataFallbackRows(
   db: DatabaseType,
   options: Omit<ListTrackedFilesOptions, 'limit'>
 ): number {
-  if (options.fileType || options.language || options.includeTests === false) return 0;
   if (!ensureSearchDbAttached(db, options.searchDbPath)) return 0;
 
   const { conditions, params } = buildSearchMetadataFilterClause(options);
@@ -365,11 +488,24 @@ function buildSearchMetadataFilterClause(
     params.push(`${options.path}/%`);
   }
   if (options.extension) {
-    const extension = options.extension.startsWith('.')
-      ? options.extension
-      : `.${options.extension}`;
-    conditions.push('m.relative_path LIKE ?');
-    params.push(`%${extension}`);
+    addExtensionCondition(conditions, params, [normalizeExtension(options.extension)]);
+  }
+  if (options.fileType) {
+    addExtensionCondition(conditions, params, extensionsForFileType(options.fileType));
+  }
+  if (options.language) {
+    addExtensionCondition(conditions, params, extensionsForLanguage(options.language));
+  }
+  if (options.includeTests === false) {
+    conditions.push(
+      "LOWER(m.relative_path) NOT LIKE '%/test/%'",
+      "LOWER(m.relative_path) NOT LIKE '%/tests/%'",
+      "LOWER(m.relative_path) NOT LIKE 'test/%'",
+      "LOWER(m.relative_path) NOT LIKE 'tests/%'",
+      "LOWER(m.relative_path) NOT LIKE '%.test.%'",
+      "LOWER(m.relative_path) NOT LIKE '%.spec.%'",
+      "LOWER(m.relative_path) NOT LIKE '%_test.%'"
+    );
   }
   if (options.branch && fallbackBranch) {
     conditions.push(
@@ -400,11 +536,16 @@ function buildSearchMetadataFilterClause(
 }
 
 function ensureSearchDbAttached(db: DatabaseType, explicitPath?: string): boolean {
-  const dbPath = explicitPath ?? getSearchDatabasePath();
-  if (!existsSync(dbPath)) return false;
   try {
     const attached = db.prepare('PRAGMA database_list').all() as Array<{ name: string }>;
     if (attached.some((entry) => entry.name === 'searchdb')) return true;
+  } catch {
+    return false;
+  }
+
+  const dbPath = explicitPath ?? getSearchDatabasePath();
+  if (!existsSync(dbPath)) return false;
+  try {
     db.prepare('ATTACH DATABASE ? AS searchdb').run(dbPath);
     return true;
   } catch {
@@ -412,10 +553,100 @@ function ensureSearchDbAttached(db: DatabaseType, explicitPath?: string): boolea
   }
 }
 
+function addExtensionCondition(
+  conditions: string[],
+  params: (string | number)[],
+  extensions: string[]
+): void {
+  const normalized = extensions.map(normalizeExtension).filter((ext) => ext.length > 0);
+  if (normalized.length === 0) {
+    conditions.push('0 = 1');
+    return;
+  }
+  conditions.push(`(${buildRelativePathExtensionPredicate('m.relative_path', normalized)})`);
+  for (const ext of normalized) params.push(`%.${ext}`);
+}
+
+function addNullableMetadataCondition(
+  conditions: string[],
+  params: (string | number)[],
+  column: 'file_type' | 'language' | 'extension',
+  value: string,
+  extensions: string[]
+): void {
+  const normalized = extensions.map(normalizeExtension).filter((ext) => ext.length > 0);
+  if (normalized.length === 0) {
+    conditions.push(`${column} = ?`);
+    params.push(value);
+    return;
+  }
+  conditions.push(
+    `(${column} = ? OR ((${column} IS NULL OR ${column} = '') AND ${buildRelativePathExtensionPredicate('relative_path', normalized)}))`
+  );
+  params.push(value);
+  for (const ext of normalized) params.push(`%.${ext}`);
+}
+
+function buildRelativePathExtensionPredicate(column: string, extensions: string[]): string {
+  return extensions.map(() => `LOWER(${column}) LIKE ?`).join(' OR ');
+}
+
+function extensionsForFileType(fileType: string): string[] {
+  return FILE_TYPE_EXTENSIONS[fileType.toLowerCase()] ?? [];
+}
+
+function extensionsForLanguage(language: string): string[] {
+  const normalized = language.toLowerCase();
+  return Object.entries(LANGUAGE_BY_EXTENSION)
+    .filter(([, lang]) => lang === normalized)
+    .map(([ext]) => ext);
+}
+
+function normalizeExtension(extension: string): string {
+  return extension.replace(/^\.+/, '').toLowerCase();
+}
+
 function inferExtension(relativePath: string): string | null {
   const fileName = relativePath.split('/').pop() ?? relativePath;
-  const dot = fileName.lastIndexOf('.');
-  return dot > 0 ? fileName.slice(dot) : null;
+  const lower = fileName.toLowerCase();
+  for (const compound of ['d.mts', 'd.cts', 'd.ts']) {
+    if (lower.endsWith(`.${compound}`)) return compound;
+  }
+  const dot = lower.lastIndexOf('.');
+  return dot > 0 ? lower.slice(dot + 1) : null;
+}
+
+function inferFallbackMetadata(relativePath: string): {
+  fileType: string | null;
+  language: string | null;
+  extension: string | null;
+  isTest: boolean;
+} {
+  const extension = inferExtension(relativePath);
+  const language = extension ? (LANGUAGE_BY_EXTENSION[extension] ?? null) : null;
+  const fileType = extension
+    ? (Object.entries(FILE_TYPE_EXTENSIONS).find(([, exts]) => exts.includes(extension))?.[0] ??
+      null)
+    : null;
+  return {
+    fileType,
+    language,
+    extension,
+    isTest: isLikelyTestPath(relativePath),
+  };
+}
+
+function isLikelyTestPath(relativePath: string): boolean {
+  const path = relativePath.toLowerCase();
+  return (
+    path.startsWith('test/') ||
+    path.startsWith('tests/') ||
+    path.includes('/test/') ||
+    path.includes('/tests/') ||
+    path.includes('.test.') ||
+    path.includes('.spec.') ||
+    path.includes('_test.')
+  );
 }
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -426,11 +657,12 @@ function mapTrackedFileRow(row: {
   extension: string | null;
   is_test: number;
 }): TrackedFileEntry {
+  const inferred = inferFallbackMetadata(row.relative_path);
   return {
     relativePath: row.relative_path,
-    fileType: row.file_type,
-    language: row.language,
-    extension: row.extension,
-    isTest: row.is_test === 1,
+    fileType: row.file_type || inferred.fileType,
+    language: row.language || inferred.language,
+    extension: row.extension || inferred.extension,
+    isTest: row.is_test === 1 || inferred.isTest,
   };
 }

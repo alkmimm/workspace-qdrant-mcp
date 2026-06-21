@@ -87,7 +87,12 @@ function buildBranchCondition(params: FilterParams): Record<string, unknown> | n
 
 function buildFileTypeCondition(params: FilterParams): Record<string, unknown> | null {
   if (!params.fileType) return null;
-  return { key: FIELD_FILE_TYPE, match: { value: params.fileType } };
+  return {
+    should: [
+      { key: FIELD_FILE_TYPE, match: { value: params.fileType } },
+      { key: 'document_type', match: { value: params.fileType } },
+    ],
+  };
 }
 
 function buildLibraryNameCondition(params: FilterParams): Record<string, unknown> | null {

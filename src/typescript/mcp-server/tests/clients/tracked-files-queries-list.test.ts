@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
 
 import {
+  countTrackedFiles,
   listTrackedFiles,
 } from '../../src/clients/tracked-files-queries/index.js';
 
@@ -64,10 +65,36 @@ const NOW = '2026-02-24T12:00:00Z';
 function seedProject(db: DatabaseType): void {
   db.prepare(
     `INSERT INTO watch_folders (watch_id, path, collection, tenant_id, is_active, created_at, updated_at)
-     VALUES (?, ?, 'projects', 'tenant-001', 1, ?, ?)`,
+     VALUES (?, ?, 'projects', 'tenant-001', 1, ?, ?)`
   ).run(WATCH_ID, '/home/user/project', NOW, NOW);
 }
 
+function attachSearchMetadata(db: DatabaseType): void {
+  db.exec(`
+    ATTACH DATABASE ':memory:' AS searchdb;
+    CREATE TABLE searchdb.file_metadata (
+      file_id INTEGER PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branches TEXT NOT NULL DEFAULT '[]',
+      file_path TEXT NOT NULL,
+      size_bytes INTEGER,
+      fts5_skipped INTEGER NOT NULL DEFAULT 0,
+      reindex_count INTEGER NOT NULL DEFAULT 0,
+      first_indexed_at TEXT,
+      base_point TEXT,
+      relative_path TEXT,
+      file_hash TEXT
+    );
+  `);
+}
+
+function seedSearchMetadata(db: DatabaseType, relativePath: string, branch = 'main'): void {
+  db.prepare(
+    `INSERT INTO searchdb.file_metadata
+     (tenant_id, branches, file_path, relative_path, size_bytes, fts5_skipped)
+     VALUES ('tenant-001', ?, ?, ?, 100, 0)`
+  ).run(JSON.stringify([branch]), `/home/user/project/${relativePath}`, relativePath);
+}
 function seedFile(
   db: DatabaseType,
   relativePath: string,
@@ -77,13 +104,13 @@ function seedFile(
     extension?: string;
     isTest?: boolean;
     branch?: string;
-  } = {},
+  } = {}
 ): void {
   const ext = opts.extension ?? relativePath.split('.').pop() ?? null;
   db.prepare(
     `INSERT INTO tracked_files
      (watch_folder_id, file_path, relative_path, file_type, language, extension, is_test, branches, file_mtime, file_hash, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     WATCH_ID,
     `/home/user/project/${relativePath}`,
@@ -96,7 +123,7 @@ function seedFile(
     NOW,
     'hash-' + relativePath + '-' + (opts.branch ?? 'main'),
     NOW,
-    NOW,
+    NOW
   );
 }
 
@@ -151,7 +178,87 @@ describe('listTrackedFiles', () => {
     expect(result.status).toBe('ok');
     expect(result.data).toHaveLength(5);
   });
+  it('should include search metadata fallback rows when filtering by fileType and language', () => {
+    attachSearchMetadata(db);
+    seedSearchMetadata(db, 'src/orphan.ts', 'dev-clean');
+    seedSearchMetadata(db, 'src/main-only.ts', 'main');
+    seedSearchMetadata(db, 'src/orphan.scss');
+    seedSearchMetadata(db, 'tests/orphan_test.ts');
 
+    const code = listTrackedFiles(db, {
+      watchFolderId: WATCH_ID,
+      path: 'src',
+      fileType: 'code',
+      branch: 'dev-clean',
+    });
+    expect(code.status).toBe('ok');
+    expect(code.data.map((file) => file.relativePath)).toContain('src/orphan.ts');
+    expect(code.data.find((file) => file.relativePath === 'src/orphan.ts')).toMatchObject({
+      fileType: 'code',
+      language: 'typescript',
+      extension: 'ts',
+    });
+    expect(code.data.map((file) => file.relativePath)).not.toContain('src/orphan.scss');
+    expect(code.data.map((file) => file.relativePath)).not.toContain('src/main-only.ts');
+
+    const typescript = listTrackedFiles(db, {
+      watchFolderId: WATCH_ID,
+      path: 'src',
+      language: 'typescript',
+      branch: 'dev-clean',
+    });
+    expect(typescript.data.map((file) => file.relativePath)).toContain('src/orphan.ts');
+
+    const noTests = listTrackedFiles(db, { watchFolderId: WATCH_ID, includeTests: false });
+    expect(noTests.data.map((file) => file.relativePath)).not.toContain('tests/orphan_test.ts');
+    expect(
+      countTrackedFiles(db, {
+        watchFolderId: WATCH_ID,
+        path: 'src',
+        fileType: 'code',
+        branch: 'dev-clean',
+      })
+    ).toBe(code.data.length);
+  });
+
+  it('should infer missing tracked file metadata when filtering by fileType and language', () => {
+    seedFile(db, 'src/metadata-missing.ts', {
+      fileType: '',
+      language: '',
+      extension: 'ts',
+      branch: 'dev-clean',
+    });
+    seedFile(db, 'src/style-missing.scss', {
+      fileType: '',
+      language: '',
+      extension: 'scss',
+      branch: 'dev-clean',
+    });
+
+    const code = listTrackedFiles(db, {
+      watchFolderId: WATCH_ID,
+      path: 'src',
+      fileType: 'code',
+      branch: 'dev-clean',
+    });
+    expect(code.data.map((file) => file.relativePath)).toContain('src/metadata-missing.ts');
+    expect(code.data.map((file) => file.relativePath)).not.toContain('src/style-missing.scss');
+    expect(code.data.find((file) => file.relativePath === 'src/metadata-missing.ts')).toMatchObject(
+      {
+        fileType: 'code',
+        language: 'typescript',
+        extension: 'ts',
+      }
+    );
+
+    const typescript = listTrackedFiles(db, {
+      watchFolderId: WATCH_ID,
+      path: 'src',
+      language: 'typescript',
+      branch: 'dev-clean',
+    });
+    expect(typescript.data.map((file) => file.relativePath)).toContain('src/metadata-missing.ts');
+  });
   it('should filter by language', () => {
     const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, language: 'rust' });
     expect(result.status).toBe('ok');
@@ -203,7 +310,11 @@ describe('listTrackedFiles', () => {
   });
 
   it('should map fields correctly', () => {
-    const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, path: 'src', language: 'typescript' });
+    const result = listTrackedFiles(db, {
+      watchFolderId: WATCH_ID,
+      path: 'src',
+      language: 'typescript',
+    });
     expect(result.data).toHaveLength(1);
     const file = result.data[0];
     expect(file.relativePath).toBe('src/server.ts');
