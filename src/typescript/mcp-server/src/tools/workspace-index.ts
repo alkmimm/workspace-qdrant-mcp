@@ -402,6 +402,20 @@ async function handleIndexingStatus(
     const eta = typeof status.eta_seconds === 'number' ? status.eta_seconds : undefined;
     const etaSummary =
       eta === undefined ? 'ETA unknown (warming up)' : `ETA ~${formatEtaSeconds(eta)}`;
+    const indexingState =
+      status.is_active === false && inFlight > 0
+        ? 'inactive_with_pending_queue'
+        : inFlight > 0
+          ? 'indexing'
+          : failed > 0
+            ? 'complete_with_failures'
+            : 'complete';
+    const statusReason =
+      indexingState === 'inactive_with_pending_queue'
+        ? 'Watcher is inactive but the daemon still reports queued indexing work.'
+        : indexingState === 'complete_with_failures'
+          ? 'Indexing queue is drained but some files failed.'
+          : undefined;
     const summary =
       inFlight === 0
         ? `Indexing complete (${done} files indexed; ${failed} failed)`
@@ -414,8 +428,9 @@ async function handleIndexingStatus(
       done: number;
       total: number;
       percent: number;
+      state: string;
       eta_seconds?: number;
-    } = { pending, in_progress: inProgress, failed, done, total, percent };
+    } = { pending, in_progress: inProgress, failed, done, total, percent, state: indexingState };
     if (eta !== undefined) indexing.eta_seconds = eta;
 
     return {
@@ -429,6 +444,7 @@ async function handleIndexingStatus(
       indexing_active: inFlight > 0,
       indexing,
       summary,
+      ...(statusReason !== undefined ? { status_reason: statusReason } : {}),
     };
   } catch (err) {
     return {

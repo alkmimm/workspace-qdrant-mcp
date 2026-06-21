@@ -249,4 +249,39 @@ describe('GrepTool — branch "*" wildcard', () => {
     expect(result.matches).toHaveLength(1);
     expect(result.matches[0].file).toBe('/repo/src/example.ts');
   });
+
+  it('suggests widening the branch when a concrete-branch grep misses but another branch has hits', async () => {
+    const daemon = makeDaemonClient();
+    (daemon.textSearch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ matches: [], total_matches: 0, truncated: false })
+      .mockResolvedValueOnce({
+        matches: [
+          {
+            file_path: 'frontend/package.json',
+            line_number: 7,
+            content: '"scripts": {}',
+            context_before: [],
+            context_after: [],
+          },
+        ],
+        total_matches: 1,
+        truncated: false,
+      });
+    const tool = new GrepTool(daemon, makeProjectDetector(undefined));
+
+    const response = await tool.grep({
+      pattern: 'scripts',
+      projectId: 'project-a',
+      branch: 'dev-clean',
+    });
+
+    expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+    expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[0][0].branch).toBe(
+      'dev-clean'
+    );
+    expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[1][0].branch).toBeUndefined();
+    expect(response.matches).toEqual([]);
+    expect(response.message).toContain('branch:"*"');
+    expect(response.message).toContain('dev-clean');
+  });
 });

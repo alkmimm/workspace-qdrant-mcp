@@ -26,12 +26,15 @@ function makeStatus(projectId: string, overrides: Record<string, unknown> = {}) 
   };
 }
 
-function makeDaemon(projectId = '367157a01d98'): {
+function makeDaemon(
+  projectId = '367157a01d98',
+  statusOverrides: Record<string, unknown> = {}
+): {
   daemon: DaemonClient;
   getProjectStatus: ReturnType<typeof vi.fn>;
   listProjects: ReturnType<typeof vi.fn>;
 } {
-  const getProjectStatus = vi.fn().mockResolvedValue(makeStatus(projectId));
+  const getProjectStatus = vi.fn().mockResolvedValue(makeStatus(projectId, statusOverrides));
   const listProjects = vi.fn().mockResolvedValue({
     projects: [{ project_id: 'fallback-active' }],
   });
@@ -276,5 +279,68 @@ describe('workspace_index status resolution', () => {
 
     expect(listProjects).toHaveBeenCalledWith({ active_only: true });
     expect(getProjectStatus).toHaveBeenCalledWith({ project_id: 'fallback-active' });
+  });
+
+  it('list_branches falls back to daemon-only projects by projectId', async () => {
+    const { daemon, listProjects } = makeDaemon('daemon-only');
+    listProjects.mockResolvedValue({
+      projects: [
+        {
+          project_id: 'daemon-only',
+          project_name: 'bws-engineer',
+          project_root: '/home/alkmimm/respositorios/bws-engineer',
+        },
+      ],
+    });
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'list_branches', projectId: 'daemon-only' },
+      daemon,
+      undefined
+    )) as Record<string, unknown>;
+
+    expect(listProjects).toHaveBeenCalledWith({});
+    expect(result).toMatchObject({
+      success: true,
+      project: 'bws-engineer',
+      projectId: 'daemon-only',
+      branches: [
+        expect.objectContaining({
+          name: 'dev-clean',
+          indexed: true,
+          kind: 'primary',
+          note: expect.stringContaining('Synthesized from daemon ListProjects'),
+        }),
+      ],
+    });
+  });
+
+  it('reports inactive watcher with pending indexing as an explicit state', async () => {
+    const { daemon } = makeDaemon('367157a01d98', {
+      is_active: false,
+      pending_count: 139,
+      in_progress_count: 0,
+      failed_count: 2,
+      done_count: 2464,
+      total_count: 2605,
+      percent_complete: 94.6,
+    });
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'project_status', projectId: '367157a01d98' },
+      daemon,
+      undefined
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      success: true,
+      is_active: false,
+      status_reason: 'Watcher is inactive but the daemon still reports queued indexing work.',
+      indexing: {
+        pending: 139,
+        failed: 2,
+        state: 'inactive_with_pending_queue',
+      },
+    });
   });
 });
