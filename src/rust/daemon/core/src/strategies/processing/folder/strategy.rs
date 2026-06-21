@@ -124,7 +124,7 @@ pub(crate) async fn process_folder_item(
     match item.op {
         QueueOperation::Scan => dispatch_scan(ctx, item, &payload, last_scan_for_scan).await,
         QueueOperation::Delete => process_folder_delete(item, &payload, &ctx.queue_manager).await,
-        QueueOperation::Update | QueueOperation::Add => {
+        QueueOperation::Update | QueueOperation::Add | QueueOperation::Uplift => {
             info!(
                 "Folder {:?} operation treated as rescan for: {}",
                 item.op,

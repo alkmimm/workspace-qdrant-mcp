@@ -20,23 +20,17 @@ qdrant:
   check_compatibility: true
 
 # Auto-ingestion configuration
+# Only the fields below are read by the current YAML loader.
 auto_ingestion:
   enabled: true
   auto_create_watches: true
   include_common_files: true
   include_source_files: true
-  target_collection_suffix: "scratchbook"
   max_files_per_batch: 5
-  batch_delay_seconds: 2.0
-  max_file_size_mb: 50
-  recursive_depth: 5
-  debounce_seconds: 10
+  debounce: 10s
 
-# Optimized auto-ingestion for large file sets
+# Optimized auto-ingestion for large file sets (legacy/example-only; not read by current runtime)
 optimized_ingestion:
-  # Control parallel file processing (1-50)
-  max_concurrent_files: 10
-  # Configure batch processing size (1-500)
   batch_size: 50
   # Enable adaptive batch sizing based on system resources
   adaptive_batch_sizing: true
@@ -105,9 +99,10 @@ logging:
 # WQM_QUEUE_BATCH_SIZE - Override batch_size
 # WQM_QUEUE_POLL_INTERVAL_MS - Override poll_interval_ms
 # WQM_QUEUE_MAX_RETRIES - Override max_retries
-# WQM_QUEUE_TARGET_THROUGHPUT - Override target_throughput
+# WQM_QUEUE_TARGET_THROUGHPUT - Override target_throughput (monitoring only)
 # WQM_QUEUE_ENABLE_METRICS - Override enable_metrics (true/false or 1/0)
 # WQM_QUEUE_MAX_CONCURRENT_ITEMS - Override max_concurrent_items (1-64, default 1 = byte-identical sequential)
-# WQM_OPTIMIZED_MAX_CONCURRENT - Override optimized_ingestion.max_concurrent_files
-# WQM_OPTIMIZED_BATCH_SIZE - Override optimized_ingestion.batch_size
-# WQM_OPTIMIZED_DEDUP_ENABLED - Override optimized_ingestion.enable_deduplication
+# WQM_DOC_PROCESSING_CONCURRENCY - Cap concurrent blocking document-processing jobs
+# WORKSPACE_QDRANT_MAX_CONCURRENT_TASKS - Override top-level daemon task parallelism
+# WORKSPACE_QDRANT_CHUNK_SIZE - Override document chunking threshold for tree-sitter / semantic chunking
+# WORKSPACE_QDRANT_AUTO_INGESTION__MAX_FILES_PER_BATCH - Override auto_ingestion.max_files_per_batch

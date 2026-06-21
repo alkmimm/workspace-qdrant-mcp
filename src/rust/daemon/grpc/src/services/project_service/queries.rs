@@ -214,7 +214,7 @@ impl ProjectServiceImpl {
             .try_get("is_active")
             .map_err(|e| Status::internal(format!("Failed to get is_active: {e}")))?;
 
-        let priority = if is_active_int == 1 { "high" } else { "normal" };
+        let priority = if is_active_int > 0 { "high" } else { "normal" };
 
         let path: String = row
             .try_get("path")
@@ -236,7 +236,7 @@ impl ProjectServiceImpl {
             project_name,
             project_root: path,
             priority: priority.to_string(),
-            is_active: is_active_int == 1,
+            is_active: is_active_int > 0,
             last_active,
             registered_at,
             git_remote: row
@@ -365,14 +365,14 @@ impl ProjectServiceImpl {
         let priority_filter = req.priority_filter.as_deref();
         if let Some(priority) = priority_filter {
             if priority == "high" {
-                query.push_str(" AND is_active = 1");
+                query.push_str(" AND is_active > 0");
             } else if priority == "normal" || priority == "low" {
                 query.push_str(" AND is_active = 0");
             }
         }
 
         if req.active_only {
-            query.push_str(" AND is_active = 1");
+            query.push_str(" AND is_active > 0");
         }
 
         query.push_str(" ORDER BY is_active DESC, last_activity_at DESC");
@@ -413,7 +413,7 @@ impl ProjectServiceImpl {
             .try_get("is_active")
             .map_err(|e| Status::internal(format!("Failed to get is_active: {e}")))?;
 
-        let priority = if is_active_int == 1 { "high" } else { "normal" };
+        let priority = if is_active_int > 0 { "high" } else { "normal" };
 
         let path: String = row
             .try_get("path")
@@ -433,7 +433,7 @@ impl ProjectServiceImpl {
             project_name,
             project_root: path,
             priority: priority.to_string(),
-            is_active: is_active_int == 1,
+            is_active: is_active_int > 0,
             last_active,
             is_worktree: is_worktree_int != 0,
         })

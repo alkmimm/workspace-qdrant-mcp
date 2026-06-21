@@ -48,6 +48,7 @@ impl QueueManager {
     /// Reset eligible failed transient items back to pending for retry.
     ///
     /// Called periodically from the processing loop idle path (default: every hour).
+    /// Resurrected items are re-queued behind a fresh lease_until backoff.
     /// Only items prefixed `[transient_` are eligible — permanent failures are left
     /// as-is. Items that have been resurrected `max_resurrections` times are promoted
     /// to `[permanent_exhausted]` and stop being resurrected.
@@ -106,20 +107,25 @@ impl QueueManager {
                     queue_id, count, max_resurrections
                 );
             } else {
-                // Resurrect with incremented count
+                // Resurrect with incremented count and a fresh lease backoff.
+                let total_delay = backoff_delay_secs(count);
+                let retry_after_str = timestamps::format_utc(
+                    &(Utc::now() + ChronoDuration::seconds(total_delay as i64)),
+                );
                 metadata["resurrection_count"] = serde_json::json!(count + 1);
                 let new_metadata = serde_json::to_string(&metadata).unwrap_or_default();
 
                 sqlx::query(
                     r#"UPDATE unified_queue
                        SET status = 'pending', retry_count = 0,
-                           lease_until = NULL, worker_id = NULL,
+                           lease_until = ?2, worker_id = NULL,
                            qdrant_status = NULL, search_status = NULL,
                            metadata = ?1,
                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                       WHERE queue_id = ?2"#,
+                       WHERE queue_id = ?3"#,
                 )
                 .bind(&new_metadata)
+                .bind(&retry_after_str)
                 .bind(queue_id)
                 .execute(&self.pool)
                 .await?;
@@ -419,6 +425,13 @@ impl QueueManager {
     }
 }
 
+fn backoff_delay_secs(attempt: i32) -> f64 {
+    let attempt = attempt.max(0);
+    let base_delay_secs = (60.0_f64 * 2.0_f64.powi(attempt)).min(3600.0);
+    let jitter = base_delay_secs * 0.1 * rand::random::<f64>();
+    base_delay_secs + jitter
+}
+
 /// Reset a unified queue item to pending with exponential backoff for retry.
 async fn mark_unified_retry(
     pool: &sqlx::SqlitePool,
@@ -428,9 +441,7 @@ async fn mark_unified_retry(
     new_retry_count: i32,
     max_retries: i32,
 ) -> QueueResult<bool> {
-    let delay_secs = (60.0_f64 * 2.0_f64.powi(retry_count)).min(3600.0);
-    let jitter = delay_secs * 0.1 * rand::random::<f64>();
-    let total_delay = delay_secs + jitter;
+    let total_delay = backoff_delay_secs(retry_count);
     let retry_after_str =
         timestamps::format_utc(&(Utc::now() + ChronoDuration::seconds(total_delay as i64)));
 

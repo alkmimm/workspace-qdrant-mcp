@@ -440,6 +440,8 @@ async function handleIndexingStatus(
       project_name: status.project_name,
       project_root: status.project_root,
       is_active: status.is_active,
+      session_active: status.is_active,
+      indexing_active: inFlight > 0,
       indexing,
       summary,
       ...(statusReason !== undefined ? { status_reason: statusReason } : {}),
@@ -501,7 +503,7 @@ function projectSelectorFromArgs(args: JsonObject): {
 } {
   const name = stringArg(args, 'projectName', ['name']);
   const id = stringArg(args, 'projectId');
-  const dir = stringArg(args, 'projectPath', ['projectDir']);
+  const dir = stringArg(args, 'projectPath', ['projectDir', 'repoDir', 'cwd']);
   return {
     ...(name !== undefined ? { projectName: name } : {}),
     ...(id !== undefined ? { projectId: id } : {}),
@@ -556,24 +558,7 @@ function dispatchTsAction(
       // indexes but that aren't in indexed-projects.json (eval item #5).
       return runListProjects(base, daemonClient);
     case 'list_branches':
-      return (async () => {
-        try {
-          return runListBranches(projectArgs);
-        } catch (e) {
-          if (daemonClient === undefined || projectArgs.projectId === undefined) throw e;
-          const p = (await daemonClient.listProjects({})).projects.find(
-            (x) => x.project_id === projectArgs.projectId
-          );
-          if (p === undefined) throw e;
-          return {
-            success: true,
-            project: p.project_name,
-            projectId: p.project_id,
-            registryFound: false,
-            branches: [],
-          };
-        }
-      })();
+      return runListBranches(projectArgs, daemonClient);
     case 'agent_branch_status': {
       const branchName = stringArg(args, 'branchName', ['branch']);
       if (!branchName) throw new Error('branchName is required');

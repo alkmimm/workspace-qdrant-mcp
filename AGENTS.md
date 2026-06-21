@@ -239,8 +239,10 @@ Comportamento obrigatório:
 2. Para trabalho no fork, confirme que está em `dev` (ou feature branch a partir de `dev`), não na `main` — a `main` recebe só promoções estáveis.
 3. Confirme se está em branch do fork ou branch de projeto indexado.
 4. Para projeto indexado, registre `project`, `path`, `branch`, `baseBranch` e `returnBranch`.
-5. Não faça merge automático de volta à branch original.
-6. Rode validações compatíveis.
+5. Ao corrigir um bug ou incluir melhoria em uma ferramenta/caminho, procure implementações equivalentes antes de encerrar. Antipadrão: aplicar fallback, dedup, validação, tenant/branch scope, observabilidade ou parsing em apenas um lugar quando `search`, `grep`, `list`, `retrieve`, `workspace_index`, CLI ou daemon têm comportamento análogo. Quando útil, replique a melhoria, extraia helper comum ou registre explicitamente por que o outro caminho não se aplica, com teste de regressão cobrindo o padrão compartilhado.
+6. Ao editar Markdown, YAML ou JSON com aspas, escapes ou blocos sensíveis, prefira uma mudança cirúrgica em um único patch. Se uma tentativa falhar por quoting/escaping, mude de estratégia antes de repetir o mesmo comando em loop.
+7. Não faça merge automático de volta à branch original.
+8. Rode validações compatíveis.
 
 ## Dados locais e segurança
 

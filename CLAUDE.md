@@ -42,6 +42,8 @@ Backward compatibility is not necessary as this project is a work in progress an
 
 When modifying files that exceed the code size limits (see global CLAUDE.md), refactor gradually by extracting the section being changed into its own module.
 
+Editing hygiene: for Markdown, YAML, JSON, or any quote-heavy file, prefer one surgical patch and verify it right away. If a change fails because of quoting or escaping, switch strategy instead of retrying the same command shape in a loop.
+
 To identify oversized files, use `LargeCode --root <project root> --output <project root>/tmp/largecode.csv` or `wc -l` on specific files. The limits are defined in the global CLAUDE.md (Rust: 500 lines/file, 80 lines/function).
 
 All Critical (>2000) and High (1000-2000) files have been split across arch-refactor rounds 1-3. Remaining oversized files are in the 500-760 line range.
@@ -219,6 +221,7 @@ SystemService, CollectionService, DocumentService, EmbeddingService, ProjectServ
 
 - **DO NOT CHANGE THE MCP CONFIGURATION**: Never modify MCP server configuration without explicit permission
 - **NO .mcp.json FILE**: The MCP server is already installed system-wide. Do not create `.mcp.json` in this project. If the server needs reconnecting, the user will handle it manually.
+- **Avoid one-off fixes for shared behavior**: When fixing a bug or improving behavior in one tool/path, scan for analogous implementations before finishing. Do not apply fallback, deduplication, validation, tenant/branch scoping, observability, or parsing improvements to only one place when `search`, `grep`, `list`, `retrieve`, `workspace_index`, CLI, or daemon paths have the same concern. Reuse a helper, replicate the fix where useful, or document why the other path is intentionally different; add regression coverage for the shared pattern.
 - **Server Stability**: Always verify server starts without crashes after changes
 - **Git Discipline**: Follow strict temporary file naming conventions (YYYYMMDD-HHMM_name format)
 - **Atomic Commits**: Make focused, single-purpose commits with clear messages

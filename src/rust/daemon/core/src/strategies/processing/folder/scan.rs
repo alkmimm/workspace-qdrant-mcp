@@ -224,7 +224,7 @@ pub(crate) async fn enqueue_submodule(
     }
 }
 
-/// Enqueue a regular subdirectory as a Folder/Scan item.
+/// Enqueue a regular subdirectory as a Folder/Scan or Folder/Uplift item.
 ///
 /// `last_scan` is embedded in the payload so the child scan can prune
 /// unchanged entries without an extra DB query.
@@ -290,14 +290,20 @@ async fn enqueue_subdirectory(
         }
     };
 
+    let op = if uplift {
+        QueueOperation::Uplift
+    } else {
+        QueueOperation::Scan
+    };
+
     match queue_manager
         .enqueue_unified(
             ItemType::Folder,
-            QueueOperation::Scan,
+            op,
             &item.tenant_id,
             &item.collection,
             &payload_json,
-            None,
+            Some(&item.branch),
             None,
         )
         .await
@@ -348,7 +354,7 @@ pub(crate) async fn process_file_entry(
         }
     };
 
-    if should_prune_by_mtime(baseline, &metadata) {
+    if !uplift && should_prune_by_mtime(baseline, &metadata) {
         debug!("mtime prune: skipping unchanged file {}", abs_path);
         *files_excluded += 1;
         return 0;
@@ -554,5 +560,97 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(op_uplift, "uplift");
+    }
+
+
+    #[tokio::test]
+    async fn uplift_bypasses_mtime_pruning() {
+        let project = tempfile::tempdir().unwrap();
+        let file = project.path().join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let root = CanonicalPath::from_user_input(&project.path().to_string_lossy()).unwrap();
+        let future_baseline = SystemTime::now() + std::time::Duration::from_secs(86_400);
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let qm = Arc::new(QueueManager::new(pool.clone()));
+        qm.init_unified_queue().await.unwrap();
+        let allowed = Arc::new(AllowedExtensions::default());
+
+        let mut excluded = 0u64;
+        let mut errors = 0u64;
+        let add_queued = process_file_entry(
+            &file,
+            &root,
+            &scan_item("t-pruned-add"),
+            &qm,
+            &allowed,
+            Some(&future_baseline),
+            false,
+            &mut excluded,
+            &mut errors,
+        )
+        .await;
+        assert_eq!(add_queued, 0, "normal Add should still honor mtime pruning");
+
+        let uplift_queued = process_file_entry(
+            &file,
+            &root,
+            &scan_item("t-uplift-mtime"),
+            &qm,
+            &allowed,
+            Some(&future_baseline),
+            true,
+            &mut excluded,
+            &mut errors,
+        )
+        .await;
+        assert_eq!(uplift_queued, 1, "Uplift is a forced rebuild and must ignore mtime");
+        assert_eq!(errors, 0);
+
+        let op: String = sqlx::query_scalar(
+            "SELECT op FROM unified_queue WHERE tenant_id = 't-uplift-mtime'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(op, "uplift");
+    }
+
+    #[tokio::test]
+    async fn enqueue_subdirectory_preserves_branch_and_uplift_op() {
+        let project = tempfile::tempdir().unwrap();
+        let child = project.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let root =
+            CanonicalPath::from_user_input(&project.path().to_string_lossy()).unwrap();
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let qm = Arc::new(QueueManager::new(pool.clone()));
+        qm.init_unified_queue().await.unwrap();
+
+        let mut item = scan_item("t-subdir");
+        item.branch = "dev-clean".to_string();
+        let queued = enqueue_subdirectory(
+            &child,
+            &root,
+            &item,
+            &qm,
+            Some("2026-06-20T20:34:32.253Z"),
+            true,
+        )
+        .await;
+        assert_eq!(queued, 1);
+
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT op, branch, payload_json FROM unified_queue WHERE tenant_id = 't-subdir'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, "uplift");
+        assert_eq!(row.1, "dev-clean");
+        assert!(row.2.contains(r#""folder_path":"child""#));
+        assert!(row.2.contains(r#""uplift":true"#));
     }
 }

@@ -19,6 +19,7 @@ import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { RulesTool, RuleScope } from '../tools/rules.js';
 import mcpPublicConfig from '../constants/mcp-public-config.json' with { type: 'json' };
 import { DEFAULT_HTTP_PORT } from '../server-types.js';
+import { getCurrentBranch } from '../utils/git-utils.js';
 import { logError, logInfo } from '../utils/logger.js';
 
 import { scanForGitProjects, type ProjectCandidate } from './discovery.js';
@@ -186,6 +187,118 @@ const handleSnapshot: RouteHandler = async (_req, res, { daemonClient, stateMana
       registeredCount: registered.length,
       approvedCount: settings.approvedProjects.length,
     },
+  });
+};
+
+// ── /api/branches/coverage — branch/index consistency snapshot ─────────────
+
+function addBranchMetric(
+  map: Map<string, Record<string, unknown>>,
+  tenantId: string,
+  branch: string,
+  patch: Record<string, unknown>
+): void {
+  const key = `${tenantId}\0${branch}`;
+  const existing = map.get(key) ?? { tenantId, branch };
+  map.set(key, { ...existing, ...patch });
+}
+
+const handleBranchCoverage: RouteHandler = async (req, res, { stateManager, searchDbReader }) => {
+  const url = new URL(req.url ?? '/', 'http://localhost');
+  const tenantId = url.searchParams.get('tenant_id') ?? undefined;
+  const coverageOptions: { tenantId?: string } = {};
+  if (tenantId !== undefined) coverageOptions.tenantId = tenantId;
+
+  const state = stateManager.getBranchCoverage(tenantId);
+  const searchStatus = searchDbReader.initialize();
+  const ftsRows =
+    searchStatus.status === 'ok' ? searchDbReader.listBranchCounts(coverageOptions) : [];
+
+  if (state.status !== 'ok' || !state.data) {
+    writeJson(res, 200, {
+      ok: false,
+      degraded: state,
+      search: searchStatus,
+      projects: [],
+    });
+    return;
+  }
+
+  const projects = new Map<string, Record<string, unknown>>();
+  for (const watch of state.data.watches) {
+    const currentBranch = getCurrentBranch(watch.path);
+    projects.set(watch.tenant_id, {
+      tenantId: watch.tenant_id,
+      path: watch.path,
+      collection: watch.collection,
+      isActive: watch.is_active,
+      isPaused: watch.is_paused,
+      lastScan: watch.last_scan,
+      currentBranch,
+      branches: [],
+      warnings: [],
+    });
+  }
+
+  const branchMap = new Map<string, Record<string, unknown>>();
+  for (const row of state.data.queue) {
+    const branch = row.branch || '(none)';
+    const queue = (branchMap.get(`${row.tenant_id}\0${branch}`)?.queue as Record<string, number> | undefined) ?? {};
+    const key = `${row.status}:${row.item_type}:${row.op}`;
+    queue[key] = (queue[key] ?? 0) + row.count;
+    queue[row.status] = (queue[row.status] ?? 0) + row.count;
+    addBranchMetric(branchMap, row.tenant_id, branch, { queue });
+  }
+  for (const row of state.data.tracked) {
+    addBranchMetric(branchMap, row.tenant_id, row.branch || '(none)', {
+      trackedFiles: row.files,
+      trackedChunks: row.chunks,
+    });
+  }
+  for (const row of ftsRows) {
+    addBranchMetric(branchMap, row.tenant_id, row.branch || '(none)', {
+      ftsFiles: row.files,
+      ftsBytes: row.total_bytes,
+    });
+  }
+
+  for (const entry of branchMap.values()) {
+    const project = projects.get(String(entry.tenantId));
+    if (!project) continue;
+    const branches = project.branches as Array<Record<string, unknown>>;
+    branches.push(entry);
+  }
+
+  for (const project of projects.values()) {
+    const currentBranch = project.currentBranch ? String(project.currentBranch) : null;
+    const warnings = project.warnings as string[];
+    const branches = project.branches as Array<Record<string, unknown>>;
+    branches.sort((a, b) => String(a.branch).localeCompare(String(b.branch)));
+    if (currentBranch) {
+      const hasCurrent = branches.some((b) => b.branch === currentBranch);
+      if (!hasCurrent) warnings.push(`No indexed rows for current branch '${currentBranch}'`);
+      const nonCurrent = branches.filter((b) => {
+        const branch = String(b.branch);
+        const total =
+          Number(b.trackedFiles ?? 0) +
+          Number(b.ftsFiles ?? 0) +
+          Number((b.queue as Record<string, number> | undefined)?.pending ?? 0);
+        return branch !== currentBranch && branch !== '(none)' && total > 0;
+      });
+      if (nonCurrent.length > 0) {
+        warnings.push(`Rows exist on non-current branch(es): ${nonCurrent.map((b) => b.branch).join(', ')}`);
+      }
+    }
+  }
+
+  writeJson(res, 200, {
+    ok: true,
+    source: {
+      stateDb: stateManager.getDatabasePath(),
+      searchDb: searchDbReader.getDatabasePath(),
+      searchStatus,
+    },
+    projects: Array.from(projects.values()),
   });
 };
 
@@ -1140,6 +1253,7 @@ type Route = { method: string; path: string; handler: RouteHandler };
 const ROUTES: ReadonlyArray<Route> = [
   { method: 'GET', path: '/admin/api/snapshot', handler: handleSnapshot },
   { method: 'GET', path: '/admin/api/health', handler: handleHealth },
+  { method: 'GET', path: '/admin/api/branches/coverage', handler: handleBranchCoverage },
   { method: 'POST', path: '/admin/api/projects/scan', handler: handleScan },
   { method: 'POST', path: '/admin/api/projects/register', handler: handleRegister },
   { method: 'POST', path: '/admin/api/projects/deregister', handler: handleDeregister },

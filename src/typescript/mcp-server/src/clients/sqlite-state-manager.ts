@@ -96,6 +96,31 @@ export interface DegradedQueryResult<T> {
   message?: string;
 }
 
+export interface StateBranchCoverage {
+  watches: Array<{
+    tenant_id: string;
+    path: string;
+    collection: string;
+    is_active: number;
+    is_paused: number;
+    last_scan: string | null;
+  }>;
+  queue: Array<{
+    tenant_id: string;
+    branch: string;
+    status: string;
+    item_type: string;
+    op: string;
+    count: number;
+  }>;
+  tracked: Array<{
+    tenant_id: string;
+    branch: string;
+    files: number;
+    chunks: number;
+  }>;
+}
+
 /**
  * SQLite state manager for MCP server
  *
@@ -188,6 +213,64 @@ export class SqliteStateManager {
 
   getQueueStats(): DegradedQueryResult<QueueStats | null> {
     return queueOps.getQueueStats(this.db);
+  }
+
+  getBranchCoverage(tenantId?: string): DegradedQueryResult<StateBranchCoverage | null> {
+    const init = this.initialize();
+    if (init.status !== 'ok' || !this.db) {
+      const degraded: DegradedQueryResult<StateBranchCoverage | null> = {
+        data: null,
+        status: 'degraded',
+        message: init.message ?? 'Database not initialized',
+      };
+      if (init.reason) degraded.reason = init.reason;
+      return degraded;
+    }
+
+    const watchWhere = tenantId ? 'WHERE tenant_id = @tenantId AND collection = @collection' : 'WHERE collection = @collection';
+    const scopedWhere = tenantId ? 'WHERE tenant_id = @tenantId' : '';
+    const trackedWhere = tenantId ? 'WHERE wf.tenant_id = @tenantId' : '';
+    const params = tenantId ? { tenantId, collection: 'projects' } : { collection: 'projects' };
+
+    try {
+      const watches = this.db.prepare(`
+        SELECT tenant_id, path, collection, is_active, is_paused, last_scan
+        FROM watch_folders
+        ${watchWhere}
+        ORDER BY path
+      `).all(params) as StateBranchCoverage['watches'];
+
+      const queue = this.db.prepare(`
+        SELECT tenant_id, COALESCE(branch, '(none)') AS branch, status, item_type, op, COUNT(*) AS count
+        FROM unified_queue
+        ${scopedWhere}
+        GROUP BY tenant_id, branch, status, item_type, op
+        ORDER BY tenant_id, branch, status, item_type, op
+      `).all(tenantId ? { tenantId } : {}) as StateBranchCoverage['queue'];
+
+      const tracked = this.db.prepare(`
+        SELECT
+          wf.tenant_id,
+          COALESCE(NULLIF(j.value, ''), '(none)') AS branch,
+          COUNT(*) AS files,
+          COALESCE(SUM(tf.chunk_count), 0) AS chunks
+        FROM tracked_files tf
+        JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id
+        LEFT JOIN json_each(tf.branches) j
+        ${trackedWhere}
+        GROUP BY wf.tenant_id, branch
+        ORDER BY wf.tenant_id, branch
+      `).all(tenantId ? { tenantId } : {}) as StateBranchCoverage['tracked'];
+
+      return { data: { watches, queue, tracked }, status: 'ok' };
+    } catch (error) {
+      return {
+        data: null,
+        status: 'degraded',
+        reason: 'database_error',
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   // ── Project queries (delegated) ───────────────────────────────────────

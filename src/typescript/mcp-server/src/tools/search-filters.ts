@@ -44,15 +44,13 @@ export function extractGlobPrefix(glob: string): string {
 export function determineCollections(
   collection: string | undefined,
   scope: SearchScope,
-  includeLibraries: boolean,
+  includeLibraries: boolean
 ): string[] {
   if (collection) return [collection];
 
   switch (scope) {
     case 'project':
-      return includeLibraries
-        ? [PROJECTS_COLLECTION, LIBRARIES_COLLECTION]
-        : [PROJECTS_COLLECTION];
+      return includeLibraries ? [PROJECTS_COLLECTION, LIBRARIES_COLLECTION] : [PROJECTS_COLLECTION];
     case 'global':
       return [PROJECTS_COLLECTION];
     case 'all':
@@ -76,12 +74,25 @@ function buildBasePointCondition(params: FilterParams): Record<string, unknown> 
 
 function buildBranchCondition(params: FilterParams): Record<string, unknown> | null {
   if (!params.branch || params.branch === '*') return null;
+  if (params.fallbackBranch && params.fallbackBranch !== params.branch) {
+    return {
+      should: [
+        { key: FIELD_BRANCH, match: { value: params.branch } },
+        { key: FIELD_BRANCH, match: { value: params.fallbackBranch } },
+      ],
+    };
+  }
   return { key: FIELD_BRANCH, match: { value: params.branch } };
 }
 
 function buildFileTypeCondition(params: FilterParams): Record<string, unknown> | null {
   if (!params.fileType) return null;
-  return { key: FIELD_FILE_TYPE, match: { value: params.fileType } };
+  return {
+    should: [
+      { key: FIELD_FILE_TYPE, match: { value: params.fileType } },
+      { key: 'document_type', match: { value: params.fileType } },
+    ],
+  };
 }
 
 function buildLibraryNameCondition(params: FilterParams): Record<string, unknown> | null {
@@ -117,11 +128,21 @@ function buildComponentCondition(params: FilterParams): Record<string, unknown> 
   };
 }
 
+function extractGlobTextHint(glob: string): string {
+  const normalized = glob.replace(/\\/g, '/');
+  const literalSegments = normalized
+    .split('/')
+    .filter((segment) => segment.length > 0 && !/[*?[{]/.test(segment));
+  literalSegments.sort((a, b) => b.length - a.length);
+  return literalSegments[0] ?? '';
+}
+
 function buildPathGlobCondition(params: FilterParams): Record<string, unknown> | null {
   if (!params.pathGlob) return null;
   const prefix = extractGlobPrefix(params.pathGlob);
-  if (!prefix) return null;
-  return { key: FIELD_FILE_PATH, match: { text: prefix } };
+  const textHint = prefix || extractGlobTextHint(params.pathGlob);
+  if (!textHint) return null;
+  return { key: FIELD_FILE_PATH, match: { text: textHint } };
 }
 
 function buildMustConditions(params: FilterParams): Record<string, unknown>[] {

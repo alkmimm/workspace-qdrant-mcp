@@ -63,6 +63,13 @@ export interface ListChurnFilesOptions {
   minReindexCount?: number;
 }
 
+export interface SearchBranchCountRow {
+  tenant_id: string;
+  branch: string;
+  files: number;
+  total_bytes: number | null;
+}
+
 export type ReaderStatus =
   | { status: 'ok' }
   | { status: 'degraded'; reason: 'database_not_found' | 'database_error'; message: string };
@@ -230,6 +237,54 @@ export class SearchDbReader {
       // Pre-v9 search.db has no `reindex_count` column — degrade to empty
       // rather than throwing, since the admin UI polls this.
       return [];
+    }
+  }
+
+  listBranchCounts(options: { tenantId?: string } = {}): SearchBranchCountRow[] {
+    const status = this.initialize();
+    if (status.status !== 'ok' || !this.db) return [];
+
+    const where: string[] = [];
+    const params: Record<string, string> = {};
+    if (options.tenantId) {
+      where.push('fm.tenant_id = @tenantId');
+      params['tenantId'] = options.tenantId;
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
+    const sqlBranches = `
+      SELECT
+        fm.tenant_id,
+        COALESCE(NULLIF(j.value, ''), '(none)') AS branch,
+        COUNT(*) AS files,
+        SUM(fm.size_bytes) AS total_bytes
+      FROM file_metadata fm
+      LEFT JOIN json_each(fm.branches) j
+      ${whereSql}
+      GROUP BY fm.tenant_id, branch
+      ORDER BY fm.tenant_id, branch
+    `;
+
+    try {
+      return this.db.prepare(sqlBranches).all(params) as SearchBranchCountRow[];
+    } catch {
+      const legacyWhereSql = whereSql.replaceAll('fm.tenant_id', 'tenant_id');
+      const sqlLegacy = `
+        SELECT
+          tenant_id,
+          COALESCE(branch, '(none)') AS branch,
+          COUNT(*) AS files,
+          SUM(size_bytes) AS total_bytes
+        FROM file_metadata
+        ${legacyWhereSql}
+        GROUP BY tenant_id, branch
+        ORDER BY tenant_id, branch
+      `;
+      try {
+        return this.db.prepare(sqlLegacy).all(params) as SearchBranchCountRow[];
+      } catch {
+        return [];
+      }
     }
   }
 }

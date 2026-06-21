@@ -125,6 +125,27 @@ Other subsystem overrides:
 
 Embedding overrides from `WQM_EMBEDDING_*` are applied after the config file is loaded, so they work even when `WQM_CONFIG_PATH` points to an explicit file. FastEmbed also honors `HF_HOME`; pointing it at the same writable cache directory as `WQM_EMBEDDING_MODEL_CACHE_DIR` keeps downloads in one place.
 
+### Throughput tuning
+
+Use these when ingestion is the bottleneck:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `WORKSPACE_QDRANT_MAX_CONCURRENT_TASKS` | `4` | Top-level daemon task parallelism |
+| `WORKSPACE_QDRANT_CHUNK_SIZE` | `1000` | Chunking threshold for semantic / document processing; larger values reduce splits on long single-line files |
+| `WQM_DOC_PROCESSING_CONCURRENCY` | auto | Caps concurrent blocking document-processing jobs |
+| `WQM_QUEUE_MAX_CONCURRENT_ITEMS` | `1` | Items dispatched in parallel within a queue batch |
+| `WQM_QUEUE_BATCH_SIZE` | `10` | Items dequeued per cycle |
+| `WQM_QUEUE_POLL_INTERVAL_MS` | `500` | Delay between dequeue polls |
+| `WQM_RESOURCE_MAX_CONCURRENT_EMBEDDINGS` | auto | Concurrent embedding jobs |
+| `WQM_RESOURCE_ONNX_INTRA_THREADS` | auto | ONNX threads per embedding job |
+| `WQM_RESOURCE_INTER_ITEM_DELAY_MS` | `50` | Delay between queue items |
+| `WORKSPACE_QDRANT_AUTO_INGESTION__MAX_FILES_PER_BATCH` | `5` | Files queued per auto-ingestion burst |
+| `WQM_MAX_RSS_MB` | `2048` | Safety valve that pauses processing when RSS grows too high |
+
+`WQM_QUEUE_TARGET_THROUGHPUT` is monitoring-only and does not throttle the queue. `WQM_STARTUP_*` only affects startup / reconcile catch-up.
+
+
 ---
 
 ## Configuration Sections
@@ -389,10 +410,7 @@ Automatic ingestion pipeline settings.
 | `include_common_files` | bool | `true` | Include common non-source files (config, docs) |
 | `include_source_files` | bool | `true` | Include source code files |
 | `max_files_per_batch` | integer | `5` | Maximum files processed per ingestion batch |
-| `batch_delay_seconds` | float | `2.0` | Delay between ingestion batches |
-| `max_file_size_mb` | integer | `50` | Maximum file size eligible for ingestion |
-| `recursive_depth` | integer | `5` | Maximum directory depth for recursive scanning |
-| `debounce_seconds` | integer | `10` | File event debounce window |
+| `debounce` | string | `"10s"` | File event debounce window (duration string) |
 
 ### `collections`
 

@@ -1,8 +1,9 @@
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
+use std::path::Path;
 use uuid::Uuid;
 
-/// Enqueue a `folder|scan` item for every enabled `watch_folders` row.
+/// Enqueue a `folder|uplift` item for every enabled `watch_folders` row.
 ///
 /// Each row IS a watch-folder root, so the scan must target that root. The
 /// folder-scan strategy resolves the root from `watch_folders` by
@@ -14,24 +15,39 @@ use uuid::Uuid;
 /// directory", enqueued zero files, and the re-embed "completed" without
 /// re-ingesting anything. Emit `folder_path: null` so the strategy scans the
 /// actual root (and takes the git-index fast path for project scans).
+///
+/// Re-embed is a rebuild, not an incremental scan: `tracked_files` and the
+/// vector collections have just been cleared, while file mtimes may be older
+/// than any previous baseline. Use Folder/Uplift and propagate
+/// `uplift: true` so every discovered file becomes File/Uplift and bypasses
+/// unchanged-hash/mtime shortcuts.
 pub(super) async fn enqueue_folder_scans(pool: &SqlitePool, now: &str) -> Result<u32, sqlx::Error> {
-    let folders = sqlx::query_as::<_, (String, String)>(
-        "SELECT collection, tenant_id FROM watch_folders WHERE enabled = 1",
+    let folders = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT collection, tenant_id, path FROM watch_folders WHERE enabled = 1",
     )
     .fetch_all(pool)
     .await?;
 
     let mut count = 0u32;
-    for (collection, tenant_id) in &folders {
+    for (collection, tenant_id, path) in &folders {
+        let branch = if collection == "projects" {
+            workspace_qdrant_core::watching_queue::get_current_branch(Path::new(path))
+        } else {
+            "main".to_string()
+        };
         let payload = serde_json::json!({
             "folder_path": null,
             "recursive": true,
-            "recursive_depth": 10,
+            "recursive_depth": 20,
             "patterns": [],
-            "ignore_patterns": []
+            "ignore_patterns": [],
+            "uplift": true
         })
         .to_string();
-        let idem_input = format!("folder|scan|{}|{}|{}", tenant_id, collection, payload);
+        let idem_input = format!(
+            "folder|uplift|{}|{}|{}|{}",
+            tenant_id, collection, branch, payload
+        );
         let mut hasher = Sha256::new();
         hasher.update(idem_input.as_bytes());
         let idem_key: String = hasher
@@ -44,14 +60,15 @@ pub(super) async fn enqueue_folder_scans(pool: &SqlitePool, now: &str) -> Result
         let res = sqlx::query(
             "INSERT OR IGNORE INTO unified_queue \
              (queue_id, idempotency_key, item_type, op, tenant_id, collection, \
-              status, payload_json, created_at, updated_at) \
-             VALUES (?1, ?2, 'folder', 'scan', ?3, ?4, 'pending', ?5, ?6, ?7)",
+              status, payload_json, branch, created_at, updated_at) \
+             VALUES (?1, ?2, 'folder', 'uplift', ?3, ?4, 'pending', ?5, ?6, ?7, ?8)",
         )
         .bind(&qid)
         .bind(&idem_key)
         .bind(tenant_id)
         .bind(collection)
         .bind(&payload)
+        .bind(&branch)
         .bind(now)
         .bind(now)
         .execute(pool)

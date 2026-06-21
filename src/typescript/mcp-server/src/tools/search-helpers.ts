@@ -34,6 +34,7 @@ import {
 } from './search-qdrant.js';
 import { expandGraphContext } from './search-graph-context.js';
 import { logDebug } from '../utils/logger.js';
+import { matchesGlob } from '../utils/path-glob.js';
 import {
   concreteBranchFilter,
   resolveEffectiveBranch,
@@ -300,6 +301,7 @@ export interface SearchAllCollectionsParams {
   currentProjectId: string | undefined;
   basePoints: string[] | undefined;
   branch: string | undefined;
+  fallbackBranch: string | undefined;
   fileType: string | undefined;
   libraryName: string | undefined;
   tag: string | undefined;
@@ -315,8 +317,8 @@ export interface SearchAllCollectionsParams {
 const SUPPLEMENTAL_SYMBOL_LIMIT = 8;
 const SUPPLEMENTAL_SYMBOL_SCORE = 1.2;
 
-function unique(values: Iterable<string>): string[] {
-  return Array.from(new Set(Array.from(values).filter(Boolean)));
+function unique(values: Iterable<string | undefined>): string[] {
+  return Array.from(new Set(Array.from(values).filter((v): v is string => Boolean(v))));
 }
 
 function normalizeNeedle(value: string): string {
@@ -407,10 +409,12 @@ export function filterSupplementalPointsToScope<
   scope: {
     tenantId: string | undefined;
     branch: string | undefined;
+    fallbackBranch?: string | undefined;
     basePoints: string[] | undefined;
   }
 ): T[] {
   const effectiveBranch = concreteBranchFilter(scope.branch);
+  const fallbackBranch = concreteBranchFilter(scope.fallbackBranch);
   const basePoints =
     scope.basePoints && scope.basePoints.length > 0 ? new Set(scope.basePoints) : undefined;
   return points.filter((point) => {
@@ -418,11 +422,12 @@ export function filterSupplementalPointsToScope<
     if (scope.tenantId !== undefined && payload[FIELD_TENANT_ID] !== scope.tenantId) {
       return false;
     }
-    if (
-      effectiveBranch !== undefined &&
-      !branchPayloadCovers(payload[FIELD_BRANCH], effectiveBranch)
-    ) {
-      return false;
+    if (effectiveBranch !== undefined) {
+      const branchPayload = payload[FIELD_BRANCH];
+      const coversEffective = branchPayloadCovers(branchPayload, effectiveBranch);
+      const coversFallback =
+        fallbackBranch !== undefined && branchPayloadCovers(branchPayload, fallbackBranch);
+      if (!coversEffective && !coversFallback) return false;
     }
     if (basePoints !== undefined) {
       const basePoint = payload[FIELD_BASE_POINT];
@@ -448,11 +453,13 @@ async function searchSupplementalSymbolCandidates(
   if (!watchFolderId) return [];
 
   const effectiveBranch = concreteBranchFilter(params.branch);
+  const fallbackBranch = concreteBranchFilter(params.fallbackBranch);
+  const branches = unique([effectiveBranch, fallbackBranch]);
   const candidates = params.stateManager.listChunkCandidates({
     watchFolderId,
     needles,
     ...(params.fileType ? { fileType: params.fileType } : {}),
-    ...(effectiveBranch !== undefined ? { branch: effectiveBranch } : {}),
+    ...(branches.length > 0 ? { branches } : {}),
     limit: SUPPLEMENTAL_SYMBOL_LIMIT,
   });
   if (candidates.data.length === 0) return [];
@@ -468,6 +475,7 @@ async function searchSupplementalSymbolCandidates(
     const scopedPoints = filterSupplementalPointsToScope(points, {
       tenantId: params.currentProjectId,
       branch: params.branch,
+      fallbackBranch: params.fallbackBranch,
       basePoints: params.basePoints,
     });
     return scopedPoints.map((point, index) => ({
@@ -496,6 +504,7 @@ function buildCollectionSearchParams(
     scope: params.scope,
     projectId: params.currentProjectId,
     branch: params.branch,
+    fallbackBranch: params.fallbackBranch,
     fileType: params.fileType,
     libraryName: params.libraryName,
     tag: params.tag,
@@ -576,6 +585,7 @@ export async function searchScratchpadLane(
     scope: 'project',
     projectId: params.projectId,
     branch: undefined,
+    fallbackBranch: undefined,
     fileType: undefined,
     libraryName: undefined,
     tag: undefined,
@@ -922,10 +932,7 @@ export function queryHasImplementationIntent(query: string): boolean {
   ) {
     return true;
   }
-  if (
-    /\b[A-Z][A-Za-z0-9]{5,}\b/.test(query) ||
-    /\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b/.test(query)
-  ) {
+  if (/\b[A-Z][A-Za-z0-9]{5,}\b/.test(query) || /\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b/.test(query)) {
     return true;
   }
   const tokens = queryContentTokens(query);
@@ -943,7 +950,11 @@ function resultPath(result: SearchResult): string {
 
 export function implementationIntentMultiplier(result: SearchResult): number {
   const path = resultPath(result).toLowerCase();
-  const fileType = ((result.metadata['file_type'] as string | undefined) ?? '').toLowerCase();
+  const fileType = (
+    (result.metadata['file_type'] as string | undefined) ??
+    (result.metadata['document_type'] as string | undefined) ??
+    ''
+  ).toLowerCase();
   if (NON_IMPL_PATH_RE.test(path) || fileType === 'docs' || fileType === 'text') {
     return IMPLEMENTATION_INTENT_NON_CODE_PENALTY;
   }
@@ -1114,13 +1125,33 @@ async function rerankResults(
 }
 
 /** Fuse, sort, expand context, update event, and assemble the final response. */
+function filterResultsByPathGlob(
+  results: SearchResult[],
+  pathGlob: string | undefined
+): SearchResult[] {
+  if (!pathGlob) return results;
+  return results.filter((result) => {
+    const relativePath =
+      typeof result.metadata['relative_path'] === 'string'
+        ? result.metadata['relative_path']
+        : undefined;
+    const filePath =
+      typeof result.metadata['file_path'] === 'string' ? result.metadata['file_path'] : undefined;
+    return (
+      (relativePath !== undefined && matchesGlob(relativePath, pathGlob)) ||
+      (filePath !== undefined && matchesGlob(filePath, pathGlob))
+    );
+  });
+}
+
 export async function finalizeResults(
   qdrantClient: QdrantClient,
   daemonClient: DaemonClient,
   stateManager: SqliteStateManager,
   params: FinalizeResultsParams
 ): Promise<SearchResponse> {
-  const fusedResults = applyRRFFusion(params.allResults, params.mode);
+  const scopedResults = filterResultsByPathGlob(params.allResults, params.options.pathGlob);
+  const fusedResults = applyRRFFusion(scopedResults, params.mode);
   // Snapshot the pre-boost score per result (raw cosine for semantic, RRF for
   // hybrid) so it can be RESTORED for display after ranking. The path-relevance
   // boost and the cross-encoder rerank below are RANKING signals ONLY — they
@@ -1205,7 +1236,7 @@ export async function finalizeResults(
   // Append the project-memory recall lane AFTER the code top-k so notes never
   // displace code. They are tenant-filtered + capped upstream and self-label via
   // `collection: "scratchpad"`.
-  const scratchpadHits = params.scratchpadHits ?? [];
+  const scratchpadHits = params.options.pathGlob ? [] : (params.scratchpadHits ?? []);
   const combinedResults =
     scratchpadHits.length > 0 ? [...finalResults, ...scratchpadHits] : finalResults;
   const collectionsSearched =

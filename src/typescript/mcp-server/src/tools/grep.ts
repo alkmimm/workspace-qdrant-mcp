@@ -14,11 +14,13 @@ import { randomUUID } from 'node:crypto';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import type { TextSearchMatch } from '../clients/grpc-types.js';
+import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import { finishToolEvent, logSearchEvent } from '../clients/search-event-queries.js';
 import { SERVER_VERSION as MCP_SERVER_VERSION } from '../server-types.js';
 import {
   concreteBranchFilter,
   resolveEffectiveBranch,
+  resolveFallbackBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
 
@@ -225,10 +227,16 @@ function grepError(message: string, latency_ms: number): GrepResponse {
 export class GrepTool {
   private readonly daemonClient: DaemonClient;
   private readonly projectDetector: ProjectDetector;
+  private readonly stateManager: SqliteStateManager | undefined;
 
-  constructor(daemonClient: DaemonClient, projectDetector: ProjectDetector) {
+  constructor(
+    daemonClient: DaemonClient,
+    projectDetector: ProjectDetector,
+    stateManager?: SqliteStateManager
+  ) {
     this.daemonClient = daemonClient;
     this.projectDetector = projectDetector;
+    this.stateManager = stateManager;
   }
 
   /**
@@ -285,6 +293,15 @@ export class GrepTool {
       projectPath,
     });
 
+    const concreteEffective = concreteBranchFilter(effectiveBranch);
+    const watchFolderId =
+      tenantId && this.stateManager ? this.stateManager.getWatchFolderIdByTenantId(tenantId) : null;
+    const baseBranch =
+      watchFolderId && concreteEffective
+        ? this.stateManager?.getBaseBranch(watchFolderId, concreteEffective)
+        : null;
+    const fallbackBranch = resolveFallbackBranch({ effectiveBranch, baseBranch });
+
     this.logGrepStart(eventId, pattern, maxResults, tenantId, effectiveBranch);
 
     return this.executeSearch(
@@ -297,7 +314,8 @@ export class GrepTool {
       effectiveBranch,
       pathGlob,
       startTime,
-      eventId
+      eventId,
+      fallbackBranch
     );
   }
 
@@ -321,7 +339,8 @@ export class GrepTool {
       queryText: truncatedPattern,
       topK: maxResults,
       projectId: tenantId,
-      filters: concreteBranch !== undefined ? JSON.stringify({ branch: concreteBranch }) : undefined,
+      filters:
+        concreteBranch !== undefined ? JSON.stringify({ branch: concreteBranch }) : undefined,
     });
   }
 
@@ -335,7 +354,8 @@ export class GrepTool {
     branch: string | undefined,
     pathGlob: string | undefined,
     startTime: number,
-    eventId: string
+    eventId: string,
+    fallbackBranch?: string
   ): Promise<GrepResponse> {
     try {
       const request = buildGrepRequest(
@@ -348,10 +368,30 @@ export class GrepTool {
         branch,
         pathGlob
       );
-      const response = await this.daemonClient.textSearch(request);
-      const rawMatches = mapGrepMatches(response.matches);
-      const matches = dedupGrepMatches(rawMatches);
-      const duplicatesDropped = rawMatches.length - matches.length;
+      const responses = [await this.daemonClient.textSearch(request)];
+      if (fallbackBranch) {
+        responses.push(
+          await this.daemonClient.textSearch(
+            buildGrepRequest(
+              pattern,
+              regex,
+              caseSensitive,
+              contextLines,
+              maxResults,
+              tenantId,
+              fallbackBranch,
+              pathGlob
+            )
+          )
+        );
+      }
+      const rawMatches = responses.flatMap((response) => mapGrepMatches(response.matches));
+      const dedupedMatches = dedupGrepMatches(rawMatches);
+      const matches = dedupedMatches.slice(0, maxResults);
+      const duplicatesDropped = rawMatches.length - dedupedMatches.length;
+      const truncated =
+        responses.some((response) => response.truncated) || dedupedMatches.length > matches.length;
+      const totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
       const message =
         matches.length === 0
           ? await this.probeBranchWideningHint(
@@ -378,10 +418,10 @@ export class GrepTool {
         // Report the deduped count. When the daemon truncated, its
         // total_matches is an upper bound over the (duplicated) full set —
         // discount the duplicates seen on this page as a best effort.
-        total_matches: response.truncated
-          ? Math.max(matches.length, response.total_matches - duplicatesDropped)
+        total_matches: truncated
+          ? Math.max(matches.length, totalMatches - duplicatesDropped)
           : matches.length,
-        truncated: response.truncated,
+        truncated,
         latency_ms: latencyMs,
         ...(message ? { message } : {}),
       };

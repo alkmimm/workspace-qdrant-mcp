@@ -479,7 +479,7 @@ async fn handle_project_uplift(
                 &item.tenant_id,
                 &item.collection,
                 &doc_payload,
-                None,
+                Some(&item.branch),
                 None,
             )
             .await

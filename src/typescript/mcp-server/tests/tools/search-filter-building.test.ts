@@ -146,10 +146,22 @@ describe('SearchTool — filter building', () => {
     expect(must.some((c) => c.key === 'branch')).toBe(false);
   });
 
-  it('should include file_type filter when provided', async () => {
-    const result = await searchTool.search({ query: 'test query', fileType: 'code' });
+  it('should include file type filters for legacy and document payload fields', async () => {
+    const result = await searchTool.search({
+      query: 'test query',
+      fileType: 'code',
+      includeScratchpad: false,
+    });
 
     expect(result.status).toBe('ok');
+    const filter = qdrantSearchMock.mock.calls[0]?.[1]?.filter;
+    const must = (filter?.must ?? []) as Array<Record<string, unknown>>;
+    expect(must).toContainEqual({
+      should: [
+        { key: 'file_type', match: { value: 'code' } },
+        { key: 'document_type', match: { value: 'code' } },
+      ],
+    });
   });
 
   it('should include tag filter when provided', async () => {
@@ -162,12 +174,36 @@ describe('SearchTool — filter building', () => {
 describe('RRF fusion', () => {
   it('should apply RRF fusion for hybrid mode — document in both sets scores highest', () => {
     const semanticResults: SearchResult[] = [
-      { id: '1', score: 0.9, collection: 'projects', content: 'doc1', metadata: { _search_type: 'semantic' } },
-      { id: '2', score: 0.8, collection: 'projects', content: 'doc2', metadata: { _search_type: 'semantic' } },
+      {
+        id: '1',
+        score: 0.9,
+        collection: 'projects',
+        content: 'doc1',
+        metadata: { _search_type: 'semantic' },
+      },
+      {
+        id: '2',
+        score: 0.8,
+        collection: 'projects',
+        content: 'doc2',
+        metadata: { _search_type: 'semantic' },
+      },
     ];
     const keywordResults: SearchResult[] = [
-      { id: '2', score: 0.85, collection: 'projects', content: 'doc2', metadata: { _search_type: 'keyword' } },
-      { id: '3', score: 0.7, collection: 'projects', content: 'doc3', metadata: { _search_type: 'keyword' } },
+      {
+        id: '2',
+        score: 0.85,
+        collection: 'projects',
+        content: 'doc2',
+        metadata: { _search_type: 'keyword' },
+      },
+      {
+        id: '3',
+        score: 0.7,
+        collection: 'projects',
+        content: 'doc3',
+        metadata: { _search_type: 'keyword' },
+      },
     ];
 
     const fused = applyRRFFusion([...semanticResults, ...keywordResults], 'hybrid');
@@ -185,7 +221,13 @@ describe('RRF fusion', () => {
 
   it('should not apply fusion for semantic-only mode', () => {
     const results: SearchResult[] = [
-      { id: '1', score: 0.9, collection: 'projects', content: 'doc1', metadata: { _search_type: 'semantic' } },
+      {
+        id: '1',
+        score: 0.9,
+        collection: 'projects',
+        content: 'doc1',
+        metadata: { _search_type: 'semantic' },
+      },
     ];
 
     const fused = applyRRFFusion(results, 'semantic');

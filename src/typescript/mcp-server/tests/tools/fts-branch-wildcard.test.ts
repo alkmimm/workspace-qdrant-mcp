@@ -29,6 +29,8 @@ function makeStateManager(): SqliteStateManager {
     updateSearchEvent: vi.fn(),
     updateSearchEventEconomy: vi.fn(),
     getProjectById: vi.fn().mockReturnValue({ data: { project_path: '/some/path' } }),
+    getWatchFolderIdByTenantId: vi.fn().mockReturnValue('watch-a'),
+    getBaseBranch: vi.fn().mockReturnValue(null),
   } as unknown as SqliteStateManager;
 }
 
@@ -114,6 +116,72 @@ describe('searchExact — branch "*" wildcard', () => {
 
     expect(lastTextSearchRequest(daemon).branch).toBe('main');
   });
+
+  it('also searches the indexed base branch for feature-branch exact search', async () => {
+    const daemon = makeDaemonClient();
+    (daemon.textSearch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ matches: [], total_matches: 0, truncated: false })
+      .mockResolvedValueOnce({
+        matches: [
+          {
+            file_path: '/repo/src/example.ts',
+            line_number: 48,
+            content: 'export class Example {}',
+            branch: 'main',
+            context_before: [],
+            context_after: [],
+          },
+        ],
+        total_matches: 1,
+        truncated: false,
+      });
+    const state = makeStateManager();
+    (state.getBaseBranch as ReturnType<typeof vi.fn>).mockReturnValue('main');
+
+    const result = await searchExact(
+      makeQdrant(),
+      daemon,
+      state,
+      makeProjectDetector(undefined),
+      makeOptions({ branch: 'feature/current' })
+    );
+
+    expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[0][0].branch).toBe(
+      'feature/current'
+    );
+    expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[1][0].branch).toBe('main');
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].metadata.file_path).toBe('/repo/src/example.ts');
+    expect(result.results[0].metadata.branch).toBe('feature/current');
+    expect(result.results[0].metadata._matched_branch).toBe('main');
+  });
+
+  it('deduplicates exact-search hits returned from branch and base-branch fallbacks', async () => {
+    const daemon = makeDaemonClient();
+    const duplicateMatch = {
+      file_path: '/repo/src/example.ts',
+      line_number: 48,
+      content: 'export class Example {}',
+      context_before: [],
+      context_after: [],
+    };
+    (daemon.textSearch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ matches: [duplicateMatch], total_matches: 1, truncated: false })
+      .mockResolvedValueOnce({ matches: [duplicateMatch], total_matches: 1, truncated: false });
+    const state = makeStateManager();
+    (state.getBaseBranch as ReturnType<typeof vi.fn>).mockReturnValue('main');
+
+    const result = await searchExact(
+      makeQdrant(),
+      daemon,
+      state,
+      makeProjectDetector(undefined),
+      makeOptions({ branch: 'feature/current' })
+    );
+
+    expect(result.results).toHaveLength(1);
+    expect(result.total).toBe(1);
+  });
 });
 
 describe('GrepTool — branch "*" wildcard', () => {
@@ -144,6 +212,42 @@ describe('GrepTool — branch "*" wildcard', () => {
     await tool.grep({ pattern: 'SERVICE_STATUS_HEALTHY', projectId: 'project-a', branch: 'main' });
 
     expect(lastTextSearchRequest(daemon).branch).toBe('main');
+  });
+
+  it('also searches the indexed base branch for feature-branch grep', async () => {
+    const daemon = makeDaemonClient();
+    (daemon.textSearch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ matches: [], total_matches: 0, truncated: false })
+      .mockResolvedValueOnce({
+        matches: [
+          {
+            file_path: '/repo/src/example.ts',
+            line_number: 48,
+            content: 'export class Example {}',
+            context_before: [],
+            context_after: [],
+            file_size: 123,
+          },
+        ],
+        total_matches: 1,
+        truncated: false,
+      });
+    const state = makeStateManager();
+    (state.getBaseBranch as ReturnType<typeof vi.fn>).mockReturnValue('main');
+    const tool = new GrepTool(daemon, makeProjectDetector(undefined), state);
+
+    const result = await tool.grep({
+      pattern: 'export class Example',
+      projectId: 'project-a',
+      branch: 'feature/current',
+    });
+
+    expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[0][0].branch).toBe(
+      'feature/current'
+    );
+    expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[1][0].branch).toBe('main');
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0].file).toBe('/repo/src/example.ts');
   });
 
   it('suggests widening the branch when a concrete-branch grep misses but another branch has hits', async () => {

@@ -19,6 +19,8 @@ export interface ListChunkCandidatesOptions {
    *  branch). Omit / pass undefined to span branches — mirrors the normal
    *  search filter, which only constrains branch when it is concrete (not `*`). */
   branch?: string;
+  /** Restrict candidates to any of these branches. Preferred over branch. */
+  branches?: string[];
   limit?: number;
 }
 
@@ -37,12 +39,18 @@ export function listChunkCandidates(
       conditions.push('tf.file_type = ?');
       params.push(options.fileType);
     }
-    if (options.branch) {
+    const branches = Array.from(
+      new Set(options.branches ?? (options.branch ? [options.branch] : []))
+    );
+    if (branches.length > 0) {
       // Branch scope: this candidate query only constrained watch_folder +
       // needle, so it used to span EVERY indexed branch of the project. Apply
-      // the same branch filter the normal search path applies.
-      conditions.push('EXISTS (SELECT 1 FROM json_each(tf.branches) WHERE value = ?)');
-      params.push(options.branch);
+      // the same branch filter the normal search path applies, including the
+      // base-branch fallback for files unchanged on a feature branch.
+      conditions.push(
+        `EXISTS (SELECT 1 FROM json_each(tf.branches) WHERE value IN (${branches.map(() => '?').join(',')}))`
+      );
+      params.push(...branches);
     }
 
     const needleClauses: string[] = [];
@@ -53,7 +61,9 @@ export function listChunkCandidates(
     conditions.push(`(${needleClauses.join(' OR ')})`);
     params.push(limit);
 
-    const rows = db.prepare(`
+    const rows = db
+      .prepare(
+        `
       SELECT qc.point_id, tf.relative_path, (SELECT value FROM json_each(tf.branches) LIMIT 1) AS branch, qc.symbol_name, qc.chunk_type, qc.start_line
       FROM qdrant_chunks qc
       JOIN tracked_files tf ON tf.file_id = qc.file_id
@@ -66,11 +76,9 @@ export function listChunkCandidates(
         tf.relative_path ASC,
         qc.start_line ASC
       LIMIT ?
-    `).all(
-      ...params.slice(0, -1),
-      ...options.needles,
-      limit
-    ) as Array<{
+    `
+      )
+      .all(...params.slice(0, -1), ...options.needles, limit) as Array<{
       point_id: string;
       relative_path: string;
       branch: string | null;

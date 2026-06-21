@@ -1,3 +1,7 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
 import { describe, it, expect, vi } from 'vitest';
 
 import { handleWorkspaceIndex } from '../../src/tools/workspace-index.js';
@@ -117,6 +121,152 @@ describe('workspace_index status resolution', () => {
     });
   });
 
+  it('reports session activity separately from indexing activity', async () => {
+    const getProjectStatus = vi.fn().mockResolvedValue(
+      makeStatus('9634ef90c02d', {
+        project_name: 'bws-engineer',
+        project_root: '/home/alkmimm/respositorios/bws-engineer',
+        is_active: false,
+        pending_count: 596,
+        done_count: 2459,
+        total_count: 3055,
+        percent_complete: 80.49,
+      })
+    );
+    const daemon = {
+      getProjectStatus,
+      listProjects: vi.fn(),
+    } as unknown as DaemonClient;
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'project_status', projectId: '9634ef90c02d' },
+      daemon
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      success: true,
+      action: 'project_status',
+      project_id: '9634ef90c02d',
+      is_active: false,
+      session_active: false,
+      indexing_active: true,
+      indexing: {
+        pending: 596,
+        done: 2459,
+        total: 3055,
+      },
+    });
+  });
+
+  it('list_branches falls back to daemon-indexed projects missing from the registry', async () => {
+    const listProjects = vi.fn().mockResolvedValue({
+      projects: [
+        {
+          project_id: '9634ef90c02d',
+          project_name: 'bws-engineer',
+          project_root: '/tmp/no-such-bws-engineer',
+          priority: 'high',
+          is_active: false,
+        },
+      ],
+      total_count: 1,
+    });
+    const daemon = {
+      getProjectStatus: vi.fn(),
+      listProjects,
+    } as unknown as DaemonClient;
+
+    const result = (await handleWorkspaceIndex(
+      {
+        action: 'list_branches',
+        projectId: '9634ef90c02d',
+        registryPath: '/tmp/workspace-qdrant-missing-registry.json',
+      },
+      daemon
+    )) as Record<string, unknown>;
+
+    expect(listProjects).toHaveBeenCalledWith({});
+    expect(result).toMatchObject({
+      success: true,
+      project: 'bws-engineer',
+      projectId: '9634ef90c02d',
+      source: 'indexed',
+      branches: [
+        {
+          name: 'main',
+          kind: 'primary',
+          path: '/tmp/no-such-bws-engineer',
+          status: 'inactive',
+          watchEnabled: true,
+          indexed: true,
+        },
+      ],
+    });
+  });
+  it('list_branches accepts cwd as a project directory selector', async () => {
+    const listProjects = vi.fn().mockResolvedValue({
+      projects: [
+        {
+          project_id: '9634ef90c02d',
+          project_name: 'bws-engineer',
+          project_root: '/tmp/no-such-bws-engineer',
+          priority: 'high',
+          is_active: false,
+        },
+      ],
+      total_count: 1,
+    });
+    const daemon = {
+      getProjectStatus: vi.fn(),
+      listProjects,
+    } as unknown as DaemonClient;
+
+    const registryPath = join(
+      mkdtempSync(join(tmpdir(), 'wqm-registry-')),
+      'indexed-projects.json'
+    );
+    writeFileSync(
+      registryPath,
+      JSON.stringify({
+        schemaVersion: 2,
+        kind: 'indexed-projects',
+        updatedAt: new Date().toISOString(),
+        projects: [
+          {
+            name: 'Finance',
+            root: '/home/alkmimm/respositorios/Finance',
+            branches: [
+              {
+                name: 'main',
+                kind: 'primary',
+                path: '/home/alkmimm/respositorios/Finance',
+                status: 'active',
+                createdAt: new Date().toISOString(),
+                lastSeenAt: new Date().toISOString(),
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    const result = (await handleWorkspaceIndex(
+      {
+        action: 'list_branches',
+        cwd: '/tmp/no-such-bws-engineer',
+        registryPath,
+      },
+      daemon
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      success: true,
+      project: 'bws-engineer',
+      projectId: '9634ef90c02d',
+      source: 'indexed',
+    });
+  });
+
   it('falls back to the first active project when cwd cannot be resolved', async () => {
     const { daemon, getProjectStatus, listProjects } = makeDaemon('fallback-active');
     const { detector } = makeDetector(null);
@@ -154,8 +304,14 @@ describe('workspace_index status resolution', () => {
       success: true,
       project: 'bws-engineer',
       projectId: 'daemon-only',
-      registryFound: false,
-      branches: [],
+      branches: [
+        expect.objectContaining({
+          name: 'dev-clean',
+          indexed: true,
+          kind: 'primary',
+          note: expect.stringContaining('Synthesized from daemon ListProjects'),
+        }),
+      ],
     });
   });
 

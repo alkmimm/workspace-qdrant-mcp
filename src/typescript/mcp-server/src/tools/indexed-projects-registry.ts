@@ -213,7 +213,11 @@ export function findProject(registry: Registry, sel: ProjectSelector): RegistryP
     if (exact.length > 1) {
       throw new Error(`Ambiguous project (root match): ${sel.projectDir}`);
     }
-    // Fall through to name/id matching if root didn't pin it.
+    if (!sel.projectName && !sel.projectId) {
+      throw new Error(`Indexed project not found: ${sel.projectDir}`);
+    }
+    // Fall through to name/id matching if root didn't pin it but an explicit
+    // name/id was also supplied.
   }
 
   if (sel.projectName) {
@@ -239,15 +243,10 @@ export function findProject(registry: Registry, sel: ProjectSelector): RegistryP
   return candidates[0] as RegistryProject;
 }
 
-export function findProjectByRoot(
-  registry: Registry,
-  rootPath: string
-): RegistryProject | null {
+export function findProjectByRoot(registry: Registry, rootPath: string): RegistryProject | null {
   if (!rootPath) return null;
   const abs = resolveProjectRoot(rootPath);
-  return (
-    registry.projects.map(normalizeProject).find((p) => toAbs(p.root) === abs) ?? null
-  );
+  return registry.projects.map(normalizeProject).find((p) => toAbs(p.root) === abs) ?? null;
 }
 
 export function findBranch(
@@ -437,14 +436,68 @@ export async function runListProjects(
   };
 }
 
-export function runListBranches(args: ProjectArgs): unknown {
+export async function runListBranches(
+  args: ProjectArgs,
+  daemonClient?: DaemonClient | null
+): Promise<unknown> {
   const registry = readRegistry(args.registryPath);
-  const project = findProject(registry, args);
-  return {
-    success: true,
-    project: project.name,
-    branches: project.branches ?? [],
-  };
+  try {
+    const project = findProject(registry, args);
+    return {
+      success: true,
+      project: project.name,
+      branches: project.branches ?? [],
+    };
+  } catch (err) {
+    if (!daemonClient) throw err;
+
+    const daemonProject = await findDaemonProject(daemonClient, args);
+    if (!daemonProject) throw err;
+
+    const root = toAbs(daemonProject.project_root);
+    const branchName = getCurrentBranch(root) ?? 'main';
+    return {
+      success: true,
+      project: daemonProject.project_name,
+      projectId: daemonProject.project_id,
+      source: 'indexed',
+      branches: [
+        {
+          name: branchName,
+          kind: 'primary',
+          path: root,
+          status: daemonProject.is_active ? 'active' : 'inactive',
+          createdAt: utcNow(),
+          lastSeenAt: utcNow(),
+          watchEnabled: true,
+          indexed: true,
+          note: 'Synthesized from daemon ListProjects; project is not registered in indexed-projects.json.',
+        },
+      ],
+    };
+  }
+}
+
+async function findDaemonProject(
+  daemonClient: DaemonClient,
+  sel: ProjectSelector
+): Promise<Awaited<ReturnType<DaemonClient['listProjects']>>['projects'][number] | null> {
+  const list = await daemonClient.listProjects({});
+  const projects = list.projects ?? [];
+  if (sel.projectDir) {
+    const target = resolveProjectRoot(sel.projectDir).toLowerCase();
+    const match = projects.find((p) => toAbs(p.project_root).toLowerCase() === target);
+    if (match) return match;
+  }
+  if (sel.projectId) {
+    const match = projects.find((p) => p.project_id === sel.projectId);
+    if (match) return match;
+  }
+  if (sel.projectName) {
+    const match = projects.find((p) => p.project_name === sel.projectName);
+    if (match) return match;
+  }
+  return null;
 }
 
 export function runAgentBranchStatus(args: BranchArgs): unknown {
@@ -586,9 +639,7 @@ async function checkBranchesForProject(
     probeDaemonProjectStatus(daemonClient, projectId),
     probeDaemonQueue(daemonClient),
   ]);
-  const watchList = includeWatch
-    ? await probeDaemonWatches(daemonClient, 'projects')
-    : undefined;
+  const watchList = includeWatch ? await probeDaemonWatches(daemonClient, 'projects') : undefined;
 
   const results: IncrementalBranchResult[] = [];
   for (const b of project.branches ?? []) {
@@ -699,9 +750,7 @@ export function runStartAgentBranch(args: StartAgentBranchArgs): unknown {
     if (existsSync(wtPath)) {
       // Backfill: worktree already exists on disk. Just register it.
       if (!isGitRepository(wtPath)) {
-        throw new Error(
-          `worktreePath exists but is not a valid git worktree: ${wtPath}`
-        );
+        throw new Error(`worktreePath exists but is not a valid git worktree: ${wtPath}`);
       }
       baseCommit = gitRevParse(repo, baseBranch);
       branchPath = wtPath;
@@ -717,16 +766,7 @@ export function runStartAgentBranch(args: StartAgentBranchArgs): unknown {
       } else {
         execFileSync(
           'git',
-          [
-            '-C',
-            repo,
-            'worktree',
-            'add',
-            '-b',
-            args.branchName,
-            wtPath,
-            baseBranch,
-          ],
+          ['-C', repo, 'worktree', 'add', '-b', args.branchName, wtPath, baseBranch],
           { stdio: 'inherit', timeout: 60000 }
         );
       }
@@ -836,11 +876,10 @@ export function runAbandonAgentBranch(args: AbandonAgentBranchArgs): unknown {
 
   if (args.removeWorktree === true && branch.useWorktree) {
     try {
-      execFileSync(
-        'git',
-        ['-C', toAbs(project.root), 'worktree', 'remove', toAbs(branch.path)],
-        { stdio: 'inherit', timeout: 30000 }
-      );
+      execFileSync('git', ['-C', toAbs(project.root), 'worktree', 'remove', toAbs(branch.path)], {
+        stdio: 'inherit',
+        timeout: 30000,
+      });
       branch.note = 'Abandoned and worktree removed by explicit request.';
     } catch (err) {
       branch.note = `Abandoned; worktree remove failed: ${(err as Error).message}`;

@@ -45,7 +45,11 @@ import {
   DEFAULT_EXPANSION_WEIGHT,
   DEFAULT_MAX_EXPANDED_KEYWORDS,
 } from './search-types.js';
-import { applyEffectiveBranch } from './branch-scope.js';
+import {
+  applyEffectiveBranch,
+  concreteBranchFilter,
+  resolveFallbackBranch,
+} from './branch-scope.js';
 
 import { determineCollections } from './search-filters.js';
 import { retrieveParent, collectionExists } from './search-qdrant.js';
@@ -247,7 +251,19 @@ export class SearchTool {
       options.projectId,
       eventId
     );
-    const effectiveOptions = applyEffectiveBranch(options, effectiveBranch);
+    const concreteEffective = concreteBranchFilter(effectiveBranch);
+    let fallbackBranch: string | undefined;
+    if (currentProjectId && concreteEffective) {
+      const watchFolderId = this._stateManager.getWatchFolderIdByTenantId(currentProjectId);
+      const baseBranch = watchFolderId
+        ? this._stateManager.getBaseBranch(watchFolderId, concreteEffective)
+        : null;
+      fallbackBranch = resolveFallbackBranch({ effectiveBranch, baseBranch });
+    }
+    const baseEffectiveOptions = applyEffectiveBranch(options, effectiveBranch);
+    const effectiveOptions = fallbackBranch
+      ? { ...baseEffectiveOptions, fallbackBranch }
+      : baseEffectiveOptions;
     const embeddings = await this.prepareEmbeddings(
       effectiveOptions,
       effectiveOptions.query,
@@ -279,6 +295,7 @@ export class SearchTool {
       searchStartMs,
       currentProjectId,
       basePoints,
+      fallbackBranch,
       basePointsDegraded,
       basePointsActiveCount,
       embeddings.denseEmbedding,
@@ -294,6 +311,7 @@ export class SearchTool {
     collectionsToSearch: string[],
     currentProjectId: string | undefined,
     basePoints: string[] | undefined,
+    fallbackBranch: string | undefined,
     denseEmbedding: number[] | undefined,
     sparseVector: Record<number, number> | undefined
   ): ReturnType<typeof searchAllCollections> {
@@ -305,6 +323,7 @@ export class SearchTool {
       currentProjectId,
       basePoints,
       branch: options.branch,
+      fallbackBranch,
       fileType: options.fileType,
       libraryName: options.libraryName,
       tag: options.tag,
@@ -328,6 +347,7 @@ export class SearchTool {
     searchStartMs: number,
     currentProjectId: string | undefined,
     basePoints: string[] | undefined,
+    fallbackBranch: string | undefined,
     basePointsDegraded: boolean,
     basePointsActiveCount: number | undefined,
     denseEmbedding: number[] | undefined,
@@ -352,6 +372,7 @@ export class SearchTool {
         collectionsToSearch,
         currentProjectId,
         basePoints,
+        fallbackBranch,
         denseEmbedding,
         sparseVector
       ),

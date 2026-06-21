@@ -1,8 +1,10 @@
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tonic::Status;
 use tracing::info;
+use workspace_qdrant_core::SearchDbManager;
 use uuid::Uuid;
 
 use crate::proto::TriggerReembedResponse;
@@ -24,9 +26,7 @@ async fn drain_to_quiescence(
     loop {
         let in_flight: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM unified_queue \
-             WHERE status = 'in_progress' \
-             AND lease_until IS NOT NULL \
-             AND lease_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+             WHERE status = 'in_progress'",
         )
         .fetch_one(&ctx.pool)
         .await
@@ -50,6 +50,82 @@ async fn drain_to_quiescence(
 
         tokio::time::sleep(poll_interval).await;
     }
+}
+
+
+async fn clear_search_db_for_watch_tenants(
+    search_db: &Arc<SearchDbManager>,
+    pool: &sqlx::SqlitePool,
+) -> Result<(), Status> {
+    let tenants: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT tenant_id FROM watch_folders \
+         WHERE collection IN ('projects','libraries','rules','scratchpad')",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| Status::internal(format!("list search-db tenants for reembed: {e}")))?;
+
+    if tenants.is_empty() {
+        return Ok(());
+    }
+
+    let search_pool = search_db.pool();
+    let mut total_lines = 0u64;
+    let mut total_files = 0u64;
+
+    for chunk in tenants.chunks(500) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT COALESCE(COUNT(*), 0), COALESCE(SUM(line_count), 0) \
+             FROM file_metadata WHERE tenant_id IN ({placeholders})"
+        );
+        let mut q = sqlx::query_as::<_, (i64, i64)>(&sql);
+        for tenant in chunk {
+            q = q.bind(tenant);
+        }
+        let (files, lines) = q
+            .fetch_one(search_pool)
+            .await
+            .map_err(|e| Status::internal(format!("count search-db rows for reembed: {e}")))?;
+        total_files += files as u64;
+        total_lines += lines as u64;
+
+        let sql = format!(
+            "DELETE FROM code_lines WHERE file_id IN \
+             (SELECT file_id FROM file_metadata WHERE tenant_id IN ({placeholders}))"
+        );
+        let mut q = sqlx::query(&sql);
+        for tenant in chunk {
+            q = q.bind(tenant);
+        }
+        q.execute(search_pool)
+            .await
+            .map_err(|e| Status::internal(format!("clear search-db code_lines for reembed: {e}")))?;
+
+        let sql = format!("DELETE FROM file_metadata WHERE tenant_id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for tenant in chunk {
+            q = q.bind(tenant);
+        }
+        q.execute(search_pool)
+            .await
+            .map_err(|e| Status::internal(format!("clear search-db file_metadata for reembed: {e}")))?;
+    }
+
+    if total_files > 0 {
+        search_db
+            .rebuild_and_maybe_optimize_fts(total_lines as usize)
+            .await
+            .map_err(|e| Status::internal(format!("rebuild search-db FTS after reembed clear: {e}")))?;
+        info!(
+            tenants = tenants.len(),
+            files = total_files,
+            lines = total_lines,
+            "reembed: cleared search.db content for watch-folder tenants"
+        );
+    }
+
+    Ok(())
 }
 
 /// Flush ALL queue rows for the canonical collections and clear
@@ -116,6 +192,11 @@ pub(super) async fn flush_and_clear_state(ctx: &ReembedContext) -> Result<u32, S
     tx.commit()
         .await
         .map_err(|e| Status::internal(format!("clear-state tx commit failed: {e}")))?;
+
+    if let Some(search_db) = &ctx.search_db {
+        clear_search_db_for_watch_tenants(search_db, &ctx.pool).await?;
+    }
+
     info!(
         tracked_files = tracked_cleared.rows_affected(),
         qdrant_chunks = chunks_cleared.rows_affected(),

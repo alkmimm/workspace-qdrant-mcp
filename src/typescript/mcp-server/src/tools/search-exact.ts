@@ -13,7 +13,9 @@ import { buildFilter } from './search-filters.js';
 import { FIELD_CONTENT, FIELD_TITLE } from '../common/native-bridge.js';
 import {
   applyEffectiveBranch,
+  concreteBranchFilter,
   resolveEffectiveBranch,
+  resolveFallbackBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
 
@@ -58,7 +60,8 @@ function mapExactResults(
     branch?: string;
     context_before?: string[];
     context_after?: string[];
-  }>
+  }>,
+  requestedBranch?: string
 ): SearchResult[] {
   return matches.map((m, idx) => ({
     id: `${m.file_path}:${m.line_number}`,
@@ -69,12 +72,28 @@ function mapExactResults(
       file_path: m.file_path,
       line_number: m.line_number,
       tenant_id: m.tenant_id,
-      branch: m.branch,
+      branch: requestedBranch ?? m.branch,
+      _matched_branch: m.branch,
       context_before: m.context_before,
       context_after: m.context_after,
       _search_type: 'exact',
     },
   }));
+}
+
+function dedupeExactResults(results: SearchResult[]): SearchResult[] {
+  const seen = new Set<string>();
+  const out: SearchResult[] = [];
+  const keySep = '\0';
+  for (const result of results) {
+    const file = String(result.metadata?.file_path ?? result.id);
+    const line = String(result.metadata?.line_number ?? '');
+    const key = `${file}${keySep}${line}${keySep}${result.content}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(result);
+  }
+  return out;
 }
 
 /** Build the text search request from search options. */
@@ -163,6 +182,7 @@ async function exactSearchInCollection(
     scope,
     projectId: tenantId,
     branch: undefined, // scratchpad/libraries are not branch-scoped
+    fallbackBranch: undefined,
     fileType: options.fileType,
     libraryName: options.libraryName,
     tag: options.tag,
@@ -294,13 +314,22 @@ export async function searchExact(
     );
   }
 
+  const concreteEffective = concreteBranchFilter(effectiveBranch);
+  let baseBranch: string | null = null;
+  if (tenantId && concreteEffective) {
+    const watchFolderId = stateManager.getWatchFolderIdByTenantId(tenantId);
+    if (watchFolderId) baseBranch = stateManager.getBaseBranch(watchFolderId, concreteEffective);
+  }
+  const fallbackBranch = resolveFallbackBranch({ effectiveBranch, baseBranch });
+
   return executeAndLogSearch(
     daemonClient,
     stateManager,
     effectiveOptions,
     tenantId,
     eventId,
-    startTime
+    startTime,
+    fallbackBranch
   );
 }
 
@@ -310,12 +339,31 @@ async function executeAndLogSearch(
   options: SearchOptions,
   tenantId: string | undefined,
   eventId: string,
-  startTime: number
+  startTime: number,
+  fallbackBranch?: string
 ): Promise<SearchResponse> {
   try {
     const request = buildExactSearchRequest(options, tenantId);
-    const response = await daemonClient.textSearch(request);
-    const results = mapExactResults(response.matches);
+    const requestedBranch = concreteBranchFilter(options.branch);
+    const primaryResponse = await daemonClient.textSearch(request);
+    const responses = [primaryResponse];
+    const resultGroups: SearchResult[][] = [mapExactResults(primaryResponse.matches, requestedBranch)];
+    if (fallbackBranch) {
+      const fallbackResponse = await daemonClient.textSearch(
+        buildExactSearchRequest({ ...options, branch: fallbackBranch }, tenantId)
+      );
+      responses.push(fallbackResponse);
+      resultGroups.push(mapExactResults(fallbackResponse.matches, requestedBranch));
+    }
+    const rawResults = resultGroups.flat();
+    const dedupedResults = dedupeExactResults(rawResults);
+    const limit = options.limit ?? 100;
+    const results = dedupedResults.slice(0, limit);
+    const duplicatesDropped = rawResults.length - dedupedResults.length;
+    const totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
+    const total = responses.some((response) => response.truncated)
+      ? Math.max(results.length, totalMatches - duplicatesDropped)
+      : dedupedResults.length;
 
     stateManager.updateSearchEvent(eventId, {
       resultCount: results.length,
@@ -323,7 +371,7 @@ async function executeAndLogSearch(
     });
     const successResponse: SearchResponse = {
       results,
-      total: response.total_matches,
+      total,
       query: options.query,
       mode: 'keyword',
       scope: options.scope ?? 'project',

@@ -4,6 +4,7 @@
 //! point deletion, tracked_files cleanup, FTS5 cleanup, and missing-file
 //! reconciliation.
 
+use std::path::Path;
 use std::time::Instant;
 
 use sqlx::SqlitePool;
@@ -34,7 +35,17 @@ pub(super) async fn process_file_delete(
 ) -> UnifiedProcessorResult<()> {
     let delete_start = Instant::now();
     let mut timings: Vec<PhaseTiming> = Vec::new();
-    let detected_language = detect_language(std::path::Path::new(abs_file_path));
+    let target_path = Path::new(abs_file_path);
+    let detected_language = detect_language(target_path);
+
+    if delete_target_still_exists(target_path) {
+        info!(
+            "Skipping stale delete for existing file on disk: {}",
+            abs_file_path
+        );
+        record_delete_timings(ctx, item, pool, detected_language, &timings).await;
+        return Ok(());
+    }
 
     if let Ok(true) = tracked_files_schema::is_incremental(pool, abs_file_path).await {
         info!(
@@ -353,6 +364,28 @@ async fn record_delete_timings(
         timings,
     )
     .await;
+}
+
+fn delete_target_still_exists(path: &Path) -> bool {
+    path.metadata()
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delete_target_still_exists;
+
+    #[test]
+    fn delete_target_still_exists_only_for_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("present.ts");
+        std::fs::write(&file, "export class Present {}\n").expect("write file");
+
+        assert!(delete_target_still_exists(&file));
+        assert!(!delete_target_still_exists(tmp.path()));
+        assert!(!delete_target_still_exists(&tmp.path().join("missing.ts")));
+    }
 }
 
 /// Clean up tracked records and Qdrant points for a file that no longer exists on disk.

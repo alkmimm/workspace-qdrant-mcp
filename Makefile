@@ -35,6 +35,7 @@ LOG_TAIL ?= 50
 
 # Single source of truth for every compose invocation.
 COMPOSE := docker compose --env-file "$(COMPOSE_ENV_FILE)" -f "$(COMPOSE_FILE)"
+COMPOSE_BUILDER ?= default
 
 MCP_HEALTH_URL ?= http://localhost:$(MCP_HTTP_PORT)/admin/api/health
 MCP_INIT_URL ?= http://localhost:$(MCP_HTTP_PORT)/admin/init
@@ -95,7 +96,8 @@ first-time: check-env
 	@echo "Step 1/4: ensure the external SQLite volume exists"
 	@docker volume create "$(MEMEXD_DB_VOLUME)" >/dev/null
 	@echo "Step 2/4: build + start the whole stack"
-	@cd "$(REPO)" && $(COMPOSE) up -d --build
+	@cd "$(REPO)" && extra=(); if $(COMPOSE) build --help 2>/dev/null | grep -q -- '--builder'; then extra=(--builder "$(COMPOSE_BUILDER)"); fi; $(COMPOSE) build "$${extra[@]}" mcp memexd
+	@cd "$(REPO)" && $(COMPOSE) up -d mcp memexd
 	@echo "Step 3/4: install POSIX git hooks"
 	@$(MAKE) -f "$(lastword $(MAKEFILE_LIST))" hooks-install
 	@echo "Step 4/4: status"
@@ -108,7 +110,7 @@ redeploy: check-env
 	@echo "=== Redeploy after code changes (build runs inside Docker) ==="
 	@echo "Step 1/4: rebuild mcp + memexd images"
 	@docker volume create "$(MEMEXD_DB_VOLUME)" >/dev/null
-	@cd "$(REPO)" && $(COMPOSE) build mcp memexd
+	@cd "$(REPO)" && extra=(); if $(COMPOSE) build --help 2>/dev/null | grep -q -- '--builder'; then extra=(--builder "$(COMPOSE_BUILDER)"); fi; $(COMPOSE) build "$${extra[@]}" mcp memexd
 	@echo "Step 2/4: recreate mcp + memexd (env may have changed)"
 	@cd "$(REPO)" && $(COMPOSE) up -d --force-recreate mcp memexd
 	@echo "Step 3/4: reinstall git hooks (idempotent — lives in the repo, not the image)"
@@ -143,11 +145,11 @@ stack-logs: check-env
 # ── Build / recreate (everything builds inside Docker) ───────────────────────
 
 build-images: check-env
-	@cd "$(REPO)" && $(COMPOSE) build mcp memexd
+	@cd "$(REPO)" && extra=(); if $(COMPOSE) build --help 2>/dev/null | grep -q -- '--builder'; then extra=(--builder "$(COMPOSE_BUILDER)"); fi; $(COMPOSE) build "$${extra[@]}" mcp memexd
 
 mcp-rebuild: check-env
 	@echo "Rebuilding MCP image (TypeScript compiled inside the container)..."
-	@cd "$(REPO)" && $(COMPOSE) build mcp
+	@cd "$(REPO)" && extra=(); if $(COMPOSE) build --help 2>/dev/null | grep -q -- '--builder'; then extra=(--builder "$(COMPOSE_BUILDER)"); fi; $(COMPOSE) build "$${extra[@]}" mcp
 	@cd "$(REPO)" && $(COMPOSE) up -d mcp
 
 memexd-recreate: check-env

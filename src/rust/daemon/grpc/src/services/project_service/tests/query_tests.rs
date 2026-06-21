@@ -100,6 +100,33 @@ async fn test_get_project_status() {
 }
 
 #[tokio::test]
+async fn test_get_project_status_treats_session_counter_as_active() {
+    let (pool, temp_dir) = setup_test_db().await;
+    let project_dir = temp_dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let project_path = canonical_str(&project_dir);
+
+    create_test_watch_folder(&pool, "abcd12345678", &project_path).await;
+    sqlx::query("UPDATE watch_folders SET is_active = 3 WHERE tenant_id = ?1")
+        .bind("abcd12345678")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let service = ProjectServiceImpl::new(pool);
+
+    let request = Request::new(GetProjectStatusRequest {
+        project_id: "abcd12345678".to_string(),
+    });
+
+    let response = service.get_project_status(request).await.unwrap().into_inner();
+
+    assert!(response.found);
+    assert_eq!(response.priority, "high");
+    assert!(response.is_active);
+}
+
+#[tokio::test]
 async fn test_get_nonexistent_project_status() {
     let (pool, _temp_dir) = setup_test_db().await;
     let service = ProjectServiceImpl::new(pool);
@@ -175,6 +202,39 @@ async fn test_list_projects_active_only() {
     let response = response.into_inner();
 
     assert_eq!(response.total_count, 0);
+}
+
+#[tokio::test]
+async fn test_list_projects_active_only_treats_session_counter_as_active() {
+    let (pool, temp_dir) = setup_test_db().await;
+    let active_dir = temp_dir.path().join("active");
+    let inactive_dir = temp_dir.path().join("inactive");
+    std::fs::create_dir_all(&active_dir).unwrap();
+    std::fs::create_dir_all(&inactive_dir).unwrap();
+
+    create_test_watch_folder(&pool, "active123456", &canonical_str(&active_dir)).await;
+    create_test_watch_folder(&pool, "inactive1234", &canonical_str(&inactive_dir)).await;
+    sqlx::query("UPDATE watch_folders SET is_active = 2 WHERE tenant_id = ?1")
+        .bind("active123456")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let service = ProjectServiceImpl::new(pool);
+
+    let response = service
+        .list_projects(Request::new(ListProjectsRequest {
+            priority_filter: None,
+            active_only: true,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(response.total_count, 1);
+    assert_eq!(response.projects[0].project_id, "active123456");
+    assert_eq!(response.projects[0].priority, "high");
+    assert!(response.projects[0].is_active);
 }
 
 #[tokio::test]
