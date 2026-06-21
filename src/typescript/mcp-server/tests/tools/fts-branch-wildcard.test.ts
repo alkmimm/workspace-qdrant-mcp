@@ -127,6 +127,7 @@ describe('searchExact — branch "*" wildcard', () => {
             file_path: '/repo/src/example.ts',
             line_number: 48,
             content: 'export class Example {}',
+            branch: 'main',
             context_before: [],
             context_after: [],
           },
@@ -151,6 +152,8 @@ describe('searchExact — branch "*" wildcard', () => {
     expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[1][0].branch).toBe('main');
     expect(result.results).toHaveLength(1);
     expect(result.results[0].metadata.file_path).toBe('/repo/src/example.ts');
+    expect(result.results[0].metadata.branch).toBe('feature/current');
+    expect(result.results[0].metadata._matched_branch).toBe('main');
   });
 
   it('deduplicates exact-search hits returned from branch and base-branch fallbacks', async () => {

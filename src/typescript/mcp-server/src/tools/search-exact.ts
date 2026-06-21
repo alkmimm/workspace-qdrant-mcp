@@ -60,7 +60,8 @@ function mapExactResults(
     branch?: string;
     context_before?: string[];
     context_after?: string[];
-  }>
+  }>,
+  requestedBranch?: string
 ): SearchResult[] {
   return matches.map((m, idx) => ({
     id: `${m.file_path}:${m.line_number}`,
@@ -71,7 +72,8 @@ function mapExactResults(
       file_path: m.file_path,
       line_number: m.line_number,
       tenant_id: m.tenant_id,
-      branch: m.branch,
+      branch: requestedBranch ?? m.branch,
+      _matched_branch: m.branch,
       context_before: m.context_before,
       context_after: m.context_after,
       _search_type: 'exact',
@@ -342,15 +344,17 @@ async function executeAndLogSearch(
 ): Promise<SearchResponse> {
   try {
     const request = buildExactSearchRequest(options, tenantId);
+    const requestedBranch = concreteBranchFilter(options.branch);
     const responses = [await daemonClient.textSearch(request)];
+    const resultGroups: SearchResult[][] = [mapExactResults(responses[0].matches, requestedBranch)];
     if (fallbackBranch) {
-      responses.push(
-        await daemonClient.textSearch(
-          buildExactSearchRequest({ ...options, branch: fallbackBranch }, tenantId)
-        )
+      const fallbackResponse = await daemonClient.textSearch(
+        buildExactSearchRequest({ ...options, branch: fallbackBranch }, tenantId)
       );
+      responses.push(fallbackResponse);
+      resultGroups.push(mapExactResults(fallbackResponse.matches, requestedBranch));
     }
-    const rawResults = responses.flatMap((response) => mapExactResults(response.matches));
+    const rawResults = resultGroups.flat();
     const dedupedResults = dedupeExactResults(rawResults);
     const limit = options.limit ?? 100;
     const results = dedupedResults.slice(0, limit);
