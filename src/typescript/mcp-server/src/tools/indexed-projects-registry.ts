@@ -213,7 +213,11 @@ export function findProject(registry: Registry, sel: ProjectSelector): RegistryP
     if (exact.length > 1) {
       throw new Error(`Ambiguous project (root match): ${sel.projectDir}`);
     }
-    // Fall through to name/id matching if root didn't pin it.
+    if (!sel.projectName && !sel.projectId) {
+      throw new Error(`Indexed project not found: ${sel.projectDir}`);
+    }
+    // Fall through to name/id matching if root didn't pin it but an explicit
+    // name/id was also supplied.
   }
 
   if (sel.projectName) {

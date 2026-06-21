@@ -1,3 +1,7 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
 import { describe, it, expect, vi } from 'vitest';
 
 import { handleWorkspaceIndex } from '../../src/tools/workspace-index.js';
@@ -214,11 +218,40 @@ describe('workspace_index status resolution', () => {
       listProjects,
     } as unknown as DaemonClient;
 
+    const registryPath = join(
+      mkdtempSync(join(tmpdir(), 'wqm-registry-')),
+      'indexed-projects.json'
+    );
+    writeFileSync(
+      registryPath,
+      JSON.stringify({
+        schemaVersion: 2,
+        kind: 'indexed-projects',
+        updatedAt: new Date().toISOString(),
+        projects: [
+          {
+            name: 'Finance',
+            root: '/home/alkmimm/respositorios/Finance',
+            branches: [
+              {
+                name: 'main',
+                kind: 'primary',
+                path: '/home/alkmimm/respositorios/Finance',
+                status: 'active',
+                createdAt: new Date().toISOString(),
+                lastSeenAt: new Date().toISOString(),
+              },
+            ],
+          },
+        ],
+      })
+    );
+
     const result = (await handleWorkspaceIndex(
       {
         action: 'list_branches',
         cwd: '/tmp/no-such-bws-engineer',
-        registryPath: '/tmp/workspace-qdrant-missing-registry.json',
+        registryPath,
       },
       daemon
     )) as Record<string, unknown>;
