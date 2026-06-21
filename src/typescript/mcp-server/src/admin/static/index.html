@@ -324,6 +324,37 @@
         </table>
       </section>
 
+      <!-- Branch coverage / branch-index consistency -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Branch coverage</h2>
+          <div class="actions">
+            <button type="button" id="reloadBranchCoverageBtn" class="secondary small">Reload</button>
+          </div>
+        </div>
+        <div class="row" style="margin-bottom:var(--space-4); align-items:center">
+          <span class="dim small">
+            queue, tracked files and FTS rows grouped by tenant and branch; rows outside the current Git branch are highlighted
+          </span>
+          <span id="branchCoverageMeta" class="dim small"></span>
+        </div>
+        <div id="branchCoverageEmpty" class="dim">No branch coverage data yet.</div>
+        <table id="branchCoverageTable" class="data" aria-label="Branch coverage by project" hidden>
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>Current</th>
+              <th>Branch</th>
+              <th class="num">Queue</th>
+              <th class="num">Tracked</th>
+              <th class="num">FTS</th>
+              <th>Signal</th>
+            </tr>
+          </thead>
+          <tbody id="branchCoverageBody"></tbody>
+        </table>
+      </section>
+
       <!-- Failed indexing items (unified_queue, status='failed') -->
       <section class="card">
         <div class="card-head">

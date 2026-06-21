@@ -56,6 +56,11 @@ const els = {
   largestFilesMeta: document.getElementById('largestFilesMeta'),
   largestFilesSkippedOnly: document.getElementById('largestFilesSkippedOnly'),
   reloadLargestFilesBtn: document.getElementById('reloadLargestFilesBtn'),
+  reloadBranchCoverageBtn: document.getElementById('reloadBranchCoverageBtn'),
+  branchCoverageMeta: document.getElementById('branchCoverageMeta'),
+  branchCoverageEmpty: document.getElementById('branchCoverageEmpty'),
+  branchCoverageTable: document.getElementById('branchCoverageTable'),
+  branchCoverageBody: document.getElementById('branchCoverageBody'),
   showClaudeConfigBtn: document.getElementById('showClaudeConfigBtn'),
   showCodexConfigBtn: document.getElementById('showCodexConfigBtn'),
   configHint: document.getElementById('configHint'),
@@ -362,6 +367,7 @@ async function refresh() {
     renderCandidates();
     renderDebug(snap);
     renderConnection(true);
+    loadBranchCoverage();
   } catch (e) {
     renderConnection(false, e.status === 401 ? 'auth failed' : 'offline');
     if (e.status === 401) {
@@ -446,6 +452,7 @@ function showApp() {
   els.appView.hidden = false;
   loadGlobalIgnore();
   loadLargestFiles();
+  loadBranchCoverage();
   loadRules();
   loadFailed();
 }
@@ -907,6 +914,103 @@ els.retryAllFailedBtn?.addEventListener('click', async () => {
     els.retryAllFailedBtn.disabled = false;
   }
 });
+
+// ── Branch coverage / consistency ─────────────────────────────────
+
+function summarizeQueue(queue) {
+  if (!queue) return '0';
+  const pending = queue.pending || 0;
+  const active = queue.in_progress || 0;
+  const failed = queue.failed || 0;
+  const parts = [];
+  if (pending) parts.push(`${pending.toLocaleString()} pending`);
+  if (active) parts.push(`${active.toLocaleString()} active`);
+  if (failed) parts.push(`${failed.toLocaleString()} failed`);
+  return parts.length ? parts.join(' · ') : '0';
+}
+
+function renderBranchCoverage(data) {
+  if (!els.branchCoverageTable) return;
+  if (!data?.ok) {
+    els.branchCoverageEmpty.textContent =
+      data?.degraded?.message || 'Branch coverage unavailable.';
+    els.branchCoverageEmpty.hidden = false;
+    els.branchCoverageTable.hidden = true;
+    els.branchCoverageMeta.textContent = '';
+    return;
+  }
+
+  const rows = [];
+  for (const project of data.projects || []) {
+    const branches = project.branches || [];
+    if (branches.length === 0) {
+      rows.push({ project, branch: { branch: '(none)' } });
+    } else {
+      for (const branch of branches) rows.push({ project, branch });
+    }
+  }
+
+  if (rows.length === 0) {
+    els.branchCoverageEmpty.textContent = 'No branch coverage data yet.';
+    els.branchCoverageEmpty.hidden = false;
+    els.branchCoverageTable.hidden = true;
+    els.branchCoverageMeta.textContent = '';
+    return;
+  }
+
+  els.branchCoverageEmpty.hidden = true;
+  els.branchCoverageTable.hidden = false;
+  els.branchCoverageBody.innerHTML = rows.map(({ project, branch }) => {
+    const current = project.currentBranch || '—';
+    const branchName = branch.branch || '(none)';
+    const isCurrent = project.currentBranch && branchName === project.currentBranch;
+    const nonCurrent = project.currentBranch && branchName !== project.currentBranch && branchName !== '(none)';
+    const warnings = project.warnings || [];
+    const projectLabel = project.path || project.tenantId || 'unknown';
+    const shortProject = projectLabel.length > 72 ? '…' + projectLabel.slice(-70) : projectLabel;
+    const trackedFiles = Number(branch.trackedFiles || 0);
+    const trackedChunks = Number(branch.trackedChunks || 0);
+    const ftsFiles = Number(branch.ftsFiles || 0);
+    const ftsBytes = Number(branch.ftsBytes || 0);
+    const signal = nonCurrent
+      ? pill('non-current rows', 'warn')
+      : isCurrent
+        ? pill('current', 'ok')
+        : pill('other', 'muted');
+    const warningText = warnings.length
+      ? `<span class="sub">${escapeHtml(warnings.join(' · '))}</span>`
+      : '';
+    return `<tr class="${nonCurrent ? 'branch-warn-row' : ''}">
+      <td><span class="path" title="${escapeHtml(projectLabel)}">${escapeHtml(shortProject)}</span>
+          <span class="sub"><code>${escapeHtml(project.tenantId || '')}</code></span></td>
+      <td><code>${escapeHtml(current)}</code></td>
+      <td><code>${escapeHtml(branchName)}</code></td>
+      <td class="num">${escapeHtml(summarizeQueue(branch.queue))}</td>
+      <td class="num">${trackedFiles.toLocaleString()} files · ${trackedChunks.toLocaleString()} chunks</td>
+      <td class="num">${ftsFiles.toLocaleString()} files · ${formatBytes(ftsBytes)}</td>
+      <td>${signal}${warningText}</td>
+    </tr>`;
+  }).join('');
+
+  const warningCount = (data.projects || []).reduce((n, p) => n + ((p.warnings || []).length ? 1 : 0), 0);
+  const source = data.source?.searchDb ? ` · search.db: ${data.source.searchDb}` : '';
+  els.branchCoverageMeta.textContent = `· ${rows.length} branch row(s) · ${warningCount} project warning(s)${source}`;
+}
+
+async function loadBranchCoverage() {
+  if (!els.branchCoverageTable) return;
+  try {
+    const data = await api('/admin/api/branches/coverage');
+    renderBranchCoverage(data);
+  } catch (err) {
+    els.branchCoverageEmpty.textContent = `Failed to load: ${err.message}`;
+    els.branchCoverageEmpty.hidden = false;
+    els.branchCoverageTable.hidden = true;
+    els.branchCoverageMeta.textContent = '';
+  }
+}
+
+els.reloadBranchCoverageBtn?.addEventListener('click', () => loadBranchCoverage());
 
 // ── Largest files (search.db file_metadata) ────────────────────────
 
