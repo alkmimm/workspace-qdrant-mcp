@@ -196,6 +196,40 @@ describe('workspace_index status resolution', () => {
       ],
     });
   });
+  it('list_branches accepts cwd as a project directory selector', async () => {
+    const listProjects = vi.fn().mockResolvedValue({
+      projects: [
+        {
+          project_id: '9634ef90c02d',
+          project_name: 'bws-engineer',
+          project_root: '/tmp/no-such-bws-engineer',
+          priority: 'high',
+          is_active: false,
+        },
+      ],
+      total_count: 1,
+    });
+    const daemon = {
+      getProjectStatus: vi.fn(),
+      listProjects,
+    } as unknown as DaemonClient;
+
+    const result = (await handleWorkspaceIndex(
+      {
+        action: 'list_branches',
+        cwd: '/tmp/no-such-bws-engineer',
+        registryPath: '/tmp/workspace-qdrant-missing-registry.json',
+      },
+      daemon
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      success: true,
+      project: 'bws-engineer',
+      projectId: '9634ef90c02d',
+      source: 'indexed',
+    });
+  });
 
   it('falls back to the first active project when cwd cannot be resolved', async () => {
     const { daemon, getProjectStatus, listProjects } = makeDaemon('fallback-active');

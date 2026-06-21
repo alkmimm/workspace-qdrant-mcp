@@ -487,7 +487,7 @@ function projectSelectorFromArgs(args: JsonObject): {
 } {
   const name = stringArg(args, 'projectName', ['name']);
   const id = stringArg(args, 'projectId');
-  const dir = stringArg(args, 'projectPath', ['projectDir']);
+  const dir = stringArg(args, 'projectPath', ['projectDir', 'repoDir', 'cwd']);
   return {
     ...(name !== undefined ? { projectName: name } : {}),
     ...(id !== undefined ? { projectId: id } : {}),
