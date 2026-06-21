@@ -345,8 +345,9 @@ async function executeAndLogSearch(
   try {
     const request = buildExactSearchRequest(options, tenantId);
     const requestedBranch = concreteBranchFilter(options.branch);
-    const responses = [await daemonClient.textSearch(request)];
-    const resultGroups: SearchResult[][] = [mapExactResults(responses[0].matches, requestedBranch)];
+    const primaryResponse = await daemonClient.textSearch(request);
+    const responses = [primaryResponse];
+    const resultGroups: SearchResult[][] = [mapExactResults(primaryResponse.matches, requestedBranch)];
     if (fallbackBranch) {
       const fallbackResponse = await daemonClient.textSearch(
         buildExactSearchRequest({ ...options, branch: fallbackBranch }, tenantId)
