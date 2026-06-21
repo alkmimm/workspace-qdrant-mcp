@@ -143,6 +143,13 @@ describe('buildFilter — existing filters preserved', () => {
     const pathCondition = must.find((c) => (c as Record<string, unknown>).key === 'file_path');
     expect(pathCondition).toBeDefined();
   });
+  it('should add pathGlob text hint for leading glob filters', () => {
+    const filter = buildFilter(makeParams({ pathGlob: '**/integrator-routes/**' }));
+    expect(filter).not.toBeNull();
+    const must = filter!.must as Record<string, unknown>[];
+    const pathCondition = must.find((c) => (c as Record<string, unknown>).key === 'file_path');
+    expect(pathCondition).toEqual({ key: 'file_path', match: { text: 'integrator-routes' } });
+  });
 
   it('should exclude deleted for libraries collection', () => {
     const filter = buildFilter(

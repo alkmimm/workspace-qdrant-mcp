@@ -123,11 +123,21 @@ function buildComponentCondition(params: FilterParams): Record<string, unknown> 
   };
 }
 
+function extractGlobTextHint(glob: string): string {
+  const normalized = glob.replace(/\\/g, '/');
+  const literalSegments = normalized
+    .split('/')
+    .filter((segment) => segment.length > 0 && !/[*?[{]/.test(segment));
+  literalSegments.sort((a, b) => b.length - a.length);
+  return literalSegments[0] ?? '';
+}
+
 function buildPathGlobCondition(params: FilterParams): Record<string, unknown> | null {
   if (!params.pathGlob) return null;
   const prefix = extractGlobPrefix(params.pathGlob);
-  if (!prefix) return null;
-  return { key: FIELD_FILE_PATH, match: { text: prefix } };
+  const textHint = prefix || extractGlobTextHint(params.pathGlob);
+  if (!textHint) return null;
+  return { key: FIELD_FILE_PATH, match: { text: textHint } };
 }
 
 function buildMustConditions(params: FilterParams): Record<string, unknown>[] {

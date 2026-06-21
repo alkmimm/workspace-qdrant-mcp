@@ -401,6 +401,7 @@ impl GrpcServer {
                 provider,
                 storage_client: storage_for_reembed,
                 pool,
+                search_db: self.search_db.clone(),
                 pause_flag,
             });
             admin_impl = admin_impl.with_reembed_context(ctx);

@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 use workspace_qdrant_core::config::EmbeddingSettings;
 use workspace_qdrant_core::embedding::provider::DenseProvider;
 use workspace_qdrant_core::storage::StorageClient;
+use workspace_qdrant_core::SearchDbManager;
 
 // Re-export the canonical names from wqm_common so callers don't import two
 // different aliases for the same constant.
@@ -20,5 +21,6 @@ pub struct ReembedContext {
     pub provider: Arc<dyn DenseProvider>,
     pub storage_client: Arc<StorageClient>,
     pub pool: SqlitePool,
+    pub search_db: Option<Arc<SearchDbManager>>,
     pub pause_flag: Arc<AtomicBool>,
 }

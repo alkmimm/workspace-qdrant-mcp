@@ -34,6 +34,7 @@ import {
 } from './search-qdrant.js';
 import { expandGraphContext } from './search-graph-context.js';
 import { logDebug } from '../utils/logger.js';
+import { matchesGlob } from '../utils/path-glob.js';
 import {
   concreteBranchFilter,
   resolveEffectiveBranch,
@@ -1117,13 +1118,33 @@ async function rerankResults(
 }
 
 /** Fuse, sort, expand context, update event, and assemble the final response. */
+function filterResultsByPathGlob(
+  results: SearchResult[],
+  pathGlob: string | undefined
+): SearchResult[] {
+  if (!pathGlob) return results;
+  return results.filter((result) => {
+    const relativePath =
+      typeof result.metadata['relative_path'] === 'string'
+        ? result.metadata['relative_path']
+        : undefined;
+    const filePath =
+      typeof result.metadata['file_path'] === 'string' ? result.metadata['file_path'] : undefined;
+    return (
+      (relativePath !== undefined && matchesGlob(relativePath, pathGlob)) ||
+      (filePath !== undefined && matchesGlob(filePath, pathGlob))
+    );
+  });
+}
+
 export async function finalizeResults(
   qdrantClient: QdrantClient,
   daemonClient: DaemonClient,
   stateManager: SqliteStateManager,
   params: FinalizeResultsParams
 ): Promise<SearchResponse> {
-  const fusedResults = applyRRFFusion(params.allResults, params.mode);
+  const scopedResults = filterResultsByPathGlob(params.allResults, params.options.pathGlob);
+  const fusedResults = applyRRFFusion(scopedResults, params.mode);
   // Snapshot the pre-boost score per result (raw cosine for semantic, RRF for
   // hybrid) so it can be RESTORED for display after ranking. The path-relevance
   // boost and the cross-encoder rerank below are RANKING signals ONLY — they
@@ -1208,7 +1229,7 @@ export async function finalizeResults(
   // Append the project-memory recall lane AFTER the code top-k so notes never
   // displace code. They are tenant-filtered + capped upstream and self-label via
   // `collection: "scratchpad"`.
-  const scratchpadHits = params.scratchpadHits ?? [];
+  const scratchpadHits = params.options.pathGlob ? [] : (params.scratchpadHits ?? []);
   const combinedResults =
     scratchpadHits.length > 0 ? [...finalResults, ...scratchpadHits] : finalResults;
   const collectionsSearched =

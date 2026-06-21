@@ -3,12 +3,16 @@ use super::recreator::collection_reembed_idempotency_key;
 use super::*;
 use async_trait::async_trait;
 use sqlx::SqlitePool;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tonic::Status;
 use workspace_qdrant_core::embedding::provider::DenseProvider;
 use workspace_qdrant_core::embedding::{DenseEmbedding, EmbeddingError};
+use tempfile::TempDir;
+use workspace_qdrant_core::fts_batch_processor::{FtsBatchConfig, FtsBatchProcessor};
+use workspace_qdrant_core::search_db::SearchDbManager;
 use workspace_qdrant_core::storage::StorageClient;
 
 /// In-memory mock recreator: records (name, dim) per call.
@@ -69,6 +73,7 @@ async fn fresh_pool() -> SqlitePool {
                 collection TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 payload_json TEXT NOT NULL DEFAULT '{}',
+                branch TEXT DEFAULT 'main',
                 lease_until TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -182,6 +187,7 @@ fn ctx_with(pool: SqlitePool, dim: usize) -> ReembedContext {
             workspace_qdrant_core::storage::StorageConfig::default(),
         )),
         pool,
+        search_db: None,
         pause_flag: Arc::new(AtomicBool::new(false)),
     }
 }
@@ -290,6 +296,66 @@ async fn flush_clears_done_rows_and_spares_non_canonical() {
     );
 }
 
+#[tokio::test]
+async fn flush_clears_search_db_for_watch_folder_tenants() {
+    let pool = fresh_pool().await;
+    sqlx::query(
+        "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled) \
+         VALUES ('w1', '/repo/a', 'projects', 'tenant-a', 1), \
+                ('w2', '/repo/b', 'projects', 'tenant-b', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let search_db = Arc::new(SearchDbManager::new(tmp.path().join("search.db")).await.unwrap());
+    let processor = FtsBatchProcessor::new(&search_db, FtsBatchConfig::default());
+    processor
+        .full_rewrite(
+            10,
+            "ghost main branch\n",
+            "tenant-a",
+            Some("main"),
+            "/repo/a/src/ghost.ts",
+            Some("bp-a"),
+            Some("src/ghost.ts"),
+            Some("hash-a"),
+        )
+        .await
+        .unwrap();
+    processor
+        .full_rewrite(
+            20,
+            "keep other tenant\n",
+            "tenant-c",
+            Some("main"),
+            "/repo/c/src/keep.ts",
+            Some("bp-c"),
+            Some("src/keep.ts"),
+            Some("hash-c"),
+        )
+        .await
+        .unwrap();
+
+    let mut ctx = ctx_with(pool.clone(), 384);
+    ctx.search_db = Some(search_db.clone());
+    flush_and_clear_state(&ctx).await.unwrap();
+
+    let tenants: Vec<String> = sqlx::query_scalar(
+        "SELECT tenant_id FROM file_metadata ORDER BY tenant_id",
+    )
+    .fetch_all(search_db.pool())
+    .await
+    .unwrap();
+    assert_eq!(tenants, vec!["tenant-c".to_string()]);
+    let lines: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM code_lines")
+        .fetch_one(search_db.pool())
+        .await
+        .unwrap();
+    assert_eq!(lines, 1, "only the non-watch-folder tenant should remain");
+}
+
 /// Regression for the "reembed completes but re-ingests nothing" bug: the
 /// re-enqueued folder scan must carry `folder_path: null` (scan the watch-folder
 /// root), NOT the absolute root path. The folder-scan strategy joins a non-null
@@ -312,11 +378,13 @@ async fn folder_scan_enqueue_uses_null_path_for_root() {
         .unwrap();
     assert_eq!(n, 1);
 
-    let payload: String =
-        sqlx::query_scalar("SELECT payload_json FROM unified_queue WHERE item_type = 'folder'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let (op, payload): (String, String) = sqlx::query_as(
+        "SELECT op, payload_json FROM unified_queue WHERE item_type = 'folder'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(op, "uplift", "reembed must force a rebuild, not an incremental scan");
     let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(
         v.get("folder_path"),
@@ -327,6 +395,55 @@ async fn folder_scan_enqueue_uses_null_path_for_root() {
         !payload.contains("/home/u/repos/DOC-V2"),
         "payload must not embed the absolute root path: {payload}"
     );
+    assert_eq!(v.get("uplift"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(
+        v.get("recursive_depth"),
+        Some(&serde_json::Value::from(20)),
+        "full reembed must not stop before deep frontend files"
+    );
+}
+
+#[tokio::test]
+async fn folder_uplift_uses_current_project_branch() {
+    let repo = TempDir::new().unwrap();
+    let run_git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
+        assert!(status.success(), "git {args:?} failed with {status}");
+    };
+    run_git(&["init", "-b", "dev-clean"]);
+    run_git(&["config", "user.email", "wqm-test@example.invalid"]);
+    run_git(&["config", "user.name", "WQM Test"]);
+    std::fs::write(repo.path().join("README.md"), "test\n").unwrap();
+    run_git(&["add", "README.md"]);
+    run_git(&["commit", "-m", "init"]);
+
+    let pool = fresh_pool().await;
+    sqlx::query(
+        "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled) \
+         VALUES ('w1', ?1, 'projects', 't1', 1)",
+    )
+    .bind(repo.path().to_string_lossy().as_ref())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let n = super::enqueue::enqueue_folder_scans(&pool, "2026-01-01T00:00:00Z")
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+
+    let (op, branch): (String, String) = sqlx::query_as(
+        "SELECT op, branch FROM unified_queue WHERE item_type = 'folder'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(op, "uplift");
+    assert_eq!(branch, "dev-clean");
 }
 
 #[tokio::test]
@@ -378,6 +495,40 @@ async fn fails_when_quiescence_timeout_exceeded() {
     // pause_flag released on timeout
     assert!(!ctx.pause_flag.load(Ordering::SeqCst));
     // No collection recreation on timeout
+    assert!(recreator.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn waits_for_expired_in_progress_items() {
+    let pool = fresh_pool().await;
+    // Regression: a long-running worker may outlive its lease. Reembed must
+    // still treat the row as in-flight, otherwise the old operation can finish
+    // after the rebuild and delete freshly reingested data.
+    sqlx::query(
+        "INSERT INTO unified_queue \
+             (queue_id, idempotency_key, item_type, op, tenant_id, collection, \
+              status, lease_until, created_at, updated_at) \
+             VALUES ('expired','expired-key','file','delete','t','projects','in_progress', \
+                     strftime('%Y-%m-%dT%H:%M:%fZ','now','-10 seconds'), \
+                     '2024-01-01T00:00:00.000Z','2024-01-01T00:00:00.000Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let ctx = ctx_with(pool, 384);
+    let recreator = MockRecreator::default();
+    let err = execute_reembed(
+        &ctx,
+        &recreator,
+        Duration::from_millis(150),
+        Duration::from_millis(20),
+    )
+    .await
+    .expect_err("expired in-progress work must still block reembed");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(err.message().contains("drain-to-quiescence timeout"));
+    assert!(!ctx.pause_flag.load(Ordering::SeqCst));
     assert!(recreator.calls.lock().unwrap().is_empty());
 }
 
@@ -543,7 +694,7 @@ async fn repopulates_rules_and_scratchpad() {
     assert_eq!(resp.scratchpad_enqueued, 2);
 
     let folder_scans: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM unified_queue WHERE item_type='folder' AND op='scan'",
+        "SELECT COUNT(*) FROM unified_queue WHERE item_type='folder' AND op='uplift'",
     )
     .fetch_one(&pool)
     .await
@@ -582,6 +733,7 @@ async fn uses_settings_output_dim_for_recreation() {
             workspace_qdrant_core::storage::StorageConfig::default(),
         )),
         pool,
+        search_db: None,
         pause_flag: Arc::new(AtomicBool::new(false)),
     };
     let recreator = MockRecreator::default();

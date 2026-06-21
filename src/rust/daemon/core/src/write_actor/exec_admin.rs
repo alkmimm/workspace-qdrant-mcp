@@ -200,7 +200,7 @@ impl WriteActor {
             // backlog instead of being silently deduped against an older scan.
             let mut payload_value = serde_json::json!({
                 "recursive": true,
-                "recursive_depth": 10,
+                "recursive_depth": 20,
                 "patterns": [],
                 "ignore_patterns": []
             });

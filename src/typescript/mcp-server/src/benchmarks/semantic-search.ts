@@ -14,7 +14,14 @@ import { parse as parseYaml } from 'yaml';
 
 import { determineCollections } from '../tools/search-filters.js';
 import { PROJECTS_COLLECTION } from '../tools/search-types.js';
-import type { SearchMode, SearchOptions, SearchResponse, SearchResult, SearchScope } from '../tools/search.js';
+import type {
+  SearchMode,
+  SearchOptions,
+  SearchResponse,
+  SearchResult,
+  SearchScope,
+} from '../tools/search.js';
+import { globToRegExp, matchesGlob } from '../utils/path-glob.js';
 
 export const SEMANTIC_SEARCH_BENCHMARK_MODES = ['semantic', 'hybrid', 'exact'] as const;
 
@@ -271,44 +278,7 @@ function dedupeStrings(values: readonly string[]): string[] {
   return result;
 }
 
-function escapeRegexChar(char: string): string {
-  return char.replace(/[\\^$+?.()|[\]{}]/g, '\\$&');
-}
-
-export function globToRegExp(glob: string): RegExp {
-  let pattern = '^';
-  for (let index = 0; index < glob.length; index += 1) {
-    const char = glob[index];
-    if (char === undefined) {
-      continue;
-    }
-    if (char === '*') {
-      if (glob[index + 1] === '*') {
-        if (glob[index + 2] === '/') {
-          pattern += '(?:.*/)?';
-          index += 2;
-          continue;
-        }
-        pattern += '.*';
-        index += 1;
-        continue;
-      }
-      pattern += '[^/]*';
-      continue;
-    }
-    if (char === '?') {
-      pattern += '[^/]';
-      continue;
-    }
-    pattern += escapeRegexChar(char);
-  }
-  pattern += '$';
-  return new RegExp(pattern);
-}
-
-export function matchesGlob(value: string, glob: string): boolean {
-  return globToRegExp(glob).test(value);
-}
+export { globToRegExp, matchesGlob };
 
 export function normalizeBenchmarkPath(input: string, workspaceRoot?: string): string {
   const trimmed = input.trim();
@@ -360,8 +330,13 @@ function expectedMatcher(expected: string): (value: string) => boolean {
   return (value: string) => value === expected;
 }
 
-function normalizeAndDedupeExpectedFiles(expectedFiles: readonly string[], workspaceRoot: string): string[] {
-  return dedupeStrings(expectedFiles.map((filePath) => normalizeBenchmarkPath(filePath, workspaceRoot)));
+function normalizeAndDedupeExpectedFiles(
+  expectedFiles: readonly string[],
+  workspaceRoot: string
+): string[] {
+  return dedupeStrings(
+    expectedFiles.map((filePath) => normalizeBenchmarkPath(filePath, workspaceRoot))
+  );
 }
 
 function summarizeTopResults(
@@ -461,15 +436,18 @@ export function evaluateSearchResults(
   const top3Hit = rawTopPaths
     .slice(0, 3)
     .some((path) => expectedMatchers.some((expected) => expected.matches(path)));
-  const top10Hit = rawTopPaths.some((path) => expectedMatchers.some((expected) => expected.matches(path)));
+  const top10Hit = rawTopPaths.some((path) =>
+    expectedMatchers.some((expected) => expected.matches(path))
+  );
 
   const relevantUniqueHits = topPaths.filter((path) =>
     expectedMatchers.some((expected) => expected.matches(path))
   );
   const precisionAt10 = topPaths.length > 0 ? relevantUniqueHits.length / topPaths.length : 0;
-  const recallAt10 = normalizedExpectedFiles.length > 0
-    ? matchedExpectedFiles.length / normalizedExpectedFiles.length
-    : 0;
+  const recallAt10 =
+    normalizedExpectedFiles.length > 0
+      ? matchedExpectedFiles.length / normalizedExpectedFiles.length
+      : 0;
   const duplicateRate = rawTopPaths.length > 0 ? 1 - topPaths.length / rawTopPaths.length : 0;
   const mrr = firstRelevantRank ? 1 / firstRelevantRank : 0;
 
@@ -490,7 +468,9 @@ export function evaluateSearchResults(
   };
 }
 
-export function summarizeModeRuns(runs: readonly SemanticSearchModeRun[]): SemanticSearchModeSummary {
+export function summarizeModeRuns(
+  runs: readonly SemanticSearchModeRun[]
+): SemanticSearchModeSummary {
   if (runs.length === 0) {
     throw new Error('Cannot summarize an empty benchmark mode run set.');
   }
@@ -505,7 +485,10 @@ export function summarizeModeRuns(runs: readonly SemanticSearchModeRun[]): Seman
     mrr: mean(runs.map((run) => run.evaluation.mrr)),
     duplicateRate: mean(runs.map((run) => run.evaluation.duplicateRate)),
     avgLatencyMs: mean(runs.flatMap((run) => run.latencySamplesMs)),
-    p95LatencyMs: percentile(runs.flatMap((run) => run.latencySamplesMs), 0.95),
+    p95LatencyMs: percentile(
+      runs.flatMap((run) => run.latencySamplesMs),
+      0.95
+    ),
   };
 }
 
@@ -549,7 +532,9 @@ function resolveOptionalNumber(value: number | undefined, fallback: number): num
   return value ?? fallback;
 }
 
-function parseDatasetDefaults(defaults: unknown): SemanticSearchBenchmarkDatasetDefaults | undefined {
+function parseDatasetDefaults(
+  defaults: unknown
+): SemanticSearchBenchmarkDatasetDefaults | undefined {
   if (defaults === undefined) return undefined;
   if (!isRecord(defaults)) {
     throw new Error('Benchmark dataset "defaults" must be an object when present.');
@@ -559,7 +544,10 @@ function parseDatasetDefaults(defaults: unknown): SemanticSearchBenchmarkDataset
   if (scope !== undefined) result.scope = scope;
   const collection = asOptionalString(defaults.collection);
   if (collection !== undefined) result.collection = collection;
-  const includeLibraries = asOptionalBoolean(defaults.includeLibraries, 'defaults.includeLibraries');
+  const includeLibraries = asOptionalBoolean(
+    defaults.includeLibraries,
+    'defaults.includeLibraries'
+  );
   if (includeLibraries !== undefined) result.includeLibraries = includeLibraries;
   const limit = asOptionalPositiveInteger(defaults.limit, 'defaults.limit');
   if (limit !== undefined) result.limit = limit;
@@ -611,7 +599,9 @@ function parseDatasetQuery(rawQuery: unknown, index: number): SemanticSearchBenc
   };
 }
 
-export function loadSemanticSearchBenchmarkDataset(filePath: string): SemanticSearchBenchmarkDataset {
+export function loadSemanticSearchBenchmarkDataset(
+  filePath: string
+): SemanticSearchBenchmarkDataset {
   const absolutePath = resolve(filePath);
   const content = readFileSync(absolutePath, 'utf8');
   const parsed = parseYaml(content) as unknown;
@@ -631,7 +621,9 @@ export function loadSemanticSearchBenchmarkDataset(filePath: string): SemanticSe
   const seenIds = new Set<string>();
   for (const query of queries) {
     if (seenIds.has(query.id)) {
-      throw new Error(`Benchmark dataset query ids must be unique; duplicate id "${query.id}" found.`);
+      throw new Error(
+        `Benchmark dataset query ids must be unique; duplicate id "${query.id}" found.`
+      );
     }
     seenIds.add(query.id);
   }
@@ -664,8 +656,12 @@ function mergeQuerySettings(
 } {
   const scope = query.scope ?? config.scope ?? defaults?.scope ?? 'project';
   const collection = query.collection ?? config.collection ?? defaults?.collection;
-  const includeLibraries = query.includeLibraries ?? config.includeLibraries ?? defaults?.includeLibraries ?? false;
-  const limit = resolveOptionalNumber(query.limit, resolveOptionalNumber(config.limit, defaults?.limit ?? 10));
+  const includeLibraries =
+    query.includeLibraries ?? config.includeLibraries ?? defaults?.includeLibraries ?? false;
+  const limit = resolveOptionalNumber(
+    query.limit,
+    resolveOptionalNumber(config.limit, defaults?.limit ?? 10)
+  );
   const projectId = query.projectId ?? config.projectId ?? defaults?.projectId;
   return {
     scope,
@@ -801,9 +797,7 @@ function buildModeRun(
       query: response.query,
       scope: response.scope,
       limit: response.results.length,
-      ...(mode === 'exact'
-        ? { exact: true }
-        : { mode: response.mode as SearchMode }),
+      ...(mode === 'exact' ? { exact: true } : { mode: response.mode as SearchMode }),
     },
     status: response.status ?? 'ok',
     statusReason: response.status_reason,
@@ -868,10 +862,16 @@ function selectBestMode(modes: Record<BenchmarkMode, SemanticSearchModeRun>): Be
   };
   const candidates = [...SEMANTIC_SEARCH_BENCHMARK_MODES].map((mode) => modes[mode]);
   candidates.sort((left, right) => {
-    if (left.evaluation.firstRelevantRank === undefined && right.evaluation.firstRelevantRank !== undefined) {
+    if (
+      left.evaluation.firstRelevantRank === undefined &&
+      right.evaluation.firstRelevantRank !== undefined
+    ) {
       return 1;
     }
-    if (left.evaluation.firstRelevantRank !== undefined && right.evaluation.firstRelevantRank === undefined) {
+    if (
+      left.evaluation.firstRelevantRank !== undefined &&
+      right.evaluation.firstRelevantRank === undefined
+    ) {
       return -1;
     }
     const leftRank = left.evaluation.firstRelevantRank ?? Number.POSITIVE_INFINITY;
@@ -956,10 +956,8 @@ export async function runSemanticSearchBenchmark(
       query: query.query,
       expectedFiles: semantic.evaluation.expectedFiles,
       bestMode: selectBestMode(modesByName),
-      semanticRescuedByHybridTop10:
-        !semantic.evaluation.top10Hit && hybrid.evaluation.top10Hit,
-      semanticRescuedByExactTop10:
-        !semantic.evaluation.top10Hit && exact.evaluation.top10Hit,
+      semanticRescuedByHybridTop10: !semantic.evaluation.top10Hit && hybrid.evaluation.top10Hit,
+      semanticRescuedByExactTop10: !semantic.evaluation.top10Hit && exact.evaluation.top10Hit,
       modes: modesByName,
     });
   }
@@ -992,14 +990,18 @@ export async function runSemanticSearchBenchmark(
       ...(config.projectId !== undefined ? { projectId: config.projectId } : {}),
       ...(config.scope !== undefined ? { scope: config.scope } : {}),
       ...(config.collection !== undefined ? { collection: config.collection } : {}),
-      ...(config.includeLibraries !== undefined ? { includeLibraries: config.includeLibraries } : {}),
+      ...(config.includeLibraries !== undefined
+        ? { includeLibraries: config.includeLibraries }
+        : {}),
       ...(config.limit !== undefined ? { limit: config.limit } : {}),
       ...(config.topK !== undefined ? { topK: config.topK } : {}),
       ...(config.warmupRuns !== undefined ? { warmupRuns: config.warmupRuns } : {}),
       ...(config.iterations !== undefined ? { iterations: config.iterations } : {}),
       modes,
       ...(config.queryIds !== undefined ? { queryIds: config.queryIds } : {}),
-      ...(config.datasetSourcePath !== undefined ? { datasetSourcePath: config.datasetSourcePath } : {}),
+      ...(config.datasetSourcePath !== undefined
+        ? { datasetSourcePath: config.datasetSourcePath }
+        : {}),
     },
     summary,
     queries: queryRuns,
