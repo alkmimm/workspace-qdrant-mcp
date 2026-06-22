@@ -372,22 +372,6 @@ fn delete_target_still_exists(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::delete_target_still_exists;
-
-    #[test]
-    fn delete_target_still_exists_only_for_files() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let file = tmp.path().join("present.ts");
-        std::fs::write(&file, "export class Present {}\n").expect("write file");
-
-        assert!(delete_target_still_exists(&file));
-        assert!(!delete_target_still_exists(tmp.path()));
-        assert!(!delete_target_still_exists(&tmp.path().join("missing.ts")));
-    }
-}
-
 /// Clean up tracked records and Qdrant points for a file that no longer exists on disk.
 ///
 /// **F-035:** if Qdrant deletion fails, returns `Err` and leaves the
@@ -483,5 +467,21 @@ pub(super) async fn handle_qdrant_failure(
                 .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delete_target_still_exists;
+
+    #[test]
+    fn delete_target_still_exists_only_for_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("present.ts");
+        std::fs::write(&file, "export class Present {}\n").expect("write file");
+
+        assert!(delete_target_still_exists(&file));
+        assert!(!delete_target_still_exists(tmp.path()));
+        assert!(!delete_target_still_exists(&tmp.path().join("missing.ts")));
     }
 }

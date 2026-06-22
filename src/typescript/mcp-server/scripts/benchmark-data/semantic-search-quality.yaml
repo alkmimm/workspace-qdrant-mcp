@@ -110,6 +110,7 @@ queries:
   - id: pt-upsert-qdrant
     query: Onde os pontos com embeddings são enviados para o Qdrant?
     expectedFiles:
+      - src/rust/daemon/core/src/strategies/processing/file/store_track.rs
       - src/rust/daemon/core/src/write_actor/actor.rs
       - src/rust/daemon/core/src/strategies/processing/file/ingest.rs
 
@@ -234,6 +235,7 @@ queries:
   - id: impl-qdrant-upsert
     query: Where does the daemon upsert embedded points into Qdrant collections?
     expectedFiles:
+      - src/rust/daemon/core/src/strategies/processing/file/store_track.rs
       - src/rust/daemon/core/src/write_actor/actor.rs
       - src/rust/daemon/core/src/strategies/processing/file/ingest.rs
 

@@ -283,12 +283,16 @@ describe('workspace_index status resolution', () => {
 
   it('list_branches falls back to daemon-only projects by projectId', async () => {
     const { daemon, listProjects } = makeDaemon('daemon-only');
+    // project_root must NOT be a live git checkout: branch synthesis calls
+    // getCurrentBranch(root), so a real repo path makes the assertion depend on
+    // that repo's current branch (non-hermetic). A non-existent path forces the
+    // deterministic getCurrentBranch → null → 'main' fallback.
     listProjects.mockResolvedValue({
       projects: [
         {
           project_id: 'daemon-only',
           project_name: 'bws-engineer',
-          project_root: '/home/alkmimm/respositorios/bws-engineer',
+          project_root: join(tmpdir(), 'wqm-daemon-only-no-such-repo'),
         },
       ],
     });
@@ -306,7 +310,7 @@ describe('workspace_index status resolution', () => {
       projectId: 'daemon-only',
       branches: [
         expect.objectContaining({
-          name: 'dev-clean',
+          name: 'main',
           indexed: true,
           kind: 'primary',
           note: expect.stringContaining('Synthesized from daemon ListProjects'),
