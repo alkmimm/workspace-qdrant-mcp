@@ -43,6 +43,15 @@ pub use wqm_common::constants::DEFAULT_GRPC_PORT;
 /// Default connection timeout in seconds
 pub const DEFAULT_CONNECTION_TIMEOUT_SECS: u64 = 5;
 
+/// Maximum size (bytes) of a single decoded gRPC response.
+///
+/// tonic's default decode limit is 4 MiB. Graph queries over a large tenant
+/// (e.g. `wqm graph communities` returning every community/member, or a deep
+/// `pagerank`/`query`) can exceed that and fail with `OutOfRange: decoded
+/// message length too large`. Raise it generously so legitimate large results
+/// transit; the server still bounds per-action results via `top_k`.
+pub const MAX_DECODING_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
 /// Client wrapper for memexd daemon gRPC services
 pub struct DaemonClient {
     system: SystemServiceClient<Channel>,
@@ -76,18 +85,30 @@ impl DaemonClient {
             .context("Failed to connect to memexd daemon. Is it running?")?;
 
         Ok(Self {
-            system: SystemServiceClient::new(channel.clone()),
-            collection: CollectionServiceClient::new(channel.clone()),
-            document: DocumentServiceClient::new(channel.clone()),
-            project: ProjectServiceClient::new(channel.clone()),
-            graph: GraphServiceClient::new(channel.clone()),
-            queue_write: QueueWriteServiceClient::new(channel.clone()),
-            watch_write: WatchWriteServiceClient::new(channel.clone()),
-            library_write: LibraryWriteServiceClient::new(channel.clone()),
-            tracking_write: TrackingWriteServiceClient::new(channel.clone()),
-            admin_write: AdminWriteServiceClient::new(channel.clone()),
-            embedding: EmbeddingServiceClient::new(channel.clone()),
-            text_search: TextSearchServiceClient::new(channel),
+            system: SystemServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            collection: CollectionServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            document: DocumentServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            project: ProjectServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            graph: GraphServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            queue_write: QueueWriteServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            watch_write: WatchWriteServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            library_write: LibraryWriteServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            tracking_write: TrackingWriteServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            admin_write: AdminWriteServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            embedding: EmbeddingServiceClient::new(channel.clone())
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
+            text_search: TextSearchServiceClient::new(channel)
+                .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE),
         })
     }
 

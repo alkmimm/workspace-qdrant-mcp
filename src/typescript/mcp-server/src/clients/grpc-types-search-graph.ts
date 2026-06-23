@@ -140,6 +140,7 @@ export interface CommunityRequest {
   max_iterations?: number;
   min_community_size?: number;
   edge_types?: string[];
+  top_k?: number;
 }
 
 export interface CommunityResponse {

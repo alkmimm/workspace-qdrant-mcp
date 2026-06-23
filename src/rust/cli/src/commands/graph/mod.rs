@@ -105,6 +105,10 @@ enum GraphCommand {
         #[arg(long)]
         min_size: Option<u32>,
 
+        /// Return only the top K largest communities
+        #[arg(long)]
+        top_k: Option<u32>,
+
         /// Edge type filter (comma-separated)
         #[arg(long, value_delimiter = ',')]
         edge_types: Vec<String>,
@@ -185,8 +189,9 @@ pub async fn execute(args: GraphArgs) -> Result<()> {
             tenant,
             max_iterations,
             min_size,
+            top_k,
             edge_types,
-        } => communities::communities(&tenant, max_iterations, min_size, edge_types).await,
+        } => communities::communities(&tenant, max_iterations, min_size, top_k, edge_types).await,
         GraphCommand::Betweenness {
             tenant,
             top_k,
