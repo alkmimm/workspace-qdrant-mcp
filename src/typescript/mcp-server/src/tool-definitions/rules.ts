@@ -7,6 +7,8 @@ export const rulesToolDefinition = {
   annotations: {
     title: 'Behavioral rules (list/add/update/remove)',
     openWorldHint: false,
+    destructiveHint: true, // 'remove' deletes a rule
+    idempotentHint: false, // 'add' of a new label changes state
   },
   description:
     "Manage behavioral rules (add, update, remove, list). Check active rules at the start of each session to load the user's behavioral preferences. Rules persist across sessions and guide how you should work. Required args per action: add/update → label + content; remove → label; list → none.",

@@ -42,7 +42,16 @@ async function dispatchStore(
   components: ServerComponents,
   sessionState: SessionState
 ): Promise<unknown> {
-  const storeType = (args?.['type'] as string) ?? 'library';
+  const storeType = args?.['type'] as string | undefined;
+  if (!storeType) {
+    // No silent 'library' default: an omitted type used to fall through to the
+    // library branch and fail with a confusing "libraryName is required". The
+    // server does not validate inputSchema.required, so this guard is the
+    // functional enforcement of store's required `type`.
+    throw new Error(
+      "store requires `type`: 'scratchpad' (notes), 'library' (docs — needs libraryName), 'url', or 'project'."
+    );
+  }
   if (storeType === 'project')
     return registerProjectFromTool(args, sessionState, components.daemonClient);
   if (storeType === 'url') return storeUrl(args, components.stateManager, sessionState);
