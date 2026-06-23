@@ -45,6 +45,10 @@ export const SEARCH_OUTPUT_SCHEMA = {
       additionalProperties: true,
       description: 'Present when the response byte budget dropped trailing hits: { dropped: N }',
     },
+    next_offset: {
+      type: 'number',
+      description: 'Pagination cursor — pass back as offset to fetch the next page; absent on the last page',
+    },
   },
 };
 

@@ -1150,6 +1150,20 @@ function filterResultsByPathGlob(
   });
 }
 
+/** Slice one page out of the ranked result list. Pure + exported so the
+ *  no-overlap property is unit-testable: paginate(ranked,0,n) and
+ *  paginate(ranked,n,n) over the same list yield disjoint pages. `hasMore` is
+ *  true when candidates exist beyond the window (drives `next_offset`). */
+export function paginateRanked<T>(
+  ranked: readonly T[],
+  offset: number,
+  limit: number
+): { page: T[]; hasMore: boolean } {
+  const start = Math.max(0, offset);
+  const end = start + Math.max(0, limit);
+  return { page: ranked.slice(start, end), hasMore: ranked.length > end };
+}
+
 export async function finalizeResults(
   qdrantClient: QdrantClient,
   daemonClient: DaemonClient,
@@ -1220,11 +1234,20 @@ export async function finalizeResults(
       mode: params.mode,
     });
   }
+  // Pagination: the [offset, offset+limit) window was over-fetched upstream;
+  // size the rerank pool to the window END (not just limit) and slice the page
+  // out of the fused/deduped/ranked list AFTER fusion, so pages never overlap.
+  const offset = Math.max(0, params.options.offset ?? 0);
+  const windowEnd = offset + params.limit;
   const ranked =
     rerankEnabled && rerankWeight > 0
-      ? await rerankResults(daemonClient, params.query, deduped, params.limit, rerankWeight)
+      ? await rerankResults(daemonClient, params.query, deduped, windowEnd, rerankWeight)
       : deduped;
-  const finalResults = ranked.slice(0, params.limit);
+  const { page: finalResults, hasMore: hasMoreCode } = paginateRanked(
+    ranked,
+    offset,
+    params.limit
+  );
 
   // Restore the display score: the ordering above used the path-boosted (and,
   // when enabled, reranked) score, but the number we RETURN is the pre-boost
@@ -1264,5 +1287,8 @@ export async function finalizeResults(
     params.scope,
     params.currentProjectId ?? params.options.projectId
   );
+  // More code candidates beyond this page → tell the agent how to fetch them.
+  // (The page-1-only scratchpad lane is intentionally not paginated.)
+  if (hasMoreCode) response.next_offset = windowEnd;
   return response;
 }

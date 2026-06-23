@@ -134,6 +134,11 @@ export const searchToolDefinition = {
         description:
           'Cap on total response body chars (default ~24000). When summed hit bodies exceed it, trailing hits are dropped (>=1 kept) and budget_truncated.dropped reports how many — narrow the query or use summary for the rest. 0 disables.',
       },
+      offset: {
+        type: 'number',
+        description:
+          'Pagination offset into the ranked results (default 0). Returns the page [offset, offset+limit); consecutive pages do not overlap. When more remain the response sets next_offset — pass it back as offset for the next page. (The scratchpad recall lane appears only on page 1.)',
+      },
     },
     required: ['query'],
   },

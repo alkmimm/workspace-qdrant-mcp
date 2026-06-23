@@ -36,6 +36,9 @@ function extractScopeOptions(
   const limit = args?.['limit'] as number | undefined;
   if (limit !== undefined) options.limit = limit;
 
+  const offset = args?.['offset'] as number | undefined;
+  if (offset !== undefined) options.offset = offset;
+
   const scoreThreshold = args?.['scoreThreshold'] as number | undefined;
   if (scoreThreshold !== undefined) options.scoreThreshold = scoreThreshold;
 }

@@ -359,15 +359,22 @@ export class SearchTool {
     // the main collection fan-out — it reuses the same embeddings, so there is
     // no reason to serialize it behind the code search. `undefined` skips the
     // lane (resolves to []); failures inside the lane also degrade to [].
+    const offset = Math.max(0, options.offset ?? 0);
+    // Over-fetch the [offset, offset+limit] window (+1 probe so finalize can set
+    // next_offset), then slice the page post-fusion in finalizeResults.
+    const fetchLimit = limit + offset + 1;
     const laneProjectId =
-      scope === 'project' && !options.collection && options.includeScratchpad !== false
+      scope === 'project' &&
+      !options.collection &&
+      options.includeScratchpad !== false &&
+      offset === 0
         ? currentProjectId
         : undefined;
     const [collectionsResult, scratchpadHits] = await Promise.all([
       this.runSearchCollections(
         options,
         mode,
-        limit,
+        fetchLimit,
         scope,
         collectionsToSearch,
         currentProjectId,
