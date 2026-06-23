@@ -23,7 +23,12 @@ import type {
   FilterParams,
   SearchCollectionParams,
 } from './search-types.js';
-import { PROJECTS_COLLECTION, SCRATCHPAD_COLLECTION, tuningFromEnv } from './search-types.js';
+import {
+  PROJECTS_COLLECTION,
+  SCRATCHPAD_COLLECTION,
+  tuningFromEnv,
+  rerankEnabledByDefault,
+} from './search-types.js';
 import { buildFilter } from './search-filters.js';
 import {
   searchCollection,
@@ -1170,7 +1175,8 @@ export async function finalizeResults(
   // Collapse same-file chunks BEFORE reranking/slicing so the pool holds
   // distinct files, not repeated chunks of one file.
   const deduped = dedupeByFile(fusedResults);
-  // Cross-encoder rerank is OPT-IN (default OFF). Measured on the 12-query
+  // Cross-encoder rerank is ON by a soft default (a weak w=0.05 blend below;
+  // WQM_SEARCH_RERANK=0 disables it). It was historically OFF. Measured on the 12-query
   // known-item benchmark (settled ext4 index, 2026-06-02): the cross-encoder
   // HURT code search — it scored implementation `.rs`/`.ts` files below
   // prose/docs for "where is X" queries, dropping recall@10 to 38% (vs 46%
@@ -1183,9 +1189,9 @@ export async function finalizeResults(
   // (e.g. bge-reranker-v2-m3 on the GPU Infinity backend) is the next thing
   // worth testing — not more tuning of this one.
   // The bi-encoder + path-relevance-boosted `deduped` order is strictly better
-  // here. Enable per-call with `rerank: true` for experimentation;
-  // WQM_SEARCH_RERANK=1 flips the default ON deployment-wide (per-call
-  // `rerank` still wins either way).
+  // here at a FULL reorder. But the weak w=0.05 blend below is the measured win,
+  // so rerank is now ON by a soft default; WQM_SEARCH_RERANK=0 forces it OFF
+  // deployment-wide (per-call `rerank` still wins either way).
   // Both follow-ups from those measurements now exist: the daemon serves a
   // MULTILINGUAL cross-encoder when WQM_RERANK_BASE_URL points at the Infinity
   // GPU sidecar (bge-reranker-v2-m3 — see core embedding::rerank), and the
@@ -1202,7 +1208,7 @@ export async function finalizeResults(
   // improved top1/MRR; w=0.10 maximized top1/MRR but lost recall. The code
   // default is the balanced 0.05; e5 deployments can still set
   // WQM_SEARCH_RERANK_WEIGHT=0.25 explicitly.
-  const rerankDefault = process.env['WQM_SEARCH_RERANK'] === '1';
+  const rerankDefault = rerankEnabledByDefault(process.env['WQM_SEARCH_RERANK']);
   const rerankEnabled = params.options.rerank ?? rerankDefault;
   const rerankWeight = Math.min(params.options.rerankWeight ?? RERANK_WEIGHT, 1);
   if (rerankEnabled && rerankWeight >= HIGH_RERANK_WEIGHT_WARNING_THRESHOLD) {

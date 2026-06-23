@@ -9,6 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { blendPoolScores } from '../../src/tools/search-helpers.js';
+import { rerankEnabledByDefault } from '../../src/tools/search-types.js';
 
 /** Pool indices sorted by blended score descending. */
 function order(blended: Map<number, number>): number[] {
@@ -73,5 +74,20 @@ describe('blendPoolScores', () => {
   it('clamps weight outside [0, 1]', () => {
     expect(order(blendPoolScores(base, rerank, 5))).toEqual([1, 2, 0]);
     expect(order(blendPoolScores(base, rerank, -1))).toEqual([0, 1, 2]);
+  });
+});
+
+describe('rerankEnabledByDefault', () => {
+  it('defaults ON when WQM_SEARCH_RERANK is unset (soft default)', () => {
+    expect(rerankEnabledByDefault(undefined)).toBe(true);
+  });
+
+  it('forces OFF only for the literal "0"', () => {
+    expect(rerankEnabledByDefault('0')).toBe(false);
+  });
+
+  it('treats "1" and any other value as ON', () => {
+    expect(rerankEnabledByDefault('1')).toBe(true);
+    expect(rerankEnabledByDefault('true')).toBe(true);
   });
 });

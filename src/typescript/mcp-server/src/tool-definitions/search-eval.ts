@@ -60,7 +60,7 @@ export const searchEvalToolDefinition = {
       rerank: {
         type: 'boolean',
         description:
-          'Force the cross-encoder rerank on/off for every query (default: deployment default, i.e. WQM_SEARCH_RERANK). Lets A/B sweeps run without redeploying.',
+          'Force the cross-encoder rerank on/off for every query (default: deployment default, i.e. WQM_SEARCH_RERANK; code default ON, WQM_SEARCH_RERANK=0 forces off). Lets A/B sweeps run without redeploying.',
       },
       rerankWeight: {
         type: 'number',

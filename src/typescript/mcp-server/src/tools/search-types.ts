@@ -83,8 +83,8 @@ export interface SearchOptions {
   /** When true, fetch 1-hop graph context for code symbol results */
   includeGraphContext?: boolean;
   /** Cross-encoder rerank of the top candidates (default: deployment setting,
-   *  WQM_SEARCH_RERANK; code default is off). Set false to skip the reranker
-   *  (lower latency), or true to enable it for a call. */
+   *  WQM_SEARCH_RERANK; code default is ON — set WQM_SEARCH_RERANK=0 to disable).
+   *  Set false to skip the reranker (lower latency), or true to enable it for a call. */
   rerank?: boolean;
   /** Blend weight (0–1) for the cross-encoder score when reranking. The final
    *  pool order is `(1-w)·norm(rrf_boosted) + w·norm(rerank)` over min-max
@@ -100,6 +100,16 @@ export interface SearchOptions {
    *  metadata (id, score, collection, title, path/symbol). Intended for
    *  pure discovery before a follow-up retrieve(). Default: false. */
   summary?: boolean;
+}
+
+/** Resolve the deployment rerank default from WQM_SEARCH_RERANK: ON unless
+ *  explicitly disabled. Unset => ON (soft default — a weak w=0.05 blend that
+ *  improves top1/MRR without recall loss); '0' => OFF (e.g. deployments with no
+ *  rerank backend, to skip the failed-call round-trip); any other value => ON.
+ *  A per-call `rerank` overrides this. Exported so search-helpers and search-eval
+ *  resolve the deployment default identically. */
+export function rerankEnabledByDefault(envValue: string | undefined): boolean {
+  return envValue === undefined ? true : envValue !== '0';
 }
 
 export interface ParentContext {

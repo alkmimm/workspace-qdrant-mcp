@@ -15,7 +15,7 @@ import { join } from 'node:path';
 
 import type { ProjectDetector } from '../utils/project-detector.js';
 import type { SearchScope } from './search-types.js';
-import { tuningFromEnv } from './search-types.js';
+import { tuningFromEnv, rerankEnabledByDefault } from './search-types.js';
 import { resolveProjectIdentity } from './branch-scope.js';
 import {
   loadSemanticSearchBenchmarkDataset,
@@ -184,7 +184,7 @@ export async function runSearchEval(
   // Resolve the EFFECTIVE rerank settings so the env-dependent deployment
   // default is observable in the result — otherwise an A/B caller cannot tell
   // what actually ran. Mirrors the resolution in search-helpers.
-  const appliedRerank = rerank ?? (process.env['WQM_SEARCH_RERANK'] === '1');
+  const appliedRerank = rerank ?? rerankEnabledByDefault(process.env['WQM_SEARCH_RERANK']);
   const appliedRerankWeight = Math.min(rerankWeight ?? tuningFromEnv('WQM_SEARCH_RERANK_WEIGHT', 0.05), 1);
 
   const report = await runSemanticSearchBenchmark(runner, dataset, {
