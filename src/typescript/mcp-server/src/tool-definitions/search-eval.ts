@@ -67,6 +67,11 @@ export const searchEvalToolDefinition = {
         description:
           'Blend weight 0–1 for the rerank score: final pool order is (1-w)·norm(rrf_boosted) + w·norm(rerank). 1 = pure cross-encoder order; 0 = rerank off (default: WQM_SEARCH_RERANK_WEIGHT, else 0.10 — measured default for the CodeRankEmbed index, 2026-06-22 A/B).',
       },
+      summary: {
+        type: 'boolean',
+        description:
+          'Delivery shape for the eval (default false). true = metadata-only hits (no chunk bodies). Ranking metrics (hit@k/recall/MRR) are unchanged vs false — only response byte cost differs. For the grep-vs-vector / inline-vs-file-based delivery experiment.',
+      },
     },
     required: [],
   },
