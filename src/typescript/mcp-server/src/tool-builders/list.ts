@@ -37,6 +37,15 @@ export function buildListOptions(args: Record<string, unknown> | undefined): Lis
   const limit = args?.['limit'] as number | undefined;
   if (limit !== undefined) options.limit = limit;
 
+  // Cursor pagination: the list response emits `next_token`; parse it back here
+  // (with optional pageSize) so callers can actually page through large listings.
+  // Without this the cursor the tool advertises is unconsumable from the MCP API.
+  const cursor = args?.['cursor'] as string | undefined;
+  if (cursor) options.cursor = cursor;
+
+  const pageSize = args?.['pageSize'] as number | undefined;
+  if (pageSize !== undefined) options.pageSize = pageSize;
+
   const projectId = args?.['projectId'] as string | undefined;
   if (projectId) options.projectId = projectId;
 

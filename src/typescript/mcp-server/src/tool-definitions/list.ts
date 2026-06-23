@@ -51,6 +51,16 @@ export const listToolDefinition = {
         type: 'number',
         description: 'Max entries returned (default: 200, max: 500)',
       },
+      pageSize: {
+        type: 'number',
+        description:
+          'Page size for cursor pagination (falls back to limit). Use together with cursor to page through a large listing.',
+      },
+      cursor: {
+        type: 'string',
+        description:
+          'Opaque pagination cursor — pass the `next_token` from a previous list response to fetch the next page.',
+      },
       projectId: {
         type: 'string',
         description: 'Specific project ID (default: current project)',

@@ -142,4 +142,17 @@ describe('SearchTool — scratchpad recall lane', () => {
     expect(result.results.some((r) => r.collection === 'scratchpad')).toBe(false);
     expect(result.collections_searched).not.toContain('scratchpad');
   });
+
+  it('runs the lane on page 1 but not beyond it (offset > 0)', async () => {
+    // Page 1 (no offset) appends the note...
+    const page1 = await searchTool.search({ query: 'ext4' });
+    expect(page1.collections_searched).toContain('scratchpad');
+
+    // ...but the supplemental lane is page-1-only: paging into code (offset > 0)
+    // must NOT re-surface notes. `collections_searched` lacking 'scratchpad'
+    // proves the lane was skipped, independent of the (empty) code page slice.
+    const page2 = await searchTool.search({ query: 'ext4', offset: 10 });
+    expect(page2.results.some((r) => r.collection === 'scratchpad')).toBe(false);
+    expect(page2.collections_searched).not.toContain('scratchpad');
+  });
 });
