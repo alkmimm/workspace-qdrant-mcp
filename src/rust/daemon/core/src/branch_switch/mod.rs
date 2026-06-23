@@ -20,5 +20,5 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use handlers::handle_git_event;
+pub use handlers::{handle_git_event, reconcile_branch_membership};
 pub use types::BranchSwitchStats;

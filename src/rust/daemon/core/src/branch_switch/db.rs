@@ -51,6 +51,38 @@ pub async fn fetch_unchanged_relative_paths(
     Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
+/// Relative paths tracked under SOME branch for this watch folder but NOT yet
+/// under `branch` — the branch-membership reconcile candidates.
+///
+/// Complements [`fetch_unchanged_relative_paths`], which only finds files the
+/// live branch-switch path (old_branch -> new_branch, valid SHAs) can diff. This
+/// query is event-independent: it catches files left tagged under an older branch
+/// when the git-watcher never saw the checkout (daemon down during checkout, the
+/// branch was already current when the project was first watched, or a
+/// synthesized project). The caller intersects the result with the working tree
+/// before re-enqueuing as an `Add` so the dedup fast-path appends the branch
+/// without re-embedding. The `NOT EXISTS` makes it idempotent: a file already
+/// tagged with `branch` is excluded, so a reconciled project yields an empty set.
+pub async fn fetch_paths_missing_branch(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    branch: &str,
+) -> Result<Vec<String>, String> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT t.relative_path
+         FROM tracked_files t
+         WHERE t.watch_folder_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM json_each(t.branches) WHERE value = ?2)",
+    )
+    .bind(watch_folder_id)
+    .bind(branch)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch paths missing branch: {}", e))?;
+
+    Ok(rows.into_iter().map(|(p,)| p).collect())
+}
+
 /// Update last_commit_hash in watch_folders.
 pub async fn update_last_commit_hash(
     pool: &SqlitePool,
