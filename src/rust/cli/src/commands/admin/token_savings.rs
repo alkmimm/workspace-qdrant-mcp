@@ -136,7 +136,7 @@ pub async fn execute(
 // ── Parsing ─────────────────────────────────────────────────────────────────
 
 /// Parse a window string like `7d`, `24h`, `30m`. Returns hours as f64.
-fn parse_window(input: &str) -> Result<f64> {
+pub(super) fn parse_window(input: &str) -> Result<f64> {
     let s = input.trim();
     if s.is_empty() {
         anyhow::bail!("Empty --window value");
@@ -168,7 +168,7 @@ fn parse_window(input: &str) -> Result<f64> {
 
 // ── Storage ─────────────────────────────────────────────────────────────────
 
-fn open_state_db() -> Result<rusqlite::Connection> {
+pub(super) fn open_state_db() -> Result<rusqlite::Connection> {
     let db_path = crate::config::get_database_path().map_err(|e| anyhow::anyhow!("{}", e))?;
     if !db_path.exists() {
         anyhow::bail!("Database not found at {}", db_path.display());
@@ -495,7 +495,7 @@ pub(crate) fn fmt_count(n: f64) -> String {
 }
 
 /// Human-readable window: "7d" / "24h" / "30m".
-fn humanize_window(hours: f64) -> String {
+pub(super) fn humanize_window(hours: f64) -> String {
     if hours >= 24.0 && (hours / 24.0).fract() == 0.0 {
         format!("{}d", (hours / 24.0) as i64)
     } else if hours >= 1.0 && hours.fract() == 0.0 {

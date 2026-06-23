@@ -24,6 +24,7 @@ mod reconcile_ignore;
 mod reembed;
 mod rename_tenant;
 mod requeue_failed;
+mod search_latency;
 mod token_savings;
 
 /// Subset of canonical collections that participate in tenant renames
@@ -253,6 +254,40 @@ enum AdminCommand {
         #[arg(long)]
         tool: Option<String>,
     },
+    /// Latency percentiles (p50/p95/p99) over search_events.latency_ms, plus a
+    /// session tool-call chain (--chain) and an auto-approve proxy
+    /// (--approve-proxy). Surfaces agent-usage data the MCP server logs
+    /// (updateSearchEvent) but never aggregated.
+    #[command(
+        after_long_help = "See also:\n  wqm admin perf          per-phase pipeline timing\n  wqm admin token-savings token-economy aggregates"
+    )]
+    SearchLatency {
+        /// Time window, e.g. `7d`, `24h`, `30m`, or a bare number (hours).
+        #[arg(short = 'w', long, default_value = "7d")]
+        window: String,
+
+        /// Group by one dimension: tool | actor | op.
+        #[arg(short = 'g', long, default_value = "tool")]
+        group_by: String,
+
+        /// Filter by project_id.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Output in JSON format.
+        #[arg(long)]
+        json: bool,
+
+        /// Reconstruct one session's tool-call chain (pass its session_id)
+        /// instead of the percentile table.
+        #[arg(long, value_name = "SESSION_ID")]
+        chain: Option<String>,
+
+        /// Show an auto-approve PROXY (% of fast same-session follow-ups)
+        /// instead of the percentile table. Not a true auto-approve rate.
+        #[arg(long)]
+        approve_proxy: bool,
+    },
     /// Manage and fetch Prometheus metrics from the daemon
     Metrics {
         #[command(subcommand)]
@@ -357,6 +392,14 @@ pub async fn execute(args: AdminArgs) -> Result<()> {
             project,
             tool,
         } => token_savings::execute(window, json, project, tool).await,
+        AdminCommand::SearchLatency {
+            window,
+            group_by,
+            project,
+            json,
+            chain,
+            approve_proxy,
+        } => search_latency::execute(window, group_by, project, json, chain, approve_proxy).await,
         AdminCommand::Metrics { command } => match command {
             MetricsCommand::Show { port, json } => metrics::execute(port, json).await,
             MetricsCommand::Enable { port } => metrics_setup::enable(port).await,
