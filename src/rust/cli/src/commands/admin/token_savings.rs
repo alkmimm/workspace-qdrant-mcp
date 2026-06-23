@@ -217,7 +217,7 @@ fn query_aggregates(
             SUM(CASE WHEN had_followup   THEN 1 ELSE 0 END)                AS followup_count, \
             SUM(CASE WHEN had_escalation THEN 1 ELSE 0 END)                AS escalation_count \
          FROM token_savings \
-         WHERE ts >= datetime('now', ?1)",
+         WHERE ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
     );
     let mut params: Vec<Value> = vec![Value::Text(format!("-{} hours", window_hours))];
 

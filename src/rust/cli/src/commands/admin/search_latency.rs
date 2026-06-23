@@ -95,7 +95,7 @@ fn query_latency(
     let sql = format!(
         "WITH base AS ( \
             SELECT {col} AS grp, latency_ms AS v FROM search_events \
-            WHERE latency_ms IS NOT NULL AND ts >= datetime('now', ?1){proj} \
+            WHERE latency_ms IS NOT NULL AND ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1){proj} \
          ), \
          counts AS (SELECT grp, COUNT(*) AS n FROM base GROUP BY grp), \
          ranked AS ( \
@@ -402,7 +402,9 @@ mod tests {
     use super::*;
 
     /// In-memory `search_events` with one row per latency value, stamped `now`
-    /// so the default window includes them.
+    /// in the PRODUCTION ts format (strftime ...Z) so the window filter is
+    /// exercised for real — a bare datetime('now') here would mask the
+    /// ts-format mismatch the window query guards against.
     fn mem_db(latencies: &[i64]) -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -416,7 +418,7 @@ mod tests {
             let mut stmt = conn
                 .prepare(
                     "INSERT INTO search_events (ts, session_id, tool, op, latency_ms) \
-                     VALUES (datetime('now'), 's1', 'mcp_qdrant', 'search', ?1)",
+                     VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 's1', 'mcp_qdrant', 'search', ?1)",
                 )
                 .unwrap();
             for v in latencies {
@@ -454,5 +456,40 @@ mod tests {
         let aggs = query_latency(&conn, "tool", 1000.0, None).unwrap();
         let a = &aggs[0];
         assert_eq!((a.calls, a.p50, a.p95, a.p99, a.max), (1, 42, 42, 42, 42));
+    }
+
+    /// Regression: search_events.ts is stored as strftime('%Y-%m-%dT%H:%M:%fZ',
+    /// 'now') (ISO8601, T + Z), so the window filter must use the SAME format. A
+    /// datetime('now', ?) threshold (space-separated, no Z) compares lexically
+    /// wrong — 'T' (0x54) > ' ' (0x20), so a SAME-DATE row earlier than the
+    /// threshold time wrongly passes `ts >= threshold`. Insert a row at TODAY
+    /// 00:00:00 (hours before "now") in the production Z format and use a
+    /// seconds-wide window: it MUST be excluded. Under the old datetime()
+    /// threshold this row was wrongly counted.
+    #[test]
+    fn window_filter_uses_iso_z_format_not_datetime() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE search_events ( \
+                id INTEGER PRIMARY KEY, ts TEXT, session_id TEXT, project_id TEXT, \
+                actor TEXT, tool TEXT, op TEXT, query_text TEXT, result_count INTEGER, \
+                latency_ms INTEGER, parent_event_id TEXT);",
+        )
+        .unwrap();
+        // Today at 00:00:00 in the production format — same calendar date as
+        // "now", but hours earlier.
+        conn.execute(
+            "INSERT INTO search_events (ts, tool, latency_ms) \
+             VALUES (strftime('%Y-%m-%dT00:00:00.000Z', 'now'), 'mcp_qdrant', 7)",
+            [],
+        )
+        .unwrap();
+        // ~3.6s window: a row hours before now must be dropped by a correct
+        // ISO-Z threshold (the buggy datetime() threshold wrongly kept it).
+        let aggs = query_latency(&conn, "tool", 0.001, None).unwrap();
+        assert!(
+            aggs.is_empty(),
+            "a row hours before now must be excluded by a seconds-wide window"
+        );
     }
 }
