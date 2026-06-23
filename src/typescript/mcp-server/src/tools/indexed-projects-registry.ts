@@ -545,8 +545,40 @@ export async function runStatusAll(
   daemonClient: DaemonClient | null | undefined
 ): Promise<unknown> {
   const registry = readRegistry(args.registryPath);
-  const enabled = registry.projects.map(normalizeProjectExport).filter((p) => p.enabled);
-  const observations = await Promise.all(enabled.map((p) => newObservation(p, daemonClient)));
+  const projects: RegistryProject[] = registry.projects
+    .map(normalizeProjectExport)
+    .filter((p) => p.enabled);
+
+  // Surface daemon-indexed projects that are absent from indexed-projects.json
+  // (the DOC-V2 case) so status_all reflects what the daemon actually serves,
+  // not a stale/polluted registry. Mirrors runListProjects' daemon
+  // cross-reference and the incremental_check synthesized-project fallback.
+  // Best-effort: if the daemon is unreachable, fall back to the registry-only
+  // listing (prior behavior).
+  if (daemonClient) {
+    try {
+      const list = await daemonClient.listProjects({});
+      const knownRoots = new Set(projects.map((p) => toAbs(p.root).toLowerCase()));
+      const knownNames = new Set(projects.map((p) => p.name));
+      for (const dp of list.projects ?? []) {
+        const root = toAbs(dp.project_root);
+        if (knownRoots.has(root.toLowerCase()) || knownNames.has(dp.project_name)) continue;
+        projects.push({
+          name: dp.project_name,
+          projectId: dp.project_id,
+          root,
+          defaultBranch: getCurrentBranch(root) ?? 'main',
+          tenantStrategy: 'project',
+          enabled: true,
+          branches: [],
+        });
+      }
+    } catch {
+      // Daemon unavailable — registry-only status.
+    }
+  }
+
+  const observations = await Promise.all(projects.map((p) => newObservation(p, daemonClient)));
   return {
     success: true,
     count: observations.length,
