@@ -87,6 +87,10 @@ fn query_latency(
     // `ranked` numbers each group's latency ascending; we pick the value at
     // rank = max(1, round(p*(n-1))+1). `max(1, …)` is the SCALAR max (2 args);
     // `MAX(CASE …)` / `MAX(v)` are aggregates (1 arg). `col` is whitelisted.
+    // Small-n caveat: SQLite ROUND() is half-away-from-zero, so n=2 puts p50 at
+    // rank 2 (the higher of the two samples) and p95/p99 at the max; n=1 makes
+    // every percentile the lone sample. Few events skew the percentiles high —
+    // expected for nearest-rank (no interpolation between samples), not a bug.
     let proj = if project.is_some() {
         " AND project_id = ?2"
     } else {
