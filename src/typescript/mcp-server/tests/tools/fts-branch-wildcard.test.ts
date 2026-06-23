@@ -198,8 +198,8 @@ describe('searchExact — branch "*" wildcard', () => {
             context_after: [],
           },
         ],
-        total_matches: 1,
-        truncated: false,
+        total_matches: 3,
+        truncated: true,
       });
     // No recorded base branch → the base-branch fallback can't fire; only the
     // empty-result auto-widen recovers the hit (the bws-engineer symptom).
@@ -219,6 +219,10 @@ describe('searchExact — branch "*" wildcard', () => {
     expect(result.results).toHaveLength(1);
     expect(result.results[0].metadata.file_path).toBe('/repo/src/EventTransformEngine.java');
     expect(result.hint).toContain('feat/rdashboard');
+    // total must not be inflated when the widened response is truncated: the
+    // duplicatesDropped recompute keeps it at the daemon's reported count (3),
+    // not 4 (the negative-duplicatesDropped regression).
+    expect(result.total).toBe(3);
   });
 });
 

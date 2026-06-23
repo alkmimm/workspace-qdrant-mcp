@@ -357,6 +357,11 @@ async function executeAndLogSearch(
     }
     const rawResults = resultGroups.flat();
     let dedupedResults = dedupeExactResults(rawResults);
+    // Track the RAW set that produced `dedupedResults` — recomputed below if the
+    // auto-widen replaces it. (A stale value goes negative: rawResults is empty
+    // whenever dedupedResults is empty, so `0 - widened.length` would inflate
+    // `total` for a truncated widen.)
+    let duplicatesDropped = rawResults.length - dedupedResults.length;
     // Auto-widen on empty (parity with grep): a branch-scoped exact search that
     // finds nothing may be missing content the daemon tagged under another branch
     // (a file unchanged on the current branch stays indexed under the branch it
@@ -367,10 +372,12 @@ async function executeAndLogSearch(
       const widenedResponse = await daemonClient.textSearch(
         buildExactSearchRequest({ ...options, branch: '*' }, tenantId)
       );
-      const widened = dedupeExactResults(mapExactResults(widenedResponse.matches, undefined));
+      const widenedRaw = mapExactResults(widenedResponse.matches, undefined);
+      const widened = dedupeExactResults(widenedRaw);
       if (widened.length > 0) {
         responses.push(widenedResponse);
         dedupedResults = widened;
+        duplicatesDropped = widenedRaw.length - widened.length;
         branchWidened = true;
       }
     }
@@ -379,7 +386,6 @@ async function executeAndLogSearch(
     // the deduped result list; set next_offset below when more remain.
     const offset = Math.max(0, options.offset ?? 0);
     const results = dedupedResults.slice(offset, offset + limit);
-    const duplicatesDropped = rawResults.length - dedupedResults.length;
     const totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
     const total = responses.some((response) => response.truncated)
       ? Math.max(results.length, totalMatches - duplicatesDropped)
