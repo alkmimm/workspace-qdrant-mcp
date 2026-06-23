@@ -11,7 +11,7 @@ export const storeToolDefinition = {
     idempotentHint: false, // re-storing creates/updates content
   },
   description:
-    'Store content or register a project. `type` is REQUIRED — pass it explicitly: "scratchpad" for ad-hoc/persistent notes and snippets (the right target for working notes; project-scoped, surface automatically in project-scoped search), "library" to store reference documentation, "url" to fetch and ingest a web page, or "project" to register a project directory for file watching and ingestion. Required by type: library → libraryName (+ content); url → url; scratchpad → content; project → path. Boundary: this tool only CREATES/updates — to edit or DELETE an existing scratchpad note use the `scratchpad` tool. Examples — note: {type:"scratchpad", content:"...", cwd:"/abs/repo"}; library: {type:"library", libraryName:"tokio", content:"...", title:"Tokio"}; project: {type:"project", path:"/abs/repo"}; url: {type:"url", url:"https://docs.rs/tokio"}.',
+    'Store content or register a project. Pass `type` explicitly, or it is inferred from an unambiguous arg (libraryName→"library", path→"project", url→"url"); a bare note still needs type:"scratchpad". Types: "scratchpad" for ad-hoc/persistent notes and snippets (the right target for working notes; project-scoped, surface automatically in project-scoped search), "library" for reference documentation, "url" to fetch and ingest a web page, "project" to register a project directory for file watching and ingestion. Required by type: library → libraryName (+ content); url → url; scratchpad → content; project → path. Boundary: this tool only CREATES/updates — to edit or DELETE an existing scratchpad note use the `scratchpad` tool. Examples — note: {type:"scratchpad", content:"...", cwd:"/abs/repo"}; library: {type:"library", libraryName:"tokio", content:"...", title:"Tokio"}; project: {type:"project", path:"/abs/repo"}; url: {type:"url", url:"https://docs.rs/tokio"}.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -81,6 +81,5 @@ export const storeToolDefinition = {
         description: 'Additional metadata',
       },
     },
-    required: ['type'],
   },
 };
