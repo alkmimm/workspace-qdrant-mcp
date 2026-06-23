@@ -312,8 +312,22 @@ impl GraphService for GraphServiceImpl {
         let pool = guard.pool();
 
         match detect_communities(pool, &req.tenant_id, &config, edge_refs.as_deref()).await {
-            Ok(communities) => {
+            Ok(mut communities) => {
                 let total_communities = communities.len() as u32;
+
+                // Return only the top K largest communities when requested.
+                // `detect_communities` already sorts by member count descending,
+                // so a prefix truncation keeps the largest. This bounds the
+                // response: a tenant-wide modules call on a big graph can
+                // otherwise serialize every community/member and blow past the
+                // gRPC message-size limit. `total_communities` still reports the
+                // full count before truncation, mirroring PageRank/betweenness.
+                if let Some(k) = req.top_k {
+                    if k > 0 && (k as usize) < communities.len() {
+                        communities.truncate(k as usize);
+                    }
+                }
+
                 let query_time_ms = start.elapsed().as_millis() as i64;
 
                 let proto_communities: Vec<CommunityProto> = communities

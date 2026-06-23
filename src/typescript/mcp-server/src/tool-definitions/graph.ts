@@ -47,7 +47,8 @@ export const graphToolDefinition = {
       topK: {
         type: 'number',
         default: 20,
-        description: "Number of top results for 'hotspots' and 'bridges' (default 20).",
+        description:
+          "Number of top results for 'hotspots' and 'bridges', and the top-K largest clusters for 'modules' (default 20).",
       },
       maxSamples: {
         type: 'number',

@@ -37,6 +37,17 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY_MS = 100;
 
+// gRPC channel options applied to every daemon client. Lifts grpc-js's 4 MiB
+// default receive cap: graph responses (e.g. community detection over a large
+// tenant) can exceed it and fail with RESOURCE_EXHAUSTED / "message larger than
+// max". The daemon still bounds per-action results via top_k; this is headroom
+// for legitimately large payloads. 64 MiB.
+const MAX_GRPC_MESSAGE_BYTES = 64 * 1024 * 1024;
+const CHANNEL_OPTIONS: grpc.ChannelOptions = {
+  'grpc.max_receive_message_length': MAX_GRPC_MESSAGE_BYTES,
+  'grpc.max_send_message_length': MAX_GRPC_MESSAGE_BYTES,
+};
+
 export interface DaemonClientConfig {
   host?: string;
   port?: number;
@@ -224,43 +235,53 @@ export class DaemonClientBase {
   ): void {
     this.systemClient = new proto.workspace_daemon.SystemService(
       address,
-      credentials
+      credentials,
+      CHANNEL_OPTIONS
     ) as unknown as SystemServiceClient;
     this.projectClient = new proto.workspace_daemon.ProjectService(
       address,
-      credentials
+      credentials,
+      CHANNEL_OPTIONS
     ) as unknown as ProjectServiceClient;
     this.documentClient = new proto.workspace_daemon.DocumentService(
       address,
-      credentials
+      credentials,
+      CHANNEL_OPTIONS
     ) as unknown as DocumentServiceClient;
     this.embeddingClient = new proto.workspace_daemon.EmbeddingService(
       address,
-      credentials
+      credentials,
+      CHANNEL_OPTIONS
     ) as unknown as EmbeddingServiceClient;
     this.textSearchClient = new proto.workspace_daemon.TextSearchService(
       address,
-      credentials
+      credentials,
+      CHANNEL_OPTIONS
     ) as unknown as TextSearchServiceClient;
     this.graphClient = new proto.workspace_daemon.GraphService(
       address,
-      credentials
+      credentials,
+      CHANNEL_OPTIONS
     ) as unknown as GraphServiceClient;
     this.queueWriteClient = new proto.workspace_daemon.QueueWriteService(
       address,
-      credentials
+      credentials,
+      CHANNEL_OPTIONS
     ) as unknown as QueueWriteServiceClient;
     this.trackingWriteClient = new proto.workspace_daemon.TrackingWriteService(
       address,
-      credentials
+      credentials,
+      CHANNEL_OPTIONS
     ) as unknown as TrackingWriteServiceClient;
     this.watchWriteClient = new proto.workspace_daemon.WatchWriteService(
       address,
-      credentials
+      credentials,
+      CHANNEL_OPTIONS
     ) as unknown as WatchWriteServiceClient;
     this.adminWriteClient = new proto.workspace_daemon.AdminWriteService(
       address,
-      credentials
+      credentials,
+      CHANNEL_OPTIONS
     ) as unknown as AdminWriteServiceClient;
   }
 

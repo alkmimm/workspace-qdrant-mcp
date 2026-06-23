@@ -152,8 +152,13 @@ export async function handleGraph(
 
     case 'modules': {
       const minSize = num(args, 'minSize');
+      // Cap to the top K largest communities (server truncates the size-sorted
+      // list). Without a bound a tenant-wide modules call returns every
+      // community/member — megabytes that overflow the gRPC message limit and
+      // bury the agent in noise. `total_communities` still reports the full count.
       const req: CommunityRequest = {
         tenant_id: tenant,
+        top_k: num(args, 'topK') ?? 20,
         ...(minSize !== undefined ? { min_community_size: minSize } : {}),
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
       };

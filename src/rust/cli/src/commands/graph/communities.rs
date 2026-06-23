@@ -10,12 +10,16 @@ pub async fn communities(
     tenant_id: &str,
     max_iterations: Option<u32>,
     min_size: Option<u32>,
+    top_k: Option<u32>,
     edge_types: Vec<String>,
 ) -> Result<()> {
     output::section("Community Detection");
     output::kv("Tenant", tenant_id);
     if let Some(ms) = min_size {
         output::kv("Min Size", ms.to_string());
+    }
+    if let Some(k) = top_k {
+        output::kv("Top K", k.to_string());
     }
     output::separator();
 
@@ -30,6 +34,7 @@ pub async fn communities(
             max_iterations,
             min_community_size: min_size,
             edge_types,
+            top_k,
         })
         .await
         .context("DetectCommunities RPC failed")?

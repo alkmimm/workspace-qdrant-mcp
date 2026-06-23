@@ -809,6 +809,7 @@ message CommunityRequest {
     optional uint32 max_iterations = 2;           // Label propagation iterations (default: 50)
     optional uint32 min_community_size = 3;       // Min members to include (default: 2)
     repeated string edge_types = 4;               // Filter edges; empty = all
+    optional uint32 top_k = 5;                    // Return only the top K largest communities (0 = all)
 }
 
 // Community Detection Response
