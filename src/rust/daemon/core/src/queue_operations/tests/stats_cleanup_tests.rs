@@ -167,6 +167,47 @@ async fn test_unified_queue_cleanup() {
 }
 
 #[tokio::test]
+async fn test_unified_queue_cleanup_boundary_date() {
+    // Regression for the ISO-Z vs datetime('now') format mismatch:
+    // cleanup_completed_unified_items uses an HOURS cutoff. A 'done' row whose
+    // updated_at is on the SAME date as the (now - N hours) cutoff but EARLIER in
+    // the day must be deleted. Pre-fix the datetime('now', ...) space threshold and
+    // ISO-Z 'T' > ' ' kept it (under-delete).
+    let temp_dir = tempdir().unwrap();
+    let db_path = temp_dir.path().join("test_unified_cleanup_boundary.db");
+
+    let config = QueueConnectionConfig::with_database_path(&db_path);
+    let pool = config.create_pool().await.unwrap();
+    apply_sql_script(&pool, include_str!("../../schema/watch_folders_schema.sql"))
+        .await
+        .unwrap();
+    let manager = QueueManager::new(pool.clone());
+    manager.init_unified_queue().await.unwrap();
+
+    // 'done' row with updated_at on the cutoff date (now - 24h) at 00:00:01, ISO-Z.
+    sqlx::query(
+        "INSERT INTO unified_queue \
+         (queue_id, idempotency_key, item_type, op, tenant_id, collection, \
+          status, payload_json, created_at, updated_at) \
+         VALUES ('boundary', 'idem-boundary', 'file', 'add', 't1', 'projects', 'done', '{}', \
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-24 hours', 'start of day', '+1 second'), \
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-24 hours', 'start of day', '+1 second'))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let cleaned = manager
+        .cleanup_completed_unified_items(Some(24))
+        .await
+        .unwrap();
+    assert_eq!(
+        cleaned, 1,
+        "boundary-date 'done' row must be cleaned with the ISO-Z threshold"
+    );
+}
+
+#[tokio::test]
 async fn test_unified_queue_depth() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test_unified_depth.db");

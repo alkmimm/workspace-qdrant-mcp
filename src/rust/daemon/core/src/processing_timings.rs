@@ -77,7 +77,10 @@ pub async fn record_timings(
 /// Delete timing records older than the retention period.
 pub async fn cleanup_old_timings(pool: &SqlitePool, retention_days: i64) {
     let result = sqlx::query(
-        "DELETE FROM processing_timings WHERE created_at < datetime('now', ? || ' days')",
+        // created_at is stored ISO-Z (now_utc()); the threshold must use the same
+        // format or lexical TEXT comparison ('T' > ' ') under-deletes boundary-date
+        // rows. perf_queries.rs reads this column with the matching strftime form.
+        "DELETE FROM processing_timings WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ? || ' days')",
     )
     .bind(-retention_days)
     .execute(pool)
@@ -237,5 +240,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1); // Only the recent one remains
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_old_timings_boundary_date() {
+        // Regression for the ISO-Z vs datetime('now') format mismatch: a row whose
+        // created_at is on the SAME date as the (now - retention_days) cutoff but
+        // EARLIER in the day must be deleted. Pre-fix the datetime('now', ...) space
+        // threshold and ISO-Z 'T' > ' ' kept boundary-date rows (under-delete). The
+        // test above uses a 2020 timestamp (different date) so does not catch this.
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE processing_timings (
+                timing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_id TEXT,
+                item_type TEXT NOT NULL,
+                op TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                tenant_id TEXT NOT NULL,
+                collection TEXT NOT NULL,
+                language TEXT,
+                created_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // created_at on the cutoff date (now - 30 days) at 00:00:01, ISO-Z format.
+        sqlx::query(
+            "INSERT INTO processing_timings \
+             (queue_id, item_type, op, phase, duration_ms, tenant_id, collection, created_at) \
+             VALUES ('boundary', 'file', 'add', 'parse', 10, 't', 'projects', \
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days', 'start of day', '+1 second'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        cleanup_old_timings(&pool, 30).await;
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM processing_timings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "boundary-date timing must be cleaned (ISO-Z threshold)");
     }
 }
