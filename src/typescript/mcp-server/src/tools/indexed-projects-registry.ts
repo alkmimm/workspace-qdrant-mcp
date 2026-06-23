@@ -662,7 +662,20 @@ export async function runIncrementalCheck(
   daemonClient: DaemonClient | null | undefined
 ): Promise<unknown> {
   const registry = readRegistry(args.registryPath);
-  const project = findProject(registry, args);
+  let project: RegistryProject;
+  let synthesized = false;
+  try {
+    project = findProject(registry, args);
+  } catch (err) {
+    // Synthesized/unregistered project: the daemon indexes it (ListProjects) but
+    // it is absent from indexed-projects.json. Don't hard-fail with "Indexed
+    // project not found" — mirror list_branches / project_status and synthesize a
+    // project from the daemon so the daemon-backed incremental check still runs.
+    const synth = daemonClient ? await synthesizeProjectFromDaemon(daemonClient, args) : null;
+    if (!synth) throw err;
+    project = synth;
+    synthesized = true;
+  }
   const results = await checkBranchesForProject(project, daemonClient, /* includeWatch */ true);
   // PS strips the redundant `project` field on the per-project variant.
   const stripped = results.map(({ project: _omit, ...rest }) => rest);
@@ -670,7 +683,51 @@ export async function runIncrementalCheck(
     success: true,
     action: 'incremental_check',
     project: project.name,
+    ...(synthesized
+      ? {
+          source: 'indexed',
+          note: 'Synthesized from daemon ListProjects; project is not registered in indexed-projects.json.',
+        }
+      : {}),
     results: stripped,
+  };
+}
+
+/**
+ * Build a minimal RegistryProject from the daemon's ListProjects for a project
+ * the daemon indexes but that is absent from indexed-projects.json. Mirrors the
+ * synthesized-project path in {@link runListBranches}. Returns null when the
+ * daemon has no matching project (so the caller keeps the original error).
+ */
+async function synthesizeProjectFromDaemon(
+  daemonClient: DaemonClient,
+  sel: ProjectSelector
+): Promise<RegistryProject | null> {
+  const dp = await findDaemonProject(daemonClient, sel);
+  if (!dp) return null;
+  const root = toAbs(dp.project_root);
+  const branchName = getCurrentBranch(root) ?? 'main';
+  const now = utcNow();
+  return {
+    name: dp.project_name,
+    projectId: dp.project_id,
+    root,
+    defaultBranch: branchName,
+    tenantStrategy: 'project',
+    enabled: true,
+    branches: [
+      {
+        name: branchName,
+        kind: 'primary',
+        path: root,
+        status: dp.is_active ? 'active' : 'inactive',
+        createdAt: now,
+        lastSeenAt: now,
+        watchEnabled: true,
+        indexed: true,
+        note: 'Synthesized from daemon ListProjects.',
+      },
+    ],
   };
 }
 

@@ -356,7 +356,24 @@ async function executeAndLogSearch(
       resultGroups.push(mapExactResults(fallbackResponse.matches, requestedBranch));
     }
     const rawResults = resultGroups.flat();
-    const dedupedResults = dedupeExactResults(rawResults);
+    let dedupedResults = dedupeExactResults(rawResults);
+    // Auto-widen on empty (parity with grep): a branch-scoped exact search that
+    // finds nothing may be missing content the daemon tagged under another branch
+    // (a file unchanged on the current branch stays indexed under the branch it
+    // was last modified on). Re-run across ALL branches. Fires ONLY when the
+    // scoped result is empty, so good branch-scoped results are never diluted.
+    let branchWidened = false;
+    if (dedupedResults.length === 0 && requestedBranch) {
+      const widenedResponse = await daemonClient.textSearch(
+        buildExactSearchRequest({ ...options, branch: '*' }, tenantId)
+      );
+      const widened = dedupeExactResults(mapExactResults(widenedResponse.matches, undefined));
+      if (widened.length > 0) {
+        responses.push(widenedResponse);
+        dedupedResults = widened;
+        branchWidened = true;
+      }
+    }
     const limit = options.limit ?? 100;
     // Pagination parity with the vector path (P1.5 C): honor `offset` by slicing
     // the deduped result list; set next_offset below when more remain.
@@ -381,6 +398,9 @@ async function executeAndLogSearch(
       collections_searched: [PROJECTS_COLLECTION],
     };
     if (dedupedResults.length > offset + limit) successResponse.next_offset = offset + results.length;
+    if (branchWidened && requestedBranch) {
+      successResponse.hint = `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`;
+    }
     await attachIndexingProgress(successResponse, daemonClient, successResponse.scope, tenantId);
     return successResponse;
   } catch (error) {
