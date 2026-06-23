@@ -190,7 +190,10 @@ function queryRawQueueStats(db: DatabaseType): QueueStats {
 
   const staleCount = db
     .prepare(
-      "SELECT COUNT(*) as count FROM unified_queue WHERE status = 'in_progress' AND lease_until < datetime('now')"
+      // lease_until is stored ISO-Z (the daemon writes it via now_utc()/format_utc());
+      // the threshold must use the same format or lexical TEXT comparison ('T' 0x54 >
+      // ' ' 0x20) under-counts expired leases on the boundary date. strftime, not datetime.
+      "SELECT COUNT(*) as count FROM unified_queue WHERE status = 'in_progress' AND lease_until < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
     )
     .get() as { count: number };
 
