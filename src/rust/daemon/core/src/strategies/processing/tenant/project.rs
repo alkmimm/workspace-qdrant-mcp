@@ -337,6 +337,37 @@ async fn handle_project_scan(
         }
     }
 
+    // Branch-membership reconcile (write-side fix for the branch-aware gap): the
+    // mtime-pruned scan above skips files unchanged since the last scan, so a file
+    // unchanged across a checkout the git-watcher missed never gets re-tagged onto
+    // the current branch — branch-scoped grep/search then exclude it. Re-tag any
+    // tracked, working-tree file missing the current branch via the dedup
+    // fast-path (no re-embed). Cheap no-op once reconciled; projects-only (the
+    // only branch-scoped collection). `item.branch` is the repo's current branch.
+    let watch_id: Option<String> = sqlx::query_scalar(
+        "SELECT watch_id FROM watch_folders \
+         WHERE tenant_id = ?1 AND collection = ?2 AND path = ?3",
+    )
+    .bind(&item.tenant_id)
+    .bind(COLLECTION_PROJECTS)
+    .bind(&payload.project_root)
+    .fetch_optional(ctx.queue_manager.pool())
+    .await
+    .unwrap_or(None)
+    .flatten();
+    if let Some(wid) = watch_id {
+        crate::branch_switch::reconcile_branch_membership(
+            ctx.queue_manager.pool(),
+            &ctx.queue_manager,
+            &wid,
+            &item.tenant_id,
+            &item.collection,
+            &payload.project_root,
+            &item.branch,
+        )
+        .await;
+    }
+
     Ok(())
 }
 

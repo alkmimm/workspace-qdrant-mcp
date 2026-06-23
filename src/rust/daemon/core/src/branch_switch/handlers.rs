@@ -11,7 +11,10 @@ use crate::queue_operations::QueueManager;
 use crate::unified_queue_schema::QueueOperation;
 use crate::watching_queue::get_current_branch;
 
-use super::db::{fetch_unchanged_relative_paths, fetch_watch_folder, update_last_commit_hash};
+use super::db::{
+    fetch_paths_missing_branch, fetch_unchanged_relative_paths, fetch_watch_folder,
+    update_last_commit_hash,
+};
 use super::queue::{enqueue_changed_file, enqueue_tenant_scan, enqueue_unchanged_file};
 use super::types::BranchSwitchStats;
 
@@ -273,4 +276,75 @@ async fn handle_new_commit(
     );
 
     Ok(stats)
+}
+
+/// Reconcile branch membership for files the live git-watcher path missed.
+///
+/// `handle_branch_switch` only fires on a checkout the [`GitWatcher`] actually
+/// observes (with valid old/new SHAs). Checkouts that predate the watch, happen
+/// while the daemon is down, or land on a synthesized project leave already-
+/// indexed files tagged only under their old branch — so a branch-scoped
+/// grep/search returns empty on the current branch even though `list` (which
+/// reads the filesystem/tracked structure) still shows the file. The read-side
+/// auto-widen (PR #151) masks this at query time; this is the write-side fix.
+///
+/// Runs on every tenant scan (startup, periodic refresh, reindex): for each file
+/// tracked but NOT yet tagged with `branch` AND still present in the working
+/// tree, re-enqueue it as an `Add` so the cross-branch dedup fast-path appends
+/// the branch to all three stores (Qdrant payload, `tracked_files.branches`,
+/// FTS5 `file_metadata.branches`) WITHOUT re-embedding. Files absent from the
+/// working tree (deleted on this branch) are skipped — never enqueued — so this
+/// never resurrects or over-deletes content. Idempotent and cheap: once a
+/// project is reconciled the candidate set is empty and this is a single SELECT.
+///
+/// Returns the number of files enqueued for reconciliation.
+pub async fn reconcile_branch_membership(
+    pool: &SqlitePool,
+    queue_manager: &QueueManager,
+    watch_folder_id: &str,
+    tenant_id: &str,
+    collection: &str,
+    project_root: &str,
+    branch: &str,
+) -> usize {
+    let candidates = match fetch_paths_missing_branch(pool, watch_folder_id, branch).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                "Branch reconcile: failed to fetch candidates for {}: {}",
+                watch_folder_id, e
+            );
+            return 0;
+        }
+    };
+    if candidates.is_empty() {
+        return 0;
+    }
+
+    let root = Path::new(project_root);
+    let mut enqueued = 0usize;
+    for rel in candidates {
+        // Only reconcile files that actually exist on the current branch's
+        // working tree — a path deleted on this branch must NOT be re-added
+        // (that would resurrect it; enqueuing it would also hit the
+        // missing-file cleanup path and risk an over-delete).
+        if !root.join(&rel).exists() {
+            continue;
+        }
+        match enqueue_unchanged_file(queue_manager, tenant_id, collection, &rel, branch).await {
+            Ok(()) => enqueued += 1,
+            Err(e) => warn!(
+                "Branch reconcile: failed to enqueue {} on {}: {}",
+                rel, branch, e
+            ),
+        }
+    }
+
+    if enqueued > 0 {
+        info!(
+            "Branch reconcile: enqueued {} working-tree files missing branch '{}' (wf={})",
+            enqueued, branch, watch_folder_id
+        );
+    }
+    enqueued
 }

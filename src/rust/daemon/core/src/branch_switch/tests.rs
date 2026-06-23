@@ -14,8 +14,11 @@ use crate::unified_queue_schema::{
 };
 use crate::watch_folders_schema;
 
-use super::db::{fetch_unchanged_relative_paths, update_last_commit_hash};
+use super::db::{
+    fetch_paths_missing_branch, fetch_unchanged_relative_paths, update_last_commit_hash,
+};
 use super::queue::{enqueue_file_op, enqueue_unchanged_file};
+use super::reconcile_branch_membership;
 use super::types::BranchSwitchStats;
 
 async fn create_test_pool() -> SqlitePool {
@@ -232,4 +235,79 @@ async fn test_enqueue_unchanged_file_uses_add_op() {
             .unwrap();
     assert_eq!(op, "add");
     assert_eq!(branch, "feature");
+}
+
+/// fetch_paths_missing_branch selects files tracked under any branch but NOT the
+/// target branch, regardless of WHICH other branch tags them (event-independent).
+#[tokio::test]
+async fn test_fetch_paths_missing_branch_selects_untagged() {
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
+    insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await; // missing feat
+    insert_tracked_file(&pool, "w1", &["main", "feat"], "h_b", "src/b.rs").await; // tagged
+    insert_tracked_file(&pool, "w1", &["dev-clean"], "h_c", "src/c.rs").await; // missing feat
+
+    let mut paths = fetch_paths_missing_branch(&pool, "w1", "feat").await.unwrap();
+    paths.sort();
+    assert_eq!(paths, vec!["src/a.rs".to_string(), "src/c.rs".to_string()]);
+}
+
+/// reconcile enqueues an Add (dedup fast-path) only for files that are BOTH
+/// missing the current branch AND present in the working tree. Deleted files
+/// (tracked but absent on disk) and already-tagged files are skipped.
+#[tokio::test]
+async fn test_reconcile_enqueues_present_untagged_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), b"fn a() {}").unwrap(); // present
+    // src/gone.rs is NOT created — tracked but deleted on this branch.
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let root_str = root.to_string_lossy().to_string();
+    insert_watch_folder(&pool, "w1", "t1", &root_str).await;
+    insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await; // present + untagged
+    insert_tracked_file(&pool, "w1", &["main"], "h_g", "src/gone.rs").await; // untagged but absent
+    insert_tracked_file(&pool, "w1", &["main", "feat"], "h_b", "src/b.rs").await; // tagged
+
+    let qm = QueueManager::new(pool.clone());
+    let n = reconcile_branch_membership(&pool, &qm, "w1", "t1", "projects", &root_str, "feat").await;
+    assert_eq!(n, 1, "only the present, untagged file is reconciled");
+
+    let rows: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT op, branch, payload_json FROM unified_queue WHERE tenant_id = 't1'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "add"); // Add op → dedup fast-path, no re-embed
+    assert_eq!(rows[0].1, "feat");
+    assert!(rows[0].2.contains("src/a.rs"));
+}
+
+/// Once every working-tree file is already tagged, reconcile is a no-op (no
+/// queue churn) — the idempotency that makes it safe to run on every scan.
+#[tokio::test]
+async fn test_reconcile_noop_when_all_tagged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), b"fn a() {}").unwrap();
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let root_str = root.to_string_lossy().to_string();
+    insert_watch_folder(&pool, "w1", "t1", &root_str).await;
+    insert_tracked_file(&pool, "w1", &["main", "feat"], "h_a", "src/a.rs").await;
+
+    let qm = QueueManager::new(pool.clone());
+    let n = reconcile_branch_membership(&pool, &qm, "w1", "t1", "projects", &root_str, "feat").await;
+    assert_eq!(n, 0);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unified_queue")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }
