@@ -52,14 +52,21 @@ async function dispatchStore(
   components: ServerComponents,
   sessionState: SessionState
 ): Promise<unknown> {
-  const storeType = args?.['type'] as string | undefined;
+  // Resolve the target type. Explicit `type` wins; otherwise INFER it from an
+  // unambiguous signal so callers that clearly mean a library/project/url don't
+  // have to restate `type` (libraryName → library, path → project, url → url).
+  // Only a bare {content} with no signal is genuinely ambiguous — there we error
+  // rather than silently defaulting to "library" (the trap #136 removed).
+  let storeType = args?.['type'] as string | undefined;
   if (!storeType) {
-    // No silent 'library' default: an omitted type used to fall through to the
-    // library branch and fail with a confusing "libraryName is required". The
-    // server does not validate inputSchema.required, so this guard is the
-    // functional enforcement of store's required `type`.
+    if (args?.['libraryName'] !== undefined || args?.['forProject'] === true) storeType = 'library';
+    else if (args?.['path'] !== undefined) storeType = 'project';
+    else if (args?.['url'] !== undefined) storeType = 'url';
+  }
+  if (!storeType) {
     throw new Error(
-      "store requires `type`: 'scratchpad' (notes), 'library' (docs — needs libraryName), 'url', or 'project'."
+      "store needs a `type` (or an unambiguous arg): 'scratchpad' for a note (content), " +
+        "'library' (libraryName), 'url' (url), or 'project' (path)."
     );
   }
   if (storeType === 'project')

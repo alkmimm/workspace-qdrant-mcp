@@ -93,8 +93,11 @@ describe('mutating tool action hints', () => {
     expect(byName.get('workspace_index')?.annotations?.destructiveHint).toBe(true);
   });
 
-  it('requires an explicit `type` on store (no silent library default)', () => {
-    expect(byName.get('store')?.inputSchema?.required).toContain('type');
+  it('does not force an explicit `type` on store (it is inferred from args)', () => {
+    // type is resolved by the dispatcher (libraryName/path/url → inferred; bare
+    // content errors), so the schema must NOT mark it required — otherwise a
+    // client that pre-validates rejects the ergonomic store({libraryName,...}).
+    expect(byName.get('store')?.inputSchema?.required ?? []).not.toContain('type');
   });
 });
 

@@ -67,6 +67,7 @@ describe('Store Tool Integration', () => {
       params: {
         name: 'store',
         arguments: {
+          type: 'library',
           content: 'Test content to store',
           title: 'Test Document',
           sourceType: 'user_input',
