@@ -182,6 +182,48 @@ describe('searchExact — branch "*" wildcard', () => {
     expect(result.results).toHaveLength(1);
     expect(result.total).toBe(1);
   });
+
+  it('auto-widens to all branches when a concrete-branch exact search misses', async () => {
+    const daemon = makeDaemonClient();
+    (daemon.textSearch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ matches: [], total_matches: 0, truncated: false }) // scoped: empty
+      .mockResolvedValueOnce({
+        matches: [
+          {
+            file_path: '/repo/src/EventTransformEngine.java',
+            line_number: 55,
+            content: 'public final class EventTransformEngine {}',
+            branch: 'main',
+            context_before: [],
+            context_after: [],
+          },
+        ],
+        total_matches: 3,
+        truncated: true,
+      });
+    // No recorded base branch → the base-branch fallback can't fire; only the
+    // empty-result auto-widen recovers the hit (the bws-engineer symptom).
+    const state = makeStateManager(); // getBaseBranch → null
+    const result = await searchExact(
+      makeQdrant(),
+      daemon,
+      state,
+      makeProjectDetector(undefined),
+      makeOptions({ branch: 'feat/rdashboard', query: 'EventTransformEngine' })
+    );
+
+    expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[0][0].branch).toBe(
+      'feat/rdashboard'
+    );
+    expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[1][0].branch).toBeUndefined();
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].metadata.file_path).toBe('/repo/src/EventTransformEngine.java');
+    expect(result.hint).toContain('feat/rdashboard');
+    // total must not be inflated when the widened response is truncated: the
+    // duplicatesDropped recompute keeps it at the daemon's reported count (3),
+    // not 4 (the negative-duplicatesDropped regression).
+    expect(result.total).toBe(3);
+  });
 });
 
 describe('GrepTool — branch "*" wildcard', () => {
@@ -250,7 +292,7 @@ describe('GrepTool — branch "*" wildcard', () => {
     expect(result.matches[0].file).toBe('/repo/src/example.ts');
   });
 
-  it('suggests widening the branch when a concrete-branch grep misses but another branch has hits', async () => {
+  it('auto-widens to all branches when a concrete-branch grep misses but another branch has hits', async () => {
     const daemon = makeDaemonClient();
     (daemon.textSearch as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({ matches: [], total_matches: 0, truncated: false })
@@ -280,7 +322,10 @@ describe('GrepTool — branch "*" wildcard', () => {
       'dev-clean'
     );
     expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[1][0].branch).toBeUndefined();
-    expect(response.matches).toEqual([]);
+    // New behavior: instead of returning empty + a hint, the widened matches ARE
+    // returned (with a message noting the widening) so the agent gets results.
+    expect(response.matches).toHaveLength(1);
+    expect(response.matches[0].file).toBe('frontend/package.json');
     expect(response.message).toContain('branch:"*"');
     expect(response.message).toContain('dev-clean');
   });

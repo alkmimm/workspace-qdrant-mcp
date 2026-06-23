@@ -210,9 +210,12 @@ function mapGrepMatches(matches: TextSearchMatch[]): GrepMatch[] {
 
 function branchWideningMessage(branch: string): string {
   return (
-    'No matches found on branch "' +
+    'No matches on branch "' +
     branch +
-    '", but matches exist in another indexed branch. Try branch:"*" to search all branches, or pass the indexed branch explicitly.'
+    '" — widened to all branches automatically; the results may be from another ' +
+    'indexed branch (a file unchanged on your branch stays indexed under the branch ' +
+    'it was last modified on). Pass branch:"*" to make this explicit, or an indexed ' +
+    'branch name to scope.'
   );
 }
 
@@ -387,22 +390,39 @@ export class GrepTool {
       }
       const rawMatches = responses.flatMap((response) => mapGrepMatches(response.matches));
       const dedupedMatches = dedupGrepMatches(rawMatches);
-      const matches = dedupedMatches.slice(0, maxResults);
-      const duplicatesDropped = rawMatches.length - dedupedMatches.length;
-      const truncated =
+      let matches = dedupedMatches.slice(0, maxResults);
+      let duplicatesDropped = rawMatches.length - dedupedMatches.length;
+      let truncated =
         responses.some((response) => response.truncated) || dedupedMatches.length > matches.length;
-      const totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
-      const message =
-        matches.length === 0
-          ? await this.probeBranchWideningHint(
-              pattern,
-              regex,
-              caseSensitive,
-              tenantId,
-              branch,
-              pathGlob
-            )
-          : undefined;
+      let totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
+      let message: string | undefined;
+      // Auto-widen on empty: a branch-scoped grep that finds nothing may simply
+      // be missing content the daemon tagged under another branch — the daemon
+      // only tags CHANGED files under a feature branch, so a file UNCHANGED on
+      // the current branch stays indexed under the branch it was last modified
+      // on and is invisible to a strict branch filter (and the recorded
+      // base-branch fallback can be absent for ad-hoc branches). Re-run across
+      // ALL branches. Fires ONLY when the scoped result is empty, so it never
+      // dilutes good branch-scoped results (no cross-branch leak in that case).
+      if (matches.length === 0) {
+        const widened = await this.widenGrepToAllBranches(
+          pattern,
+          regex,
+          caseSensitive,
+          contextLines,
+          maxResults,
+          tenantId,
+          branch,
+          pathGlob
+        );
+        if (widened) {
+          matches = widened.matches;
+          duplicatesDropped = widened.duplicatesDropped;
+          truncated = widened.truncated;
+          totalMatches = widened.totalMatches;
+          message = widened.message;
+        }
+      }
       const economy = computeGrepEconomy(matches);
       const latencyMs = Date.now() - startTime;
       finishToolEvent(this.daemonClient, eventId, {
@@ -448,21 +468,50 @@ export class GrepTool {
     }
   }
 
-  private async probeBranchWideningHint(
+  /**
+   * On an empty branch-scoped result, re-run the grep across ALL branches and
+   * return the widened matches (+ a message noting the widening).
+   *
+   * Returns `undefined` when no widening applies (no tenant, or the branch was
+   * already "*"/unset) or when the all-branches query is also empty — in which
+   * case the caller keeps its (empty) branch-scoped result unchanged.
+   */
+  private async widenGrepToAllBranches(
     pattern: string,
     regex: boolean,
     caseSensitive: boolean,
+    contextLines: number,
+    maxResults: number,
     tenantId: string | undefined,
     branch: string | undefined,
     pathGlob: string | undefined
-  ): Promise<string | undefined> {
+  ): Promise<
+    | {
+        matches: GrepMatch[];
+        truncated: boolean;
+        totalMatches: number;
+        duplicatesDropped: number;
+        message: string;
+      }
+    | undefined
+  > {
     const concreteBranch = concreteBranchFilter(branch);
     if (!tenantId || !concreteBranch) return undefined;
     try {
-      const probe = await this.daemonClient.textSearch(
-        buildGrepRequest(pattern, regex, caseSensitive, 0, 1, tenantId, '*', pathGlob)
+      const resp = await this.daemonClient.textSearch(
+        buildGrepRequest(pattern, regex, caseSensitive, contextLines, maxResults, tenantId, '*', pathGlob)
       );
-      return probe.matches.length > 0 ? branchWideningMessage(concreteBranch) : undefined;
+      const rawMatches = mapGrepMatches(resp.matches);
+      const dedupedMatches = dedupGrepMatches(rawMatches);
+      const matches = dedupedMatches.slice(0, maxResults);
+      if (matches.length === 0) return undefined;
+      return {
+        matches,
+        duplicatesDropped: rawMatches.length - dedupedMatches.length,
+        truncated: resp.truncated || dedupedMatches.length > matches.length,
+        totalMatches: resp.total_matches,
+        message: branchWideningMessage(concreteBranch),
+      };
     } catch {
       return undefined;
     }

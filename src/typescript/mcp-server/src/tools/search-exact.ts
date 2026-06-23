@@ -356,13 +356,36 @@ async function executeAndLogSearch(
       resultGroups.push(mapExactResults(fallbackResponse.matches, requestedBranch));
     }
     const rawResults = resultGroups.flat();
-    const dedupedResults = dedupeExactResults(rawResults);
+    let dedupedResults = dedupeExactResults(rawResults);
+    // Track the RAW set that produced `dedupedResults` — recomputed below if the
+    // auto-widen replaces it. (A stale value goes negative: rawResults is empty
+    // whenever dedupedResults is empty, so `0 - widened.length` would inflate
+    // `total` for a truncated widen.)
+    let duplicatesDropped = rawResults.length - dedupedResults.length;
+    // Auto-widen on empty (parity with grep): a branch-scoped exact search that
+    // finds nothing may be missing content the daemon tagged under another branch
+    // (a file unchanged on the current branch stays indexed under the branch it
+    // was last modified on). Re-run across ALL branches. Fires ONLY when the
+    // scoped result is empty, so good branch-scoped results are never diluted.
+    let branchWidened = false;
+    if (dedupedResults.length === 0 && requestedBranch) {
+      const widenedResponse = await daemonClient.textSearch(
+        buildExactSearchRequest({ ...options, branch: '*' }, tenantId)
+      );
+      const widenedRaw = mapExactResults(widenedResponse.matches, undefined);
+      const widened = dedupeExactResults(widenedRaw);
+      if (widened.length > 0) {
+        responses.push(widenedResponse);
+        dedupedResults = widened;
+        duplicatesDropped = widenedRaw.length - widened.length;
+        branchWidened = true;
+      }
+    }
     const limit = options.limit ?? 100;
     // Pagination parity with the vector path (P1.5 C): honor `offset` by slicing
     // the deduped result list; set next_offset below when more remain.
     const offset = Math.max(0, options.offset ?? 0);
     const results = dedupedResults.slice(offset, offset + limit);
-    const duplicatesDropped = rawResults.length - dedupedResults.length;
     const totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
     const total = responses.some((response) => response.truncated)
       ? Math.max(results.length, totalMatches - duplicatesDropped)
@@ -381,6 +404,9 @@ async function executeAndLogSearch(
       collections_searched: [PROJECTS_COLLECTION],
     };
     if (dedupedResults.length > offset + limit) successResponse.next_offset = offset + results.length;
+    if (branchWidened && requestedBranch) {
+      successResponse.hint = `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`;
+    }
     await attachIndexingProgress(successResponse, daemonClient, successResponse.scope, tenantId);
     return successResponse;
   } catch (error) {
