@@ -1019,16 +1019,17 @@ const RERANK_POOL = 30;
 /** Default blend weight (0–1) for the cross-encoder score when reranking.
  * 1 sorts the pool purely by the reranker (legacy replace behavior); values
  * in between mix the bi-encoder + path-boost order with the reranker signal.
- * 0.05 is the balanced measured default for the BGE-M3 profile after the
- * implementation-intent nudge (2026-06-13, 46-query benchmark): semantic
- * top1 39.1→41.3 and MRR 0.50→0.52 with unchanged recall@10/top10.
- * The e5-large profile previously peaked at 0.25, and 0.10 maximizes BGE-M3
- * top1/MRR at some recall cost, so deployments can still override via
+ * 0.10 is the measured default for the current CodeRankEmbed (768d) index
+ * (2026-06-22 live A/B, 46-query golden set): semantic top1 56.5→58.7 and
+ * MRR 0.69→0.70 with unchanged recall@10/top10. On that index w=0.05 was a
+ * no-op on semantic (it had won on the earlier BGE-M3 index, 2026-06-13), so
+ * the default was re-tuned up. Higher w trades top10/recall (esp. hybrid:
+ * recall@10 −3.3pp at 0.10) for top1, so deployments can override via
  * WQM_SEARCH_RERANK_WEIGHT. Values
  * >= 0.5 consistently degrade code search; w=1 is the legacy pure-reranker
  * order and should be used only for experiments. Per-call rerankWeight wins
  * over the env default. */
-const RERANK_WEIGHT = tuningFromEnv('WQM_SEARCH_RERANK_WEIGHT', 0.05);
+const RERANK_WEIGHT = tuningFromEnv('WQM_SEARCH_RERANK_WEIGHT', 0.1);
 const HIGH_RERANK_WEIGHT_WARNING_THRESHOLD = 0.5;
 // Cross-encoder latency scales mostly with per-document text length. Measured
 // on the 46-query benchmark: 500 chars preserved quality and cut semantic
@@ -1175,7 +1176,7 @@ export async function finalizeResults(
   // Collapse same-file chunks BEFORE reranking/slicing so the pool holds
   // distinct files, not repeated chunks of one file.
   const deduped = dedupeByFile(fusedResults);
-  // Cross-encoder rerank is ON by a soft default (a weak w=0.05 blend below;
+  // Cross-encoder rerank is ON by a soft default (a weak w=0.10 blend below;
   // WQM_SEARCH_RERANK=0 disables it). It was historically OFF. Measured on the 12-query
   // known-item benchmark (settled ext4 index, 2026-06-02): the cross-encoder
   // HURT code search — it scored implementation `.rs`/`.ts` files below
@@ -1189,7 +1190,7 @@ export async function finalizeResults(
   // (e.g. bge-reranker-v2-m3 on the GPU Infinity backend) is the next thing
   // worth testing — not more tuning of this one.
   // The bi-encoder + path-relevance-boosted `deduped` order is strictly better
-  // here at a FULL reorder. But the weak w=0.05 blend below is the measured win,
+  // here at a FULL reorder. But the weak w=0.10 blend below is the measured win,
   // so rerank is now ON by a soft default; WQM_SEARCH_RERANK=0 forces it OFF
   // deployment-wide (per-call `rerank` still wins either way).
   // Both follow-ups from those measurements now exist: the daemon serves a
@@ -1203,11 +1204,12 @@ export async function finalizeResults(
   // 31.8→6.8, MRR 0.45→0.21) — but as a weak nudge it beats the baseline on
   // every semantic aggregate: w=0.25 → top3 56.8→59.1, top10 68.2→72.7,
   // recall@10 60.2→62.5, MRR 0.45→0.47 at +24ms avg latency; hybrid top3
-  // 50→56.8. RE-TUNED 2026-06-13 for the BGE-M3 dense profile (46 queries):
-  // after the implementation-intent nudge, w=0.05 preserved top10/recall and
-  // improved top1/MRR; w=0.10 maximized top1/MRR but lost recall. The code
-  // default is the balanced 0.05; e5 deployments can still set
-  // WQM_SEARCH_RERANK_WEIGHT=0.25 explicitly.
+  // 50→56.8. RE-TUNED 2026-06-13 (BGE-M3, 46q): w=0.05 improved top1/MRR with
+  // recall preserved. RE-TUNED AGAIN 2026-06-22 on the live CodeRankEmbed (768d)
+  // index (46q A/B): w=0.05 had become a no-op on semantic, so the code default
+  // is now 0.10 (semantic top1 56.5→58.7, MRR 0.69→0.70, recall@10 flat); the
+  // trade-off is hybrid recall@10 −3.3pp. Deployments can override via
+  // WQM_SEARCH_RERANK_WEIGHT.
   const rerankDefault = rerankEnabledByDefault(process.env['WQM_SEARCH_RERANK']);
   const rerankEnabled = params.options.rerank ?? rerankDefault;
   const rerankWeight = Math.min(params.options.rerankWeight ?? RERANK_WEIGHT, 1);
