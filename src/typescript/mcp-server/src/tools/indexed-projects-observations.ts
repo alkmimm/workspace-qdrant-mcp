@@ -471,7 +471,8 @@ export async function probeDaemonWatches(
  */
 export async function newObservation(
   project: RegistryProject,
-  daemonClient: DaemonClient | null | undefined
+  daemonClient: DaemonClient | null | undefined,
+  opts?: { skipQueue?: boolean }
 ): Promise<Observation> {
   const root = project.root;
 
@@ -498,11 +499,20 @@ export async function newObservation(
   // Health + queue come from the daemon over gRPC (SystemService). The wqm
   // CLI shell-out is gone: it was absent in the dockerized container and, for
   // queue stats, read the wrong SQLite anyway. All four probes are independent.
+  // `skipQueue` is set by status_all/observe_all callers that report the
+  // daemon-wide queue once at the top level (GetQueueStats has no tenant
+  // filter), so the per-project probe would just repeat the same global counts.
   const [qdrant, daemonTcp, wqmHealth, queue] = await Promise.all([
     testQdrant(project.qdrantUrl),
     testTcpEndpoint(project.daemonEndpoint),
     probeDaemonHealth(daemonClient),
-    probeDaemonQueue(daemonClient),
+    opts?.skipQueue
+      ? Promise.resolve<DaemonQueueResult>({
+          ok: false,
+          source: 'daemon-grpc',
+          error: 'daemon-wide queue reported once at the top level (daemonQueue)',
+        })
+      : probeDaemonQueue(daemonClient),
   ]);
 
   return {

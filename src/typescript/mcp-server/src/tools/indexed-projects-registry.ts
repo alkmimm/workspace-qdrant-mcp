@@ -563,25 +563,44 @@ export async function runStatusAll(
       for (const dp of list.projects ?? []) {
         const root = toAbs(dp.project_root);
         if (knownRoots.has(root.toLowerCase()) || knownNames.has(dp.project_name)) continue;
-        projects.push({
-          name: dp.project_name,
-          projectId: dp.project_id,
-          root,
-          defaultBranch: getCurrentBranch(root) ?? 'main',
-          tenantStrategy: 'project',
-          enabled: true,
-          branches: [],
-        });
+        // Route through normalizeProject so synthesized daemon-only projects get
+        // the same qdrantUrl / daemonEndpoint defaults as registry projects —
+        // otherwise newObservation's qdrant/daemonTcp probes report "not
+        // configured" for every synthesized project (the 11-of-12 case).
+        projects.push(
+          normalizeProject({
+            name: dp.project_name,
+            projectId: dp.project_id,
+            root,
+            defaultBranch: getCurrentBranch(root) ?? 'main',
+            tenantStrategy: 'project',
+            enabled: true,
+            branches: [],
+          })
+        );
       }
     } catch {
       // Daemon unavailable — registry-only status.
     }
   }
 
-  const observations = await Promise.all(projects.map((p) => newObservation(p, daemonClient)));
+  // The unified ingestion queue is daemon-WIDE: GetQueueStats(Empty) has no
+  // tenant filter and every project shares the `projects` collection, so a
+  // per-project queue breakdown is not available from the daemon. Probing it
+  // inside each observation just repeated the same global counts across every
+  // project (misleading). Probe it ONCE and report it at the top level as
+  // `daemonQueue`; skip the per-project queue probe and strip the placeholder.
+  // (Per-tenant queue stats would need a tenant filter on GetQueueStats — see
+  // docs/specs/14-future-development.md.)
+  const daemonQueue = await probeDaemonQueue(daemonClient);
+  const rawObservations = await Promise.all(
+    projects.map((p) => newObservation(p, daemonClient, { skipQueue: true }))
+  );
+  const observations = rawObservations.map(({ queue: _queue, ...rest }) => rest);
   return {
     success: true,
     count: observations.length,
+    daemonQueue,
     projects: observations,
   };
 }
