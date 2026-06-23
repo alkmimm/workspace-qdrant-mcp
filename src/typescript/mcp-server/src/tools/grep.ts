@@ -412,6 +412,12 @@ export class GrepTool {
         bytesOut: economy.bytesOut,
         toolVersion: MCP_SERVER_VERSION,
       });
+      // No response byte budget here (unlike search's applyResponseBudget): grep
+      // matches are line-scoped — one matched line plus bounded context — and the
+      // daemon already truncates the match set, so the payload is intrinsically
+      // small. The byte budget exists for search's full chunk bodies, which grep
+      // never returns. (list is likewise budget-free: its `listing` is a single
+      // pre-formatted, already-bounded string.)
       return {
         success: true,
         matches,

@@ -33,6 +33,10 @@ export const SEARCH_OUTPUT_SCHEMA = {
   type: 'object' as const,
   additionalProperties: true,
   properties: {
+    // Parity with the sibling read schemas: `success` is always added by the
+    // dispatcher's health-monitor wrapper. (status / status_reason / indexing /
+    // health stay permissive-covered per the file header above.)
+    success: { type: 'boolean' },
     results: { type: 'array', items: SEARCH_HIT_SCHEMA },
     total: { type: 'number' },
     query: { type: 'string' },
@@ -69,10 +73,21 @@ export const LIST_OUTPUT_SCHEMA = {
   additionalProperties: true,
   properties: {
     success: { type: 'boolean' },
+    projectPath: {
+      type: ['string', 'null'],
+      description: 'Resolved project path (null when unresolved)',
+    },
+    basePath: { type: 'string', description: 'Directory the listing was rooted at' },
     format: { type: 'string' },
     // `listing` shape varies by format (tree/flat/summary) — left unconstrained.
     listing: {},
     stats: { type: 'object', additionalProperties: true },
+    message: { type: 'string', description: 'Human-readable note (e.g. empty-result guidance)' },
+    next_token: {
+      type: 'string',
+      description:
+        'Pagination cursor — pass back as `cursor` to fetch the next page; absent on the last page',
+    },
   },
 };
 

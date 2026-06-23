@@ -152,4 +152,40 @@ describe('runSearchEval', () => {
       expect(options['summary']).toBe(true);
     }
   });
+
+  it('reports the rerank soft-default in `applied` and honors WQM_SEARCH_RERANK (P1.7)', async () => {
+    const savedFlag = process.env['WQM_SEARCH_RERANK'];
+    const savedWeight = process.env['WQM_SEARCH_RERANK_WEIGHT'];
+    try {
+      // Env unset ⇒ soft-default ON at the tuned weight (0.1). `applied` surfaces
+      // the EFFECTIVE settings so an A/B run records what was actually measured.
+      delete process.env['WQM_SEARCH_RERANK'];
+      delete process.env['WQM_SEARCH_RERANK_WEIGHT'];
+      const runnerOn = makeRunner('src/tools/search.ts');
+      const resOn = await runSearchEval(runnerOn, makeDetector('p1'), {
+        cases: [{ query: 'q', expectedFiles: ['src/tools/search.ts'] }],
+      });
+      expect(resOn.applied).toMatchObject({ rerank: true, rerankWeight: 0.1 });
+      // Omitting rerank must NOT force a value onto the runner — the search()
+      // soft-default resolves it, so eval stays faithful to production behavior.
+      const onCalls = (runnerOn.search as ReturnType<typeof vi.fn>).mock.calls as Array<
+        [Record<string, unknown>]
+      >;
+      for (const [options] of onCalls) {
+        expect(options['rerank']).toBeUndefined();
+      }
+
+      // WQM_SEARCH_RERANK=0 disables the deployment default.
+      process.env['WQM_SEARCH_RERANK'] = '0';
+      const resOff = await runSearchEval(makeRunner('src/tools/search.ts'), makeDetector('p1'), {
+        cases: [{ query: 'q', expectedFiles: ['src/tools/search.ts'] }],
+      });
+      expect(resOff.applied?.rerank).toBe(false);
+    } finally {
+      if (savedFlag === undefined) delete process.env['WQM_SEARCH_RERANK'];
+      else process.env['WQM_SEARCH_RERANK'] = savedFlag;
+      if (savedWeight === undefined) delete process.env['WQM_SEARCH_RERANK_WEIGHT'];
+      else process.env['WQM_SEARCH_RERANK_WEIGHT'] = savedWeight;
+    }
+  });
 });
