@@ -60,6 +60,12 @@ export const graphToolDefinition = {
         default: 2,
         description: "Minimum community size for 'modules' (default 2).",
       },
+      memberLimit: {
+        type: 'number',
+        default: 10,
+        description:
+          "For 'modules': members listed per community (default 10). Each community also reports its true `member_count`; the largest clusters hold thousands of members, so this keeps the response agent-sized. Use 0 for all members.",
+      },
       edgeTypes: {
         type: 'array',
         items: { type: 'string' },
