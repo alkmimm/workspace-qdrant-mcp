@@ -295,13 +295,17 @@ describe('SqliteStateManager', () => {
           file_path TEXT
         );
       `);
+      // lease_until MUST be written in the real stored format — ISO-Z via
+      // strftime('%Y-%m-%dT%H:%M:%fZ', ...) (the daemon uses now_utc()/format_utc()).
+      // Inserting via datetime('now', ...) (space format, no Z) would mask the
+      // lexical-comparison bug the staleCount query guards against.
       db.prepare(
         `INSERT INTO unified_queue (queue_id, idempotency_key, item_type, op, tenant_id, collection, status, lease_until)
-         VALUES (?, ?, 'file', 'add', 't1', 'c1', 'in_progress', datetime('now', '-1 hour'))`
+         VALUES (?, ?, 'file', 'add', 't1', 'c1', 'in_progress', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour'))`
       ).run('q-stale', 'k'.repeat(32));
       db.prepare(
         `INSERT INTO unified_queue (queue_id, idempotency_key, item_type, op, tenant_id, collection, status, lease_until)
-         VALUES (?, ?, 'file', 'add', 't1', 'c1', 'in_progress', datetime('now', '+1 hour'))`
+         VALUES (?, ?, 'file', 'add', 't1', 'c1', 'in_progress', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 hour'))`
       ).run('q-fresh', 'k2'.repeat(16));
       db.close();
 
