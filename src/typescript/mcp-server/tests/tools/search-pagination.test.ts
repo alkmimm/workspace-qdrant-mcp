@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { paginateRanked } from '../../src/tools/search-helpers.js';
+import { paginateRanked, reconcileNextOffset } from '../../src/tools/search-helpers.js';
 
 describe('paginateRanked', () => {
   const ranked = Array.from({ length: 25 }, (_, i) => i); // 0..24
@@ -42,5 +42,26 @@ describe('paginateRanked', () => {
     const { page, hasMore } = paginateRanked(ranked, 100, 10);
     expect(page).toEqual([]);
     expect(hasMore).toBe(false);
+  });
+});
+
+describe('reconcileNextOffset (byte-budget × pagination)', () => {
+  it('returns undefined when no more code and nothing was dropped', () => {
+    expect(reconcileNextOffset(0, 10, 10, false)).toBeUndefined();
+  });
+
+  it('stays at offset+limit when more code exists and nothing was dropped', () => {
+    expect(reconcileNextOffset(0, 10, 10, true)).toBe(10);
+    expect(reconcileNextOffset(10, 10, 10, true)).toBe(20);
+  });
+
+  it('points at the first dropped code hit when the budget trimmed the page', () => {
+    // 10 code hits, budget kept 6 → next page resumes at 6 (not 10), so the 4
+    // dropped hits are reachable rather than skipped.
+    expect(reconcileNextOffset(0, 10, 6, true)).toBe(6);
+    // even with no "more beyond the page", a budget drop must expose next_offset
+    expect(reconcileNextOffset(0, 8, 5, false)).toBe(5);
+    // resumes after the kept code hits when paginating
+    expect(reconcileNextOffset(10, 10, 7, true)).toBe(17);
   });
 });

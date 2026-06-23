@@ -358,7 +358,10 @@ async function executeAndLogSearch(
     const rawResults = resultGroups.flat();
     const dedupedResults = dedupeExactResults(rawResults);
     const limit = options.limit ?? 100;
-    const results = dedupedResults.slice(0, limit);
+    // Pagination parity with the vector path (P1.5 C): honor `offset` by slicing
+    // the deduped result list; set next_offset below when more remain.
+    const offset = Math.max(0, options.offset ?? 0);
+    const results = dedupedResults.slice(offset, offset + limit);
     const duplicatesDropped = rawResults.length - dedupedResults.length;
     const totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
     const total = responses.some((response) => response.truncated)
@@ -377,6 +380,7 @@ async function executeAndLogSearch(
       scope: options.scope ?? 'project',
       collections_searched: [PROJECTS_COLLECTION],
     };
+    if (dedupedResults.length > offset + limit) successResponse.next_offset = offset + results.length;
     await attachIndexingProgress(successResponse, daemonClient, successResponse.scope, tenantId);
     return successResponse;
   } catch (error) {
