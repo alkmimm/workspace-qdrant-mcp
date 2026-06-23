@@ -152,7 +152,11 @@ export class WorkspaceQdrantMcpServer {
     args: Record<string, unknown> | undefined,
     components: ServerComponents,
     sessionState: SessionState
-  ): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
+  ): Promise<{
+    content: Array<{ type: string; text: string }>;
+    structuredContent?: Record<string, unknown>;
+    isError?: boolean;
+  }> {
     // Session-sticky host-CWD resolution. The HTTP transport binds the host cwd
     // from the `x-mcp-host-cwd` header, which always wins. But a client may be
     // unable to send that header per session (e.g. Claude Code over HTTP has no

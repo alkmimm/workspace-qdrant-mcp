@@ -28,8 +28,18 @@ import mcpPublicConfig from './constants/mcp-public-config.json' with { type: 'j
 
 export type ToolResult = {
   content: Array<{ type: string; text: string }>;
+  /** Machine-validatable mirror of the (object) result for read tools that
+   *  declare an outputSchema. The same JSON is ALSO serialized into the
+   *  TextContent above, so clients that don't consume structuredContent are
+   *  unaffected (MCP spec: provide both). */
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 };
+
+/** Read tools whose result is a single JSON object safe to mirror into
+ *  structuredContent — kept in sync with the outputSchema-bearing definitions
+ *  in tool-definitions/index.ts. */
+const STRUCTURED_OUTPUT_TOOLS = new Set(['search', 'grep', 'list', 'retrieve', 'graph']);
 
 // Derived from src/constants/mcp-public-config.json (single source of truth).
 // publicTools = tools exposed in client `enabled_tools` lists.
@@ -137,7 +147,22 @@ export async function dispatchToolCall(
       routeTool(toolName, args, components, sessionState)
     );
     logToolCall(toolName, Date.now() - startTime, true);
-    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    const text = JSON.stringify(result, null, 2);
+    // Read tools mirror their object result into structuredContent (validated
+    // against the declared outputSchema) while TextContent stays the universal
+    // fallback. Non-object / array results keep content-only.
+    if (
+      STRUCTURED_OUTPUT_TOOLS.has(toolName) &&
+      result !== null &&
+      typeof result === 'object' &&
+      !Array.isArray(result)
+    ) {
+      return {
+        content: [{ type: 'text', text }],
+        structuredContent: result as Record<string, unknown>,
+      };
+    }
+    return { content: [{ type: 'text', text }] };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     logToolCall(toolName, Date.now() - startTime, false, { error: errorMessage });

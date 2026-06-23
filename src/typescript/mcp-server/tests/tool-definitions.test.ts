@@ -38,6 +38,7 @@ type Annotated = {
     idempotentHint?: boolean;
   };
   inputSchema?: { required?: string[] };
+  outputSchema?: { type?: string };
 };
 
 const defs = getToolDefinitions() as unknown as ReadonlyArray<Annotated>;
@@ -94,5 +95,22 @@ describe('mutating tool action hints', () => {
 
   it('requires an explicit `type` on store (no silent library default)', () => {
     expect(byName.get('store')?.inputSchema?.required).toContain('type');
+  });
+});
+
+// Read tools declare a (permissive) outputSchema so clients can validate the
+// structuredContent the dispatcher mirrors; write/eval/embedding tools do not.
+const STRUCTURED_OUTPUT = new Set(['search', 'grep', 'list', 'retrieve', 'graph']);
+
+describe('tool output schemas', () => {
+  it('declares outputSchema on exactly the structured-output read tools', () => {
+    for (const d of defs) {
+      if (STRUCTURED_OUTPUT.has(d.name)) {
+        expect(d.outputSchema, `${d.name} should declare outputSchema`).toBeDefined();
+        expect(d.outputSchema?.type, `${d.name} outputSchema.type`).toBe('object');
+      } else {
+        expect(d.outputSchema, `${d.name} must not declare outputSchema`).toBeUndefined();
+      }
+    }
   });
 });
