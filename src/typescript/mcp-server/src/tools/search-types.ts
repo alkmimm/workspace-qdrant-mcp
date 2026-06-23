@@ -90,7 +90,7 @@ export interface SearchOptions {
    *  pool order is `(1-w)·norm(rrf_boosted) + w·norm(rerank)` over min-max
    *  normalized scores. 1 = pure cross-encoder order (legacy replace
    *  behavior); 0 = reranking disabled. Default: WQM_SEARCH_RERANK_WEIGHT
-   *  env, else 0.05 (balanced BGE-M3 default after implementation-intent tuning). */
+   *  env, else 0.10 (measured default for the CodeRankEmbed index, 2026-06-22 A/B). */
   rerankWeight?: number;
   /** Per-hit text cap (in chars). Content longer than this is truncated
    *  with a marker pointing to retrieve() for the full chunk. Defaults
@@ -103,7 +103,7 @@ export interface SearchOptions {
 }
 
 /** Resolve the deployment rerank default from WQM_SEARCH_RERANK: ON unless
- *  explicitly disabled. Unset => ON (soft default — a weak w=0.05 blend that
+ *  explicitly disabled. Unset => ON (soft default — a weak w=0.10 blend that
  *  improves top1/MRR without recall loss); '0' => OFF (e.g. deployments with no
  *  rerank backend, to skip the failed-call round-trip); any other value => ON.
  *  A per-call `rerank` overrides this. Exported so search-helpers and search-eval

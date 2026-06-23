@@ -185,7 +185,7 @@ export async function runSearchEval(
   // default is observable in the result — otherwise an A/B caller cannot tell
   // what actually ran. Mirrors the resolution in search-helpers.
   const appliedRerank = rerank ?? rerankEnabledByDefault(process.env['WQM_SEARCH_RERANK']);
-  const appliedRerankWeight = Math.min(rerankWeight ?? tuningFromEnv('WQM_SEARCH_RERANK_WEIGHT', 0.05), 1);
+  const appliedRerankWeight = Math.min(rerankWeight ?? tuningFromEnv('WQM_SEARCH_RERANK_WEIGHT', 0.1), 1);
 
   const report = await runSemanticSearchBenchmark(runner, dataset, {
     // relative_path on each hit carries the repo-relative path, so the
