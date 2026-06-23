@@ -152,10 +152,13 @@ export async function handleGraph(
 
     case 'modules': {
       const minSize = num(args, 'minSize');
-      // Cap to the top K largest communities (server truncates the size-sorted
-      // list). Without a bound a tenant-wide modules call returns every
-      // community/member — megabytes that overflow the gRPC message limit and
-      // bury the agent in noise. `total_communities` still reports the full count.
+      // Member sample per community. `top_k` bounds the community COUNT, but the
+      // largest communities each hold thousands of members — a top-20 dump is
+      // still ~1.5M chars and overflows the response. Return each cluster's true
+      // size (`member_count`) plus a small representative sample so the payload
+      // stays agent-sized. memberLimit<=0 means "all members" (escape hatch).
+      const memberLimitRaw = num(args, 'memberLimit');
+      const memberLimit = memberLimitRaw === undefined ? 10 : memberLimitRaw;
       const req: CommunityRequest = {
         tenant_id: tenant,
         top_k: num(args, 'topK') ?? 20,
@@ -163,7 +166,23 @@ export async function handleGraph(
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
       };
       const r = await daemonClient.detectCommunities(req);
-      return { success: true, action, tenant_id: tenant, ...r };
+      const communities = (r.communities ?? []).map((c) => {
+        const members = c.members ?? [];
+        return {
+          community_id: c.community_id,
+          member_count: members.length,
+          members: memberLimit > 0 ? members.slice(0, memberLimit) : members,
+        };
+      });
+      return {
+        success: true,
+        action,
+        tenant_id: tenant,
+        total_communities: r.total_communities,
+        query_time_ms: r.query_time_ms,
+        member_limit: memberLimit,
+        communities,
+      };
     }
 
     case 'relations': {
