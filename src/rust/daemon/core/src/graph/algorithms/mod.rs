@@ -98,10 +98,24 @@ pub(super) async fn load_adjacency_graph(
 
     let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
     let mut incoming: HashMap<String, Vec<String>> = HashMap::new();
+    let mut dropped_dangling = 0usize;
 
     for row in &edge_rows {
         let src: String = row.get("source_node_id");
         let tgt: String = row.get("target_node_id");
+        // Drop edges whose endpoint is a skipped stub (absent from `nodes`).
+        // A stub is not a real node; counting it in a source's out-degree leaks
+        // PageRank rank to nowhere — a node whose out-edges ALL point at stubs is
+        // not detected as dangling (it has outgoing edges), so its rank is
+        // divided away to targets no resolved node collects and the scores stop
+        // summing to ~1.0; it also adds phantom hops to betweenness. Keep the
+        // in-memory graph internally consistent: edges only between resolved,
+        // file-backed nodes (community detection already filtered these at the
+        // neighbor-build step).
+        if !nodes.contains_key(src.as_str()) || !nodes.contains_key(tgt.as_str()) {
+            dropped_dangling += 1;
+            continue;
+        }
         outgoing.entry(src.clone()).or_default().push(tgt.clone());
         incoming.entry(tgt).or_default().push(src);
     }
@@ -110,6 +124,7 @@ pub(super) async fn load_adjacency_graph(
         tenant_id,
         nodes = nodes.len(),
         edges = edge_rows.len(),
+        dropped_dangling,
         "Loaded adjacency graph"
     );
 
