@@ -106,6 +106,12 @@ fn collection_clause(coll: Option<&str>, param_idx: u32) -> (String, Vec<String>
 }
 
 // ─── Query functions ─────────────────────────────────────────────────────────
+//
+// NOTE: processing_timings.created_at is stored ISO-Z (now_utc(),
+// "YYYY-MM-DDTHH:MM:SS.mmmZ"). Window thresholds therefore use
+// strftime('%Y-%m-%dT%H:%M:%fZ', 'now', <offset>), NOT datetime('now', <offset>)
+// (space-separated, no Z) — a lexical 'T' > ' ' mismatch would OVER-include
+// boundary-date rows. Mirrors token_savings.rs / search_latency.rs.
 
 /// Query total items processed in the time window.
 pub fn query_total_items(
@@ -116,14 +122,14 @@ pub fn query_total_items(
     let (sql, params) = if let Some(c) = coll_filter {
         (
             "SELECT COUNT(DISTINCT queue_id) FROM processing_timings \
-             WHERE created_at > datetime('now', ?1) AND collection = ?2"
+             WHERE created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1) AND collection = ?2"
                 .to_string(),
             vec![cutoff.to_string(), c.to_string()],
         )
     } else {
         (
             "SELECT COUNT(DISTINCT queue_id) FROM processing_timings \
-             WHERE created_at > datetime('now', ?1)"
+             WHERE created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)"
                 .to_string(),
             vec![cutoff.to_string()],
         )
@@ -151,7 +157,7 @@ pub fn query_grouped_stats(
     let sql = format!(
         "SELECT COALESCE({col}, '') as grp, COUNT(*) \
          FROM processing_timings \
-         WHERE created_at > datetime('now', ?1){coll_clause} \
+         WHERE created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1){coll_clause} \
          GROUP BY grp ORDER BY grp"
     );
 
@@ -208,7 +214,7 @@ pub fn query_two_level_stats(
 
     let sql1 = format!(
         "SELECT DISTINCT COALESCE({col1}, '') FROM processing_timings \
-         WHERE created_at > datetime('now', ?1){coll_clause1} ORDER BY 1"
+         WHERE created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1){coll_clause1} ORDER BY 1"
     );
     let mut stmt1 = conn.prepare(&sql1)?;
     let level1_keys: Vec<String> = if coll_params.is_empty() {
@@ -291,7 +297,7 @@ fn query_sub_groups(
     let sql2 = format!(
         "SELECT COALESCE({col2}, '') as grp2, COUNT(*) \
          FROM processing_timings \
-         WHERE created_at > datetime('now', ?1) AND COALESCE({col1}, '') = ?2{coll_clause2} \
+         WHERE created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1) AND COALESCE({col1}, '') = ?2{coll_clause2} \
          GROUP BY grp2 ORDER BY grp2"
     );
     let mut stmt2 = conn.prepare(&sql2)?;
@@ -326,7 +332,7 @@ fn fetch_sorted_durations(
     let (coll_clause, coll_params) = collection_clause(coll_filter, 3);
     let sql = format!(
         "SELECT duration_ms FROM processing_timings \
-         WHERE created_at > datetime('now', ?1) AND COALESCE({col}, '') = ?2{coll_clause} \
+         WHERE created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1) AND COALESCE({col}, '') = ?2{coll_clause} \
          ORDER BY duration_ms"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -356,7 +362,7 @@ fn fetch_sorted_durations_2d(
     let (coll_clause, coll_params) = collection_clause(coll_filter, 4);
     let sql = format!(
         "SELECT duration_ms FROM processing_timings \
-         WHERE created_at > datetime('now', ?1) \
+         WHERE created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1) \
            AND COALESCE({col1}, '') = ?2 \
            AND COALESCE({col2}, '') = ?3{coll_clause} \
          ORDER BY duration_ms"
@@ -407,4 +413,58 @@ fn std_error(values: &[i64]) -> f64 {
         .sum::<f64>()
         / (n as f64 - 1.0);
     variance.sqrt() / (n as f64).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn setup_timings_table(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE processing_timings ( \
+                timing_id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                queue_id TEXT, item_type TEXT, op TEXT, phase TEXT, \
+                duration_ms INTEGER NOT NULL, tenant_id TEXT, collection TEXT, \
+                language TEXT, created_at TEXT NOT NULL);",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn query_total_items_excludes_boundary_date_rows() {
+        // Regression for the ISO-Z vs datetime('now') OVER-include bug: a row whose
+        // created_at is on the SAME date as the (now + offset) window start but
+        // EARLIER in the day must NOT be counted. Pre-fix the datetime('now', ?1)
+        // (space) threshold and ISO-Z 'T' > ' ' lexically over-included it.
+        let conn = Connection::open_in_memory().unwrap();
+        setup_timings_table(&conn);
+
+        // 'in' is inside the window (created now); 'out' is on the window-start date
+        // (now - 1 hour) at 00:00:01, ISO-Z — older than the 1-hour window.
+        conn.execute(
+            "INSERT INTO processing_timings \
+             (queue_id, item_type, op, phase, duration_ms, tenant_id, collection, created_at) \
+             VALUES ('in', 'file', 'add', 'parse', 5, 't', 'projects', \
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processing_timings \
+             (queue_id, item_type, op, phase, duration_ms, tenant_id, collection, created_at) \
+             VALUES ('out', 'file', 'add', 'parse', 5, 't', 'projects', \
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hours', 'start of day', '+1 second'))",
+            [],
+        )
+        .unwrap();
+
+        // 1-hour window → only 'in' counts; 'out' shares the window-start date but is
+        // earlier, so it must be excluded (was over-included before the strftime fix).
+        let total = query_total_items(&conn, "-1 hours", None);
+        assert_eq!(
+            total, 1,
+            "boundary-date row must be excluded from the window with the ISO-Z threshold"
+        );
+    }
 }

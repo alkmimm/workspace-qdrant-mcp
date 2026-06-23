@@ -230,6 +230,44 @@ async fn clean_queue_deletes_old_items() {
 }
 
 #[tokio::test]
+async fn clean_queue_deletes_boundary_date_items() {
+    // Regression for the ISO-Z vs datetime('now') format mismatch: a 'done' row
+    // whose updated_at falls on the SAME calendar date as the (now - older_than_days)
+    // cutoff but EARLIER in the day must be deleted. Pre-fix the threshold was
+    // datetime('now', ...) (space-format, no Z) and ISO-Z 'T' (0x54) > ' ' (0x20)
+    // lexically, so boundary-date rows survived. The existing test above uses a
+    // 2020 timestamp (different date) and so does not exercise this boundary.
+    let (pool, handle) = setup_test_db().await;
+
+    // updated_at = start of the cutoff date (now - 1 day) + 1s, ISO-Z format →
+    // same date as the cutoff but earlier in the day, hence genuinely > 1 day old.
+    sqlx::query(
+        "INSERT INTO unified_queue \
+         (queue_id, idempotency_key, item_type, op, tenant_id, collection, \
+          status, payload_json, created_at, updated_at) \
+         VALUES ('boundary', 'idem-boundary', 'file', 'add', 't1', 'projects', 'done', '{}', \
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 days', 'start of day', '+1 second'), \
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 days', 'start of day', '+1 second'))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let deleted = handle
+        .clean_queue(CleanQueueData {
+            older_than_days: 1,
+            statuses: vec!["done".into()],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        deleted, 1,
+        "boundary-date 'done' row must be cleaned with the ISO-Z threshold"
+    );
+}
+
+#[tokio::test]
 async fn clean_queue_rejects_invalid_status() {
     let (_pool, handle) = setup_test_db().await;
 

@@ -290,7 +290,9 @@ impl QueueManager {
         let hours = retention_hours.unwrap_or(24);
 
         let query = format!(
-            "DELETE FROM unified_queue WHERE status = 'done' AND updated_at < datetime('now', '-{} hours')",
+            // updated_at is stored ISO-Z; use strftime for the threshold so lexical
+            // TEXT comparison doesn't under-delete boundary-date rows ('T' > ' ').
+            "DELETE FROM unified_queue WHERE status = 'done' AND updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} hours')",
             hours
         );
 

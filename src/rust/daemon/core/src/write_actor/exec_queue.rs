@@ -196,8 +196,13 @@ impl WriteActor {
             .join(", ");
 
         let sql = format!(
+            // updated_at is stored ISO-Z (strftime('%Y-%m-%dT%H:%M:%fZ', 'now') /
+            // now_utc()); the threshold must use the SAME format. datetime('now',…)
+            // yields a space-separated string with no Z, and lexical TEXT compare
+            // ('T' 0x54 > ' ' 0x20) would keep boundary-date rows that should be
+            // deleted (under-delete). See queue_operations/query.rs, processing_timings.rs.
             "DELETE FROM unified_queue \
-             WHERE status IN ({}) AND updated_at < datetime('now', '-' || ?1 || ' days')",
+             WHERE status IN ({}) AND updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ?1 || ' days')",
             placeholders
         );
 
