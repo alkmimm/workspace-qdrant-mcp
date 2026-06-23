@@ -249,6 +249,9 @@ export function shapeHitPayloads(
     if (hint !== undefined && out.hint === undefined) out.hint = hint;
     if (dropped > 0) {
       out.budget_truncated = { dropped };
+      // Keep `total` consistent with the returned `results` after the trim
+      // (it was set to the pre-budget page length upstream).
+      out.total = kept.length;
       // The per-hit map already counted dropped hits into bytesOutShaped;
       // recompute from the kept hits so token-economy telemetry stays honest.
       metrics.bytesOutShaped = kept.reduce((sum, r) => sum + hitShapedBytes(r), 0);

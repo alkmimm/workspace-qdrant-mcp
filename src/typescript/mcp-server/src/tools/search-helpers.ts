@@ -1164,6 +1164,23 @@ export function paginateRanked<T>(
   return { page: ranked.slice(start, end), hasMore: ranked.length > end };
 }
 
+/** Reconcile `next_offset` after the response byte budget may have dropped
+ *  trailing CODE hits (P1.5 B × C). `hadNextOffset` = finalizeResults already
+ *  saw more code beyond the page. Returns the next page's offset = offset + kept
+ *  code hits whenever there is more to fetch (more beyond the page, OR the budget
+ *  dropped code hits from this page), else undefined. Keeping it pure makes the
+ *  budget×pagination interaction unit-testable without the full pipeline. */
+export function reconcileNextOffset(
+  offset: number,
+  preCodeCount: number,
+  keptCodeCount: number,
+  hadNextOffset: boolean
+): number | undefined {
+  const codeDropped = preCodeCount - keptCodeCount;
+  if (hadNextOffset || codeDropped > 0) return offset + keptCodeCount;
+  return undefined;
+}
+
 export async function finalizeResults(
   qdrantClient: QdrantClient,
   daemonClient: DaemonClient,

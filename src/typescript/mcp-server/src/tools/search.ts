@@ -44,6 +44,7 @@ import {
   DEFAULT_SCORE_THRESHOLD,
   DEFAULT_EXPANSION_WEIGHT,
   DEFAULT_MAX_EXPANDED_KEYWORDS,
+  SCRATCHPAD_COLLECTION,
 } from './search-types.js';
 import {
   applyEffectiveBranch,
@@ -63,6 +64,7 @@ import {
   searchAllCollections,
   searchScratchpadLane,
   finalizeResults,
+  reconcileNextOffset,
 } from './search-helpers.js';
 
 /** Format an explicit status_reason for the F-014 base-point degradation
@@ -207,6 +209,21 @@ export class SearchTool {
     const eventId = randomUUID();
     const response = await this.executeSearch(options, eventId);
     const { response: shaped, metrics } = shapeHitPayloads(response, options);
+    // Reconcile pagination with the byte budget (P1.5 B × C): shaping runs the
+    // byte budget AFTER executeSearch set next_offset = offset+limit. If it
+    // dropped trailing CODE hits, repoint next_offset at the first dropped hit
+    // so the next page resumes there (else those ranks are unreachable). Count
+    // only code hits — the scratchpad lane trails and is page-1-only.
+    const pageOffset = Math.max(0, options.offset ?? 0);
+    const preCode = response.results.filter((r) => r.collection !== SCRATCHPAD_COLLECTION).length;
+    const keptCode = shaped.results.filter((r) => r.collection !== SCRATCHPAD_COLLECTION).length;
+    const reconciled = reconcileNextOffset(
+      pageOffset,
+      preCode,
+      keptCode,
+      shaped.next_offset !== undefined
+    );
+    if (reconciled !== undefined) shaped.next_offset = reconciled;
     this._stateManager.updateSearchEventEconomy(eventId, {
       bytesIn: metrics.bytesInShaped,
       bytesOut: metrics.bytesOutShaped,
