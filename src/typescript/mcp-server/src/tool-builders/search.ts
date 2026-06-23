@@ -107,6 +107,14 @@ function extractOutputOptions(
 
   const summary = args?.['summary'] as boolean | undefined;
   if (summary !== undefined) options.summary = summary;
+
+  const responseFormat = args?.['responseFormat'] as string | undefined;
+  if (responseFormat === 'concise' || responseFormat === 'detailed') {
+    options.responseFormat = responseFormat;
+  }
+
+  const maxResponseBytes = args?.['maxResponseBytes'] as number | undefined;
+  if (maxResponseBytes !== undefined) options.maxResponseBytes = maxResponseBytes;
 }
 
 /** Build search options from raw tool arguments. */
