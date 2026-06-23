@@ -115,6 +115,11 @@ export interface SearchOptions {
    *  {@link SearchResponse.budget_truncated}. Defaults to
    *  {@link DEFAULT_MAX_RESPONSE_BYTES}; set 0 to disable. */
   maxResponseBytes?: number;
+  /** Pagination offset into the ranked results (default 0). The page
+   *  [offset, offset+limit) is sliced AFTER fusion/dedup/rerank, so consecutive
+   *  pages don't overlap. The scratchpad recall lane is a page-1-only supplement
+   *  (omitted when offset>0). See {@link SearchResponse.next_offset}. */
+  offset?: number;
 }
 
 /** Resolve the deployment rerank default from WQM_SEARCH_RERANK: ON unless
@@ -216,6 +221,9 @@ export interface SearchResponse {
    *  `dropped` is how many were cut (the kept set always has >=1). The agent can
    *  narrow the query, raise `maxResponseBytes`, or use `summary` for the rest. */
   budget_truncated?: { dropped: number };
+  /** Set when more code candidates exist beyond the returned page — pass it back
+   *  as `offset` to fetch the next page. Absent on the last page. */
+  next_offset?: number;
 }
 
 /**
