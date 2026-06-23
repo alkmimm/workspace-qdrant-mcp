@@ -12,9 +12,11 @@ export const workspaceIndexToolDefinition = {
   annotations: {
     title: 'Observe & manage indexing (mostly read-only)',
     openWorldHint: false,
+    destructiveHint: true, // cleanup_orphans / abandon_agent_branch drop registry state
+    idempotentHint: false,
   },
   description:
-    'Observe and manage workspace-qdrant indexing: project registry, agent-branch lifecycle, and worktrees. Most actions are READ-ONLY observability and run by default. The 8 MUTATING actions require DOUBLE opt-in — `allowMutation: true` AND the server env `WQM_INDEX_MANAGER_ALLOW_MUTATION=1` (which you cannot observe from here, so a mutating call fails with a clear error until the operator sets it) — plus explicit user confirmation. See the `action` enum for the per-action read-only/mutating split.',
+    'Observe and manage workspace-qdrant indexing: project registry, agent-branch lifecycle, and worktrees. Most actions are READ-ONLY observability and run by default. The 8 MUTATING actions require DOUBLE opt-in — `allowMutation: true` AND the server env `WQM_INDEX_MANAGER_ALLOW_MUTATION=1` (which you cannot observe from here, so a mutating call fails with a clear error until the operator sets it) — plus explicit user confirmation. See the `action` enum for the per-action read-only/mutating split. Boundary: for code/doc search use search/grep, for notes use store/scratchpad; this tool only manages the indexing registry. Examples — status: {action:"indexing_status", cwd:"/abs/repo"}; list: {action:"list_projects"}; (mutating) add: {action:"add_project", projectPath:"/abs/repo", allowMutation:true}.',
   inputSchema: {
     type: 'object' as const,
     properties: {

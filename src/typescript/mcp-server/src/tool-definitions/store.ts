@@ -7,9 +7,11 @@ export const storeToolDefinition = {
   annotations: {
     title: 'Store note/snippet/library/project',
     openWorldHint: false,
+    destructiveHint: false, // additive only; no delete path
+    idempotentHint: false, // re-storing creates/updates content
   },
   description:
-    'Store content or register a project. Use type "scratchpad" for ad-hoc/persistent notes and snippets (the right target for working notes; these are project-scoped and surface automatically in project-scoped search), type "library" (default) to store reference documentation, type "url" to fetch and ingest a web page, or type "project" to register a project directory for file watching and ingestion. Note: omitting type defaults to "library" (which requires libraryName) — pass type:"scratchpad" explicitly for notes. Required by type: library → libraryName (+ content); url → url; scratchpad → content; project → path.',
+    'Store content or register a project. `type` is REQUIRED — pass it explicitly: "scratchpad" for ad-hoc/persistent notes and snippets (the right target for working notes; project-scoped, surface automatically in project-scoped search), "library" to store reference documentation, "url" to fetch and ingest a web page, or "project" to register a project directory for file watching and ingestion. Required by type: library → libraryName (+ content); url → url; scratchpad → content; project → path. Boundary: this tool only CREATES/updates — to edit or DELETE an existing scratchpad note use the `scratchpad` tool. Examples — note: {type:"scratchpad", content:"...", cwd:"/abs/repo"}; library: {type:"library", libraryName:"tokio", content:"...", title:"Tokio"}; project: {type:"project", path:"/abs/repo"}; url: {type:"url", url:"https://docs.rs/tokio"}.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -17,7 +19,7 @@ export const storeToolDefinition = {
         type: 'string',
         enum: ['library', 'url', 'scratchpad', 'project'],
         description:
-          'What to store: "scratchpad" for ad-hoc/persistent notes & snippets (project-scoped), "library" for reference docs (default; requires libraryName), "url" to fetch and ingest a web page, "project" to register a project directory',
+          'What to store: "scratchpad" for ad-hoc/persistent notes & snippets (project-scoped), "library" for reference docs (requires libraryName), "url" to fetch and ingest a web page, "project" to register a project directory',
       },
       content: {
         type: 'string',
@@ -79,5 +81,6 @@ export const storeToolDefinition = {
         description: 'Additional metadata',
       },
     },
+    required: ['type'],
   },
 };

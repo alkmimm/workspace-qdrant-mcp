@@ -34,7 +34,10 @@ type Annotated = {
     title?: string;
     readOnlyHint?: boolean;
     openWorldHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
   };
+  inputSchema?: { required?: string[] };
 };
 
 const defs = getToolDefinitions() as unknown as ReadonlyArray<Annotated>;
@@ -68,5 +71,28 @@ describe('tool definition annotations', () => {
         `${name} must not claim read-only`
       ).not.toBe(true);
     }
+  });
+});
+
+describe('mutating tool action hints', () => {
+  it('declares destructiveHint & idempotentHint on every mutating tool', () => {
+    for (const name of MUTATING) {
+      const a = byName.get(name)?.annotations;
+      expect(typeof a?.destructiveHint, `${name} needs a destructiveHint`).toBe('boolean');
+      expect(typeof a?.idempotentHint, `${name} needs an idempotentHint`).toBe('boolean');
+    }
+  });
+
+  it('marks delete-capable tools destructive and the additive store non-destructive', () => {
+    // store has no delete path → non-destructive (avoids a spurious "destructive"
+    // prompt); rules/scratchpad/workspace_index each own a delete/cleanup action.
+    expect(byName.get('store')?.annotations?.destructiveHint).toBe(false);
+    expect(byName.get('scratchpad')?.annotations?.destructiveHint).toBe(true);
+    expect(byName.get('rules')?.annotations?.destructiveHint).toBe(true);
+    expect(byName.get('workspace_index')?.annotations?.destructiveHint).toBe(true);
+  });
+
+  it('requires an explicit `type` on store (no silent library default)', () => {
+    expect(byName.get('store')?.inputSchema?.required).toContain('type');
   });
 });

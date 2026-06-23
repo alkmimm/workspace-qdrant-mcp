@@ -7,9 +7,11 @@ export const scratchpadToolDefinition = {
   annotations: {
     title: 'Manage scratchpad notes (list/update/delete)',
     openWorldHint: false,
+    destructiveHint: true, // 'delete' removes a note
+    idempotentHint: false, // 'update' replaces note content in place
   },
   description:
-    'Manage existing scratchpad notes: list, update, or delete. Create notes with store(type:"scratchpad"). Notes are project-scoped — pass projectId (the tenant_id seen in a search/list result) to target a specific project, or cwd to auto-detect it. update/delete identify a note by its CURRENT content (content-addressed), which must match VERBATIM — get it from `scratchpad list` (returns full, untruncated content), NOT from a `search` hit (whose content may be truncated). If no entry matches exactly, the op fails with a clear error instead of silently doing nothing. Required args per action: update → content + newContent; delete → content; list → none.',
+    'Manage existing scratchpad notes: list, update, or delete. Create notes with store(type:"scratchpad"). Notes are project-scoped — pass projectId (the tenant_id seen in a search/list result) to target a specific project, or cwd to auto-detect it. update/delete identify a note by its CURRENT content (content-addressed), which must match VERBATIM — get it from `scratchpad list` (returns full, untruncated content), NOT from a `search` hit (whose content may be truncated). If no entry matches exactly, the op fails with a clear error instead of silently doing nothing. Required args per action: update → content + newContent; delete → content; list → none. Boundary: to CREATE a note use store(type:"scratchpad"); this tool never creates. Examples — list: {action:"list"}; delete: {action:"delete", content:"<verbatim note text>"}; update: {action:"update", content:"<old>", newContent:"<new>"}.',
   inputSchema: {
     type: 'object' as const,
     properties: {
