@@ -2,6 +2,10 @@
 
 This section documents research findings and architectural ideas that may be pursued in future development cycles. These items are exploratory and have not been scoped into the project plan.
 
+### Per-tenant queue statistics
+
+`SystemService.GetQueueStats` takes `google.protobuf.Empty` and returns daemon-wide queue counts: the unified ingestion queue is shared across all tenants, and every project lives in the single `projects` collection, so the `by_collection` breakdown cannot split per project either. Consequently `workspace_index status_all` can only report one global `daemonQueue` block, not per-project pending/in-progress/failed counts. To answer "which project is behind", add an optional `tenant_id` filter to `GetQueueStats` (the `ingestion_queue` rows already carry `tenant_id`) and have the MCP `status_all`/`observe` paths request per-project stats. Until then the single global block is the honest representation (it was previously duplicated identically into every project, which falsely implied per-project queues).
+
 ### Graph RAG (Knowledge Graph-Enhanced Retrieval)
 
 **What it is:** Graph RAG augments traditional vector search with knowledge graph traversal, enabling relationship-aware retrieval that understands structural connections between code entities (function calls, imports, type hierarchies, module dependencies).
