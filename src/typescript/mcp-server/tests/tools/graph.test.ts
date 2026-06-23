@@ -200,6 +200,63 @@ describe('handleGraph', () => {
     });
   });
 
+  it('modules forwards member_limit and surfaces the daemon member_count', async () => {
+    const member = (s: string) => ({
+      node_id: s,
+      symbol_name: s,
+      symbol_type: 'struct',
+      file_path: `${s}.rs`,
+    });
+    const { client, mocks } = mockClient({
+      detectCommunities: vi.fn().mockResolvedValue({
+        // Daemon already capped members to member_limit; member_count is the
+        // TRUE pre-cap size (942 here), which the handler must surface instead
+        // of the received members.length (2).
+        communities: [{ community_id: 0, member_count: 942, members: [member('A'), member('B')] }],
+        total_communities: 1153,
+        query_time_ms: 7,
+      }),
+    });
+    const { detector } = mockDetector(null);
+    const result = (await handleGraph(
+      { action: 'modules', projectId: 't1', topK: 5, memberLimit: 2 },
+      client,
+      detector
+    )) as Record<string, unknown>;
+
+    // Request: member_limit threaded to the daemon so the cap happens at the
+    // source (bounds the gRPC message), not just in this response.
+    expect(mocks['detectCommunities']).toHaveBeenCalledWith({
+      tenant_id: 't1',
+      top_k: 5,
+      member_limit: 2,
+    });
+
+    // Response: true size preserved from the proto member_count, not members.length.
+    const communities = result['communities'] as Array<Record<string, unknown>>;
+    expect(communities[0]?.['member_count']).toBe(942);
+    expect((communities[0]?.['members'] as unknown[]).length).toBe(2);
+    expect(result['total_communities']).toBe(1153);
+    expect(result['member_limit']).toBe(2);
+  });
+
+  it('modules maps memberLimit<=0 to member_limit 0 (all members) and defaults to 10', async () => {
+    const { client, mocks } = mockClient();
+    const { detector } = mockDetector(null);
+    await handleGraph({ action: 'modules', projectId: 't1', memberLimit: 0 }, client, detector);
+    expect(mocks['detectCommunities']).toHaveBeenCalledWith({
+      tenant_id: 't1',
+      top_k: 20,
+      member_limit: 0,
+    });
+    await handleGraph({ action: 'modules', projectId: 't1' }, client, detector);
+    expect(mocks['detectCommunities']).toHaveBeenLastCalledWith({
+      tenant_id: 't1',
+      top_k: 20,
+      member_limit: 10,
+    });
+  });
+
   it('rejects an unknown action', async () => {
     const { client } = mockClient();
     const { detector } = mockDetector(null);

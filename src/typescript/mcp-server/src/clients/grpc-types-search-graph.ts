@@ -133,6 +133,8 @@ export interface CommunityMemberProto {
 export interface CommunityProto {
   community_id: number;
   members: CommunityMemberProto[];
+  /** True member count before member_limit sampling (daemon-set). */
+  member_count?: number;
 }
 
 export interface CommunityRequest {
@@ -141,6 +143,8 @@ export interface CommunityRequest {
   min_community_size?: number;
   edge_types?: string[];
   top_k?: number;
+  /** Members per community in the response (0/absent = all). */
+  member_limit?: number;
 }
 
 export interface CommunityResponse {

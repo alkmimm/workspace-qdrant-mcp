@@ -154,14 +154,18 @@ export async function handleGraph(
       const minSize = num(args, 'minSize');
       // Member sample per community. `top_k` bounds the community COUNT, but the
       // largest communities each hold thousands of members — a top-20 dump is
-      // still ~1.5M chars and overflows the response. Return each cluster's true
-      // size (`member_count`) plus a small representative sample so the payload
-      // stays agent-sized. memberLimit<=0 means "all members" (escape hatch).
+      // still ~1.5M chars and overflows the response. The daemon now caps members
+      // to `member_limit` at the SOURCE (so the gRPC message is bounded too, not
+      // just this response) and reports each cluster's true `member_count`.
+      // memberLimit<=0 means "all members" (escape hatch) — sent as 0, which the
+      // daemon treats as no cap.
       const memberLimitRaw = num(args, 'memberLimit');
       const memberLimit = memberLimitRaw === undefined ? 10 : memberLimitRaw;
+      const memberLimitWire = memberLimit > 0 ? Math.floor(memberLimit) : 0;
       const req: CommunityRequest = {
         tenant_id: tenant,
         top_k: num(args, 'topK') ?? 20,
+        member_limit: memberLimitWire,
         ...(minSize !== undefined ? { min_community_size: minSize } : {}),
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
       };
@@ -170,7 +174,10 @@ export async function handleGraph(
         const members = c.members ?? [];
         return {
           community_id: c.community_id,
-          member_count: members.length,
+          // Daemon caps members and reports the true size in member_count; fall
+          // back to the received length if an older daemon omits it. The slice is
+          // then a defensive no-op (members already <= memberLimit).
+          member_count: c.member_count ?? members.length,
           members: memberLimit > 0 ? members.slice(0, memberLimit) : members,
         };
       });

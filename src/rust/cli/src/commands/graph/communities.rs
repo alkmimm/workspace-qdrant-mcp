@@ -35,6 +35,8 @@ pub async fn communities(
             min_community_size: min_size,
             edge_types,
             top_k,
+            // CLI shows full members; member_limit (MCP-only sampling) stays unset.
+            member_limit: None,
         })
         .await
         .context("DetectCommunities RPC failed")?

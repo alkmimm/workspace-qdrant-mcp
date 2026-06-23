@@ -810,6 +810,7 @@ message CommunityRequest {
     optional uint32 min_community_size = 3;       // Min members to include (default: 2)
     repeated string edge_types = 4;               // Filter edges; empty = all
     optional uint32 top_k = 5;                    // Return only the top K largest communities (0 = all)
+    optional uint32 member_limit = 6;             // Members per community in response (0/absent = all)
 }
 
 // Community Detection Response
@@ -823,6 +824,7 @@ message CommunityResponse {
 message CommunityProto {
     uint32 community_id = 1;
     repeated CommunityMemberProto members = 2;
+    uint32 member_count = 3;                          // True member count before member_limit sampling
 }
 
 // A member of a community
