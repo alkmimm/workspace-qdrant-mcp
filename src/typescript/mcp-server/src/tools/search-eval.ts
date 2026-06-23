@@ -115,7 +115,10 @@ export interface SearchEvalResult {
   /** Hit rates per dataset category (query-id prefix: pt/sym/impl/doc/real,
    *  else "orig") for the ranked modes — so a weak category (e.g. PT) is
    *  visible instead of silently dragging the aggregate verdict. */
-  byCategory?: Record<string, { semantic: Record<string, number>; hybrid: Record<string, number> }>;
+  byCategory?: Record<
+    string,
+    { semantic: Record<string, number>; hybrid: Record<string, number>; exact: Record<string, number> }
+  >;
   perQuery?: Array<Record<string, unknown>>;
 }
 
@@ -181,6 +184,7 @@ export async function runSearchEval(
   const includeTopPaths = (args?.['includeTopPaths'] as boolean | undefined) ?? false;
   const rerank = args?.['rerank'] as boolean | undefined;
   const rerankWeight = args?.['rerankWeight'] as number | undefined;
+  const summary = args?.['summary'] as boolean | undefined;
   // Resolve the EFFECTIVE rerank settings so the env-dependent deployment
   // default is observable in the result — otherwise an A/B caller cannot tell
   // what actually ran. Mirrors the resolution in search-helpers.
@@ -201,17 +205,24 @@ export async function runSearchEval(
     ...(tenant.tenantId ? { projectId: tenant.tenantId } : {}),
     ...(rerank !== undefined ? { rerank } : {}),
     ...(rerankWeight !== undefined ? { rerankWeight } : {}),
+    ...(summary !== undefined ? { summary } : {}),
   });
 
   // Per-category hit rates (semantic + hybrid) keyed by query-id prefix.
-  const byCategory: Record<string, { semantic: CategoryHitCounts; hybrid: CategoryHitCounts }> = {};
+  const byCategory: Record<
+    string,
+    { semantic: CategoryHitCounts; hybrid: CategoryHitCounts; exact: CategoryHitCounts }
+  > = {};
   for (const q of report.queries) {
     const cat = categoryOf(q.id);
     const bucket = (byCategory[cat] ??= {
       semantic: { n: 0, top1: 0, top3: 0, top10: 0 },
       hybrid: { n: 0, top1: 0, top3: 0, top10: 0 },
+      exact: { n: 0, top1: 0, top3: 0, top10: 0 },
     });
-    for (const mode of ['semantic', 'hybrid'] as const) {
+    // Include `exact` (grep/FTS5) so the grep-vs-vector contrast is visible per
+    // category (e.g. sym- identifiers favour exact; impl-/pt- favour semantic).
+    for (const mode of ['semantic', 'hybrid', 'exact'] as const) {
       const ev = q.modes[mode].evaluation;
       bucket[mode].n += 1;
       bucket[mode].top1 += ev.top1Hit ? 1 : 0;
@@ -238,7 +249,11 @@ export async function runSearchEval(
     byCategory: Object.fromEntries(
       Object.entries(byCategory).map(([cat, counts]) => [
         cat,
-        { semantic: shapeCategory(counts.semantic), hybrid: shapeCategory(counts.hybrid) },
+        {
+          semantic: shapeCategory(counts.semantic),
+          hybrid: shapeCategory(counts.hybrid),
+          exact: shapeCategory(counts.exact),
+        },
       ])
     ),
     perQuery: report.queries.map((q) => {

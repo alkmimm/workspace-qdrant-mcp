@@ -132,5 +132,24 @@ describe('runSearchEval', () => {
     // Unknown prefixes fall into "orig" (the original known-item set).
     expect(res.byCategory?.['orig']?.semantic).toMatchObject({ n: 1, top10: 100 });
     expect(res.byCategory?.['impl']?.hybrid).toMatchObject({ n: 1, top10: 100 });
+    // Per-category exact (grep/FTS5) breakdown is now emitted too (P2.9) so the
+    // grep-vs-vector contrast is measurable per category, not just in aggregate.
+    expect(res.byCategory?.['impl']?.exact).toMatchObject({ n: 1, top1: 100, top10: 100 });
+  });
+
+  it('forwards the summary delivery flag to every search call (P2.9)', async () => {
+    const runner = makeRunner('src/tools/search.ts');
+    const res = await runSearchEval(runner, makeDetector('p1'), {
+      cases: [{ query: 'q', expectedFiles: ['src/tools/search.ts'] }],
+      summary: true,
+    });
+    expect(res.success).toBe(true);
+    const calls = (runner.search as ReturnType<typeof vi.fn>).mock.calls as Array<
+      [Record<string, unknown>]
+    >;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [options] of calls) {
+      expect(options['summary']).toBe(true);
+    }
   });
 });

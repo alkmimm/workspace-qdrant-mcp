@@ -59,6 +59,33 @@ is a thin wrapper around the same runner. Use this for the fast measure→edit�
 loop on a small case set; use the host runner below for the full curated
 dataset and to (re)generate the committed `reports/semantic-search.json`.
 
+### Delivery / grep-vs-vector experiment (P2.9)
+
+Two orthogonal axes over the bundled set, both read from `search_eval` output:
+
+**Axis 1 — retrieval method (one run, zero code).** Compare `modes.exact`
+(grep/FTS5) vs `modes.semantic` (vector) vs `modes.hybrid`, plus the per-category
+`byCategory.<cat>.{semantic,hybrid,exact}` breakdown. Hypothesis: `sym-`
+(identifier) queries favour `exact`; `impl-`/`pt-` (conceptual) favour `semantic`.
+
+**Axis 2 — delivery shape (inline vs metadata-only).** Run twice:
+`search_eval({ summary: false })` vs `search_eval({ summary: true })`. Summary
+mode drops chunk bodies but keeps paths, so the ranking metrics (top1/3/10,
+recall@10, MRR) are **identical** across the two — that invariance IS the
+finding; the only delta is response size. Read per-row `bytes_out` from
+`search_events`: inline ≈ N, summary ≈ 0 (bodies dropped — the agent then pays a
+follow-up `retrieve()` for the bodies it needs).
+
+Record per cell: method, `top1/top3/top10`, `recallAt10`, `mrr`, `byCategory`,
+and `bytes_out`; tag the run via `telemetryActor` so the A/B traffic stays
+separable in `search_events`.
+
+**Honest caveat:** the external study motivating this (grep-beats-vector,
+inline-vs-file-based delivery) is conversational-QA, not code retrieval — these
+results are specific to this corpus + golden set and do not transfer to NL-QA
+claims. Lead with recall@10/MRR; per-category n is small (e.g. `sym-` n=6), so
+top1 swings are noisy.
+
 ## Re-test guide (host runner)
 
 The runner needs the daemon's real `memexd.db`, which lives in the

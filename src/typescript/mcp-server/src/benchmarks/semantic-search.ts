@@ -91,6 +91,10 @@ export interface SemanticSearchBenchmarkRunConfig {
   rerank?: boolean;
   /** Blend weight (0–1) for the rerank score; see SearchOptions.rerankWeight. */
   rerankWeight?: number;
+  /** Delivery shape: when true, search returns metadata-only hits (no chunk
+   *  bodies). Orthogonal to ranking — used by the grep-vs-vector / inline-vs-
+   *  file-based delivery experiment to measure byte cost without changing rank. */
+  summary?: boolean;
 }
 
 export interface SearchBenchmarkRunner {
@@ -726,6 +730,9 @@ function buildSearchOptions(
   // sweeps rerank on/off and the blend weight without container recreates.
   if (config.rerank !== undefined) options.rerank = config.rerank;
   if (config.rerankWeight !== undefined) options.rerankWeight = config.rerankWeight;
+  // Delivery-shape passthrough (P2.9 experiment): summary mode drops bodies but
+  // keeps paths, so ranking metrics are unchanged — only response bytes differ.
+  if (config.summary !== undefined) options.summary = config.summary;
 
   return options;
 }
