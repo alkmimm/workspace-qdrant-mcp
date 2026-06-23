@@ -29,7 +29,7 @@ import type {
   SearchResult,
   ShapingMetrics,
 } from './search-types.js';
-import { DEFAULT_MAX_BYTES_PER_HIT } from './search-types.js';
+import { DEFAULT_MAX_BYTES_PER_HIT, DEFAULT_MAX_RESPONSE_BYTES } from './search-types.js';
 
 /** Metadata payload fields known to carry chunk text. Stripped in
  *  summary mode AND deduplicated against `result.content` in truncate
@@ -198,6 +198,27 @@ function hitShapedBytes(r: SearchResult): number {
   return (r.content?.length ?? 0) + (r.parent_context?.unit_text?.length ?? 0);
 }
 
+/** Drop trailing hits once the cumulative shaped body bytes exceed `budget`
+ *  (always keeping at least one hit). Bounds the TOTAL response size — the
+ *  per-hit cap alone can't, since N hits at the cap still sum to N×cap. A
+ *  non-positive budget disables the trim. The caller surfaces `dropped` via
+ *  `budget_truncated` so the agent can narrow the query or ask for summary. */
+function applyResponseBudget(
+  results: SearchResult[],
+  budget: number
+): { kept: SearchResult[]; dropped: number } {
+  if (budget <= 0) return { kept: results, dropped: 0 };
+  let running = 0;
+  const kept: SearchResult[] = [];
+  for (const r of results) {
+    const bytes = hitShapedBytes(r);
+    if (kept.length > 0 && running + bytes > budget) break;
+    running += bytes;
+    kept.push(r);
+  }
+  return { kept, dropped: results.length - kept.length };
+}
+
 function emptyMetrics(mode: ShapingMetrics['mode']): ShapingMetrics {
   return { bytesInShaped: 0, bytesOutShaped: 0, hitsTruncated: 0, mode };
 }
@@ -215,9 +236,23 @@ export function shapeHitPayloads(
   // branch runs (every branch preserves chunk_symbol_name). Folded into the
   // response by `finalize` below.
   const hint = hasSymbolHit(response.results) ? GRAPH_HINT : undefined;
-  const finalize = (base: SearchResponse, results: SearchResult[]): SearchResponse => {
-    const out: SearchResponse = { ...base, results };
+  const budget = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  const finalize = (
+    base: SearchResponse,
+    results: SearchResult[],
+    metrics: ShapingMetrics
+  ): SearchResponse => {
+    // Apply the global byte budget in finalize so ALL three shaping branches
+    // (summary / none / truncate) honor it uniformly.
+    const { kept, dropped } = applyResponseBudget(results, budget);
+    const out: SearchResponse = { ...base, results: kept };
     if (hint !== undefined && out.hint === undefined) out.hint = hint;
+    if (dropped > 0) {
+      out.budget_truncated = { dropped };
+      // The per-hit map already counted dropped hits into bytesOutShaped;
+      // recompute from the kept hits so token-economy telemetry stays honest.
+      metrics.bytesOutShaped = kept.reduce((sum, r) => sum + hitShapedBytes(r), 0);
+    }
     return out;
   };
 
@@ -228,9 +263,13 @@ export function shapeHitPayloads(
       return shapeAsSummary(r);
     });
     // bytesOutShaped stays 0 — summary mode drops bodies entirely.
-    return { response: finalize(response, results), metrics };
+    return { response: finalize(response, results, metrics), metrics };
   }
-  const cap = options.maxBytesPerHit ?? DEFAULT_MAX_BYTES_PER_HIT;
+  // responseFormat is the coarse knob: `detailed` disables the per-hit cap
+  // (full bodies); `concise`/unset uses the default. An explicit maxBytesPerHit
+  // still wins over both.
+  const cap =
+    options.maxBytesPerHit ?? (options.responseFormat === 'detailed' ? 0 : DEFAULT_MAX_BYTES_PER_HIT);
   if (cap <= 0) {
     const metrics = emptyMetrics('none');
     // Cap disabled: bodies pass through untouched, but still lift `location`
@@ -242,7 +281,7 @@ export function shapeHitPayloads(
       const location = deriveLocation(r.metadata);
       return location !== undefined ? { ...r, location } : r;
     });
-    return { response: finalize(response, results), metrics };
+    return { response: finalize(response, results, metrics), metrics };
   }
   const metrics = emptyMetrics('truncate');
   const results = response.results.map((r) => {
@@ -256,5 +295,5 @@ export function shapeHitPayloads(
     metrics.bytesOutShaped += hitShapedBytes(shaped);
     return shaped;
   });
-  return { response: finalize(response, results), metrics };
+  return { response: finalize(response, results, metrics), metrics };
 }

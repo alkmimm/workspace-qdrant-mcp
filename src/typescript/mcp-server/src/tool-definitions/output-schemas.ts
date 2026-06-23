@@ -40,6 +40,11 @@ export const SEARCH_OUTPUT_SCHEMA = {
     scope: { type: 'string' },
     collections_searched: { type: 'array', items: { type: 'string' } },
     hint: { type: 'string', description: 'In-band next-tool hint (graph), present only for symbol hits' },
+    budget_truncated: {
+      type: 'object',
+      additionalProperties: true,
+      description: 'Present when the response byte budget dropped trailing hits: { dropped: N }',
+    },
   },
 };
 

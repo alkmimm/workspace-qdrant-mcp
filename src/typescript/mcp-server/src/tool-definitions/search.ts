@@ -123,6 +123,17 @@ export const searchToolDefinition = {
         description:
           'When true, drop chunk text bodies and return only metadata (id, score, collection, title, path/symbol). Use for pure discovery before a follow-up retrieve() call. Default: false.',
       },
+      responseFormat: {
+        type: 'string',
+        enum: ['concise', 'detailed'],
+        description:
+          'Response verbosity (default: concise). "concise" truncates each hit body with a retrieve() marker; "detailed" returns full bodies (per-hit cap off). Prefer concise for discovery; detailed only when you need whole chunks. `summary` (metadata-only) is stronger than either.',
+      },
+      maxResponseBytes: {
+        type: 'number',
+        description:
+          'Cap on total response body chars (default ~24000). When summed hit bodies exceed it, trailing hits are dropped (>=1 kept) and budget_truncated.dropped reports how many — narrow the query or use summary for the rest. 0 disables.',
+      },
     },
     required: ['query'],
   },

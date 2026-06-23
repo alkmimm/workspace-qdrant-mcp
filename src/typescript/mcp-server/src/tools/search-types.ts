@@ -35,6 +35,12 @@ export const DEFAULT_SCORE_THRESHOLD = 0.3;
 /** Per-hit text cap (in chars). Default 1500 keeps a 10-hit response well
  *  under typical MCP client per-tool-result token budgets (~25k chars). */
 export const DEFAULT_MAX_BYTES_PER_HIT = 1500;
+/** Global cap (in chars) on the SUMMED hit bodies of one response. The per-hit
+ *  cap can't bound the total (N hits × cap), so once the running body total
+ *  exceeds this, trailing hits are dropped (>=1 always kept) and
+ *  `SearchResponse.budget_truncated` reports how many. ~24k chars ≈ 6k tokens,
+ *  under the ~25k informal client budget. Set `maxResponseBytes: 0` to disable. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 24000;
 
 // Tag expansion defaults
 export const DEFAULT_EXPANSION_WEIGHT = 0.5;
@@ -100,6 +106,15 @@ export interface SearchOptions {
    *  metadata (id, score, collection, title, path/symbol). Intended for
    *  pure discovery before a follow-up retrieve(). Default: false. */
   summary?: boolean;
+  /** Response verbosity. `concise` (default) truncates each hit body to the
+   *  per-hit cap; `detailed` returns full bodies (disables the per-hit cap). An
+   *  explicit `maxBytesPerHit` overrides this; `summary` is stronger than both. */
+  responseFormat?: 'concise' | 'detailed';
+  /** Global cap (chars) on the summed hit bodies of the whole response; trailing
+   *  hits beyond it are dropped (>=1 kept) and reported via
+   *  {@link SearchResponse.budget_truncated}. Defaults to
+   *  {@link DEFAULT_MAX_RESPONSE_BYTES}; set 0 to disable. */
+  maxResponseBytes?: number;
 }
 
 /** Resolve the deployment rerank default from WQM_SEARCH_RERANK: ON unless
@@ -197,6 +212,10 @@ export interface SearchResponse {
   /** Attached only when `scope === 'project'` and the daemon queue
    *  still has work for the current tenant. Absent otherwise. */
   indexing?: IndexingProgress;
+  /** Attached only when the global response byte budget dropped trailing hits:
+   *  `dropped` is how many were cut (the kept set always has >=1). The agent can
+   *  narrow the query, raise `maxResponseBytes`, or use `summary` for the rest. */
+  budget_truncated?: { dropped: number };
 }
 
 /**

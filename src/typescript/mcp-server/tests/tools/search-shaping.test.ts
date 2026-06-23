@@ -181,6 +181,91 @@ describe('shapeHitPayloads', () => {
     });
   });
 
+  describe('responseFormat + global byte budget (P1.5)', () => {
+    it('detailed returns full bodies (per-hit cap disabled)', () => {
+      const long = 'z'.repeat(5000);
+      const { response: shaped } = shapeHitPayloads(
+        makeResponse([makeResult({ content: long })]),
+        baseOptions({ responseFormat: 'detailed' })
+      );
+      expect(shaped.results[0].content).toBe(long);
+    });
+
+    it('concise truncates like the default', () => {
+      const { response: shaped } = shapeHitPayloads(
+        makeResponse([makeResult({ content: 'y'.repeat(5000) })]),
+        baseOptions({ responseFormat: 'concise' })
+      );
+      expect(shaped.results[0].content.length).toBeLessThanOrEqual(DEFAULT_MAX_BYTES_PER_HIT);
+      expect(shaped.results[0].content).toContain('[truncated');
+    });
+
+    it('explicit maxBytesPerHit overrides responseFormat=detailed', () => {
+      const { response: shaped } = shapeHitPayloads(
+        makeResponse([makeResult({ content: 'y'.repeat(5000) })]),
+        baseOptions({ responseFormat: 'detailed', maxBytesPerHit: 200 })
+      );
+      expect(shaped.results[0].content.length).toBeLessThanOrEqual(200);
+    });
+
+    it('drops trailing hits past the response budget and reports budget_truncated', () => {
+      const hits = Array.from({ length: 5 }, (_, i) =>
+        makeResult({ id: `doc-${i}`, content: 'a'.repeat(1000) })
+      );
+      const { response: shaped } = shapeHitPayloads(
+        makeResponse(hits),
+        baseOptions({ responseFormat: 'detailed', maxResponseBytes: 2500 })
+      );
+      expect(shaped.results.length).toBeGreaterThanOrEqual(1);
+      expect(shaped.results.length).toBeLessThan(5);
+      expect(shaped.budget_truncated?.dropped).toBe(5 - shaped.results.length);
+    });
+
+    it('always keeps at least one hit even if it alone exceeds the budget', () => {
+      const { response: shaped } = shapeHitPayloads(
+        makeResponse([makeResult({ content: 'a'.repeat(10_000) })]),
+        baseOptions({ responseFormat: 'detailed', maxResponseBytes: 100 })
+      );
+      expect(shaped.results.length).toBe(1);
+      expect(shaped.budget_truncated).toBeUndefined();
+    });
+
+    it('maxResponseBytes=0 disables the global budget', () => {
+      const hits = Array.from({ length: 5 }, (_, i) =>
+        makeResult({ id: `doc-${i}`, content: 'a'.repeat(1000) })
+      );
+      const { response: shaped } = shapeHitPayloads(
+        makeResponse(hits),
+        baseOptions({ responseFormat: 'detailed', maxResponseBytes: 0 })
+      );
+      expect(shaped.results.length).toBe(5);
+      expect(shaped.budget_truncated).toBeUndefined();
+    });
+
+    it('recomputes bytesOutShaped from kept hits after a budget drop', () => {
+      const hits = Array.from({ length: 5 }, (_, i) =>
+        makeResult({ id: `doc-${i}`, content: 'a'.repeat(1000) })
+      );
+      const { response: shaped, metrics } = shapeHitPayloads(
+        makeResponse(hits),
+        baseOptions({ responseFormat: 'detailed', maxResponseBytes: 2500 })
+      );
+      expect(metrics.bytesOutShaped).toBe(shaped.results.length * 1000);
+    });
+
+    it('applies the budget in concise/truncate mode too (not only detailed)', () => {
+      const hits = Array.from({ length: 5 }, (_, i) =>
+        makeResult({ id: `doc-${i}`, content: 'a'.repeat(1000) })
+      );
+      const { response: shaped } = shapeHitPayloads(
+        makeResponse(hits),
+        baseOptions({ responseFormat: 'concise', maxResponseBytes: 2500 })
+      );
+      expect(shaped.results.length).toBeLessThan(5);
+      expect(shaped.budget_truncated?.dropped).toBe(5 - shaped.results.length);
+    });
+  });
+
   describe('summary mode', () => {
     it('drops chunk bodies but keeps id, score, collection, title, and structural metadata', () => {
       const r = makeResult({
