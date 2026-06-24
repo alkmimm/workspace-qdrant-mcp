@@ -246,6 +246,8 @@ fn test_queue_type_validation_vectors() {
     assert!(QueueOperation::Delete.is_valid_for(ItemType::File));
     assert!(!QueueOperation::Scan.is_valid_for(ItemType::File));
     assert!(QueueOperation::Scan.is_valid_for(ItemType::Folder));
+    // Folder+Uplift = the admin force re-embed's full rescan (was wrongly rejected).
+    assert!(QueueOperation::Uplift.is_valid_for(ItemType::Folder));
     assert!(QueueOperation::Delete.is_valid_for(ItemType::Tenant));
     assert!(!QueueOperation::Reset.is_valid_for(ItemType::Tenant));
     assert!(QueueOperation::Rename.is_valid_for(ItemType::File));
