@@ -4,7 +4,9 @@
  * Surfaces the daemon's GraphService (edges built from tree-sitter symbol
  * relations during ingestion) to MCP clients. Read-only. Actions:
  *   - stats     : node/edge counts by type (GetGraphStats)
- *   - relations : callers/callees N hops from a symbol (QueryRelated)
+ *   - relations : a symbol's dependencies N hops out (QueryRelated). Defaults to
+ *                 dependency edges (excludes CONTAINS membership; pass
+ *                 edgeTypes:["CONTAINS"] to list members instead).
  *   - impact    : what transitively depends on a symbol (ImpactAnalysis)
  *   - hotspots  : most central symbols by PageRank (ComputePageRank)
  *   - modules   : code communities/clusters (DetectCommunities)
@@ -49,6 +51,17 @@ function strArray(args: JsonObject, key: string): string[] | undefined {
   }
   return undefined;
 }
+
+/**
+ * Default edge types for `relations` — every dependency edge EXCEPT `CONTAINS`.
+ * Traversing CONTAINS from a class/struct returns its own members, so an
+ * unfiltered `relations` on a large class is an internal MEMBER INVENTORY, not a
+ * dependency map. Excluding CONTAINS by default makes `relations` answer "what
+ * does this symbol depend on" (calls / type uses / imports / inheritance). Pass
+ * `edgeTypes` explicitly (e.g. `["CONTAINS"]`) to override — the membership
+ * escape hatch.
+ */
+const RELATION_DEPENDENCY_EDGES = ['CALLS', 'IMPORTS', 'USES_TYPE', 'EXTENDS', 'IMPLEMENTS'];
 
 /**
  * SHA256(tenant_id|file_path|symbol_name|symbol_type)[..32 hex chars].
@@ -231,7 +244,10 @@ export async function handleGraph(
         // Daemon caps the traversal list to top_k (nearest-by-depth first) and
         // returns the true total. topK<=0 = all.
         top_k: num(args, 'topK') ?? 50,
-        ...(edgeTypes ? { edge_types: edgeTypes } : {}),
+        // Default to dependency edges (exclude CONTAINS membership) so relations
+        // is a DEPENDENCY MAP, not an internal member inventory. Explicit
+        // `edgeTypes` (e.g. ["CONTAINS"]) overrides — the membership escape hatch.
+        edge_types: edgeTypes ?? RELATION_DEPENDENCY_EDGES,
       };
       const r = await daemonClient.queryRelated(req);
       return { success: true, action, tenant_id: tenant, symbol, node_id: nodeId, ...r };
