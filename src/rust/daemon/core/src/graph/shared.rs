@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_stub_edges_skips_ambiguous() {
+    async fn test_resolve_stub_edges_keeps_ambiguous() {
         use super::super::{EdgeType, NodeType};
         let store = test_shared_store().await;
 
@@ -371,16 +371,28 @@ mod tests {
         let new_b = GraphNode::new(T, "y.rs", "new", NodeType::Function);
         let stub = GraphNode::stub(T, "new", NodeType::Function);
         store
-            .upsert_nodes(&[caller.clone(), new_a, new_b, stub.clone()])
+            .upsert_nodes(&[caller.clone(), new_a.clone(), new_b.clone(), stub.clone()])
             .await
             .unwrap();
         let dangling = GraphEdge::new(T, &caller.node_id, &stub.node_id, EdgeType::Calls, "a.rs");
         store.insert_edges(&[dangling]).await.unwrap();
 
+        // R1: the one dangling stub edge is RESOLVED (not skipped) — it fans out to
+        // BOTH same-named candidates with confidence 1/N, restoring recall.
         let repointed = store.resolve_stub_edges(T).await.unwrap();
-        assert_eq!(
-            repointed, 0,
-            "ambiguous name (2 defining files) must not repoint"
+        assert_eq!(repointed, 1, "ambiguous stub must resolve (keep-all-candidates)");
+
+        // Both candidates are now reachable from the caller (impact/usages recall).
+        let related = store
+            .query_related(T, &caller.node_id, 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap();
+        let targets: std::collections::HashSet<&str> =
+            related.iter().map(|n| n.node_id.as_str()).collect();
+        assert!(
+            targets.contains(new_a.node_id.as_str()) && targets.contains(new_b.node_id.as_str()),
+            "ambiguous call should reach every candidate, got {:?}",
+            targets
         );
     }
 
