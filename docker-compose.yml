@@ -213,6 +213,19 @@ services:
       # enabling: 100000 (~5MB at 50 chars/line — covers most legitimate
       # source files, drops CSV dumps / generated proto / lockfiles).
       WQM_FTS5_HARD_CAP: ${WQM_FTS5_HARD_CAP:-0}
+      # ── Graph centrality denoise (hotspots/bridges/modules only) ──────────
+      # These tune which nodes count toward PageRank/betweenness/community. They
+      # do NOT touch relations/impact/usages/search/grep. Read once per process,
+      # so changing them needs a memexd RESTART (force-recreate), not a reembed.
+      #   _EXCLUDE: comma-separated file_path substrings to drop from centrality
+      #     (e.g. "generated/,/test/,.pb.dart" — kill generated/test/vendored noise).
+      #   _GENERIC_THRESHOLD: drop a symbol NAME defined in more than N places
+      #     (generic in any language). Empty = corpus-derived max(15, total/500);
+      #     lower it (e.g. 20) to also catch build/newBuilder/compile; 0 = disable.
+      #   _SKIP_SYMBOLS: comma-separated exact symbol names to always drop.
+      WQM_GRAPH_CENTRALITY_EXCLUDE: ${WQM_GRAPH_CENTRALITY_EXCLUDE:-}
+      WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD: ${WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD:-}
+      WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS: ${WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS:-}
       # Daemon DB lives on the memexd_db named volume — see volumes section
       # above. Bind-mount on Docker Desktop 9P breaks SQLite WAL.
       WQM_DATABASE_PATH: /var/lib/memexd/memexd.db

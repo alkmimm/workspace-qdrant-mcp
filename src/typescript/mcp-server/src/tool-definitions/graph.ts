@@ -22,7 +22,7 @@ export const graphToolDefinition = {
         type: 'string',
         enum: ['stats', 'relations', 'impact', 'usages', 'hotspots', 'bridges', 'modules'],
         description:
-          "stats: node/edge counts. relations: callers/callees of a symbol. impact: transitive change blast-radius (direct + indirect dependents). usages: DIRECT references only (1-hop \"find references\"). hotspots: most central symbols (PageRank). bridges: bottleneck symbols on many shortest paths (betweenness). modules: code clusters. Default: 'stats'.",
+          "stats: node/edge counts. relations: a symbol's dependencies (calls/uses-type/imports/inheritance) — excludes CONTAINS membership by default, so a large class returns its dependencies, not its member list (pass edgeTypes:[\"CONTAINS\"] to list members). impact: transitive change blast-radius (direct + indirect dependents). usages: DIRECT references only (1-hop \"find references\"). hotspots: most central symbols (PageRank). bridges: bottleneck symbols on many shortest paths (betweenness). modules: code clusters. Default: 'stats'.",
       },
       symbol: {
         type: 'string',
@@ -70,7 +70,7 @@ export const graphToolDefinition = {
         type: 'array',
         items: { type: 'string' },
         description:
-          'Filter by edge type (e.g. ["CALLS","IMPORTS","CONTAINS","USES_TYPE"]). Empty/omitted = all edge types.',
+          'Filter by edge type (e.g. ["CALLS","IMPORTS","CONTAINS","USES_TYPE","EXTENDS","IMPLEMENTS"]). Omitted = all types for hotspots/bridges/modules, but dependency edges only (CONTAINS excluded) for relations.',
       },
       projectId: {
         type: 'string',

@@ -195,6 +195,8 @@ describe('handleGraph', () => {
       node_id: expectedId,
       max_hops: 2,
       top_k: 50,
+      // relations defaults to dependency edges (CONTAINS excluded).
+      edge_types: ['CALLS', 'IMPORTS', 'USES_TYPE', 'EXTENDS', 'IMPLEMENTS'],
     });
   });
 
@@ -235,7 +237,39 @@ describe('handleGraph', () => {
       node_id: id,
       max_hops: 1,
       top_k: 7,
+      edge_types: ['CALLS', 'IMPORTS', 'USES_TYPE', 'EXTENDS', 'IMPLEMENTS'],
     });
+  });
+
+  it('relations excludes CONTAINS by default; explicit edgeTypes overrides', async () => {
+    const { client, mocks } = mockClient();
+    const { detector } = mockDetector(null);
+    // Default: dependency edges only (membership inventory suppressed).
+    await handleGraph(
+      { action: 'relations', symbol: 'BigClass', filePath: 'a.rs', projectId: 't1' },
+      client,
+      detector
+    );
+    expect(mocks['queryRelated']).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        edge_types: ['CALLS', 'IMPORTS', 'USES_TYPE', 'EXTENDS', 'IMPLEMENTS'],
+      })
+    );
+    // Escape hatch: explicit CONTAINS to list members.
+    await handleGraph(
+      {
+        action: 'relations',
+        symbol: 'BigClass',
+        filePath: 'a.rs',
+        projectId: 't1',
+        edgeTypes: ['CONTAINS'],
+      },
+      client,
+      detector
+    );
+    expect(mocks['queryRelated']).toHaveBeenLastCalledWith(
+      expect.objectContaining({ edge_types: ['CONTAINS'] })
+    );
   });
 
   it('relations requires symbol and filePath', async () => {
