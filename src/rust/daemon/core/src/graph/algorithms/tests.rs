@@ -19,6 +19,21 @@ fn centrality_exclude_matches_substrings() {
     assert!(!is_centrality_excluded("src/old_project/legacy.rs", &[]));
 }
 
+#[test]
+fn centrality_generic_filter_is_dynamic_not_hardcoded() {
+    // There is NO built-in/per-language stoplist — genericity is frequency-derived,
+    // so nothing needs curating or updating per language. The env var is an optional
+    // manual override only, empty by default.
+    assert!(
+        centrality_manual_skip_symbols().is_empty(),
+        "must have no hardcoded stoplist"
+    );
+    // The threshold is corpus-derived: floored for a small graph, ~0.2% for a large
+    // one (so it adapts to a small lib vs a large monorepo, any language).
+    assert_eq!(centrality_generic_threshold(100), 15, "small corpus → floor (15)");
+    assert_eq!(centrality_generic_threshold(50_000), 100, "large corpus → ~0.2%");
+}
+
 /// Create an in-memory SQLite pool with graph schema.
 async fn setup_graph_pool() -> SqlitePool {
     let pool = SqlitePoolOptions::new()
