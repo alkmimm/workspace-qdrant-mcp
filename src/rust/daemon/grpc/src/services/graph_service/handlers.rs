@@ -330,20 +330,36 @@ impl GraphService for GraphServiceImpl {
 
                 let query_time_ms = start.elapsed().as_millis() as i64;
 
+                // Bound the per-community member list at the SOURCE. `top_k` caps
+                // the community COUNT, but each of the largest communities can hold
+                // thousands of members, so serializing them all still blows up the
+                // gRPC message (and the downstream MCP response). `member_limit`
+                // (0/absent = all) caps the per-community sample sent over the wire;
+                // `member_count` preserves each community's true size so callers can
+                // see how many were elided. The CLI omits member_limit and still
+                // receives the full list.
+                let member_limit = req.member_limit.filter(|&v| v > 0).map(|v| v as usize);
+
                 let proto_communities: Vec<CommunityProto> = communities
                     .into_iter()
-                    .map(|c| CommunityProto {
-                        community_id: c.community_id,
-                        members: c
+                    .map(|c| {
+                        let member_count = c.members.len() as u32;
+                        let members: Vec<CommunityMemberProto> = c
                             .members
                             .into_iter()
+                            .take(member_limit.unwrap_or(usize::MAX))
                             .map(|m| CommunityMemberProto {
                                 node_id: m.node_id,
                                 symbol_name: m.symbol_name,
                                 symbol_type: m.symbol_type,
                                 file_path: m.file_path,
                             })
-                            .collect(),
+                            .collect();
+                        CommunityProto {
+                            community_id: c.community_id,
+                            members,
+                            member_count,
+                        }
                     })
                     .collect();
 
