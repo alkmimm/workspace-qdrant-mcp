@@ -122,6 +122,41 @@ describe('handleGraph', () => {
     expect(result['action']).toBe('usages');
   });
 
+  it('usages returns only DIRECT references (distance===1); impact returns all', async () => {
+    const node = (name: string, distance: number) => ({
+      node_id: name,
+      symbol_name: name,
+      file_path: `${name}.rs`,
+      impact_type: distance === 1 ? 'direct_caller' : 'indirect_caller',
+      distance,
+    });
+    const mixed = {
+      impacted_nodes: [node('a', 1), node('b', 2), node('c', 1)],
+      total_impacted: 3,
+      query_time_ms: 1,
+    };
+    const { client } = mockClient({ impactAnalysis: vi.fn().mockResolvedValue(mixed) });
+    const { detector } = mockDetector(null);
+
+    const usages = (await handleGraph(
+      { action: 'usages', symbol: 'x', projectId: 't1' },
+      client,
+      detector
+    )) as Record<string, unknown>;
+    expect(
+      (usages['impacted_nodes'] as Array<{ distance: number }>).map((n) => n.distance)
+    ).toEqual([1, 1]);
+    expect(usages['total_impacted']).toBe(2);
+
+    const impact = (await handleGraph(
+      { action: 'impact', symbol: 'x', projectId: 't1' },
+      client,
+      detector
+    )) as Record<string, unknown>;
+    expect((impact['impacted_nodes'] as unknown[]).length).toBe(3);
+    expect(impact['total_impacted']).toBe(3);
+  });
+
   it('impact requires a symbol', async () => {
     const { client } = mockClient();
     const { detector } = mockDetector(null);
