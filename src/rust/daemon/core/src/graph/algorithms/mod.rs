@@ -11,7 +11,7 @@ pub use betweenness::{compute_betweenness_centrality, BetweennessEntry};
 pub use community::{detect_communities, Community, CommunityConfig, CommunityMember};
 pub use pagerank::{compute_pagerank, PageRankConfig, PageRankEntry};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use sqlx::{Row, SqlitePool};
@@ -62,6 +62,45 @@ fn is_centrality_excluded(file_path: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|p| file_path.contains(p.as_str()))
 }
 
+/// OPTIONAL manual override: symbol names to exclude from CENTRALITY regardless of
+/// frequency, via the comma-separated `WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS` env var.
+/// There is deliberately NO built-in or per-language list — genericity is derived
+/// DYNAMICALLY from definition frequency (see `centrality_generic_threshold`), so
+/// nothing needs curating or updating per language (fits the dynamic language
+/// registry). Empty/unset = none. Parsed once per process. (R3)
+fn centrality_manual_skip_symbols() -> &'static HashSet<String> {
+    static SYMBOLS: OnceLock<HashSet<String>> = OnceLock::new();
+    SYMBOLS.get_or_init(|| {
+        std::env::var("WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
+
+/// Definition-count threshold above which a symbol NAME is treated as generic and
+/// dropped from centrality. Corpus-derived and LANGUAGE-AGNOSTIC: a name defined in
+/// many places (toString/build/get — in ANY language) is central by ubiquity, not
+/// importance — exactly aider/deprank's data-driven model, no curated list. The
+/// default scales with corpus size (~0.2%, floored at 15) so it adapts to a small
+/// lib vs a large monorepo; override with an absolute
+/// `WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD` (0 disables the frequency filter). (R3)
+fn centrality_generic_threshold(total_definitions: usize) -> usize {
+    static OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
+    let ov = OVERRIDE.get_or_init(|| {
+        std::env::var("WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+    });
+    match *ov {
+        Some(0) => usize::MAX, // explicitly disabled
+        Some(n) => n,
+        None => std::cmp::max(15, total_definitions / 500),
+    }
+}
+
 /// Load the full adjacency graph for a tenant from SQLite.
 pub(super) async fn load_adjacency_graph(
     pool: &SqlitePool,
@@ -76,6 +115,18 @@ pub(super) async fn load_adjacency_graph(
     .bind(tenant_id)
     .fetch_all(pool)
     .await?;
+
+    // Pre-pass: count file-backed definitions per symbol name, for the dynamic
+    // genericity filter below (stubs with empty file_path don't count).
+    let mut def_count: HashMap<String, usize> = HashMap::new();
+    for row in &node_rows {
+        let fp: String = row.get("file_path");
+        if !fp.is_empty() {
+            *def_count.entry(row.get("symbol_name")).or_default() += 1;
+        }
+    }
+    let generic_threshold = centrality_generic_threshold(def_count.values().copied().sum());
+    let manual_skip = centrality_manual_skip_symbols();
 
     let mut nodes = HashMap::with_capacity(node_rows.len());
     let exclude = centrality_exclude_patterns();
@@ -101,11 +152,23 @@ pub(super) async fn load_adjacency_graph(
             excluded += 1;
             continue;
         }
+        let symbol_name: String = row.get("symbol_name");
+        // Dynamic genericity filter (R3): a name defined in MORE than the
+        // corpus-derived threshold is generic-by-ubiquity (toString/build/get — any
+        // language) and central by ubiquity, not importance → drop from centrality.
+        // Plus the optional manual env override. NO hardcoded per-language list.
+        // Centrality only; search/grep/relations/impact see the full graph.
+        if def_count.get(&symbol_name).copied().unwrap_or(0) > generic_threshold
+            || manual_skip.contains(&symbol_name)
+        {
+            excluded += 1;
+            continue;
+        }
         let node_id: String = row.get("node_id");
         nodes.insert(
             node_id,
             NodeInfo {
-                symbol_name: row.get("symbol_name"),
+                symbol_name,
                 symbol_type: row.get("symbol_type"),
                 file_path,
             },

@@ -129,15 +129,32 @@ fn build_pagerank_results(
     graph: &AdjacencyGraph,
     tenant_id: &str,
 ) -> Vec<PageRankEntry> {
+    // IDF demotion (R3): a symbol whose NAME recurs across many definitions
+    // (toString/build/get) is generic-by-ubiquity, not important — scale its rank by
+    // ln(N / count(name)) so distinctive symbols rise and ubiquitous ones sink
+    // (deprank/aider IDF model). Complements the symbol stoplist in the loader.
+    let total = graph.nodes.len().max(1) as f64;
+    let mut name_count: HashMap<&str, usize> = HashMap::new();
+    for info in graph.nodes.values() {
+        *name_count.entry(info.symbol_name.as_str()).or_default() += 1;
+    }
+
     let mut results: Vec<PageRankEntry> = scores
         .into_iter()
         .filter_map(|(id, score)| {
-            graph.nodes.get(id.as_str()).map(|info| PageRankEntry {
-                node_id: id,
-                symbol_name: info.symbol_name.clone(),
-                symbol_type: info.symbol_type.clone(),
-                file_path: info.file_path.clone(),
-                score,
+            graph.nodes.get(id.as_str()).map(|info| {
+                let count = name_count
+                    .get(info.symbol_name.as_str())
+                    .copied()
+                    .unwrap_or(1) as f64;
+                let idf = (total / count).ln().max(0.0);
+                PageRankEntry {
+                    node_id: id,
+                    symbol_name: info.symbol_name.clone(),
+                    symbol_type: info.symbol_type.clone(),
+                    file_path: info.file_path.clone(),
+                    score: score * idf,
+                }
             })
         })
         .collect();
