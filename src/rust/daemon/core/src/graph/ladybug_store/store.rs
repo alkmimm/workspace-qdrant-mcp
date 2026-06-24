@@ -338,6 +338,8 @@ impl GraphStore for LadybugGraphStore {
                     edge_type: String::new(),
                     depth: 1,
                     path: String::new(),
+                    // LadybugDB has no R1 weight model; report full confidence.
+                    confidence: 1.0,
                 });
             }
         }
@@ -379,6 +381,8 @@ impl GraphStore for LadybugGraphStore {
                     file_path: value_to_string(&row[2]),
                     impact_type: "caller".to_string(),
                     distance: 1,
+                    // LadybugDB has no R1 weight model; report full confidence.
+                    confidence: 1.0,
                 });
             }
         }

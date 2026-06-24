@@ -235,6 +235,7 @@ impl GraphStore for SqliteGraphStore {
         let query = format!(
             "WITH RECURSIVE graph_traverse AS (
                 SELECT e.target_node_id AS node_id, e.edge_type, 1 AS depth,
+                       COALESCE(e.weight, 1.0) AS confidence,
                        e.source_node_id || ' -> ' || e.target_node_id AS path
                 FROM graph_edges e
                 WHERE e.source_node_id = ?1 AND e.tenant_id = ?2 AND ?3 >= 1 {type_filter}
@@ -242,15 +243,22 @@ impl GraphStore for SqliteGraphStore {
                 UNION ALL
 
                 SELECT e.target_node_id, e.edge_type, gt.depth + 1,
+                       gt.confidence * COALESCE(e.weight, 1.0),
                        gt.path || ' -> ' || e.target_node_id
                 FROM graph_edges e
                 INNER JOIN graph_traverse gt ON e.source_node_id = gt.node_id
                 WHERE gt.depth < ?3 AND e.tenant_id = ?2 {type_filter}
             )
-            SELECT DISTINCT gt.node_id, gt.edge_type, gt.depth, gt.path,
-                   n.symbol_name, n.symbol_type, n.file_path
+            -- GROUP BY over the original DISTINCT columns preserves the row set
+            -- exactly (path + edge_type fix the edge chain, so confidence is unique
+            -- per group); MAX is the best-path weight product. (confidence-expose)
+            SELECT gt.node_id, gt.edge_type, gt.depth, gt.path,
+                   n.symbol_name, n.symbol_type, n.file_path,
+                   MAX(gt.confidence) AS confidence
             FROM graph_traverse gt
             JOIN graph_nodes n ON gt.node_id = n.node_id
+            GROUP BY gt.node_id, gt.edge_type, gt.depth, gt.path,
+                     n.symbol_name, n.symbol_type, n.file_path
             ORDER BY gt.depth, n.symbol_name"
         );
 
@@ -271,6 +279,7 @@ impl GraphStore for SqliteGraphStore {
                 edge_type: row.get("edge_type"),
                 depth: row.get::<i64, _>("depth") as u32,
                 path: row.get("path"),
+                confidence: row.get::<f64, _>("confidence"),
             })
             .collect();
 
@@ -443,17 +452,38 @@ impl GraphStore for SqliteGraphStore {
             by_name.entry(name).or_default().push((nid, fp, ty));
         }
 
+        // R2 scope map: member node_id -> its enclosing class/container node_id, from
+        // CONTAINS edges. Lets the resolver prefer a same-named callee defined in the
+        // CALLER's own class (cross-file methods of one class) over a tenant-wide
+        // collision — the precision tier above keep-all-candidates. (R2)
+        let contained_by: HashMap<String, String> = sqlx::query(
+            "SELECT source_node_id AS class_id, target_node_id AS member_id
+             FROM graph_edges
+             WHERE tenant_id = ?1 AND edge_type = 'CONTAINS'",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| (r.get::<String, _>("member_id"), r.get::<String, _>("class_id")))
+        .collect();
+
         // Resolve a stub name to real definition node(s), each with a CONFIDENCE
-        // weight (see docs/plans/2026-06-24-code-graph-resolution-roadmap.md, R1):
-        //   own-file definition  -> [(node, 1.0)]       precise
-        //   unique tenant-wide   -> [(node, 0.7)]       likely
-        //   ambiguous (N>1)      -> [(c, 1/N) for each] KEEP ALL (recall > precision)
-        //   external / no match  -> []                  leave it a stub
-        // Keeping ambiguous edges (instead of dropping them) is what restores
-        // impact/usages recall when same-named callees (build/of/toString/domain
-        // methods) collide across files. `container_only` restricts the pool to
-        // container kinds — used for CONTAINS parents.
-        let pick_all = |name: &str, own_file: &str, container_only: bool| -> Vec<(String, f64)> {
+        // weight (see docs/plans/2026-06-24-code-graph-resolution-roadmap.md, R1/R2):
+        //   own-file definition       -> [(node, 1.0)]       precise
+        //   caller's class (R2 scope) -> [(node, 0.95)]      scoped
+        //   unique tenant-wide        -> [(node, 0.7)]       likely
+        //   ambiguous (N>1)           -> [(c, 1/N) for each] KEEP ALL (recall>precision)
+        //   external / no match       -> []                  leave it a stub
+        // Keeping ambiguous edges (instead of dropping them) restores impact/usages
+        // recall when same-named callees (build/of/toString/domain methods) collide
+        // across files; the scope tier then recovers PRECISION for the common
+        // intra-class case. `container_only` restricts the pool to container kinds.
+        let pick_all = |name: &str,
+                        own_file: &str,
+                        caller_class: Option<&str>,
+                        container_only: bool|
+         -> Vec<(String, f64)> {
             let Some(candidates) = by_name.get(name) else {
                 return Vec::new();
             };
@@ -468,6 +498,17 @@ impl GraphStore for SqliteGraphStore {
             // Prefer a definition in the edge's own file (precise).
             if let Some((nid, _)) = pool.iter().find(|(_, fp)| *fp == own_file) {
                 return vec![((*nid).to_string(), 1.0)];
+            }
+            // R2: prefer a candidate in the CALLER's own enclosing class (e.g. a
+            // sibling/inherited method defined in another file) over a tenant-wide
+            // collision — the scope-aware precision tier.
+            if let Some(cc) = caller_class {
+                if let Some((nid, _)) = pool
+                    .iter()
+                    .find(|(nid, _)| contained_by.get(*nid).map(String::as_str) == Some(cc))
+                {
+                    return vec![((*nid).to_string(), 0.95)];
+                }
             }
             // A unique tenant-wide name.
             if pool.len() == 1 {
@@ -485,6 +526,8 @@ impl GraphStore for SqliteGraphStore {
         let resolution_metadata = |confidence: f64, n: usize| -> String {
             let tier = if confidence >= 0.99 {
                 "in_file"
+            } else if confidence >= 0.9 {
+                "scoped"
             } else if n == 1 {
                 "tenant_unique"
             } else {
@@ -506,11 +549,13 @@ impl GraphStore for SqliteGraphStore {
         for d in &target_dangling {
             let peer_name: String = d.get("peer_name");
             let source_file: String = d.get("source_file");
-            let candidates = pick_all(&peer_name, &source_file, false);
+            let source_node_id: String = d.get("source_node_id");
+            // R2: the caller's enclosing class, used to prefer a same-class callee.
+            let caller_class = contained_by.get(&source_node_id).map(String::as_str);
+            let candidates = pick_all(&peer_name, &source_file, caller_class, false);
             if candidates.is_empty() {
                 continue; // external/stdlib or unresolved — leave it a stub.
             }
-            let source_node_id: String = d.get("source_node_id");
             let edge_type_str: String = d.get("edge_type");
             let Some(edge_type) = EdgeType::from_str(&edge_type_str) else {
                 continue;
@@ -560,7 +605,7 @@ impl GraphStore for SqliteGraphStore {
             let source_file: String = d.get("source_file");
             // Containment is structural (one owner): keep ONLY a confident match
             // (own-file or tenant-unique), never fan out an ambiguous container name.
-            let Some(new_source) = pick_all(&peer_name, &source_file, true)
+            let Some(new_source) = pick_all(&peer_name, &source_file, None, true)
                 .into_iter()
                 .find(|(_, c)| *c >= 0.7)
                 .map(|(nid, _)| nid)
@@ -671,21 +716,27 @@ impl SqliteGraphStore {
     ) -> GraphDbResult<Vec<ImpactNode>> {
         let rows = sqlx::query(
             "WITH RECURSIVE reverse_traverse AS (
-                SELECT e.source_node_id AS node_id, e.edge_type, 1 AS depth
+                SELECT e.source_node_id AS node_id, e.edge_type, 1 AS depth,
+                       COALESCE(e.weight, 1.0) AS confidence
                 FROM graph_edges e
                 WHERE e.target_node_id = ?1 AND e.tenant_id = ?2
 
                 UNION ALL
 
-                SELECT e.source_node_id, e.edge_type, rt.depth + 1
+                SELECT e.source_node_id, e.edge_type, rt.depth + 1,
+                       rt.confidence * COALESCE(e.weight, 1.0)
                 FROM graph_edges e
                 INNER JOIN reverse_traverse rt ON e.target_node_id = rt.node_id
                 WHERE rt.depth < 3 AND e.tenant_id = ?2
             )
-            SELECT DISTINCT rt.node_id, rt.edge_type, rt.depth,
-                   n.symbol_name, n.file_path
+            -- Same (node,edge_type,depth) reachable by several paths collapses to one
+            -- row (as the original DISTINCT did); MAX keeps the most-confident path's
+            -- weight product. (confidence-expose)
+            SELECT rt.node_id, rt.edge_type, rt.depth,
+                   n.symbol_name, n.file_path, MAX(rt.confidence) AS confidence
             FROM reverse_traverse rt
             JOIN graph_nodes n ON rt.node_id = n.node_id
+            GROUP BY rt.node_id, rt.edge_type, rt.depth, n.symbol_name, n.file_path
             ORDER BY rt.depth, n.symbol_name",
         )
         .bind(target_id)
@@ -711,6 +762,7 @@ impl SqliteGraphStore {
                     file_path: row.get("file_path"),
                     impact_type: impact_type.to_string(),
                     distance: depth as u32,
+                    confidence: row.get::<f64, _>("confidence"),
                 }
             })
             .collect())

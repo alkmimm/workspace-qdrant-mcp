@@ -267,6 +267,12 @@ pub struct TraversalNode {
     pub edge_type: String,
     pub depth: u32,
     pub path: String,
+    /// Resolution confidence of the edge(s) traversed to reach this node, in
+    /// [0,1]: the product of edge weights along the best path. 1.0 = precise
+    /// (own-file/pre-R1), 0.95 = same-class scope (R2), 0.7 = tenant-unique,
+    /// <0.6 = one of N ambiguous same-name candidates (R1 fan-out). Lets a
+    /// caller rank/filter usages by how sure the resolver was.
+    pub confidence: f64,
 }
 
 /// Result of an impact analysis query.
@@ -285,6 +291,12 @@ pub struct ImpactNode {
     pub file_path: String,
     pub impact_type: String,
     pub distance: u32,
+    /// Resolution confidence of the path from the changed symbol to this node,
+    /// in [0,1]: the product of edge weights along the best reverse path. 1.0 =
+    /// precise, 0.95 = same-class scope (R2), 0.7 = tenant-unique, <0.6 = one of
+    /// N ambiguous same-name candidates (R1 fan-out). Lets a caller distinguish
+    /// a sure caller from a name-collision guess in the blast radius.
+    pub confidence: f64,
 }
 
 /// Graph statistics.

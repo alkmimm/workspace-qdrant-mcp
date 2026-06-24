@@ -69,6 +69,8 @@ export interface TraversalNodeProto {
   edge_type: string;
   depth: number;
   path: string;
+  /** Best-path edge-weight product in [0,1]: resolution certainty (1.0 precise, 0.95 scoped, 0.7 tenant-unique, <0.6 ambiguous name-collision). */
+  confidence: number;
 }
 
 export interface ImpactAnalysisRequest {
@@ -91,6 +93,8 @@ export interface ImpactNodeProto {
   file_path: string;
   impact_type: string;
   distance: number;
+  /** Best-path edge-weight product in [0,1]: resolution certainty (1.0 precise, 0.95 scoped, 0.7 tenant-unique, <0.6 ambiguous name-collision). */
+  confidence: number;
 }
 
 export interface PageRankRequest {

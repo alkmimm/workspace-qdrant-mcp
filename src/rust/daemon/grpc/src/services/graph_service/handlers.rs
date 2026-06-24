@@ -95,6 +95,7 @@ impl GraphService for GraphServiceImpl {
                         edge_type: n.edge_type,
                         depth: n.depth,
                         path: n.path,
+                        confidence: n.confidence,
                     })
                     .collect();
 
@@ -169,6 +170,7 @@ impl GraphService for GraphServiceImpl {
                         file_path: n.file_path,
                         impact_type: n.impact_type,
                         distance: n.distance,
+                        confidence: n.confidence,
                     })
                     .collect();
 

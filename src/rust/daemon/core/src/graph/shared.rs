@@ -397,6 +397,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_stub_edges_scope_prefers_caller_class() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // Class A (y.rs) contains caller (x.rs) and method m (y.rs); class B (z.rs)
+        // defines its own m. The call `m()` from caller is ambiguous by name, but
+        // caller's own file has no `m`, so R1's own-file tier misses. The SCOPE
+        // tier must pick A's m (same class as the caller), NOT B's m — even though
+        // both are tenant-visible candidates.
+        let class_a = GraphNode::new(T, "y.rs", "A", NodeType::Struct);
+        let class_b = GraphNode::new(T, "z.rs", "B", NodeType::Struct);
+        let caller = GraphNode::new(T, "x.rs", "caller", NodeType::Function);
+        let m_a = GraphNode::new(T, "y.rs", "m", NodeType::Function);
+        let m_b = GraphNode::new(T, "z.rs", "m", NodeType::Function);
+        let stub = GraphNode::stub(T, "m", NodeType::Function);
+        store
+            .upsert_nodes(&[
+                class_a.clone(),
+                class_b.clone(),
+                caller.clone(),
+                m_a.clone(),
+                m_b.clone(),
+                stub.clone(),
+            ])
+            .await
+            .unwrap();
+        store
+            .insert_edges(&[
+                // CONTAINS edges define class membership (build the scope map).
+                GraphEdge::new(T, &class_a.node_id, &caller.node_id, EdgeType::Contains, "y.rs"),
+                GraphEdge::new(T, &class_a.node_id, &m_a.node_id, EdgeType::Contains, "y.rs"),
+                GraphEdge::new(T, &class_b.node_id, &m_b.node_id, EdgeType::Contains, "z.rs"),
+                // The ambiguous, name-only call.
+                GraphEdge::new(T, &caller.node_id, &stub.node_id, EdgeType::Calls, "x.rs"),
+            ])
+            .await
+            .unwrap();
+
+        let repointed = store.resolve_stub_edges(T).await.unwrap();
+        assert_eq!(repointed, 1, "scoped stub must resolve to a single candidate");
+
+        // The call resolves to A's m (same class) and NOT to B's m.
+        let callees = store
+            .query_related(T, &caller.node_id, 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap();
+        let ids: std::collections::HashSet<&str> =
+            callees.iter().map(|n| n.node_id.as_str()).collect();
+        assert!(
+            ids.contains(m_a.node_id.as_str()),
+            "scope should resolve to the caller's own class method (A.m)"
+        );
+        assert!(
+            !ids.contains(m_b.node_id.as_str()),
+            "scope must NOT fan out to the other class's method (B.m)"
+        );
+    }
+
+    #[tokio::test]
     async fn test_resolve_stub_edges_repoints_contains_source() {
         use super::super::{EdgeType, NodeType};
         let store = test_shared_store().await;
