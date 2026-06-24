@@ -109,10 +109,16 @@ impl QueueOperation {
             (ItemType::Doc, QueueOperation::Uplift) => true,
             (ItemType::Doc, _) => false,
 
-            // Folder: delete, scan, rename
+            // Folder: delete, scan, rename, uplift
             (ItemType::Folder, QueueOperation::Delete) => true,
             (ItemType::Folder, QueueOperation::Scan) => true,
             (ItemType::Folder, QueueOperation::Rename) => true,
+            // Uplift = the admin force re-embed's FULL rescan: the folder strategy
+            // treats it as a rescan with last_scan=None (full, not incremental) and
+            // propagates payload.uplift to re-process every file, bypassing the
+            // unchanged-hash skip (exec_reembed_tenant). Without this entry the
+            // force re-embed always errored "uplift not valid for item type folder".
+            (ItemType::Folder, QueueOperation::Uplift) => true,
             (ItemType::Folder, _) => false,
 
             // Tenant: add, update, delete, scan, rename, uplift
