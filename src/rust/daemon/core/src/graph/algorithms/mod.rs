@@ -12,6 +12,7 @@ pub use community::{detect_communities, Community, CommunityConfig, CommunityMem
 pub use pagerank::{compute_pagerank, PageRankConfig, PageRankEntry};
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use sqlx::{Row, SqlitePool};
 use tracing::debug;
@@ -37,6 +38,30 @@ pub(super) struct AdjacencyGraph {
     pub(super) incoming: HashMap<String, Vec<String>>,
 }
 
+/// Path substrings that exclude a node from CENTRALITY (hotspots/bridges/modules)
+/// — NOT from search/grep/relations/impact, which never call this loader. Set via
+/// the `WQM_GRAPH_CENTRALITY_EXCLUDE` env var (comma-separated substrings), e.g.
+/// `old_project/,/test/,Test.java`. A node is excluded when its file_path CONTAINS
+/// any pattern. Without this, legacy/test/util code (`old_project/`, `assertEquals`,
+/// util builders) dominates PageRank/betweenness/community and buries the real,
+/// current hotspots. Empty/unset = no exclusion. Parsed once per process.
+fn centrality_exclude_patterns() -> &'static [String] {
+    static PATTERNS: OnceLock<Vec<String>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        std::env::var("WQM_GRAPH_CENTRALITY_EXCLUDE")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
+
+/// True if `file_path` matches any centrality-exclude pattern (substring match).
+fn is_centrality_excluded(file_path: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| file_path.contains(p.as_str()))
+}
+
 /// Load the full adjacency graph for a tenant from SQLite.
 pub(super) async fn load_adjacency_graph(
     pool: &SqlitePool,
@@ -53,6 +78,8 @@ pub(super) async fn load_adjacency_graph(
     .await?;
 
     let mut nodes = HashMap::with_capacity(node_rows.len());
+    let exclude = centrality_exclude_patterns();
+    let mut excluded = 0usize;
     for row in &node_rows {
         let file_path: String = row.get("file_path");
         // Skip unresolved stub nodes. `GraphNode::stub` keys a node on its bare
@@ -64,6 +91,14 @@ pub(super) async fn load_adjacency_graph(
         // nodes; an edge that still points at a skipped stub simply contributes
         // no rank (its id is absent from `nodes`, treated as 0.0 downstream).
         if file_path.is_empty() {
+            continue;
+        }
+        // Skip nodes on centrality-excluded paths (legacy/test/util noise, via the
+        // WQM_GRAPH_CENTRALITY_EXCLUDE env var). Edges to them auto-drop below (the
+        // same "endpoint absent from `nodes`" logic that drops stub edges), so
+        // out-degrees stay accurate.
+        if !exclude.is_empty() && is_centrality_excluded(&file_path, exclude) {
+            excluded += 1;
             continue;
         }
         let node_id: String = row.get("node_id");
@@ -125,6 +160,7 @@ pub(super) async fn load_adjacency_graph(
         nodes = nodes.len(),
         edges = edge_rows.len(),
         dropped_dangling,
+        excluded,
         "Loaded adjacency graph"
     );
 
