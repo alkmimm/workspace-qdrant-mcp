@@ -2,6 +2,23 @@ use super::*;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
+#[test]
+fn centrality_exclude_matches_substrings() {
+    let patterns = vec![
+        "old_project/".to_string(),
+        "/test/".to_string(),
+        "Test.java".to_string(),
+    ];
+    // Prefix, mid-path, and suffix patterns all match via substring.
+    assert!(is_centrality_excluded("src/old_project/legacy.rs", &patterns));
+    assert!(is_centrality_excluded("app/src/test/Helper.kt", &patterns));
+    assert!(is_centrality_excluded("api/UserTest.java", &patterns));
+    // Real, current source is kept.
+    assert!(!is_centrality_excluded("src/core/user.rs", &patterns));
+    // An empty pattern list never excludes.
+    assert!(!is_centrality_excluded("src/old_project/legacy.rs", &[]));
+}
+
 /// Create an in-memory SQLite pool with graph schema.
 async fn setup_graph_pool() -> SqlitePool {
     let pool = SqlitePoolOptions::new()
