@@ -112,19 +112,23 @@ pub(super) async fn load_adjacency_graph(
         );
     }
 
-    // Load edges with optional type filter
+    // Load edges with optional type filter. Centrality consumes only HIGH-confidence
+    // edges (weight >= 0.6): this excludes the 1/N ambiguous fan-out emitted by
+    // resolve_stub_edges (R1) so a name collision cannot inflate PageRank/betweenness,
+    // while impact/usages (which query graph_edges directly) still traverse every
+    // candidate. Pre-R1 edges default to weight 1.0 and are unaffected.
     let edge_rows = if let Some(types) = edge_types {
         let placeholders: Vec<String> = types.iter().map(|t| format!("'{}'", t)).collect();
         let query = format!(
             "SELECT source_node_id, target_node_id FROM graph_edges
-             WHERE tenant_id = ?1 AND edge_type IN ({})",
+             WHERE tenant_id = ?1 AND weight >= 0.6 AND edge_type IN ({})",
             placeholders.join(", ")
         );
         sqlx::query(&query).bind(tenant_id).fetch_all(pool).await?
     } else {
         sqlx::query(
             "SELECT source_node_id, target_node_id FROM graph_edges
-             WHERE tenant_id = ?1",
+             WHERE tenant_id = ?1 AND weight >= 0.6",
         )
         .bind(tenant_id)
         .fetch_all(pool)

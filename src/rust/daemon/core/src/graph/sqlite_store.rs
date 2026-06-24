@@ -443,79 +443,114 @@ impl GraphStore for SqliteGraphStore {
             by_name.entry(name).or_default().push((nid, fp, ty));
         }
 
-        // Pick the real node for a stub of the given name: prefer a definition
-        // in the edge's own file, else a unique tenant-wide match (ambiguous
-        // names are skipped). `container_only` restricts the pool to container
-        // kinds — used for CONTAINS parents.
-        let pick = |name: &str, own_file: &str, container_only: bool| -> Option<String> {
-            let candidates = by_name.get(name)?;
-            // (node_id, file_path) of eligible candidates.
+        // Resolve a stub name to real definition node(s), each with a CONFIDENCE
+        // weight (see docs/plans/2026-06-24-code-graph-resolution-roadmap.md, R1):
+        //   own-file definition  -> [(node, 1.0)]       precise
+        //   unique tenant-wide   -> [(node, 0.7)]       likely
+        //   ambiguous (N>1)      -> [(c, 1/N) for each] KEEP ALL (recall > precision)
+        //   external / no match  -> []                  leave it a stub
+        // Keeping ambiguous edges (instead of dropping them) is what restores
+        // impact/usages recall when same-named callees (build/of/toString/domain
+        // methods) collide across files. `container_only` restricts the pool to
+        // container kinds — used for CONTAINS parents.
+        let pick_all = |name: &str, own_file: &str, container_only: bool| -> Vec<(String, f64)> {
+            let Some(candidates) = by_name.get(name) else {
+                return Vec::new();
+            };
             let pool: Vec<(&str, &str)> = candidates
                 .iter()
                 .filter(|(_, _, ty)| !container_only || Self::is_container_node_type(ty))
                 .map(|(nid, fp, _)| (nid.as_str(), fp.as_str()))
                 .collect();
-            // Prefer a definition in the edge's own file.
+            if pool.is_empty() {
+                return Vec::new();
+            }
+            // Prefer a definition in the edge's own file (precise).
             if let Some((nid, _)) = pool.iter().find(|(_, fp)| *fp == own_file) {
-                return Some((*nid).to_string());
+                return vec![((*nid).to_string(), 1.0)];
             }
-            // Else accept a unique tenant-wide match; ambiguous names are skipped.
-            match pool.as_slice() {
-                [(nid, _)] => Some((*nid).to_string()),
-                _ => None,
+            // A unique tenant-wide name.
+            if pool.len() == 1 {
+                return vec![(pool[0].0.to_string(), 0.7)];
             }
+            // Ambiguous: keep EVERY candidate, confidence 1/N. The fan-out is
+            // normalized so centrality (which consumes only high-confidence edges,
+            // weight >= 0.6) is not inflated, while impact/usages see all candidates.
+            let conf = 1.0 / pool.len() as f64;
+            pool.iter()
+                .map(|(nid, _)| ((*nid).to_string(), conf))
+                .collect()
+        };
+        // Compact resolution provenance stamped onto each repointed edge's metadata.
+        let resolution_metadata = |confidence: f64, n: usize| -> String {
+            let tier = if confidence >= 0.99 {
+                "in_file"
+            } else if n == 1 {
+                "tenant_unique"
+            } else {
+                "ambiguous"
+            };
+            format!(
+                "{{\"resolution\":\"{}\",\"confidence\":{:.4},\"candidates\":{}}}",
+                tier, confidence, n
+            )
         };
 
         let now = now_utc();
         let mut repointed: u64 = 0;
         let mut tx = self.pool.begin().await?;
 
-        // Pass 1 — target-stub edges: repoint the TARGET to the real node.
+        // Pass 1 — target-stub edges: repoint the TARGET to the real node(s).
+        // Ambiguous names fan out to every candidate (confidence 1/N) instead of
+        // being dropped; external/unresolved names yield no candidate and stay stubs.
         for d in &target_dangling {
             let peer_name: String = d.get("peer_name");
             let source_file: String = d.get("source_file");
-            let Some(new_target) = pick(&peer_name, &source_file, false) else {
-                continue; // external/stdlib, ambiguous, or unresolved.
-            };
-            let source_node_id: String = d.get("source_node_id");
-            // Skip self-loops (e.g. direct recursion) — they add no signal and
-            // skew centrality.
-            if source_node_id == new_target {
-                continue;
+            let candidates = pick_all(&peer_name, &source_file, false);
+            if candidates.is_empty() {
+                continue; // external/stdlib or unresolved — leave it a stub.
             }
+            let source_node_id: String = d.get("source_node_id");
             let edge_type_str: String = d.get("edge_type");
             let Some(edge_type) = EdgeType::from_str(&edge_type_str) else {
                 continue;
             };
             let old_edge_id: String = d.get("edge_id");
-            let weight: f64 = d.get("weight");
-            let metadata_json: Option<String> = d.get("metadata_json");
-            let new_edge_id = compute_edge_id(&source_node_id, &new_target, edge_type);
-
-            sqlx::query(
-                "INSERT OR IGNORE INTO graph_edges
-                    (edge_id, tenant_id, source_node_id, target_node_id, edge_type,
-                     source_file, weight, metadata_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )
-            .bind(&new_edge_id)
-            .bind(tenant_id)
-            .bind(&source_node_id)
-            .bind(&new_target)
-            .bind(edge_type.as_str())
-            .bind(&source_file)
-            .bind(weight)
-            .bind(&metadata_json)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
-
-            sqlx::query("DELETE FROM graph_edges WHERE edge_id = ?1 AND tenant_id = ?2")
-                .bind(&old_edge_id)
+            let mut emitted = false;
+            for (new_target, confidence) in &candidates {
+                // Skip self-loops (e.g. direct recursion) — no signal, skews centrality.
+                if &source_node_id == new_target {
+                    continue;
+                }
+                let new_edge_id = compute_edge_id(&source_node_id, new_target, edge_type);
+                let meta = resolution_metadata(*confidence, candidates.len());
+                sqlx::query(
+                    "INSERT OR IGNORE INTO graph_edges
+                        (edge_id, tenant_id, source_node_id, target_node_id, edge_type,
+                         source_file, weight, metadata_json, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .bind(&new_edge_id)
                 .bind(tenant_id)
+                .bind(&source_node_id)
+                .bind(new_target)
+                .bind(edge_type.as_str())
+                .bind(&source_file)
+                .bind(*confidence)
+                .bind(&meta)
+                .bind(&now)
                 .execute(&mut *tx)
                 .await?;
-            repointed += 1;
+                emitted = true;
+            }
+            if emitted {
+                sqlx::query("DELETE FROM graph_edges WHERE edge_id = ?1 AND tenant_id = ?2")
+                    .bind(&old_edge_id)
+                    .bind(tenant_id)
+                    .execute(&mut *tx)
+                    .await?;
+                repointed += 1;
+            }
         }
 
         // Pass 2 — source-stub edges (CONTAINS from a file-less container stub):
@@ -523,7 +558,13 @@ impl GraphStore for SqliteGraphStore {
         for d in &source_dangling {
             let peer_name: String = d.get("peer_name");
             let source_file: String = d.get("source_file");
-            let Some(new_source) = pick(&peer_name, &source_file, true) else {
+            // Containment is structural (one owner): keep ONLY a confident match
+            // (own-file or tenant-unique), never fan out an ambiguous container name.
+            let Some(new_source) = pick_all(&peer_name, &source_file, true)
+                .into_iter()
+                .find(|(_, c)| *c >= 0.7)
+                .map(|(nid, _)| nid)
+            else {
                 continue;
             };
             let target_node_id: String = d.get("target_node_id");
