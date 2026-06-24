@@ -117,9 +117,12 @@ export async function handleGraph(
       const symbol = str(args, 'symbol');
       if (!symbol) throw new Error(`graph action '${action}' requires \`symbol\``);
       const filePath = str(args, 'filePath');
+      // Bound the impacted-node list: the daemon caps to top_k (nearest-by-depth
+      // first) and still returns the true total_impacted. topK<=0 = all.
       const req: ImpactAnalysisRequest = {
         tenant_id: tenant,
         symbol_name: symbol,
+        top_k: num(args, 'topK') ?? 50,
         ...(filePath ? { file_path: filePath } : {}),
       };
       const r = await daemonClient.impactAnalysis(req);
@@ -200,6 +203,9 @@ export async function handleGraph(
         tenant_id: tenant,
         node_id: nodeId,
         max_hops: num(args, 'maxHops') ?? 1,
+        // Daemon caps the traversal list to top_k (nearest-by-depth first) and
+        // returns the true total. topK<=0 = all.
+        top_k: num(args, 'topK') ?? 50,
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
       };
       const r = await daemonClient.queryRelated(req);

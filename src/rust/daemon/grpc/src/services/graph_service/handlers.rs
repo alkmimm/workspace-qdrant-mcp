@@ -38,6 +38,10 @@ impl GraphService for GraphServiceImpl {
         }
 
         let max_hops = req.max_hops.clamp(0, 5);
+        // Bound the result list at the daemon (the query ORDERs BY depth, so this
+        // keeps the nearest nodes). 0/absent = all, so `wqm graph query` (CLI) is
+        // unchanged — otherwise a hub node's N-hop fan-out is serialized whole.
+        let top_k = req.top_k.filter(|&v| v > 0).map(|v| v as usize);
 
         // Parse edge type filters
         let edge_types: Option<Vec<EdgeType>> = if req.edge_types.is_empty() {
@@ -82,6 +86,7 @@ impl GraphService for GraphServiceImpl {
 
                 let proto_nodes: Vec<TraversalNodeProto> = nodes
                     .into_iter()
+                    .take(top_k.unwrap_or(usize::MAX))
                     .map(|n| TraversalNodeProto {
                         node_id: n.node_id,
                         symbol_name: n.symbol_name,
@@ -129,6 +134,11 @@ impl GraphService for GraphServiceImpl {
             None => None,
         };
 
+        // Bound the impacted-node list at the daemon (reverse_traverse ORDERs BY
+        // depth, so this keeps the nearest callers). 0/absent = all, so
+        // `wqm graph impact` (CLI) is unchanged; total_impacted stays the TRUE count.
+        let top_k = req.top_k.filter(|&v| v > 0).map(|v| v as usize);
+
         debug!(
             "GraphService.ImpactAnalysis: tenant={} symbol={} file={:?}",
             req.tenant_id, req.symbol_name, validated_file_path
@@ -152,6 +162,7 @@ impl GraphService for GraphServiceImpl {
                 let impacted_nodes: Vec<ImpactNodeProto> = report
                     .impacted_nodes
                     .into_iter()
+                    .take(top_k.unwrap_or(usize::MAX))
                     .map(|n| ImpactNodeProto {
                         node_id: n.node_id,
                         symbol_name: n.symbol_name,

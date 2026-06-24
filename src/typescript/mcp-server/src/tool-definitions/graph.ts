@@ -48,7 +48,7 @@ export const graphToolDefinition = {
         type: 'number',
         default: 20,
         description:
-          "Number of top results for 'hotspots' and 'bridges', and the top-K largest clusters for 'modules' (default 20).",
+          "Max results: top symbols for 'hotspots'/'bridges', top-K largest clusters for 'modules' (default 20), and max nodes returned for 'impact'/'usages'/'relations' (nearest-first, default 50; 0 = all — the true total is still reported).",
       },
       maxSamples: {
         type: 'number',

@@ -101,6 +101,7 @@ describe('handleGraph', () => {
     expect(mocks['impactAnalysis']).toHaveBeenCalledWith({
       tenant_id: 't1',
       symbol_name: 'authenticate',
+      top_k: 50,
       file_path: 'src/auth.rs',
     });
   });
@@ -116,6 +117,7 @@ describe('handleGraph', () => {
     expect(mocks['impactAnalysis']).toHaveBeenCalledWith({
       tenant_id: 't1',
       symbol_name: 'parse',
+      top_k: 50,
     });
     expect(result['action']).toBe('usages');
   });
@@ -157,6 +159,47 @@ describe('handleGraph', () => {
       tenant_id: 't1',
       node_id: expectedId,
       max_hops: 2,
+      top_k: 50,
+    });
+  });
+
+  it('caps impact/usages/relations at topK (default 50, override, 0=all)', async () => {
+    const { client, mocks } = mockClient();
+    const { detector } = mockDetector(null);
+    // Override flows through to the daemon for impact...
+    await handleGraph(
+      { action: 'impact', symbol: 'authenticate', projectId: 't1', topK: 5 },
+      client,
+      detector
+    );
+    expect(mocks['impactAnalysis']).toHaveBeenLastCalledWith({
+      tenant_id: 't1',
+      symbol_name: 'authenticate',
+      top_k: 5,
+    });
+    // ...and topK:0 (all) is forwarded verbatim — the daemon treats 0 as no cap.
+    await handleGraph(
+      { action: 'usages', symbol: 'parse', projectId: 't1', topK: 0 },
+      client,
+      detector
+    );
+    expect(mocks['impactAnalysis']).toHaveBeenLastCalledWith({
+      tenant_id: 't1',
+      symbol_name: 'parse',
+      top_k: 0,
+    });
+    // relations is capped too (default maxHops 1).
+    await handleGraph(
+      { action: 'relations', symbol: 'x', filePath: 'a.rs', projectId: 't1', topK: 7 },
+      client,
+      detector
+    );
+    const id = computeNodeId('t1', 'a.rs', 'x', 'function');
+    expect(mocks['queryRelated']).toHaveBeenLastCalledWith({
+      tenant_id: 't1',
+      node_id: id,
+      max_hops: 1,
+      top_k: 7,
     });
   });
 

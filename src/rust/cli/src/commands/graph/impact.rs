@@ -29,6 +29,8 @@ pub async fn impact_analysis(
             tenant_id: tenant_id.to_string(),
             symbol_name: symbol_name.to_string(),
             file_path,
+            // CLI shows all impacted nodes; top_k (MCP-only cap) stays unset.
+            top_k: None,
         })
         .await
         .context("ImpactAnalysis RPC failed")?
