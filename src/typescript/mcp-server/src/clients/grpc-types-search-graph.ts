@@ -51,6 +51,8 @@ export interface QueryRelatedRequest {
   node_id: string;
   max_hops: number;
   edge_types?: string[];
+  /** Max nodes returned, nearest-first (0/absent = all). */
+  top_k?: number;
 }
 
 export interface QueryRelatedResponse {
@@ -73,6 +75,8 @@ export interface ImpactAnalysisRequest {
   tenant_id: string;
   symbol_name: string;
   file_path?: string;
+  /** Max impacted nodes returned, nearest-first (0/absent = all). */
+  top_k?: number;
 }
 
 export interface ImpactAnalysisResponse {

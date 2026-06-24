@@ -32,6 +32,8 @@ pub async fn query_related(
             node_id: node_id.to_string(),
             max_hops,
             edge_types,
+            // CLI shows the full traversal; top_k (MCP-only cap) stays unset.
+            top_k: None,
         })
         .await
         .context("QueryRelated RPC failed")?

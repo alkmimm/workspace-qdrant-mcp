@@ -721,6 +721,7 @@ message QueryRelatedRequest {
     string node_id = 2;                           // Node ID to query from
     uint32 max_hops = 3;                          // Max traversal depth (1-5)
     repeated string edge_types = 4;               // Filter: ["CALLS", "IMPORTS"], empty = all
+    optional uint32 top_k = 5;                    // Max nodes returned, nearest-first (0/absent = all)
 }
 
 // QueryRelated Response
@@ -746,6 +747,7 @@ message ImpactAnalysisRequest {
     string tenant_id = 1;                         // Project tenant_id
     string symbol_name = 2;                       // Symbol to analyze
     optional string file_path = 3;                // [relative] Narrow to specific file (relative path)
+    optional uint32 top_k = 4;                    // Max impacted nodes returned, nearest-first (0/absent = all)
 }
 
 // ImpactAnalysis Response
