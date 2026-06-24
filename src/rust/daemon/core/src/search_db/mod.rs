@@ -197,6 +197,38 @@ impl SearchDbManager {
         Ok(())
     }
 
+    /// Append `branch` to the `branches` set of every `file_metadata` row whose
+    /// `base_point` is in `base_points` and that does not already carry it.
+    ///
+    /// The BULK counterpart of the per-file FTS5 re-key the cross-branch dedup
+    /// fast-path enqueues: the branch-switch bulk-membership op uses it so a
+    /// `git checkout` updates search.db in one statement instead of one row at a
+    /// time. Idempotent (the `NOT EXISTS` guard); `code_lines` are untouched
+    /// (they are keyed by `file_id` and shared across branches). No-op on an
+    /// empty list.
+    pub async fn add_branch_to_file_metadata_by_base_points(
+        &self,
+        base_points: &[String],
+        branch: &str,
+    ) -> Result<()> {
+        if base_points.is_empty() {
+            return Ok(());
+        }
+        let placeholders = vec!["?"; base_points.len()].join(", ");
+        let sql = format!(
+            "UPDATE file_metadata
+             SET branches = json_insert(branches, '$[#]', ?)
+             WHERE base_point IN ({placeholders})
+               AND NOT EXISTS (SELECT 1 FROM json_each(file_metadata.branches) WHERE value = ?)"
+        );
+        let mut q = sqlx::query(&sql).bind(branch);
+        for bp in base_points {
+            q = q.bind(bp);
+        }
+        q.bind(branch).execute(&self.pool).await?;
+        Ok(())
+    }
+
     // ========================================================================
     // Schema management
     // ========================================================================

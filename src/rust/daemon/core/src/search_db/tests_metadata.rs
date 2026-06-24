@@ -26,6 +26,74 @@ async fn test_file_metadata_table_exists() {
 }
 
 #[tokio::test]
+async fn test_add_branch_to_file_metadata_by_base_points() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("search.db");
+    let manager = SearchDbManager::new(&db_path).await.unwrap();
+
+    // One file_metadata row on "main" with a known base_point.
+    sqlx::query(crate::code_lines_schema::UPSERT_FILE_METADATA_SQL)
+        .bind(1_i64)
+        .bind("project-abc")
+        .bind("main")
+        .bind("/src/lib.rs")
+        .bind(None::<&str>)
+        .bind(None::<&str>)
+        .bind(None::<&str>)
+        .bind(None::<i64>)
+        .bind(0_i64)
+        .execute(manager.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE file_metadata SET base_point = 'bp1' WHERE file_id = 1")
+        .execute(manager.pool())
+        .await
+        .unwrap();
+
+    async fn read_branches(m: &SearchDbManager) -> Vec<String> {
+        let raw: String =
+            sqlx::query_scalar("SELECT branches FROM file_metadata WHERE file_id = 1")
+                .fetch_one(m.pool())
+                .await
+                .unwrap();
+        serde_json::from_str::<Vec<String>>(&raw).unwrap()
+    }
+
+    // Append "feature" by base_point → merged into the set, not replaced.
+    manager
+        .add_branch_to_file_metadata_by_base_points(&["bp1".to_string()], "feature")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_branches(&manager).await,
+        vec!["main".to_string(), "feature".to_string()]
+    );
+
+    // Idempotent: re-running does not duplicate the branch.
+    manager
+        .add_branch_to_file_metadata_by_base_points(&["bp1".to_string()], "feature")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_branches(&manager).await,
+        vec!["main".to_string(), "feature".to_string()],
+        "second append is idempotent"
+    );
+
+    // A base_point with no matching row is a no-op (and must not error).
+    manager
+        .add_branch_to_file_metadata_by_base_points(&["nonexistent".to_string()], "x")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_branches(&manager).await,
+        vec!["main".to_string(), "feature".to_string()]
+    );
+
+    manager.close().await;
+}
+
+#[tokio::test]
 async fn test_file_metadata_indexes_exist() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("search.db");

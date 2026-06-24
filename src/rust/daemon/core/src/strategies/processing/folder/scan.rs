@@ -193,6 +193,7 @@ pub(crate) async fn enqueue_submodule(
         project_type: None,
         old_tenant_id: None,
         is_active: None,
+        branch_membership: None,
     };
     let payload_json = serde_json::to_string(&submodule_payload)
         .unwrap_or_else(|_| format!(r#"{{"project_root":"{}"}}"#, path.display()));

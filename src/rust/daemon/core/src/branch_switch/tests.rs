@@ -17,7 +17,7 @@ use crate::watch_folders_schema;
 use super::db::{
     fetch_paths_missing_branch, fetch_unchanged_relative_paths, update_last_commit_hash,
 };
-use super::queue::{enqueue_file_op, enqueue_unchanged_file};
+use super::queue::{enqueue_branch_membership_bulk, enqueue_file_op, enqueue_unchanged_file};
 use super::reconcile_branch_membership;
 use super::types::BranchSwitchStats;
 
@@ -235,6 +235,53 @@ async fn test_enqueue_unchanged_file_uses_add_op() {
             .unwrap();
     assert_eq!(op, "add");
     assert_eq!(branch, "feature");
+}
+
+/// A new branch's unchanged files are enqueued as ONE bulk `(Tenant, Scan)` op
+/// carrying the verified path list — NOT one `File/Add` per file. This is the fix
+/// for "creating a branch floods the queue with pending indexing items".
+#[tokio::test]
+async fn test_branch_membership_bulk_collapses_to_one_op() {
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
+    let qm = QueueManager::new(pool.clone());
+
+    let paths = vec![
+        "src/a.rs".to_string(),
+        "src/b.rs".to_string(),
+        "src/c.rs".to_string(),
+    ];
+    let n = enqueue_branch_membership_bulk(
+        &qm,
+        "t1",
+        "projects",
+        "w1",
+        "/tmp/project",
+        "feature",
+        paths,
+    )
+    .await
+    .unwrap();
+    assert_eq!(n, 3, "all three paths counted");
+
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT item_type, op, payload_json FROM unified_queue WHERE tenant_id = 't1'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1, "one bulk op enqueued, not one item per file");
+    assert_eq!(rows[0].0, "tenant");
+    assert_eq!(rows[0].1, "scan");
+    assert!(
+        rows[0].2.contains("branch_membership"),
+        "payload carries the bulk marker"
+    );
+    assert!(
+        rows[0].2.contains("src/c.rs"),
+        "payload carries the verified path list"
+    );
 }
 
 /// fetch_paths_missing_branch selects files tracked under any branch but NOT the

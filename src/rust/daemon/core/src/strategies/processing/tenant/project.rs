@@ -11,8 +11,11 @@ use tracing::{debug, info, warn};
 use crate::context::ProcessingContext;
 use crate::specs::parse_payload;
 use crate::unified_queue_processor::{UnifiedProcessorError, UnifiedProcessorResult};
-use crate::unified_queue_schema::{ItemType, ProjectPayload, QueueOperation, UnifiedQueueItem};
+use crate::unified_queue_schema::{
+    BranchMembershipBulk, ItemType, ProjectPayload, QueueOperation, UnifiedQueueItem,
+};
 use wqm_common::constants::COLLECTION_PROJECTS;
+use wqm_common::timestamps;
 
 use super::grammar_warm;
 use super::project_worktree::resolve_worktree_info;
@@ -46,6 +49,14 @@ pub(crate) async fn process_project_item(
 
     let payload: ProjectPayload = parse_payload(item)?;
 
+    // A `(Tenant, Scan)` carrying a branch-membership marker is NOT a directory
+    // scan — it's the bulk branch re-key a `git checkout` enqueues instead of one
+    // Add per unchanged file. Handle it and return before the scan dispatch.
+    if let Some(spec) = &payload.branch_membership {
+        handle_branch_membership_bulk(ctx, item, spec).await?;
+        return Ok(());
+    }
+
     match item.op {
         QueueOperation::Add => {
             handle_project_add(ctx, item, &payload).await?;
@@ -72,6 +83,119 @@ pub(crate) async fn process_project_item(
         item.queue_id, payload.project_root
     );
 
+    Ok(())
+}
+
+/// Append `spec.branch` to every listed path's branch set across all three
+/// stores WITHOUT re-embedding — the bulk counterpart of the per-file
+/// cross-branch dedup fast-path.
+///
+/// Order matters for correctness: Qdrant FIRST (the proven per-base_point
+/// primitive), then the two SQLite stores only for the base_points the vector
+/// store actually backs. A base_point that returns 0 points is skipped (logged),
+/// never tagged — so we never claim branch membership the vector store can't
+/// serve; the per-file reconcile re-ingests it on a later scan. Every step is
+/// idempotent (`NOT EXISTS` guards), so a retried op is a no-op once applied.
+///
+/// Safe to drive by path with no per-file hash recheck because the caller only
+/// lists git-identical (no-diff) files — see [`BranchMembershipBulk`].
+async fn handle_branch_membership_bulk(
+    ctx: &ProcessingContext,
+    item: &UnifiedQueueItem,
+    spec: &BranchMembershipBulk,
+) -> UnifiedProcessorResult<()> {
+    if spec.paths.is_empty() {
+        return Ok(());
+    }
+
+    // 1. Candidate content-rows: tracked on this watch folder, for one of the
+    //    listed paths, with a real base_point, not yet carrying the branch.
+    let path_ph = vec!["?"; spec.paths.len()].join(", ");
+    let select_sql = format!(
+        "SELECT DISTINCT base_point FROM tracked_files
+         WHERE watch_folder_id = ? AND base_point IS NOT NULL AND branches IS NOT NULL
+           AND relative_path IN ({path_ph})
+           AND NOT EXISTS (SELECT 1 FROM json_each(tracked_files.branches) WHERE value = ?)"
+    );
+    let mut sel = sqlx::query_scalar::<_, String>(&select_sql).bind(&spec.watch_folder_id);
+    for p in &spec.paths {
+        sel = sel.bind(p);
+    }
+    sel = sel.bind(&spec.branch);
+    let candidates: Vec<String> = sel
+        .fetch_all(&ctx.pool)
+        .await
+        .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("branch bulk select: {e}")))?;
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    // 2. Qdrant: append the branch to each base_point's shared points. Keep only
+    //    those the vector store still backs (the dedup fast-path's count==0
+    //    fallback, applied in bulk).
+    let mut tagged: Vec<String> = Vec::with_capacity(candidates.len());
+    let mut missing = 0usize;
+    for bp in &candidates {
+        let points = ctx
+            .storage_client
+            .add_branch_to_base_point(&item.collection, bp, &spec.branch)
+            .await
+            .map_err(|e| UnifiedProcessorError::Storage(e.to_string()))?;
+        if points > 0 {
+            tagged.push(bp.clone());
+        } else {
+            missing += 1;
+        }
+    }
+    if missing > 0 {
+        warn!(
+            "branch bulk: {} base_points had 0 Qdrant points — left for per-file reconcile (branch={})",
+            missing, spec.branch
+        );
+    }
+    if tagged.is_empty() {
+        return Ok(());
+    }
+
+    // 3. state.db: append the branch to the Qdrant-confirmed content rows.
+    let now = timestamps::now_utc();
+    let bp_ph = vec!["?"; tagged.len()].join(", ");
+    let update_sql = format!(
+        "UPDATE tracked_files
+         SET branches = json_insert(branches, '$[#]', ?), updated_at = ?
+         WHERE watch_folder_id = ? AND base_point IN ({bp_ph})
+           AND NOT EXISTS (SELECT 1 FROM json_each(tracked_files.branches) WHERE value = ?)"
+    );
+    let mut upd = sqlx::query(&update_sql)
+        .bind(&spec.branch)
+        .bind(&now)
+        .bind(&spec.watch_folder_id);
+    for bp in &tagged {
+        upd = upd.bind(bp);
+    }
+    upd.bind(&spec.branch)
+        .execute(&ctx.pool)
+        .await
+        .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("branch bulk update: {e}")))?;
+
+    // 4. search.db: same append on file_metadata (code_lines are shared by
+    //    file_id, so nothing is re-written there).
+    if let Some(search_db) = &ctx.search_db {
+        search_db
+            .add_branch_to_file_metadata_by_base_points(&tagged, &spec.branch)
+            .await
+            .map_err(|e| {
+                UnifiedProcessorError::ProcessingFailed(format!("branch bulk fts5: {e}"))
+            })?;
+    }
+
+    info!(
+        "branch bulk: tagged {} base_points onto branch '{}' (wf={}, {} paths in op)",
+        tagged.len(),
+        spec.branch,
+        spec.watch_folder_id,
+        spec.paths.len()
+    );
     Ok(())
 }
 

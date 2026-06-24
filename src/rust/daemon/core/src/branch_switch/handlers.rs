@@ -15,7 +15,10 @@ use super::db::{
     fetch_paths_missing_branch, fetch_unchanged_relative_paths, fetch_watch_folder,
     update_last_commit_hash,
 };
-use super::queue::{enqueue_changed_file, enqueue_tenant_scan, enqueue_unchanged_file};
+use super::queue::{
+    enqueue_branch_membership_bulk, enqueue_changed_file, enqueue_tenant_scan,
+    enqueue_unchanged_file,
+};
 use super::types::BranchSwitchStats;
 
 /// Handle a git event by dispatching to the appropriate handler.
@@ -110,6 +113,7 @@ async fn handle_branch_switch(
         new_branch,
         tenant_id,
         collection,
+        project_root,
         &changed_paths,
         &mut stats,
     )
@@ -143,9 +147,15 @@ async fn handle_branch_switch(
 }
 
 /// Enqueue unchanged files (tracked on the old branch, byte-identical content)
-/// as `Add` ops on the new branch so the cross-branch dedup fast-path re-keys
-/// their Qdrant points + FTS5 rows. Paths present in the diff are skipped —
-/// they changed and take the full-ingest path via `enqueue_all_changed_files`.
+/// for cross-branch dedup re-key onto the new branch. Paths present in the diff
+/// are skipped — they changed and take the full-ingest path via
+/// `enqueue_all_changed_files`.
+///
+/// These paths produced NO diff between the two commits, so they are git-identical
+/// on both branches. That lets us BULK the re-key: instead of one `Add` per file
+/// (each draining individually and flooding `pending`), we enqueue a handful of
+/// `(Tenant, Scan)` ops carrying the verified path list, and the processor appends
+/// the branch to all three stores in batches without re-embedding.
 #[allow(clippy::too_many_arguments)]
 async fn enqueue_unchanged_files(
     pool: &SqlitePool,
@@ -155,6 +165,7 @@ async fn enqueue_unchanged_files(
     new_branch: &str,
     tenant_id: &str,
     collection: &str,
+    project_root: &str,
     changed_paths: &HashSet<String>,
     stats: &mut BranchSwitchStats,
 ) {
@@ -168,25 +179,37 @@ async fn enqueue_unchanged_files(
             }
         };
 
-    for rel in unchanged {
-        if changed_paths.contains(&rel) {
-            continue;
-        }
-        match enqueue_unchanged_file(queue_manager, tenant_id, collection, &rel, new_branch).await {
-            Ok(()) => stats.enqueued_unchanged += 1,
-            Err(e) => {
-                warn!(
-                    "Failed to enqueue unchanged file {} on {}: {}",
-                    rel, new_branch, e
-                );
-                stats.errors += 1;
-            }
+    // Drop paths that genuinely changed (they take the full-ingest path); what
+    // remains is byte-identical on both branches and safe to re-key by path.
+    let to_rekey: Vec<String> = unchanged
+        .into_iter()
+        .filter(|rel| !changed_paths.contains(rel))
+        .collect();
+
+    match enqueue_branch_membership_bulk(
+        queue_manager,
+        tenant_id,
+        collection,
+        watch_folder_id,
+        project_root,
+        new_branch,
+        to_rekey,
+    )
+    .await
+    {
+        Ok(n) => stats.enqueued_unchanged += n as u64,
+        Err(e) => {
+            warn!(
+                "Failed to enqueue bulk branch re-key {} -> {}: {}",
+                old_branch, new_branch, e
+            );
+            stats.errors += 1;
         }
     }
 
     if stats.enqueued_unchanged > 0 {
         info!(
-            "Enqueued {} unchanged files for dedup re-key: branch {} -> {}",
+            "Enqueued {} unchanged files for BULK dedup re-key: branch {} -> {}",
             stats.enqueued_unchanged, old_branch, new_branch
         );
     }

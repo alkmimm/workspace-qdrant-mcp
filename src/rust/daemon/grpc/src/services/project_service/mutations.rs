@@ -170,6 +170,7 @@ impl ProjectServiceImpl {
             project_type: None,
             old_tenant_id: None,
             is_active: None,
+            branch_membership: None,
         };
         let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
 
