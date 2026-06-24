@@ -27,6 +27,7 @@ pub use sql::{
 
 pub use types::{
     // Payload types (from wqm_common via types.rs)
+    BranchMembershipBulk,
     CollectionPayload,
     ContentPayload,
     DeleteDocumentPayload,

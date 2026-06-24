@@ -320,6 +320,7 @@ fn make_tenant_add_item(tenant_id: &str, project_root: &str) -> UnifiedQueueItem
         project_type: None,
         old_tenant_id: None,
         is_active: Some(false),
+        branch_membership: None,
     };
     let payload_json = serde_json::to_string(&payload).unwrap();
     let now = wqm_common::timestamps::now_utc();

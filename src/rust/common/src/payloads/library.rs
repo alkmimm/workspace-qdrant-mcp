@@ -21,6 +21,38 @@ pub struct ProjectPayload {
     /// Whether to set is_active=1 on watch_folder creation (used when op=Add)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_active: Option<bool>,
+    /// When present on a `(Tenant, Scan)` item, the processor runs a BULK
+    /// branch-membership append (see [`BranchMembershipBulk`]) instead of a
+    /// directory scan — collapsing the per-file `Add` storm a `git checkout`
+    /// would otherwise enqueue into a handful of ops.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_membership: Option<BranchMembershipBulk>,
+}
+
+/// Marker that turns a `(Tenant, Scan)` item into a BULK branch-membership
+/// append instead of a directory scan.
+///
+/// Set by the branch-switch handler when a `git checkout` (including branch
+/// creation, where the new branch points at the same commit) leaves files
+/// byte-identical across branches. Instead of enqueuing one `Add` per unchanged
+/// file — each taking the cross-branch dedup fast-path individually — it enqueues
+/// a few of these carrying the verified-identical path list, and the processor
+/// appends `branch` to all three stores (`tracked_files.branches`, the Qdrant
+/// point `branch` payload, and `file_metadata.branches`) WITHOUT re-embedding.
+///
+/// Safe to drive by path (no per-file hash recheck) ONLY because the listed
+/// paths produced NO diff between the two commits, so they are byte-identical and
+/// the existing content row / base_point already IS the new branch's content. The
+/// event-independent reconcile path (working-tree files whose content is NOT
+/// git-verified) deliberately stays per-file so its hash gate still runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchMembershipBulk {
+    /// Watch folder whose `tracked_files` rows to update.
+    pub watch_folder_id: String,
+    /// Branch to append to each listed path's branch set.
+    pub branch: String,
+    /// Repo-relative paths, verified byte-identical on the target branch.
+    pub paths: Vec<String>,
 }
 
 /// Payload for tenant items with collection="libraries"
@@ -116,6 +148,7 @@ mod tests {
             project_type: None,
             old_tenant_id: Some("old_abc123".to_string()),
             is_active: None,
+            branch_membership: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("old_tenant_id"));

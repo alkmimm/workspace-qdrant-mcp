@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 pub use wqm_common::payloads::{
-    CollectionPayload, ContentPayload, DeleteDocumentPayload, DeleteTenantPayload, FilePayload,
-    FolderPayload, LibraryContentPayload, LibraryPayload, MemoryPayload, ProjectPayload,
-    ScratchpadPayload, UrlPayload, WebsitePayload,
+    BranchMembershipBulk, CollectionPayload, ContentPayload, DeleteDocumentPayload,
+    DeleteTenantPayload, FilePayload, FolderPayload, LibraryContentPayload, LibraryPayload,
+    MemoryPayload, ProjectPayload, ScratchpadPayload, UrlPayload, WebsitePayload,
 };
 pub use wqm_common::queue_types::{
     DestinationStatus, ItemType, QueueDecision, QueueOperation, QueueStatus,

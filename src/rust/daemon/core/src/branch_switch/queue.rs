@@ -6,8 +6,14 @@ use wqm_common::paths::{CanonicalPath, RelativePath};
 
 use crate::git::{FileChange, FileChangeStatus};
 use crate::queue_operations::QueueManager;
-use crate::unified_queue_schema::{FilePayload, ItemType, QueueOperation};
+use crate::unified_queue_schema::{
+    BranchMembershipBulk, FilePayload, ItemType, ProjectPayload, QueueOperation,
+};
 use crate::watching_queue::get_current_branch;
+
+/// Paths per bulk branch-membership op. Bounded so one op's SQL `IN (...)` stays
+/// well under SQLite's bound-parameter limit and the queue payload stays small.
+const BRANCH_BULK_CHUNK: usize = 500;
 
 /// Enqueue a single changed file based on its diff-tree status.
 /// Returns the operation type that was enqueued.
@@ -196,6 +202,58 @@ async fn lookup_watch_folder_root(
             .map_err(|e| format!("watch_folder.path is not canonical: {}", e))
     })
     .transpose()
+}
+
+/// Enqueue the unchanged-file branch re-key as a FEW bulk `(Tenant, Scan)` ops
+/// (each carrying a verified path chunk) instead of one `Add` per file.
+///
+/// Each op carries a [`BranchMembershipBulk`] marker; the tenant processor
+/// appends `branch` to all three stores for the listed paths WITHOUT
+/// re-embedding (see `strategies::processing::tenant::project`). The caller must
+/// pass only git-identical (no-diff) paths — that is what makes a per-path append
+/// safe without re-hashing each file. Returns the total number of paths enqueued.
+pub async fn enqueue_branch_membership_bulk(
+    queue_manager: &QueueManager,
+    tenant_id: &str,
+    collection: &str,
+    watch_folder_id: &str,
+    project_root: &str,
+    branch: &str,
+    paths: Vec<String>,
+) -> Result<usize, String> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    let total = paths.len();
+    for chunk in paths.chunks(BRANCH_BULK_CHUNK) {
+        let payload = ProjectPayload {
+            project_root: project_root.to_string(),
+            git_remote: None,
+            project_type: None,
+            old_tenant_id: None,
+            is_active: None,
+            branch_membership: Some(BranchMembershipBulk {
+                watch_folder_id: watch_folder_id.to_string(),
+                branch: branch.to_string(),
+                paths: chunk.to_vec(),
+            }),
+        };
+        let payload_json = serde_json::to_string(&payload)
+            .map_err(|e| format!("serialize branch bulk payload: {}", e))?;
+        queue_manager
+            .enqueue_unified(
+                ItemType::Tenant,
+                QueueOperation::Scan,
+                tenant_id,
+                collection,
+                &payload_json,
+                Some(branch),
+                None,
+            )
+            .await
+            .map_err(|e| format!("enqueue branch bulk op: {}", e))?;
+    }
+    Ok(total)
 }
 
 /// Enqueue a full tenant scan (used for reset events).

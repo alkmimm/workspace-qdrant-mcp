@@ -11,8 +11,8 @@ mod web;
 pub use content::{ContentPayload, MemoryPayload, ScratchpadPayload};
 pub use filesystem::{FilePayload, FolderPayload};
 pub use library::{
-    ChunkingConfigPayload, LibraryContentPayload, LibraryDocumentPayload, LibraryPayload,
-    ProjectPayload,
+    BranchMembershipBulk, ChunkingConfigPayload, LibraryContentPayload, LibraryDocumentPayload,
+    LibraryPayload, ProjectPayload,
 };
 pub use operations::{CollectionPayload, DeleteDocumentPayload, DeleteTenantPayload};
 pub use web::{UrlPayload, WebsitePayload};
