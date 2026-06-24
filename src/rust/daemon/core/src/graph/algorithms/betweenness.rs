@@ -1,7 +1,16 @@
 /// Betweenness centrality using Brandes' algorithm.
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+/// Wall-clock budget for the Brandes source loop. Betweenness is the heaviest
+/// centrality action (exact is O(V·(V+E))); on a large graph the default
+/// "all sources" run blows past the gRPC call timeout. When the budget is hit we
+/// stop and return the partial (approximate) scores accumulated so far — the same
+/// safety net community detection got via `LP_TIME_BUDGET` (#153). Callers can
+/// still pass `max_samples` to cap the source set explicitly.
+const BETWEENNESS_TIME_BUDGET: Duration = Duration::from_secs(20);
 use sqlx::SqlitePool;
 use tracing::info;
 
@@ -69,16 +78,31 @@ pub async fn compute_betweenness_centrality(
         _ => node_ids.iter().map(|id| id.as_str()).collect(),
     };
 
+    let start = Instant::now();
+    let mut processed = 0usize;
     for &source in &sources {
+        if start.elapsed() >= BETWEENNESS_TIME_BUDGET {
+            info!(
+                tenant_id,
+                processed,
+                total_sources = sources.len(),
+                "Betweenness time budget hit — returning partial (approximate) scores"
+            );
+            break;
+        }
         brandes_bfs(source, &neighbors, &mut betweenness);
+        processed += 1;
     }
 
-    let results = normalize_betweenness(betweenness, &graph.nodes, &node_ids, &sources);
+    // Normalize against the sources actually processed (sample_scale divides by
+    // this), so a budget-truncated run still scales its scores correctly.
+    let processed_sources = &sources[..processed];
+    let results = normalize_betweenness(betweenness, &graph.nodes, &node_ids, processed_sources);
 
     info!(
         tenant_id,
         nodes = results.len(),
-        sources = sources.len(),
+        sources = processed,
         "Betweenness centrality computation complete"
     );
 
