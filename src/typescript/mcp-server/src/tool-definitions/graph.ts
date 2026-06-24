@@ -22,7 +22,7 @@ export const graphToolDefinition = {
         type: 'string',
         enum: ['stats', 'relations', 'impact', 'usages', 'hotspots', 'bridges', 'modules'],
         description:
-          "stats: node/edge counts. relations: callers/callees of a symbol. impact: change blast-radius (what breaks if you change a symbol). usages: where/by what a symbol is used (find usages). hotspots: most central symbols (PageRank). bridges: bottleneck symbols on many shortest paths (betweenness). modules: code clusters. Default: 'stats'.",
+          "stats: node/edge counts. relations: callers/callees of a symbol. impact: transitive change blast-radius (direct + indirect dependents). usages: DIRECT references only (1-hop \"find references\"). hotspots: most central symbols (PageRank). bridges: bottleneck symbols on many shortest paths (betweenness). modules: code clusters. Default: 'stats'.",
       },
       symbol: {
         type: 'string',

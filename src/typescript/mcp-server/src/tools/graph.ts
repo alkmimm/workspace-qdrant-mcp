@@ -109,11 +109,13 @@ export async function handleGraph(
 
     case 'impact':
     case 'usages': {
-      // Both wrap ImpactAnalysis (reverse reachability over the graph):
-      //   impact → "blast radius if I change X" (what breaks)
-      //   usages → "where/by what is X used" (find usages)
-      // Same data, framed for the two questions. Precision improves once the
-      // LSP call-hierarchy pass resolves CALLS edges (see daemon graph_ingest).
+      // Both wrap ImpactAnalysis (reverse reachability over the graph), but differ
+      // in DEPTH:
+      //   impact → transitive blast-radius (depth<3): all that breaks if you
+      //            change X, direct AND indirect.
+      //   usages → DIRECT references only (distance===1): "who references X" (the
+      //            IDE find-references), filtered from the same response below.
+      // Precision improves once the LSP call-hierarchy pass resolves CALLS edges.
       const symbol = str(args, 'symbol');
       if (!symbol) throw new Error(`graph action '${action}' requires \`symbol\``);
       const filePath = str(args, 'filePath');
@@ -126,6 +128,22 @@ export async function handleGraph(
         ...(filePath ? { file_path: filePath } : {}),
       };
       const r = await daemonClient.impactAnalysis(req);
+      if (action === 'usages') {
+        // Keep only direct references (1-hop). The daemon tags each node's
+        // distance; distance===1 is a direct caller / reference / type-use. This
+        // is what makes `usages` distinct from the transitive `impact`.
+        // total_impacted becomes the direct-reference count.
+        const direct = (r.impacted_nodes ?? []).filter((n) => n.distance === 1);
+        return {
+          success: true,
+          action,
+          tenant_id: tenant,
+          symbol,
+          ...r,
+          impacted_nodes: direct,
+          total_impacted: direct.length,
+        };
+      }
       return { success: true, action, tenant_id: tenant, symbol, ...r };
     }
 
