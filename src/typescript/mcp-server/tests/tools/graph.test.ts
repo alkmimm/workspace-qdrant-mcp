@@ -197,6 +197,9 @@ describe('handleGraph', () => {
       top_k: 50,
       // relations defaults to dependency edges (CONTAINS excluded).
       edge_types: ['CALLS', 'IMPORTS', 'USES_TYPE', 'EXTENDS', 'IMPLEMENTS'],
+      // Name-based fallback identity (daemon uses it if the node_id misses).
+      symbol_name: 'authenticate',
+      file_path: 'src/auth.rs',
     });
   });
 
@@ -238,6 +241,8 @@ describe('handleGraph', () => {
       max_hops: 1,
       top_k: 7,
       edge_types: ['CALLS', 'IMPORTS', 'USES_TYPE', 'EXTENDS', 'IMPLEMENTS'],
+      symbol_name: 'x',
+      file_path: 'a.rs',
     });
   });
 

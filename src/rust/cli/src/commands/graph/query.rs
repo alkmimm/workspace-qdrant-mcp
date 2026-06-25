@@ -34,6 +34,10 @@ pub async fn query_related(
             edge_types,
             // CLI shows the full traversal; top_k (MCP-only cap) stays unset.
             top_k: None,
+            // CLI queries by node_id; the name-based fallback is for clients that
+            // can't compute a matching node_id (the MCP relations tool).
+            symbol_name: None,
+            file_path: None,
         })
         .await
         .context("QueryRelated RPC failed")?

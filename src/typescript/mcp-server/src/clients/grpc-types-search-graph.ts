@@ -53,6 +53,10 @@ export interface QueryRelatedRequest {
   edge_types?: string[];
   /** Max nodes returned, nearest-first (0/absent = all). */
   top_k?: number;
+  /** Fallback: resolve the source node BY NAME when node_id misses (robust to symbolType/filePath mismatch in the client-computed node_id). */
+  symbol_name?: string;
+  /** Optional narrowing for symbol_name resolution. */
+  file_path?: string;
 }
 
 export interface QueryRelatedResponse {
