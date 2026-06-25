@@ -12,6 +12,22 @@ across branches) — designed, not implemented.
 > array) remains the open follow-up. The original design text is preserved below
 > for rationale.
 
+> **Update 2026-06-24.** **Layer 2 SHIPPED** (PR #124): `base_point` is now
+> branch-agnostic (`SHA256(tenant | relative_path | file_hash)`), one physical
+> Qdrant point is shared across branches, and `branch` lives as a JSON **set** in
+> the point payload, in `tracked_files.branches`, and in `file_metadata.branches`
+> (search.db) — branch-scoped search/grep filter on set membership. The dedup
+> fast-path (`strategies/processing/file/branch_dedup.rs::try_branch_dedup`)
+> appends the branch to the shared point via `StorageClient::add_branch_to_base_point`
+> instead of copying vectors. **Bulk branch-membership (PR #167):** a `git
+> checkout` no longer enqueues one `File/Add` per unchanged file — the
+> branch-switch handler enqueues a few `(Tenant, Scan)` ops carrying a
+> `BranchMembershipBulk` marker (the verified, git-identical path list), and the
+> tenant processor batches the three-store append (Qdrant `add_branch_to_base_point`
+> per base_point, then idempotent `branches`-set merges). Only branch-SWITCH is
+> bulked (the no-diff files are byte-identical → safe to re-key by path); the
+> event-independent reconcile stays per-file so its hash gate runs.
+
 ## Problem
 
 When a user switches branches (`git checkout main` → `git checkout fork/fixes`),

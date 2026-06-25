@@ -21,6 +21,8 @@
 #   MCP_HTTP_PORT     host port for the MCP HTTP/admin endpoint (default: 6335)
 #   QDRANT_HTTP_PORT  host port for Qdrant REST (default: 6333)
 #   LOG_TAIL          lines for stack-logs (default: 50)
+#   MARKER            string for `verify-deploy` to grep in the deployed memexd
+#                     binary (default: empty = skip the binary check)
 
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -eu -o pipefail -c
@@ -32,6 +34,7 @@ MCP_HTTP_PORT ?= 6335
 QDRANT_HTTP_PORT ?= 6333
 MEMEXD_GRPC_PORT ?= 50051
 LOG_TAIL ?= 50
+MARKER ?=
 
 # Single source of truth for every compose invocation.
 COMPOSE := docker compose --env-file "$(COMPOSE_ENV_FILE)" -f "$(COMPOSE_FILE)"
@@ -42,7 +45,7 @@ MCP_INIT_URL ?= http://localhost:$(MCP_HTTP_PORT)/admin/init
 MEMEXD_DB_VOLUME ?= workspace-qdrant-mcp_memexd_db
 
 .PHONY: help check-env first-time redeploy \
-	stack-up stack-down stack-restart stack-status stack-logs \
+	stack-up stack-down stack-restart stack-status stack-logs verify-deploy \
 	build-images mcp-rebuild memexd-recreate \
 	health-quick scan register-all watch reindex reindex-status hooks-install clean \
 	mem-watch-start mem-watch mem-watch-stop
@@ -59,6 +62,8 @@ help:
 	@echo "  stack-restart    down + up"
 	@echo "  stack-status     compose ps + ping admin/qdrant/daemon"
 	@echo "  stack-logs       tail mcp + memexd logs (LOG_TAIL=$(LOG_TAIL))"
+	@echo "  verify-deploy    confirm running stack == latest build + knobs wired + health"
+	@echo "                   (MARKER='<str>' also greps the deployed memexd binary)"
 	@echo "------------------------------------------------------------"
 	@echo "Build / recreate (all builds run INSIDE Docker — no local cargo/npm):"
 	@echo "  build-images     docker compose build mcp memexd"
@@ -141,6 +146,17 @@ stack-status: check-env
 
 stack-logs: check-env
 	@cd "$(REPO)" && $(COMPOSE) logs --tail $(LOG_TAIL) mcp memexd
+
+# Post-redeploy sanity check: are the running containers actually from the latest
+# build, are the daemon-side graph-centrality knobs wired, and is the stack
+# healthy? `MARKER='<string>'` additionally asserts the deployed memexd binary
+# contains that literal (a log line, env-var name, or embedded SQL fragment) —
+# the robust, MCP-free way to confirm a specific Rust fix shipped. Uses docker
+# cp/inspect (the `docker exec` rule does not apply).
+verify-deploy: check-env
+	@MCP_HTTP_PORT="$(MCP_HTTP_PORT)" QDRANT_HTTP_PORT="$(QDRANT_HTTP_PORT)" \
+		MEMEXD_GRPC_PORT="$(MEMEXD_GRPC_PORT)" \
+		bash "$(REPO)/scripts/verify-deploy.sh" "$(MARKER)"
 
 # ── Build / recreate (everything builds inside Docker) ───────────────────────
 
