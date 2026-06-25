@@ -68,6 +68,9 @@ make first-time        # from scratch: create db volume + build + up + hooks + s
 make redeploy          # after code changes / git pull: rebuild + recreate mcp+memexd
 make stack-status      # compose ps + ping admin/qdrant/daemon
 make stack-logs        # tail mcp + memexd logs
+make verify-deploy     # confirm running stack == latest build + knobs wired + health
+                       #   MARKER='<str>' also asserts the deployed memexd binary
+                       #   contains that literal (verify a specific fix shipped)
 make reindex           # force-reindex every watched project (admin API)
 make reindex-status    # per-project indexing progress
 make help              # all targets
