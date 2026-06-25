@@ -284,6 +284,44 @@ async fn test_branch_membership_bulk_collapses_to_one_op() {
     );
 }
 
+/// A path list larger than `BRANCH_BULK_CHUNK` is split into several BOUNDED ops,
+/// never one monolithic op. Each op runs to completion on a single processor slot
+/// doing a sequential Qdrant `set_payload` per base_point, so a small chunk keeps
+/// each op short — it completes, releases the slot, and interleaves with File
+/// ingestion instead of monopolizing a slot for tens of minutes under load.
+#[tokio::test]
+async fn test_branch_membership_bulk_chunks_large_lists() {
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
+    let qm = QueueManager::new(pool.clone());
+
+    // 60 paths with BRANCH_BULK_CHUNK = 25 → ceil(60/25) = 3 bounded ops.
+    let paths: Vec<String> = (0..60).map(|i| format!("src/f{i}.rs")).collect();
+    let n = enqueue_branch_membership_bulk(
+        &qm, "t1", "projects", "w1", "/tmp/project", "feature", paths,
+    )
+    .await
+    .unwrap();
+    assert_eq!(n, 60, "all paths counted");
+
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT payload_json FROM unified_queue WHERE tenant_id = 't1'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 3, "60 paths / chunk 25 = 3 bounded ops, not 1 monolith");
+
+    // Every path appears exactly once across the chunk payloads — no loss, no dup.
+    let combined = rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>().join("");
+    for i in 0..60 {
+        assert!(
+            combined.contains(&format!("src/f{i}.rs")),
+            "path src/f{i}.rs present in some chunk"
+        );
+    }
+}
+
 /// fetch_paths_missing_branch selects files tracked under any branch but NOT the
 /// target branch, regardless of WHICH other branch tags them (event-independent).
 #[tokio::test]

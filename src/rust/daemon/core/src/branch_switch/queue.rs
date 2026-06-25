@@ -11,9 +11,17 @@ use crate::unified_queue_schema::{
 };
 use crate::watching_queue::get_current_branch;
 
-/// Paths per bulk branch-membership op. Bounded so one op's SQL `IN (...)` stays
-/// well under SQLite's bound-parameter limit and the queue payload stays small.
-const BRANCH_BULK_CHUNK: usize = 500;
+/// Paths per bulk branch-membership op. Kept SMALL on purpose: the processor
+/// runs each op to completion on one concurrency slot, and the op does a
+/// SEQUENTIAL Qdrant `set_payload` (`add_branch_to_base_point`) per base_point.
+/// Under heavy load (e.g. a concurrent force-reembed hammering Qdrant) each
+/// set_payload can take seconds, so a large chunk turns one op into a 30-80 min
+/// monolith that monopolizes its slot and starves File ingestion — and a daemon
+/// restart re-runs the whole op from scratch (the state.db write lands at the
+/// end). 25 keeps each op bounded (completes, releases the slot, interleaves);
+/// 1600 files becomes ~64 small ops, still vastly fewer than 1600 per-file Adds.
+/// Also stays well under SQLite's bound-parameter limit for the `IN (...)`.
+const BRANCH_BULK_CHUNK: usize = 25;
 
 /// Enqueue a single changed file based on its diff-tree status.
 /// Returns the operation type that was enqueued.
