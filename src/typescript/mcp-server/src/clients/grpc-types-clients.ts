@@ -63,6 +63,8 @@ import type {
   RetryAllResponse,
   RetryItemRequest,
   RetryItemResponse,
+  CancelItemsRequest,
+  CancelItemsResponse,
   LogSearchEventRequest,
   UpdateSearchEventRequest,
   UpdateSearchEventEconomyRequest,
@@ -247,6 +249,10 @@ export interface QueueWriteServiceClient {
   retryItem(
     request: RetryItemRequest,
     callback: (error: Error | null, response: RetryItemResponse) => void
+  ): void;
+  cancelItems(
+    request: CancelItemsRequest,
+    callback: (error: Error | null, response: CancelItemsResponse) => void
   ): void;
 }
 

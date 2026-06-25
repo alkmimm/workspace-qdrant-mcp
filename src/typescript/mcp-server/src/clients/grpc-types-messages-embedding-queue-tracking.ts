@@ -79,6 +79,22 @@ export interface RetryItemResponse {
   reset: boolean;
 }
 
+export interface CancelItemsRequest {
+  tenant_id: string;
+  /** Statuses to cancel (e.g. ["pending"]). The daemon ALWAYS excludes in_progress. */
+  statuses: string[];
+  /** If true, return the count without deleting. */
+  dry_run: boolean;
+}
+
+export interface CancelItemsResponse {
+  /** Items deleted (or would be deleted in dry_run). */
+  count: number;
+  tenant_id: string;
+  project_path: string;
+  is_dry_run: boolean;
+}
+
 // ── TrackingWriteService ──
 
 export interface LogSearchEventRequest {
