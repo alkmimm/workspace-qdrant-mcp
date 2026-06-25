@@ -296,6 +296,15 @@ impl DaemonMetrics {
             .inc();
     }
 
+    /// Record a unified queue re-lease: an in_progress item re-selected after its
+    /// lease expired without completing. A rising rate for a fixed (item_type, op)
+    /// indicates a lease-loop (an op that never finishes within `lease_duration`).
+    pub fn unified_queue_released(&self, item_type: &str, op: &str) {
+        self.unified_queue_releases_total
+            .with_label_values(&[item_type, op])
+            .inc();
+    }
+
     /// Set count of stale lease items
     pub fn set_unified_queue_stale_items(&self, count: i64) {
         self.unified_queue_stale_items

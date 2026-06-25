@@ -150,7 +150,7 @@
     {
       "id": 11,
       "title": "Enqueue vs dequeue rate (5m)",
-      "description": "Producers vs consumers. Diverging lines = backpressure.",
+      "description": "Producers vs consumers. Diverging lines = backpressure. The re-lease series (memexd_unified_queue_releases_total) above 0 means an in_progress item's lease expired before completion and it was re-leased; a sustained nonzero line for one item_type/op is a lease-loop — an op that never finishes within its lease and silently restarts every expiry.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -167,6 +167,12 @@
           "expr": "sum by (item_type) (rate(memexd_unified_queue_dequeues_total[5m]))",
           "legendFormat": "dequeue / {{item_type}}",
           "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (item_type, op) (rate(memexd_unified_queue_releases_total[5m]))",
+          "legendFormat": "re-lease / {{item_type}}/{{op}}",
+          "refId": "C"
         }
       ]
     },

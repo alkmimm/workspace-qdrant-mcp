@@ -3,7 +3,7 @@
 use chrono::Duration as ChronoDuration;
 use chrono::Utc;
 use sqlx::{Row, SqliteConnection};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use wqm_common::constants::{COLLECTION_LIBRARIES, COLLECTION_PROJECTS, COLLECTION_RULES};
 use wqm_common::timestamps;
 
@@ -111,6 +111,13 @@ impl QueueManager {
             return Ok(Vec::new());
         }
 
+        // Capture which selected rows are ALREADY `in_progress` with an expired
+        // lease — those are RE-LEASES (an op that exceeded `lease_duration` without
+        // completing), not fresh dequeues. `lease_items` below overwrites their
+        // lease, so snapshot it now: re-leases are otherwise SILENT (no recovery
+        // log) and are the only fingerprint of a lease-loop.
+        let re_leased = select_in_progress_subset(&mut tx, &queue_ids).await?;
+
         // Update the selected items to in_progress
         lease_items(&mut tx, &queue_ids, worker_id, &lease_until_str).await?;
 
@@ -140,7 +147,30 @@ impl QueueManager {
         );
 
         for item in &items {
-            METRICS.unified_queue_dequeued(&item.item_type.to_string());
+            let item_type_s = item.item_type.to_string();
+            METRICS.unified_queue_dequeued(&item_type_s);
+            // A row that was still `in_progress` when re-selected had its lease
+            // expire before the worker finished. Surface it: a repeated re-lease of
+            // the same queue_id (visible by grepping this queue_id or via the
+            // `memexd_unified_queue_releases_total` counter on the dashboard) is the
+            // signature of a lease-loop — an op that never completes within
+            // `lease_duration` and silently restarts every expiry.
+            if let Some(expired_lease) = re_leased.get(&item.queue_id) {
+                let op_s = item.op.to_string();
+                METRICS.unified_queue_released(&item_type_s, &op_s);
+                warn!(
+                    queue_id = %item.queue_id,
+                    item_type = %item_type_s,
+                    op = %op_s,
+                    tenant_id = %item.tenant_id,
+                    retry_count = item.retry_count,
+                    expired_lease_until = expired_lease.as_deref().unwrap_or("<none>"),
+                    worker_id = %worker_id,
+                    "Re-leasing in_progress unified queue item whose lease expired \
+                     before completion (op exceeded lease_duration); repeated \
+                     re-leases of the same queue_id indicate a lease-loop"
+                );
+            }
         }
 
         Ok(items)
@@ -316,6 +346,42 @@ async fn lease_items(
 
     update_builder.execute(&mut *conn).await?;
     Ok(())
+}
+
+/// Snapshot which of `queue_ids` are currently `in_progress`, with their
+/// (soon-to-be-overwritten) `lease_until`.
+///
+/// A row selected for dequeue while still `in_progress` means its lease expired
+/// before the worker finished — the dequeue is RE-LEASING it rather than picking
+/// up fresh work. Capturing this set BEFORE `lease_items` overwrites the lease
+/// lets the caller log/meter re-leases. Without it, re-leases are silent (the
+/// "Recovered N stale unified queue leases" message belongs to the separate
+/// `recover_stale_unified_leases` path, not this hot dequeue path), so a
+/// never-completing op that re-leases every `lease_duration` loops invisibly.
+async fn select_in_progress_subset(
+    conn: &mut SqliteConnection,
+    queue_ids: &[String],
+) -> QueueResult<std::collections::HashMap<String, Option<String>>> {
+    let placeholders: Vec<String> = (1..=queue_ids.len()).map(|i| format!("?{}", i)).collect();
+    let query = format!(
+        "SELECT queue_id, lease_until FROM unified_queue \
+         WHERE status = 'in_progress' AND queue_id IN ({})",
+        placeholders.join(", ")
+    );
+
+    let mut builder = sqlx::query(&query);
+    for queue_id in queue_ids {
+        builder = builder.bind(queue_id);
+    }
+
+    let rows = builder.fetch_all(&mut *conn).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let qid: String = row.try_get("queue_id")?;
+        let lease: Option<String> = row.try_get("lease_until")?;
+        map.insert(qid, lease);
+    }
+    Ok(map)
 }
 
 /// Fetch queue items by their IDs.
