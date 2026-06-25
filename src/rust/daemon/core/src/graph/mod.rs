@@ -342,6 +342,28 @@ pub trait GraphStore: Send + Sync {
         edge_types: Option<&[EdgeType]>,
     ) -> GraphDbResult<Vec<TraversalNode>>;
 
+    /// Like [`query_related`](Self::query_related) but resolves the source
+    /// node(s) BY SYMBOL NAME (+ optional file_path) instead of a precomputed
+    /// node_id. A client computes node_id = SHA256(tenant|file_path|name|type),
+    /// which silently misses whenever its `symbol_type`/`file_path` differ from
+    /// what the extractor stored (e.g. an async fn keyed as "async_function" vs
+    /// "function"). This resolves the node the same robust way `impact_analysis`
+    /// does (name match, file_path as a soft narrowing), traverses forward from
+    /// every match, and merges (dedup by node_id, lowest depth wins).
+    ///
+    /// Default impl returns empty so the caller keeps its node_id-based result;
+    /// backends with name resolution override it.
+    async fn query_related_by_symbol(
+        &self,
+        _tenant_id: &str,
+        _symbol_name: &str,
+        _file_path: Option<&str>,
+        _max_hops: u32,
+        _edge_types: Option<&[EdgeType]>,
+    ) -> GraphDbResult<Vec<TraversalNode>> {
+        Ok(Vec::new())
+    }
+
     /// Find all nodes that would be affected by changing a given symbol.
     async fn impact_analysis(
         &self,

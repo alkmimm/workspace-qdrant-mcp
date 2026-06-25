@@ -286,6 +286,50 @@ impl GraphStore for SqliteGraphStore {
         Ok(results)
     }
 
+    async fn query_related_by_symbol(
+        &self,
+        tenant_id: &str,
+        symbol_name: &str,
+        file_path: Option<&str>,
+        max_hops: u32,
+        edge_types: Option<&[EdgeType]>,
+    ) -> GraphDbResult<Vec<TraversalNode>> {
+        // Resolve the source node(s) by name. Prefer the file_path-narrowed
+        // match; if that finds nothing (the file_path form can differ from what
+        // the extractor stored — the same mismatch that defeats client-side
+        // node_id computation), fall back to a name-only match, exactly how
+        // impact_analysis stays robust.
+        let mut targets = self
+            .find_target_nodes(tenant_id, symbol_name, file_path)
+            .await?;
+        if targets.is_empty() && file_path.is_some() {
+            targets = self.find_target_nodes(tenant_id, symbol_name, None).await?;
+        }
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Traverse forward from every matched node, merging the results. Dedup on
+        // (node_id, edge_type, path) — the same granularity query_related emits —
+        // so a node reached from two source nodes is not double-listed; sort by
+        // depth then name to match query_related's ordering.
+        let mut seen: std::collections::HashSet<(String, String, String)> =
+            std::collections::HashSet::new();
+        let mut out: Vec<TraversalNode> = Vec::new();
+        for nid in &targets {
+            for n in self
+                .query_related(tenant_id, nid, max_hops, edge_types)
+                .await?
+            {
+                if seen.insert((n.node_id.clone(), n.edge_type.clone(), n.path.clone())) {
+                    out.push(n);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.symbol_name.cmp(&b.symbol_name)));
+        Ok(out)
+    }
+
     async fn impact_analysis(
         &self,
         tenant_id: &str,

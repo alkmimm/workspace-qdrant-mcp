@@ -248,6 +248,12 @@ export async function handleGraph(
         // is a DEPENDENCY MAP, not an internal member inventory. Explicit
         // `edgeTypes` (e.g. ["CONTAINS"]) overrides — the membership escape hatch.
         edge_types: edgeTypes ?? RELATION_DEPENDENCY_EDGES,
+        // Fallback identity: the daemon resolves the node by NAME if the
+        // computed node_id misses (the symbolType/filePath must otherwise match
+        // the extractor EXACTLY — e.g. an async fn is "async_function"). Without
+        // this, a wrong symbolType silently returned 0.
+        symbol_name: symbol,
+        file_path: filePath,
       };
       const r = await daemonClient.queryRelated(req);
       return { success: true, action, tenant_id: tenant, symbol, node_id: nodeId, ...r };

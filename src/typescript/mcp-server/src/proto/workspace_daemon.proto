@@ -717,6 +717,8 @@ message QueryRelatedRequest {
     uint32 max_hops = 3;                          // Max traversal depth (1-5)
     repeated string edge_types = 4;               // Filter: ["CALLS", "IMPORTS"], empty = all
     optional uint32 top_k = 5;                    // Max nodes returned, nearest-first (0/absent = all)
+    optional string symbol_name = 6;              // Fallback: resolve the source node BY NAME when node_id misses (robust to symbolType/path mismatch)
+    optional string file_path = 7;                // Optional narrowing for symbol_name resolution
 }
 
 // QueryRelated Response

@@ -37,7 +37,7 @@ export const graphToolDefinition = {
         type: 'string',
         default: 'function',
         description:
-          "Symbol kind for 'relations' node lookup (function, class, struct, method, …). Default: 'function'.",
+          "Symbol kind for 'relations' node lookup. Valid: function, async_function, method, struct, class, enum, interface, trait, type_alias, constant, module, macro, impl. Default: 'function'. If it doesn't match what the indexer stored (e.g. an async fn is 'async_function', not 'function'), relations now falls back to resolving the node by NAME — so a wrong symbolType no longer silently returns 0.",
       },
       maxHops: {
         type: 'number',

@@ -55,6 +55,22 @@ impl<S: GraphStore> SharedGraphStore<S> {
             .await
     }
 
+    /// Query related nodes resolving the source BY SYMBOL NAME (+ optional
+    /// file_path) — the robust fallback when a client-computed node_id misses.
+    pub async fn query_related_by_symbol(
+        &self,
+        tenant_id: &str,
+        symbol_name: &str,
+        file_path: Option<&str>,
+        max_hops: u32,
+        edge_types: Option<&[EdgeType]>,
+    ) -> GraphDbResult<Vec<TraversalNode>> {
+        let guard = self.inner.read().await;
+        guard
+            .query_related_by_symbol(tenant_id, symbol_name, file_path, max_hops, edge_types)
+            .await
+    }
+
     /// Impact analysis for a symbol change.
     pub async fn impact_analysis(
         &self,
@@ -453,6 +469,65 @@ mod tests {
             !ids.contains(m_b.node_id.as_str()),
             "scope must NOT fan out to the other class's method (B.m)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_query_related_by_symbol_resolves_when_node_id_unknown() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // caller (a.rs) CALLS callee (b.rs).
+        let caller = GraphNode::new(T, "a.rs", "caller", NodeType::Function);
+        let callee = GraphNode::new(T, "b.rs", "callee", NodeType::Function);
+        store
+            .upsert_nodes(&[caller.clone(), callee.clone()])
+            .await
+            .unwrap();
+        store
+            .insert_edges(&[GraphEdge::new(
+                T,
+                &caller.node_id,
+                &callee.node_id,
+                EdgeType::Calls,
+                "a.rs",
+            )])
+            .await
+            .unwrap();
+
+        // Resolve the source BY NAME (no node_id) → reaches the callee. This is
+        // what makes relations robust to a client computing the wrong node_id.
+        let by_name = store
+            .query_related_by_symbol(T, "caller", None, 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap();
+        assert!(
+            by_name.iter().any(|n| n.node_id == callee.node_id),
+            "name resolution should reach the callee"
+        );
+
+        // A matching file_path narrows to the same node.
+        let narrowed = store
+            .query_related_by_symbol(T, "caller", Some("a.rs"), 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap();
+        assert!(narrowed.iter().any(|n| n.node_id == callee.node_id));
+
+        // A WRONG file_path falls back to name-only — the footgun fix.
+        let wrong_path = store
+            .query_related_by_symbol(T, "caller", Some("nope.rs"), 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap();
+        assert!(
+            wrong_path.iter().any(|n| n.node_id == callee.node_id),
+            "a wrong file_path must fall back to name-only resolution"
+        );
+
+        // Unknown symbol → empty, not an error.
+        let unknown = store
+            .query_related_by_symbol(T, "does_not_exist", None, 1, None)
+            .await
+            .unwrap();
+        assert!(unknown.is_empty());
     }
 
     #[tokio::test]

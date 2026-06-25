@@ -33,8 +33,10 @@ impl GraphService for GraphServiceImpl {
         if req.tenant_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id is required"));
         }
-        if req.node_id.is_empty() {
-            return Err(Status::invalid_argument("node_id is required"));
+        if req.node_id.is_empty() && req.symbol_name.as_deref().map_or(true, str::is_empty) {
+            return Err(Status::invalid_argument(
+                "either node_id or symbol_name is required",
+            ));
         }
 
         let max_hops = req.max_hops.clamp(0, 5);
@@ -69,47 +71,68 @@ impl GraphService for GraphServiceImpl {
 
         let start = std::time::Instant::now();
 
-        let result = self
-            .graph_store
-            .query_related(
-                &req.tenant_id,
-                &req.node_id,
-                max_hops,
-                edge_types.as_deref(),
-            )
-            .await;
-
-        match result {
-            Ok(nodes) => {
-                let query_time_ms = start.elapsed().as_millis() as i64;
-                let total = nodes.len() as u32;
-
-                let proto_nodes: Vec<TraversalNodeProto> = nodes
-                    .into_iter()
-                    .take(top_k.unwrap_or(usize::MAX))
-                    .map(|n| TraversalNodeProto {
-                        node_id: n.node_id,
-                        symbol_name: n.symbol_name,
-                        symbol_type: n.symbol_type,
-                        file_path: n.file_path,
-                        edge_type: n.edge_type,
-                        depth: n.depth,
-                        path: n.path,
-                        confidence: n.confidence,
-                    })
-                    .collect();
-
-                Ok(Response::new(QueryRelatedResponse {
-                    nodes: proto_nodes,
-                    total,
-                    query_time_ms,
-                }))
+        // Primary: node_id-based traversal (precise; the only path on backends
+        // without name resolution).
+        let mut nodes = if req.node_id.is_empty() {
+            Vec::new()
+        } else {
+            match self
+                .graph_store
+                .query_related(&req.tenant_id, &req.node_id, max_hops, edge_types.as_deref())
+                .await
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    error!("GraphService.QueryRelated failed: {}", e);
+                    return Err(Status::internal(format!("Graph query failed: {}", e)));
+                }
             }
-            Err(e) => {
-                error!("GraphService.QueryRelated failed: {}", e);
-                Err(Status::internal(format!("Graph query failed: {}", e)))
+        };
+
+        // Fallback: resolve by symbol name when the node_id missed. A client
+        // computes node_id from (symbol, type, file_path); if its symbol_type or
+        // file_path differs from what the extractor stored, the precise lookup
+        // returns nothing even though the symbol exists in the graph. Name
+        // resolution (as impact/usages already do) recovers it.
+        if nodes.is_empty() {
+            if let Some(sym) = req.symbol_name.as_deref().filter(|s| !s.is_empty()) {
+                let fp = req.file_path.as_deref().filter(|s| !s.is_empty());
+                match self
+                    .graph_store
+                    .query_related_by_symbol(&req.tenant_id, sym, fp, max_hops, edge_types.as_deref())
+                    .await
+                {
+                    Ok(n) => nodes = n,
+                    Err(e) => {
+                        error!("GraphService.QueryRelated (by symbol) failed: {}", e);
+                        return Err(Status::internal(format!("Graph query failed: {}", e)));
+                    }
+                }
             }
         }
+
+        let query_time_ms = start.elapsed().as_millis() as i64;
+        let total = nodes.len() as u32;
+        let proto_nodes: Vec<TraversalNodeProto> = nodes
+            .into_iter()
+            .take(top_k.unwrap_or(usize::MAX))
+            .map(|n| TraversalNodeProto {
+                node_id: n.node_id,
+                symbol_name: n.symbol_name,
+                symbol_type: n.symbol_type,
+                file_path: n.file_path,
+                edge_type: n.edge_type,
+                depth: n.depth,
+                path: n.path,
+                confidence: n.confidence,
+            })
+            .collect();
+
+        Ok(Response::new(QueryRelatedResponse {
+            nodes: proto_nodes,
+            total,
+            query_time_ms,
+        }))
     }
 
     #[tracing::instrument(skip_all, fields(method = "GraphService.impact_analysis"))]
