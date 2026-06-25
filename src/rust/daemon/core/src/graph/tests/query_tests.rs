@@ -119,6 +119,49 @@ async fn test_query_related_edge_type_filter() {
     assert_eq!(results[0].node_id, c.node_id);
 }
 
+/// A re-convergent (diamond) graph — a -> b, a -> c, b -> d, c -> d — must return
+/// each reachable node ONCE at its minimum depth. The old recursive UNION-ALL CTE
+/// emitted `d` twice (one row per path a->b->d and a->c->d); on a hub-heavy graph
+/// that per-path fan-out was exponential (a live 1-hop relation measured ~60s).
+/// The bounded BFS visits each node once.
+#[tokio::test]
+async fn test_query_related_reconvergent_dedup() {
+    let store = test_store().await;
+
+    let a = GraphNode::new(TENANT, "a.rs", "a", NodeType::Function);
+    let b = GraphNode::new(TENANT, "b.rs", "b", NodeType::Function);
+    let c = GraphNode::new(TENANT, "c.rs", "c", NodeType::Function);
+    let d = GraphNode::new(TENANT, "d.rs", "d", NodeType::Function);
+    store
+        .upsert_nodes(&[a.clone(), b.clone(), c.clone(), d.clone()])
+        .await
+        .unwrap();
+
+    let edges = vec![
+        GraphEdge::new(TENANT, &a.node_id, &b.node_id, EdgeType::Calls, "a.rs"),
+        GraphEdge::new(TENANT, &a.node_id, &c.node_id, EdgeType::Calls, "a.rs"),
+        GraphEdge::new(TENANT, &b.node_id, &d.node_id, EdgeType::Calls, "b.rs"),
+        GraphEdge::new(TENANT, &c.node_id, &d.node_id, EdgeType::Calls, "c.rs"),
+    ];
+    store.insert_edges(&edges).await.unwrap();
+
+    let results = store
+        .query_related(TENANT, &a.node_id, 3, None)
+        .await
+        .unwrap();
+
+    // b, c, d — d exactly once (reached via b OR c, not both), at its min depth.
+    assert_eq!(
+        results.len(),
+        3,
+        "each reachable node once: {:?}",
+        results.iter().map(|r| &r.symbol_name).collect::<Vec<_>>()
+    );
+    let d_rows: Vec<_> = results.iter().filter(|r| r.symbol_name == "d").collect();
+    assert_eq!(d_rows.len(), 1, "re-convergent node d appears once");
+    assert_eq!(d_rows[0].depth, 2, "d reached at its minimum depth (2)");
+}
+
 // -- Impact analysis --
 
 #[tokio::test]

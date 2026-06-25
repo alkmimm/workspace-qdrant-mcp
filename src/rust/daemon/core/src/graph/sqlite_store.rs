@@ -1,8 +1,10 @@
-//! SQLite-backed graph store using recursive CTEs for traversal.
+//! SQLite-backed graph store with bounded breadth-first traversal.
+
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
-use tracing::debug;
+use tracing::{debug, warn};
 use wqm_common::timestamps::now_utc;
 
 use super::{
@@ -12,8 +14,9 @@ use super::{
 
 /// SQLite-backed implementation of `GraphStore`.
 ///
-/// Uses a dedicated `graph.db` with WAL mode. Recursive CTEs handle
-/// multi-hop traversal without requiring a graph database engine.
+/// Uses a dedicated `graph.db` with WAL mode. Multi-hop traversal is a bounded
+/// breadth-first walk (one index-seeking query per hop, visited-set dedup, node
+/// budget) — no graph database engine required.
 #[derive(Clone)]
 pub struct SqliteGraphStore {
     pool: SqlitePool,
@@ -222,67 +225,148 @@ impl GraphStore for SqliteGraphStore {
         max_hops: u32,
         edge_types: Option<&[EdgeType]>,
     ) -> GraphDbResult<Vec<TraversalNode>> {
-        // Build edge type filter clause
+        if max_hops == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Bounded breadth-first traversal. Replaces a recursive `UNION ALL` CTE
+        // that re-expanded every node via every path — on a re-convergent /
+        // hub-heavy call graph that is exponential (a single live 1-hop relation
+        // on the 686k-edge tenant measured ~60s before this change). BFS visits
+        // each node once at its minimum depth, issues ONE index-seeking query per
+        // hop over the whole frontier (`source_node_id IN (...)` → idx_edges_source),
+        // and hard-caps the reached-node count.
+        const NODE_BUDGET: usize = 10_000;
+
+        // Edge-type filter appended to each per-hop query (single table, no alias).
         let type_filter = match edge_types {
             Some(types) if !types.is_empty() => {
                 let placeholders: Vec<String> =
                     types.iter().map(|t| format!("'{}'", t.as_str())).collect();
-                format!("AND e.edge_type IN ({})", placeholders.join(", "))
+                format!(" AND edge_type IN ({})", placeholders.join(", "))
             }
             _ => String::new(),
         };
 
-        let query = format!(
-            "WITH RECURSIVE graph_traverse AS (
-                SELECT e.target_node_id AS node_id, e.edge_type, 1 AS depth,
-                       COALESCE(e.weight, 1.0) AS confidence,
-                       e.source_node_id || ' -> ' || e.target_node_id AS path
-                FROM graph_edges e
-                WHERE e.source_node_id = ?1 AND e.tenant_id = ?2 AND ?3 >= 1 {type_filter}
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(node_id.to_string());
+        // (node_id, path, confidence) for the current frontier.
+        let mut frontier: Vec<(String, String, f64)> =
+            vec![(node_id.to_string(), node_id.to_string(), 1.0)];
+        // Reached nodes in BFS order: (node_id, edge_type, depth, path, confidence).
+        let mut hits: Vec<(String, String, u32, String, f64)> = Vec::new();
+        let mut truncated = false;
 
-                UNION ALL
+        let mut depth = 0u32;
+        while depth < max_hops && !frontier.is_empty() {
+            depth += 1;
 
-                SELECT e.target_node_id, e.edge_type, gt.depth + 1,
-                       gt.confidence * COALESCE(e.weight, 1.0),
-                       gt.path || ' -> ' || e.target_node_id
-                FROM graph_edges e
-                INNER JOIN graph_traverse gt ON e.source_node_id = gt.node_id
-                WHERE gt.depth < ?3 AND e.tenant_id = ?2 {type_filter}
-            )
-            -- GROUP BY over the original DISTINCT columns preserves the row set
-            -- exactly (path + edge_type fix the edge chain, so confidence is unique
-            -- per group); MAX is the best-path weight product. (confidence-expose)
-            SELECT gt.node_id, gt.edge_type, gt.depth, gt.path,
-                   n.symbol_name, n.symbol_type, n.file_path,
-                   MAX(gt.confidence) AS confidence
-            FROM graph_traverse gt
-            JOIN graph_nodes n ON gt.node_id = n.node_id
-            GROUP BY gt.node_id, gt.edge_type, gt.depth, gt.path,
-                     n.symbol_name, n.symbol_type, n.file_path
-            ORDER BY gt.depth, n.symbol_name"
+            let placeholders: Vec<String> =
+                (0..frontier.len()).map(|i| format!("?{}", i + 2)).collect();
+            let query = format!(
+                "SELECT source_node_id, target_node_id, edge_type, \
+                 COALESCE(weight, 1.0) AS w \
+                 FROM graph_edges \
+                 WHERE tenant_id = ?1 AND source_node_id IN ({}){}",
+                placeholders.join(", "),
+                type_filter
+            );
+            let mut qb = sqlx::query(&query).bind(tenant_id);
+            for (nid, _, _) in &frontier {
+                qb = qb.bind(nid);
+            }
+            let rows = qb.fetch_all(&self.pool).await?;
+
+            let mut next: Vec<(String, String, f64)> = Vec::new();
+            {
+                let parent: HashMap<&str, (&str, f64)> = frontier
+                    .iter()
+                    .map(|(n, p, c)| (n.as_str(), (p.as_str(), *c)))
+                    .collect();
+                for row in &rows {
+                    let tgt: String = row.get("target_node_id");
+                    if !visited.insert(tgt.clone()) {
+                        continue; // already reached at an equal-or-shallower depth
+                    }
+                    let src: String = row.get("source_node_id");
+                    let edge_type: String = row.get("edge_type");
+                    let weight: f64 = row.get("w");
+                    let (ppath, pconf) =
+                        parent.get(src.as_str()).copied().unwrap_or((node_id, 1.0));
+                    let path = format!("{ppath} -> {tgt}");
+                    let confidence = pconf * weight;
+                    hits.push((tgt.clone(), edge_type, depth, path.clone(), confidence));
+                    next.push((tgt, path, confidence));
+                    if visited.len() >= NODE_BUDGET {
+                        truncated = true;
+                        break;
+                    }
+                }
+            }
+            frontier = next;
+            if truncated {
+                break;
+            }
+        }
+
+        if truncated {
+            warn!(
+                "graph query_related: node budget {} reached from source {} — results truncated",
+                NODE_BUDGET, node_id
+            );
+        }
+        if hits.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Resolve symbol metadata for reached nodes that ARE graph nodes (the old
+        // INNER JOIN dropped edge targets with no node row, e.g. unresolved stubs).
+        let uniq_ids: Vec<String> = {
+            let mut seen: HashSet<&str> = HashSet::new();
+            hits.iter()
+                .filter(|h| seen.insert(h.0.as_str()))
+                .map(|h| h.0.clone())
+                .collect()
+        };
+        let node_ph: Vec<String> = (0..uniq_ids.len()).map(|i| format!("?{}", i + 1)).collect();
+        let node_query = format!(
+            "SELECT node_id, symbol_name, symbol_type, file_path \
+             FROM graph_nodes WHERE node_id IN ({})",
+            node_ph.join(", ")
         );
+        let mut nqb = sqlx::query(&node_query);
+        for id in &uniq_ids {
+            nqb = nqb.bind(id);
+        }
+        let node_rows = nqb.fetch_all(&self.pool).await?;
+        let mut meta: HashMap<String, (String, String, String)> =
+            HashMap::with_capacity(node_rows.len());
+        for r in &node_rows {
+            let id: String = r.get("node_id");
+            meta.insert(
+                id,
+                (r.get("symbol_name"), r.get("symbol_type"), r.get("file_path")),
+            );
+        }
 
-        let rows = sqlx::query(&query)
-            .bind(node_id)
-            .bind(tenant_id)
-            .bind(max_hops as i64)
-            .fetch_all(&self.pool)
-            .await?;
-
-        let results = rows
-            .iter()
-            .map(|row| TraversalNode {
-                node_id: row.get("node_id"),
-                symbol_name: row.get("symbol_name"),
-                symbol_type: row.get("symbol_type"),
-                file_path: row.get("file_path"),
-                edge_type: row.get("edge_type"),
-                depth: row.get::<i64, _>("depth") as u32,
-                path: row.get("path"),
-                confidence: row.get::<f64, _>("confidence"),
+        let mut results: Vec<TraversalNode> = hits
+            .into_iter()
+            .filter_map(|(id, edge_type, depth, path, confidence)| {
+                meta.get(&id)
+                    .map(|(symbol_name, symbol_type, file_path)| TraversalNode {
+                        node_id: id.clone(),
+                        symbol_name: symbol_name.clone(),
+                        symbol_type: symbol_type.clone(),
+                        file_path: file_path.clone(),
+                        edge_type,
+                        depth,
+                        path,
+                        confidence,
+                    })
             })
             .collect();
-
+        results
+            .sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.symbol_name.cmp(&b.symbol_name)));
         Ok(results)
     }
 
@@ -758,56 +842,123 @@ impl SqliteGraphStore {
         tenant_id: &str,
         target_id: &str,
     ) -> GraphDbResult<Vec<ImpactNode>> {
-        let rows = sqlx::query(
-            "WITH RECURSIVE reverse_traverse AS (
-                SELECT e.source_node_id AS node_id, e.edge_type, 1 AS depth,
-                       COALESCE(e.weight, 1.0) AS confidence
-                FROM graph_edges e
-                WHERE e.target_node_id = ?1 AND e.tenant_id = ?2
+        // Bounded breadth-first REVERSE traversal (callers of `target_id`, up to 3
+        // hops). Same rationale as `query_related`: the previous recursive
+        // `UNION ALL` CTE re-expanded nodes via every path and could blow up on a
+        // hub-heavy graph. One index-seeking query per hop (`target_node_id IN (...)`
+        // → idx_edges_target), visited-set dedup, node budget.
+        const MAX_DISTANCE: u32 = 3;
+        const NODE_BUDGET: usize = 10_000;
 
-                UNION ALL
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(target_id.to_string());
+        // (node_id, confidence) for the current reverse frontier.
+        let mut frontier: Vec<(String, f64)> = vec![(target_id.to_string(), 1.0)];
+        // Reached callers in BFS order: (node_id, edge_type, distance, confidence).
+        let mut hits: Vec<(String, String, u32, f64)> = Vec::new();
+        let mut truncated = false;
 
-                SELECT e.source_node_id, e.edge_type, rt.depth + 1,
-                       rt.confidence * COALESCE(e.weight, 1.0)
-                FROM graph_edges e
-                INNER JOIN reverse_traverse rt ON e.target_node_id = rt.node_id
-                WHERE rt.depth < 3 AND e.tenant_id = ?2
-            )
-            -- Same (node,edge_type,depth) reachable by several paths collapses to one
-            -- row (as the original DISTINCT did); MAX keeps the most-confident path's
-            -- weight product. (confidence-expose)
-            SELECT rt.node_id, rt.edge_type, rt.depth,
-                   n.symbol_name, n.file_path, MAX(rt.confidence) AS confidence
-            FROM reverse_traverse rt
-            JOIN graph_nodes n ON rt.node_id = n.node_id
-            GROUP BY rt.node_id, rt.edge_type, rt.depth, n.symbol_name, n.file_path
-            ORDER BY rt.depth, n.symbol_name",
-        )
-        .bind(target_id)
-        .bind(tenant_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let mut distance = 0u32;
+        while distance < MAX_DISTANCE && !frontier.is_empty() {
+            distance += 1;
 
-        Ok(rows
-            .iter()
-            .map(|row| {
-                let depth: i64 = row.get("depth");
-                let edge_type_str: String = row.get("edge_type");
-                let impact_type = match (depth, edge_type_str.as_str()) {
-                    (1, "CALLS") => "direct_caller",
-                    (1, "USES_TYPE") => "type_user",
-                    (1, _) => "direct_reference",
-                    (_, "CALLS") => "indirect_caller",
-                    _ => "indirect_reference",
-                };
-                ImpactNode {
-                    node_id: row.get("node_id"),
-                    symbol_name: row.get("symbol_name"),
-                    file_path: row.get("file_path"),
-                    impact_type: impact_type.to_string(),
-                    distance: depth as u32,
-                    confidence: row.get::<f64, _>("confidence"),
+            let placeholders: Vec<String> =
+                (0..frontier.len()).map(|i| format!("?{}", i + 2)).collect();
+            let query = format!(
+                "SELECT source_node_id, target_node_id, edge_type, \
+                 COALESCE(weight, 1.0) AS w \
+                 FROM graph_edges \
+                 WHERE tenant_id = ?1 AND target_node_id IN ({})",
+                placeholders.join(", ")
+            );
+            let mut qb = sqlx::query(&query).bind(tenant_id);
+            for (nid, _) in &frontier {
+                qb = qb.bind(nid);
+            }
+            let rows = qb.fetch_all(&self.pool).await?;
+
+            let mut next: Vec<(String, f64)> = Vec::new();
+            {
+                let parent: HashMap<&str, f64> =
+                    frontier.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+                for row in &rows {
+                    let src: String = row.get("source_node_id"); // the caller
+                    if !visited.insert(src.clone()) {
+                        continue;
+                    }
+                    let tgt: String = row.get("target_node_id");
+                    let edge_type: String = row.get("edge_type");
+                    let weight: f64 = row.get("w");
+                    let pconf = parent.get(tgt.as_str()).copied().unwrap_or(1.0);
+                    let confidence = pconf * weight;
+                    hits.push((src.clone(), edge_type, distance, confidence));
+                    next.push((src, confidence));
+                    if visited.len() >= NODE_BUDGET {
+                        truncated = true;
+                        break;
+                    }
                 }
+            }
+            frontier = next;
+            if truncated {
+                break;
+            }
+        }
+
+        if truncated {
+            warn!(
+                "graph reverse_traverse: node budget {} reached from target {} — impact truncated",
+                NODE_BUDGET, target_id
+            );
+        }
+        if hits.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let uniq_ids: Vec<String> = {
+            let mut seen: HashSet<&str> = HashSet::new();
+            hits.iter()
+                .filter(|h| seen.insert(h.0.as_str()))
+                .map(|h| h.0.clone())
+                .collect()
+        };
+        let node_ph: Vec<String> = (0..uniq_ids.len()).map(|i| format!("?{}", i + 1)).collect();
+        let node_query = format!(
+            "SELECT node_id, symbol_name, file_path \
+             FROM graph_nodes WHERE node_id IN ({})",
+            node_ph.join(", ")
+        );
+        let mut nqb = sqlx::query(&node_query);
+        for id in &uniq_ids {
+            nqb = nqb.bind(id);
+        }
+        let node_rows = nqb.fetch_all(&self.pool).await?;
+        let mut meta: HashMap<String, (String, String)> = HashMap::with_capacity(node_rows.len());
+        for r in &node_rows {
+            let id: String = r.get("node_id");
+            meta.insert(id, (r.get("symbol_name"), r.get("file_path")));
+        }
+
+        Ok(hits
+            .into_iter()
+            .filter_map(|(id, edge_type, distance, confidence)| {
+                meta.get(&id).map(|(symbol_name, file_path)| {
+                    let impact_type = match (distance, edge_type.as_str()) {
+                        (1, "CALLS") => "direct_caller",
+                        (1, "USES_TYPE") => "type_user",
+                        (1, _) => "direct_reference",
+                        (_, "CALLS") => "indirect_caller",
+                        _ => "indirect_reference",
+                    };
+                    ImpactNode {
+                        node_id: id.clone(),
+                        symbol_name: symbol_name.clone(),
+                        file_path: file_path.clone(),
+                        impact_type: impact_type.to_string(),
+                        distance,
+                        confidence,
+                    }
+                })
             })
             .collect())
     }
