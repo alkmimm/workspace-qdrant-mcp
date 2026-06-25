@@ -87,6 +87,47 @@ fn test_split_chunk_with_overlap() {
 }
 
 #[test]
+fn test_split_carries_calls_to_first_fragment() {
+    // Regression: an oversized (fragmented) function must keep its CALLS on the
+    // first fragment. The graph extractor builds CALLS edges from `chunk.calls`;
+    // all fragments share one graph node_id, so without this a fragmented
+    // function (e.g. a large match-dispatch handler) gets ZERO outgoing CALLS
+    // edges and relations/impact/usages under-report its callees.
+    let chunker = SemanticChunker::new(200); // target_size = 800 chars
+    let chunk = SemanticChunk::new(
+        ChunkType::Function,
+        "big_dispatch",
+        "line1\nline2\nline3\nline4\nline5\n".repeat(100),
+        1,
+        500,
+        "rust",
+        "test.rs",
+    )
+    .with_signature("fn big_dispatch()")
+    .with_calls(vec![
+        "fetch_watch_folder".to_string(),
+        "handle_branch_switch".to_string(),
+    ]);
+
+    let fragments = chunker.split_oversized_chunk(&chunk);
+    assert!(fragments.len() > 1, "expected fragmentation");
+    assert_eq!(
+        fragments[0].calls,
+        vec![
+            "fetch_watch_folder".to_string(),
+            "handle_branch_switch".to_string()
+        ],
+        "first fragment must inherit the function's calls so the graph node gets CALLS edges"
+    );
+    for frag in &fragments[1..] {
+        assert!(
+            frag.calls.is_empty(),
+            "only the first fragment carries calls (the shared node_id dedups anyway)"
+        );
+    }
+}
+
+#[test]
 fn test_safe_char_boundary() {
     // ASCII: all byte indices are char boundaries
     assert_eq!(safe_char_boundary("hello", 3), 3);

@@ -137,12 +137,22 @@ fn split_chunk_with_overlap(chunk: &SemanticChunk, max_chunk_size: usize) -> Vec
             fragment = fragment.with_parent(parent.clone());
         }
         if fragment_index == 0 {
-            // Only first fragment gets docstring and signature
+            // Only the first fragment carries the function-level metadata:
+            // docstring, signature, and CALLS. All fragments share ONE graph
+            // node_id (same symbol_name|file_path|type), so the graph extractor
+            // builds the CALLS edges once from fragment 0. Without carrying
+            // `calls` here, an oversized (fragmented) function — e.g. a large
+            // match-dispatch handler — gets ZERO outgoing CALLS edges in the
+            // graph, so `relations`/`impact`/`usages` under-report its callees.
+            // (signature still drives USES_TYPE; parent_symbol drives CONTAINS.)
             if let Some(ref doc) = chunk.docstring {
                 fragment = fragment.with_docstring(doc.clone());
             }
             if let Some(ref sig) = chunk.signature {
                 fragment = fragment.with_signature(sig.clone());
+            }
+            if !chunk.calls.is_empty() {
+                fragment = fragment.with_calls(chunk.calls.clone());
             }
         }
 
