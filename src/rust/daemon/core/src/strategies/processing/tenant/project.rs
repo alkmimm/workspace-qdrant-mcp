@@ -5,10 +5,13 @@
 //! Delete (tenant-scoped point removal), and Uplift (cascade to per-file items).
 
 use std::path::Path;
+use std::sync::Arc;
 
+use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
 
 use crate::context::ProcessingContext;
+use crate::search_db::SearchDbManager;
 use crate::specs::parse_payload;
 use crate::unified_queue_processor::{UnifiedProcessorError, UnifiedProcessorResult};
 use crate::unified_queue_schema::{
@@ -108,32 +111,31 @@ async fn handle_branch_membership_bulk(
         return Ok(());
     }
 
-    // 1. Candidate content-rows: tracked on this watch folder, for one of the
-    //    listed paths, with a real base_point, not yet carrying the branch.
-    let path_ph = vec!["?"; spec.paths.len()].join(", ");
-    let select_sql = format!(
-        "SELECT DISTINCT base_point FROM tracked_files
-         WHERE watch_folder_id = ? AND base_point IS NOT NULL AND branches IS NOT NULL
-           AND relative_path IN ({path_ph})
-           AND NOT EXISTS (SELECT 1 FROM json_each(tracked_files.branches) WHERE value = ?)"
-    );
-    let mut sel = sqlx::query_scalar::<_, String>(&select_sql).bind(&spec.watch_folder_id);
-    for p in &spec.paths {
-        sel = sel.bind(p);
-    }
-    sel = sel.bind(&spec.branch);
-    let candidates: Vec<String> = sel
-        .fetch_all(&ctx.pool)
-        .await
-        .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("branch bulk select: {e}")))?;
+    // Candidate base_points: tracked on this watch folder, for one of the listed
+    // paths, with a real base_point, not yet carrying the branch.
+    let candidates =
+        select_branch_bulk_candidates(&ctx.pool, &spec.watch_folder_id, &spec.branch, &spec.paths)
+            .await
+            .map_err(|e| {
+                UnifiedProcessorError::ProcessingFailed(format!("branch bulk select: {e}"))
+            })?;
     if candidates.is_empty() {
         return Ok(());
     }
 
-    // 2. Qdrant: append the branch to each base_point's shared points. Keep only
-    //    those the vector store still backs (the dedup fast-path's count==0
-    //    fallback, applied in bulk).
-    let mut tagged: Vec<String> = Vec::with_capacity(candidates.len());
+    // Append the branch per base_point, CHECKPOINTING each one as it succeeds.
+    // Qdrant first (the proven `add_branch_to_base_point`, keeping only the
+    // base_points the vector store still backs via its count==0 fallback), then
+    // immediately persist that single base_point to state.db + search.db.
+    //
+    // Persisting per base_point — rather than once at the end — means a lease
+    // expiry mid-op leaves COMMITTED progress: the next pass's candidate SELECT
+    // (`branch NOT EXISTS`) skips the done base_points, so the op RESUMES instead
+    // of re-running every (slow) set_payload. With an end-only persist, an op that
+    // exceeded the 300s lease before its single terminal write was silently
+    // re-leased from scratch and looped forever without converging (the lease-loop
+    // that starved the queue under heavy Qdrant load).
+    let mut tagged = 0usize;
     let mut missing = 0usize;
     for bp in &candidates {
         let points = ctx
@@ -142,7 +144,15 @@ async fn handle_branch_membership_bulk(
             .await
             .map_err(|e| UnifiedProcessorError::Storage(e.to_string()))?;
         if points > 0 {
-            tagged.push(bp.clone());
+            persist_branch_tag_for_base_points(
+                &ctx.pool,
+                ctx.search_db.as_ref(),
+                &spec.watch_folder_id,
+                &spec.branch,
+                std::slice::from_ref(bp),
+            )
+            .await?;
+            tagged += 1;
         } else {
             missing += 1;
         }
@@ -153,13 +163,70 @@ async fn handle_branch_membership_bulk(
             missing, spec.branch
         );
     }
-    if tagged.is_empty() {
+    if tagged > 0 {
+        info!(
+            "branch bulk: tagged {} base_points onto branch '{}' (wf={}, {} paths in op)",
+            tagged,
+            spec.branch,
+            spec.watch_folder_id,
+            spec.paths.len()
+        );
+    }
+    Ok(())
+}
+
+/// Select the base_points tracked under `watch_folder_id` for one of `paths`
+/// that do NOT yet carry `branch` (with a real `base_point` and non-null
+/// `branches`).
+///
+/// This is the bulk branch re-key's candidate set. Because it filters on
+/// `branch NOT EXISTS`, base_points already persisted by an earlier (possibly
+/// re-leased) pass are excluded — which is what lets
+/// [`handle_branch_membership_bulk`] resume rather than restart on re-lease.
+pub(crate) async fn select_branch_bulk_candidates(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    branch: &str,
+    paths: &[String],
+) -> Result<Vec<String>, sqlx::Error> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let path_ph = vec!["?"; paths.len()].join(", ");
+    let select_sql = format!(
+        "SELECT DISTINCT base_point FROM tracked_files
+         WHERE watch_folder_id = ? AND base_point IS NOT NULL AND branches IS NOT NULL
+           AND relative_path IN ({path_ph})
+           AND NOT EXISTS (SELECT 1 FROM json_each(tracked_files.branches) WHERE value = ?)"
+    );
+    let mut sel = sqlx::query_scalar::<_, String>(&select_sql).bind(watch_folder_id);
+    for p in paths {
+        sel = sel.bind(p);
+    }
+    sel = sel.bind(branch);
+    sel.fetch_all(pool).await
+}
+
+/// Append `branch` to the given `base_points` in state.db (`tracked_files`) and,
+/// when a search.db is present, in `file_metadata` (`code_lines` are shared by
+/// `file_id`, so nothing is re-written there). Idempotent via the `branch NOT
+/// EXISTS` guard.
+///
+/// The bulk handler calls this PER base_point so that each Qdrant `set_payload`
+/// is immediately checkpointed: a lease expiry leaves committed work behind and
+/// the op resumes from the next un-tagged base_point.
+pub(crate) async fn persist_branch_tag_for_base_points(
+    pool: &SqlitePool,
+    search_db: Option<&Arc<SearchDbManager>>,
+    watch_folder_id: &str,
+    branch: &str,
+    base_points: &[String],
+) -> UnifiedProcessorResult<()> {
+    if base_points.is_empty() {
         return Ok(());
     }
-
-    // 3. state.db: append the branch to the Qdrant-confirmed content rows.
     let now = timestamps::now_utc();
-    let bp_ph = vec!["?"; tagged.len()].join(", ");
+    let bp_ph = vec!["?"; base_points.len()].join(", ");
     let update_sql = format!(
         "UPDATE tracked_files
          SET branches = json_insert(branches, '$[#]', ?), updated_at = ?
@@ -167,35 +234,23 @@ async fn handle_branch_membership_bulk(
            AND NOT EXISTS (SELECT 1 FROM json_each(tracked_files.branches) WHERE value = ?)"
     );
     let mut upd = sqlx::query(&update_sql)
-        .bind(&spec.branch)
+        .bind(branch)
         .bind(&now)
-        .bind(&spec.watch_folder_id);
-    for bp in &tagged {
+        .bind(watch_folder_id);
+    for bp in base_points {
         upd = upd.bind(bp);
     }
-    upd.bind(&spec.branch)
-        .execute(&ctx.pool)
+    upd.bind(branch)
+        .execute(pool)
         .await
         .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("branch bulk update: {e}")))?;
 
-    // 4. search.db: same append on file_metadata (code_lines are shared by
-    //    file_id, so nothing is re-written there).
-    if let Some(search_db) = &ctx.search_db {
+    if let Some(search_db) = search_db {
         search_db
-            .add_branch_to_file_metadata_by_base_points(&tagged, &spec.branch)
+            .add_branch_to_file_metadata_by_base_points(base_points, branch)
             .await
-            .map_err(|e| {
-                UnifiedProcessorError::ProcessingFailed(format!("branch bulk fts5: {e}"))
-            })?;
+            .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("branch bulk fts5: {e}")))?;
     }
-
-    info!(
-        "branch bulk: tagged {} base_points onto branch '{}' (wf={}, {} paths in op)",
-        tagged.len(),
-        spec.branch,
-        spec.watch_folder_id,
-        spec.paths.len()
-    );
     Ok(())
 }
 

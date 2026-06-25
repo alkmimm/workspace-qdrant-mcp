@@ -312,6 +312,95 @@ async fn insert_parent_watch_folder(pool: &SqlitePool, path: &str, tenant_id: &s
     .expect("seed parent watch_folder");
 }
 
+/// The bulk branch re-key persists each base_point's tag as it goes (checkpoint),
+/// so a re-leased op RESUMES: `select_branch_bulk_candidates` excludes a
+/// base_point once `persist_branch_tag_for_base_points` has tagged it. This is the
+/// lease-loop fix — with an end-only persist, an op that exceeded the 300s lease
+/// under heavy Qdrant load looped forever re-running every set_payload without
+/// committing progress. Pure state.db path (no Qdrant / no search.db).
+#[tokio::test]
+async fn test_branch_bulk_persist_checkpoints_and_resumes() {
+    use super::project::{persist_branch_tag_for_base_points, select_branch_bulk_candidates};
+    use crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("in-memory pool");
+    sqlx::query(CREATE_WATCH_FOLDERS_SQL).execute(&pool).await.unwrap();
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL).execute(&pool).await.unwrap();
+
+    let now = "2025-01-01T00:00:00Z";
+    sqlx::query(
+        "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled, created_at, updated_at)
+         VALUES ('w1', '/tmp/project', 'projects', 't1', 1, ?1, ?1)",
+    )
+    .bind(now)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (h, rel) in [("h_a", "src/a.rs"), ("h_b", "src/b.rs")] {
+        let bp = wqm_common::hashing::compute_base_point("t1", rel, h);
+        sqlx::query(
+            "INSERT INTO tracked_files
+             (watch_folder_id, relative_path, branches, file_mtime, file_hash, collection, base_point, created_at, updated_at)
+             VALUES ('w1', ?1, '[\"main\"]', ?2, ?3, 'projects', ?4, ?2, ?2)",
+        )
+        .bind(rel)
+        .bind(now)
+        .bind(h)
+        .bind(&bp)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let bp_a = wqm_common::hashing::compute_base_point("t1", "src/a.rs", "h_a");
+    let paths = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+
+    // Both base_points are candidates for 'feat' before any persist.
+    let before = select_branch_bulk_candidates(&pool, "w1", "feat", &paths)
+        .await
+        .unwrap();
+    assert_eq!(before.len(), 2, "both base_points missing 'feat'");
+
+    // Checkpoint ONLY a.rs's base_point.
+    persist_branch_tag_for_base_points(&pool, None, "w1", "feat", std::slice::from_ref(&bp_a))
+        .await
+        .unwrap();
+
+    let branches_a: String =
+        sqlx::query_scalar("SELECT branches FROM tracked_files WHERE relative_path = 'src/a.rs'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let branches_b: String =
+        sqlx::query_scalar("SELECT branches FROM tracked_files WHERE relative_path = 'src/b.rs'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(branches_a.contains("feat"), "a.rs re-keyed onto feat: {branches_a}");
+    assert!(!branches_b.contains("feat"), "b.rs untouched: {branches_b}");
+
+    // RESUME: re-selecting candidates now excludes a.rs — only b.rs remains.
+    let after = select_branch_bulk_candidates(&pool, "w1", "feat", &paths)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 1, "a.rs skipped after checkpoint — op resumes at b.rs");
+
+    // IDEMPOTENT: persisting a.rs again does not double-insert 'feat'.
+    persist_branch_tag_for_base_points(&pool, None, "w1", "feat", std::slice::from_ref(&bp_a))
+        .await
+        .unwrap();
+    let branches_a2: String =
+        sqlx::query_scalar("SELECT branches FROM tracked_files WHERE relative_path = 'src/a.rs'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(branches_a2.matches("feat").count(), 1, "feat tagged once: {branches_a2}");
+}
+
 /// Build a synthetic `UnifiedQueueItem` for a Tenant/Add of `project_root`.
 fn make_tenant_add_item(tenant_id: &str, project_root: &str) -> UnifiedQueueItem {
     let payload = ProjectPayload {
