@@ -317,6 +317,7 @@ pub(super) fn create_unified_queue_metrics() -> (
     IntCounterVec,
     IntGaugeVec,
     IntCounterVec,
+    IntCounterVec,
 ) {
     let unified_queue_depth = int_gauge_vec(
         "unified_queue_depth",
@@ -356,6 +357,14 @@ pub(super) fn create_unified_queue_metrics() -> (
         "Unified queue retry count by item_type",
         &["item_type"],
     );
+    // Re-leases: an in_progress item whose lease expired before completion and was
+    // re-selected by the dequeue. A rising rate for a fixed (item_type, op) means
+    // an op is looping — it never finishes within `lease_duration`.
+    let unified_queue_releases_total = int_counter_vec(
+        "unified_queue_releases_total",
+        "Unified queue lease-expiry re-leases by item_type and op (lease-loop signal)",
+        &["item_type", "op"],
+    );
     (
         unified_queue_depth,
         unified_queue_processing_time_seconds,
@@ -364,6 +373,7 @@ pub(super) fn create_unified_queue_metrics() -> (
         unified_queue_dequeues_total,
         unified_queue_stale_items,
         unified_queue_retries_total,
+        unified_queue_releases_total,
     )
 }
 

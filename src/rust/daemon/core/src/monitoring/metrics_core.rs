@@ -164,6 +164,12 @@ pub struct DaemonMetrics {
     /// Labels: item_type
     pub unified_queue_retries_total: IntCounterVec,
 
+    /// Unified queue lease-expiry re-leases: an in_progress item re-selected by the
+    /// dequeue after its lease expired without completing. A rising rate for a fixed
+    /// (item_type, op) is a lease-loop signal.
+    /// Labels: item_type, op
+    pub unified_queue_releases_total: IntCounterVec,
+
     /// Age in seconds of the oldest pending queue item (0 if none)
     pub queue_oldest_pending_age_seconds: IntGauge,
 
@@ -296,6 +302,7 @@ struct CreatedMetrics {
     unified_queue_dequeues_total: IntCounterVec,
     unified_queue_stale_items: IntGaugeVec,
     unified_queue_retries_total: IntCounterVec,
+    unified_queue_releases_total: IntCounterVec,
     queue_oldest_pending_age_seconds: IntGauge,
     process_resident_memory_bytes: IntGauge,
     process_cpu_percent: Gauge,
@@ -354,6 +361,7 @@ fn create_all_metrics() -> CreatedMetrics {
         unified_queue_dequeues_total,
         unified_queue_stale_items,
         unified_queue_retries_total,
+        unified_queue_releases_total,
     ) = create_unified_queue_metrics();
     let unified_queue_depth_by_tenant = create_per_tenant_indexing_metric();
     let indexing_eta_seconds_by_tenant = create_per_tenant_eta_metric();
@@ -452,6 +460,7 @@ fn create_all_metrics() -> CreatedMetrics {
         unified_queue_dequeues_total,
         unified_queue_stale_items,
         unified_queue_retries_total,
+        unified_queue_releases_total,
         queue_oldest_pending_age_seconds,
         process_resident_memory_bytes,
         process_cpu_percent,
@@ -517,6 +526,7 @@ fn register_metrics(registry: &Registry, m: &CreatedMetrics) {
             Box::new(m.unified_queue_dequeues_total.clone()),
             Box::new(m.unified_queue_stale_items.clone()),
             Box::new(m.unified_queue_retries_total.clone()),
+            Box::new(m.unified_queue_releases_total.clone()),
             Box::new(m.queue_oldest_pending_age_seconds.clone()),
             Box::new(m.process_resident_memory_bytes.clone()),
             Box::new(m.process_cpu_percent.clone()),
@@ -587,6 +597,7 @@ impl DaemonMetrics {
             unified_queue_dequeues_total: m.unified_queue_dequeues_total,
             unified_queue_stale_items: m.unified_queue_stale_items,
             unified_queue_retries_total: m.unified_queue_retries_total,
+            unified_queue_releases_total: m.unified_queue_releases_total,
             queue_oldest_pending_age_seconds: m.queue_oldest_pending_age_seconds,
             process_resident_memory_bytes: m.process_resident_memory_bytes,
             process_cpu_percent: m.process_cpu_percent,

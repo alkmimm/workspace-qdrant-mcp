@@ -320,6 +320,75 @@ async fn test_unified_queue_recover_stale_leases() {
     assert_eq!(stats.in_progress_items, 0);
 }
 
+/// Regression: a dequeue that re-selects an `in_progress` item whose lease expired
+/// (a RE-LEASE — the lease-loop primitive) must bump
+/// `unified_queue_releases_total{item_type,op}`, making an otherwise-silent
+/// lease-loop observable. The counter is a process-global shared by parallel tests,
+/// so assert the robust direction only: the re-lease adds AT LEAST one for our
+/// (item_type, op) (other tests can only push it higher).
+#[tokio::test]
+async fn test_dequeue_re_lease_increments_releases_counter() {
+    let temp_dir = tempdir().unwrap();
+    let db_path = temp_dir.path().join("test_relelease_counter.db");
+
+    let config = QueueConnectionConfig::with_database_path(&db_path);
+    let pool = config.create_pool().await.unwrap();
+    apply_sql_script(&pool, include_str!("../../schema/watch_folders_schema.sql"))
+        .await
+        .unwrap();
+
+    let manager = QueueManager::new(pool);
+    manager.init_unified_queue().await.unwrap();
+
+    manager
+        .enqueue_unified(
+            ItemType::File,
+            UnifiedOp::Add,
+            "test-tenant",
+            "test-collection",
+            r#"{"file_path":"/test/relelease.rs"}"#,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Read the counter via the SAME stringification production uses, so the label
+    // lookup matches regardless of the enum Display output.
+    let it = ItemType::File.to_string();
+    let op = UnifiedOp::Add.to_string();
+    let counter = crate::monitoring::metrics_core::METRICS
+        .unified_queue_releases_total
+        .with_label_values(&[it.as_str(), op.as_str()]);
+    let before = counter.get();
+
+    // First dequeue: a FRESH lease of a pending item with a 1s lease.
+    let first = manager
+        .dequeue_unified(10, "worker-1", Some(1), None, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1, "pending item leased");
+    let qid = first[0].queue_id.clone();
+
+    // Let the 1s lease expire while the item is still in_progress.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Second dequeue: the item is in_progress with an expired lease -> RE-LEASE.
+    let second = manager
+        .dequeue_unified(10, "worker-2", Some(60), None, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(second.len(), 1, "expired-lease item re-selected");
+    assert_eq!(second[0].queue_id, qid, "the same item was re-leased");
+    assert!(
+        counter.get() > before,
+        "re-leasing an in_progress item must bump unified_queue_releases_total \
+         (before={}, after={})",
+        before,
+        counter.get()
+    );
+}
+
 /// Regression: an orphaned `search_status='in_progress'` (FTS5 rows committed
 /// but the finalize handshake lost to a restart) must be reset to `pending` at
 /// startup so `finalize_after_success` can auto-resolve it to `done`. Without
