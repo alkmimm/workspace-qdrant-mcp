@@ -40,10 +40,20 @@ for c in wqm-memexd wqm-mcp; do
     say "[FAIL]" "$c is not running"; warn=$((warn + 1))
   elif [[ -z "$i_created" ]]; then
     say "[?]" "$c running, but local image ${IMG[$c]} not found to compare"
-  elif [[ "$c_created" > "$i_created" ]]; then
-    say "[OK]" "$c recreated after its image build (fresh)"
   else
-    say "[STALE]" "$c predates the latest ${IMG[$c]} build — run 'make redeploy'"; warn=$((warn + 1))
+    # NEVER compare the .Created strings lexically: docker emits the CONTAINER's
+    # in UTC ('...Z') but the IMAGE's in local time ('...-03:00'), so a string
+    # compare is a timezone-format bug (false 'fresh' when the image is newer in
+    # absolute time). Normalize both to epoch seconds with `date -d`.
+    c_epoch=$(date -d "$c_created" +%s 2>/dev/null || echo 0)
+    i_epoch=$(date -d "$i_created" +%s 2>/dev/null || echo 0)
+    if [[ "$c_epoch" -eq 0 || "$i_epoch" -eq 0 ]]; then
+      say "[?]" "$c: could not parse .Created timestamps to compare"
+    elif [[ "$c_epoch" -ge "$i_epoch" ]]; then
+      say "[OK]" "$c recreated after its image build (fresh)"
+    else
+      say "[STALE]" "$c predates the latest ${IMG[$c]} build — run 'make redeploy'"; warn=$((warn + 1))
+    fi
   fi
 done
 
