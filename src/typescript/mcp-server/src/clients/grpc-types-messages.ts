@@ -71,6 +71,8 @@ export type {
   RetryAllResponse,
   RetryItemRequest,
   RetryItemResponse,
+  CancelItemsRequest,
+  CancelItemsResponse,
   LogSearchEventRequest,
   UpdateSearchEventRequest,
   UpdateSearchEventEconomyRequest,

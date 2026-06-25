@@ -94,6 +94,8 @@ export {
   type RetryAllResponse,
   type RetryItemRequest,
   type RetryItemResponse,
+  type CancelItemsRequest,
+  type CancelItemsResponse,
   // TrackingWriteService
   type LogSearchEventRequest,
   type UpdateSearchEventRequest,

@@ -103,6 +103,7 @@ const els = {
   ruleFormMsg: document.getElementById('ruleFormMsg'),
   reloadFailedBtn: document.getElementById('reloadFailedBtn'),
   retryAllFailedBtn: document.getElementById('retryAllFailedBtn'),
+  cancelPendingBtn: document.getElementById('cancelPendingBtn'),
   failedMeta: document.getElementById('failedMeta'),
   failedEmpty: document.getElementById('failedEmpty'),
   failedTable: document.getElementById('failedTable'),
@@ -912,6 +913,43 @@ els.retryAllFailedBtn?.addEventListener('click', async () => {
     toast(e.message, 'error');
   } finally {
     els.retryAllFailedBtn.disabled = false;
+  }
+});
+
+els.cancelPendingBtn?.addEventListener('click', async () => {
+  const tenantId = (
+    prompt('Cancel PENDING queue items for which tenant?\n\nEnter the tenant_id (e.g. 367157a01d98):') || ''
+  ).trim();
+  if (!tenantId) return;
+  els.cancelPendingBtn.disabled = true;
+  try {
+    // Dry-run first to preview the blast radius before the destructive confirm.
+    const dry = await api('/admin/api/queue/cancel', {
+      method: 'POST',
+      body: { tenantId, statuses: ['pending'], dryRun: true },
+    });
+    if (!dry.count) {
+      toast(`No pending items to cancel for ${tenantId}`);
+      return;
+    }
+    const ok = confirm(
+      `Cancel ${dry.count} PENDING item(s) for ${dry.projectPath || tenantId}?\n\n` +
+        'This has NO item_type filter — File items are removed too, so a reembed ' +
+        'may be needed afterward to re-ingest them. in_progress items are never ' +
+        'cancelled. This cannot be undone.'
+    );
+    if (!ok) return;
+    const r = await api('/admin/api/queue/cancel', {
+      method: 'POST',
+      body: { tenantId, statuses: ['pending'], dryRun: false },
+    });
+    toast(`Cancelled ${r.count ?? 0} pending item(s) for ${tenantId}`);
+    loadFailed();
+    refresh();
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    els.cancelPendingBtn.disabled = false;
   }
 });
 

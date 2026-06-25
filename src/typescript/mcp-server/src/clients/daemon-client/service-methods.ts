@@ -32,6 +32,8 @@ import type {
   RetryAllResponse,
   RetryItemRequest,
   RetryItemResponse,
+  CancelItemsRequest,
+  CancelItemsResponse,
   LogSearchEventRequest,
   UpdateSearchEventRequest,
   UpdateSearchEventEconomyRequest,
@@ -224,6 +226,23 @@ export class DaemonClientService extends DaemonClientSystem {
         'retryItem',
         request,
         this.getMethodTimeout('retryItem')
+      )
+    );
+  }
+
+  /**
+   * Cancel pending (and any other passed-status) queue items for a tenant
+   * (QueueWriteService.CancelItems). The daemon ALWAYS excludes in_progress
+   * items, and has NO item_type filter — every matching-status item for the
+   * tenant (File items included) is removed.
+   */
+  async cancelItems(request: CancelItemsRequest): Promise<CancelItemsResponse> {
+    return this.callWithRetry(() =>
+      grpcUnaryWithTimeout(
+        this.queueWriteClient,
+        'cancelItems',
+        request,
+        this.getMethodTimeout('cancelItems')
       )
     );
   }

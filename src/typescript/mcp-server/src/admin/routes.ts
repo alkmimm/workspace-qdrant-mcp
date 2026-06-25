@@ -1246,6 +1246,54 @@ const handleQueueRetry: RouteHandler = async (req, res, { daemonClient }) => {
   }
 };
 
+/**
+ * POST /admin/api/queue/cancel — cancel pending queue items for a tenant via
+ * QueueWriteService.CancelItems. Body:
+ * `{ tenantId: string, statuses?: string[] (default ["pending"]), dryRun?: boolean }`.
+ *
+ * DESTRUCTIVE: CancelItems has NO item_type filter, so it removes ALL
+ * matching-status items for the tenant — File items included — and a reembed
+ * may be needed afterward to re-ingest them. The daemon ALWAYS excludes
+ * in_progress items (an actively-leased op is never cancelled mid-flight). Use
+ * `dryRun: true` first to preview the count.
+ */
+const handleQueueCancel: RouteHandler = async (req, res, { daemonClient }) => {
+  const body = (await readJsonBody(req)) as Partial<{
+    tenantId: string;
+    statuses: string[];
+    dryRun: boolean;
+  }>;
+  const tenantId = typeof body.tenantId === 'string' ? body.tenantId.trim() : '';
+  if (!tenantId) {
+    writeError(res, 400, 'tenantId required');
+    return;
+  }
+  const statuses =
+    Array.isArray(body.statuses) && body.statuses.length > 0
+      ? body.statuses.map((s) => String(s))
+      : ['pending'];
+  const dryRun = body.dryRun === true;
+
+  try {
+    const resp = await daemonClient.cancelItems({
+      tenant_id: tenantId,
+      statuses,
+      dry_run: dryRun,
+    });
+    logInfo('admin queue cancel', { tenantId, statuses, dryRun, count: resp.count });
+    writeJson(res, 200, {
+      ok: true,
+      count: resp.count ?? 0,
+      tenantId: resp.tenant_id,
+      projectPath: resp.project_path,
+      isDryRun: resp.is_dry_run,
+    });
+  } catch (error) {
+    logError('admin queue cancel failed', error, { tenantId });
+    writeError(res, 502, 'cancel failed', error instanceof Error ? error.message : String(error));
+  }
+};
+
 // ── Route table ──────────────────────────────────────────────────────────────
 
 type Route = { method: string; path: string; handler: RouteHandler };
@@ -1278,6 +1326,7 @@ const ROUTES: ReadonlyArray<Route> = [
   { method: 'DELETE', path: '/admin/api/rules', handler: handleRulesRemove },
   { method: 'GET', path: '/admin/api/queue/failed', handler: handleQueueFailed },
   { method: 'POST', path: '/admin/api/queue/retry', handler: handleQueueRetry },
+  { method: 'POST', path: '/admin/api/queue/cancel', handler: handleQueueCancel },
 ];
 
 /**
