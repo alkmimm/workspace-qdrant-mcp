@@ -106,23 +106,28 @@
     },
     {
       "id": 7,
-      "title": "Items processed (24h)",
+      "title": "Drain rate (items/min)",
+      "description": "Items leaving the unified queue per minute (rate of dequeues over 5m). Near 0 while 'Queue depth (total)' is high means the queue is STALLED, not merely busy — this is the signal that distinguishes the two.",
       "type": "stat",
       "gridPos": { "h": 4, "w": 3, "x": 18, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
+      "fieldConfig": { "defaults": { "decimals": 1, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 30 }] } } },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(increase(memexd_queue_items_processed_total[24h])) or vector(0)", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "60 * sum(rate(memexd_unified_queue_dequeues_total[5m]))", "refId": "A" }]
     },
     {
       "id": 8,
-      "title": "Stale items (alert if > 0)",
+      "title": "Queue STALLED?",
+      "description": "STALLED = there are pending items but the dequeue rate is ~0 over the last 5m, i.e. work is not draining (vs OK = draining or idle). This is what you check when 'done' looks frozen.",
       "type": "stat",
       "gridPos": { "h": 4, "w": 3, "x": 21, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } },
+      "fieldConfig": { "defaults": {
+        "mappings": [{ "type": "value", "options": { "0": { "text": "OK", "color": "green" }, "1": { "text": "STALLED", "color": "red" } } }],
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+      } },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(memexd_unified_queue_stale_items)", "refId": "A" }]
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "(sum(memexd_unified_queue_depth{status=\"pending\"}) > bool 0) * (sum(rate(memexd_unified_queue_dequeues_total[5m])) < bool 0.001)", "refId": "A" }]
     },
 
     { "id": 100, "type": "row", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 4 }, "title": "Queue", "collapsed": false },
@@ -167,15 +172,16 @@
     },
     {
       "id": 12,
-      "title": "Items processed — by priority & status (5m)",
+      "title": "Drain rate — items leaving the queue by item_type (5m)",
+      "description": "Rate of dequeues per item_type. Pair this with 'Unified queue depth by item_type' to its left: depth high here AND this flat at 0 for a given item_type = that work is stuck (e.g. a force-reembed's file items not draining). The old per-priority counter was unused by the unified queue and always read 0.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "stacking": { "mode": "normal" } } } },
       "targets": [{
         "datasource": { "type": "prometheus", "uid": "prometheus" },
-        "expr": "sum by (priority, status) (rate(memexd_queue_items_processed_total[5m]))",
-        "legendFormat": "{{priority}} / {{status}}",
+        "expr": "sum by (item_type) (rate(memexd_unified_queue_dequeues_total[5m]))",
+        "legendFormat": "{{item_type}}",
         "refId": "A"
       }]
     },
