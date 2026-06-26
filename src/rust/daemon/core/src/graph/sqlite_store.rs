@@ -564,7 +564,7 @@ impl GraphStore for SqliteGraphStore {
         // Real candidate nodes (resolved file_path, not file-typed), indexed by
         // symbol_name -> [(node_id, file_path, symbol_type)].
         let real_rows = sqlx::query(
-            "SELECT node_id, symbol_name, file_path, symbol_type FROM graph_nodes
+            "SELECT node_id, symbol_name, file_path, symbol_type, language FROM graph_nodes
              WHERE tenant_id = ?1 AND file_path <> '' AND symbol_type <> 'file'",
         )
         .bind(tenant_id)
@@ -572,11 +572,24 @@ impl GraphStore for SqliteGraphStore {
         .await?;
 
         let mut by_name: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+        // node_id -> language, stamped at extraction by the dynamic language registry
+        // (graph/extractor/mod.rs). Used to scope call/type resolution to the
+        // caller's own language: a TypeScript `.filter()` must not repoint onto a
+        // Rust `filter` method of the same bare name (R3 — cross-language false
+        // CALLS were a top source of `relations` noise). Only known, non-empty
+        // languages are recorded, so an unclassified node never causes an over-drop.
+        let mut node_lang: HashMap<String, String> = HashMap::new();
         for r in &real_rows {
             let name: String = r.get("symbol_name");
             let nid: String = r.get("node_id");
             let fp: String = r.get("file_path");
             let ty: String = r.get("symbol_type");
+            let lang: Option<String> = r.get("language");
+            if let Some(l) = lang {
+                if !l.is_empty() {
+                    node_lang.insert(nid.clone(), l);
+                }
+            }
             by_name.entry(name).or_default().push((nid, fp, ty));
         }
 
@@ -610,6 +623,7 @@ impl GraphStore for SqliteGraphStore {
         let pick_all = |name: &str,
                         own_file: &str,
                         caller_class: Option<&str>,
+                        caller_lang: Option<&str>,
                         container_only: bool|
          -> Vec<(String, f64)> {
             let Some(candidates) = by_name.get(name) else {
@@ -618,6 +632,14 @@ impl GraphStore for SqliteGraphStore {
             let pool: Vec<(&str, &str)> = candidates
                 .iter()
                 .filter(|(_, _, ty)| !container_only || Self::is_container_node_type(ty))
+                // Language scope: drop a candidate only when BOTH the caller's and
+                // the candidate's languages are known AND differ (a cross-language
+                // false positive). Unknown on either side → keep, so a node the
+                // registry didn't classify is never over-dropped.
+                .filter(|(nid, _, _)| match (caller_lang, node_lang.get(nid.as_str())) {
+                    (Some(cl), Some(tl)) => cl == tl.as_str(),
+                    _ => true,
+                })
                 .map(|(nid, fp, _)| (nid.as_str(), fp.as_str()))
                 .collect();
             if pool.is_empty() {
@@ -680,7 +702,9 @@ impl GraphStore for SqliteGraphStore {
             let source_node_id: String = d.get("source_node_id");
             // R2: the caller's enclosing class, used to prefer a same-class callee.
             let caller_class = contained_by.get(&source_node_id).map(String::as_str);
-            let candidates = pick_all(&peer_name, &source_file, caller_class, false);
+            // Caller's language, used to scope out cross-language collisions.
+            let caller_lang = node_lang.get(&source_node_id).map(String::as_str);
+            let candidates = pick_all(&peer_name, &source_file, caller_class, caller_lang, false);
             if candidates.is_empty() {
                 continue; // external/stdlib or unresolved — leave it a stub.
             }
@@ -731,16 +755,19 @@ impl GraphStore for SqliteGraphStore {
         for d in &source_dangling {
             let peer_name: String = d.get("peer_name");
             let source_file: String = d.get("source_file");
+            let target_node_id: String = d.get("target_node_id");
+            // Reference language = the real member's language; a container and its
+            // member share a language, so this scopes out cross-language collisions.
+            let ref_lang = node_lang.get(&target_node_id).map(String::as_str);
             // Containment is structural (one owner): keep ONLY a confident match
             // (own-file or tenant-unique), never fan out an ambiguous container name.
-            let Some(new_source) = pick_all(&peer_name, &source_file, None, true)
+            let Some(new_source) = pick_all(&peer_name, &source_file, None, ref_lang, true)
                 .into_iter()
                 .find(|(_, c)| *c >= 0.7)
                 .map(|(nid, _)| nid)
             else {
                 continue;
             };
-            let target_node_id: String = d.get("target_node_id");
             if target_node_id == new_source {
                 continue;
             }

@@ -377,6 +377,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_stub_edges_scopes_by_language() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // A Rust caller calling `process`; two real `process` defs of the SAME bare
+        // name in different languages (Rust b.rs + TypeScript c.ts). The resolver
+        // must bind ONLY to the same-language (Rust) definition — a TS def is never a
+        // valid callee of a Rust call (the cross-language `relations` noise class).
+        let mut caller = GraphNode::new(T, "a.rs", "caller", NodeType::Function);
+        caller.language = Some("rust".into());
+        let mut rust_callee = GraphNode::new(T, "b.rs", "process", NodeType::Function);
+        rust_callee.language = Some("rust".into());
+        let mut ts_callee = GraphNode::new(T, "c.ts", "process", NodeType::Function);
+        ts_callee.language = Some("typescript".into());
+        let stub = GraphNode::stub(T, "process", NodeType::Function);
+        store
+            .upsert_nodes(&[
+                caller.clone(),
+                rust_callee.clone(),
+                ts_callee.clone(),
+                stub.clone(),
+            ])
+            .await
+            .unwrap();
+        let dangling = GraphEdge::new(T, &caller.node_id, &stub.node_id, EdgeType::Calls, "a.rs");
+        store.insert_edges(&[dangling]).await.unwrap();
+
+        let repointed = store.resolve_stub_edges(T).await.unwrap();
+        assert_eq!(repointed, 1, "the dangling call repoints");
+
+        let related = store
+            .query_related(T, &caller.node_id, 1, None)
+            .await
+            .unwrap();
+        assert!(
+            related.iter().any(|n| n.file_path == "b.rs"),
+            "must bind to the same-language (Rust) definition"
+        );
+        assert!(
+            !related.iter().any(|n| n.file_path == "c.ts"),
+            "must NOT bind to the cross-language (TypeScript) definition"
+        );
+    }
+
+    #[tokio::test]
     async fn test_resolve_stub_edges_keeps_ambiguous() {
         use super::super::{EdgeType, NodeType};
         let store = test_shared_store().await;
