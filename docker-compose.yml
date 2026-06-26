@@ -223,9 +223,14 @@ services:
       #     (generic in any language). Empty = corpus-derived max(15, total/500);
       #     lower it (e.g. 20) to also catch build/newBuilder/compile; 0 = disable.
       #   _SKIP_SYMBOLS: comma-separated exact symbol names to always drop.
+      #   _USAGE_THRESHOLD: drop a NODE whose high-confidence in-degree exceeds N
+      #     (called/used everywhere — e.g. a unique def colliding with a stdlib
+      #     builtin: collect/iter/Result). Empty = corpus-derived max(50, total/150);
+      #     lower it to de-noise more aggressively; 0 = disable.
       WQM_GRAPH_CENTRALITY_EXCLUDE: ${WQM_GRAPH_CENTRALITY_EXCLUDE:-}
       WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD: ${WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD:-}
       WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS: ${WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS:-}
+      WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD: ${WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD:-}
       # Daemon DB lives on the memexd_db named volume — see volumes section
       # above. Bind-mount on Docker Desktop 9P breaks SQLite WAL.
       WQM_DATABASE_PATH: /var/lib/memexd/memexd.db
