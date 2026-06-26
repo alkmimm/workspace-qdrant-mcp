@@ -39,9 +39,15 @@ fn centrality_usage_threshold_is_dynamic() {
     // USE-ubiquity axis (R3): a NODE called/used far more than any real symbol is
     // demoted even when its name is unique (def_count == 1) — the stdlib-collision
     // case (collect/iter/Result) the definition-count axis cannot see. Threshold is
-    // corpus-derived (floored at 50, ~0.67% for a large graph), no hardcoded list.
+    // corpus-derived: floor 50, then total/150, CAPPED at 125 (the generic-name line
+    // is ~constant across project sizes, not proportional — calibrated on 3 tenants).
     assert_eq!(centrality_usage_threshold(100), 50, "small corpus → floor (50)");
-    assert_eq!(centrality_usage_threshold(30_000), 200, "large corpus → ~0.67%");
+    assert_eq!(centrality_usage_threshold(15_000), 100, "mid corpus → total/150");
+    assert_eq!(
+        centrality_usage_threshold(30_000),
+        125,
+        "large corpus → capped at 125 (not 200) — generic line is ~constant, not proportional"
+    );
 }
 
 /// Create an in-memory SQLite pool with graph schema.

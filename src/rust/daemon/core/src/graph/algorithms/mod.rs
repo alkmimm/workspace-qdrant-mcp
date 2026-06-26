@@ -110,8 +110,16 @@ fn centrality_generic_threshold(total_definitions: usize) -> usize {
 /// stdlib call onto that single node (tenant-unique tier, weight 0.7). Such a node
 /// has implausibly high in-degree and is central by ubiquity, not importance
 /// (aider/deprank model), burying the real hotspots and gluing unrelated modules
-/// into one giant community. Corpus-derived and LANGUAGE-AGNOSTIC (~0.67%, floored
-/// at 50); override with `WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD` (0 disables). (R3)
+/// into one giant community.
+///
+/// Corpus-derived and LANGUAGE-AGNOSTIC, but with a CAP: the generic-name line is
+/// roughly CONSTANT across projects (~115-125 in-degree), NOT proportional to
+/// size — a bigger codebase just has MORE names above the line, not a higher line.
+/// Calibrated on three tenants (real-domain peak ~111-113 in-degree everywhere;
+/// generic floor ~118+): floor 50 (small libs), then `total/150` in the mid-range,
+/// capped at 125 so a large monorepo (e.g. DOC-V2 at 40k defs) is not handed an
+/// over-lenient 270 that lets `isBlank`/`collect`/`assertEquals` survive. Override
+/// with `WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD` (0 disables). (R3)
 fn centrality_usage_threshold(total_definitions: usize) -> usize {
     static OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
     let ov = OVERRIDE.get_or_init(|| {
@@ -122,7 +130,7 @@ fn centrality_usage_threshold(total_definitions: usize) -> usize {
     match *ov {
         Some(0) => usize::MAX, // explicitly disabled
         Some(n) => n,
-        None => std::cmp::max(50, total_definitions / 150),
+        None => std::cmp::max(50, std::cmp::min(total_definitions / 150, 125)),
     }
 }
 

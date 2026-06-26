@@ -225,8 +225,9 @@ services:
       #   _SKIP_SYMBOLS: comma-separated exact symbol names to always drop.
       #   _USAGE_THRESHOLD: drop a NODE whose high-confidence in-degree exceeds N
       #     (called/used everywhere — e.g. a unique def colliding with a stdlib
-      #     builtin: collect/iter/Result). Empty = corpus-derived max(50, total/150);
-      #     lower it to de-noise more aggressively; 0 = disable.
+      #     builtin: collect/iter/Result). Empty = corpus-derived max(50,
+      #     min(total/150, 125)) — capped because the generic-name line is ~constant
+      #     across project sizes; lower it to de-noise more; 0 = disable.
       WQM_GRAPH_CENTRALITY_EXCLUDE: ${WQM_GRAPH_CENTRALITY_EXCLUDE:-}
       WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD: ${WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD:-}
       WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS: ${WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS:-}
