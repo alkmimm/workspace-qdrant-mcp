@@ -60,7 +60,7 @@ done
 echo ""
 echo "=== 2. graph-centrality knobs reach the daemon container ==="
 env_dump=$(docker inspect wqm-memexd --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null)
-for v in WQM_GRAPH_CENTRALITY_EXCLUDE WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS; do
+for v in WQM_GRAPH_CENTRALITY_EXCLUDE WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD; do
   line=$(grep "^$v=" <<<"$env_dump" || true)
   if [[ -n "$line" ]]; then say "[OK]" "$line"; else say "[MISS]" "$v NOT wired into the memexd container"; warn=$((warn + 1)); fi
 done

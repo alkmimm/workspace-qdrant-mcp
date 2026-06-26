@@ -34,6 +34,16 @@ fn centrality_generic_filter_is_dynamic_not_hardcoded() {
     assert_eq!(centrality_generic_threshold(50_000), 100, "large corpus → ~0.2%");
 }
 
+#[test]
+fn centrality_usage_threshold_is_dynamic() {
+    // USE-ubiquity axis (R3): a NODE called/used far more than any real symbol is
+    // demoted even when its name is unique (def_count == 1) — the stdlib-collision
+    // case (collect/iter/Result) the definition-count axis cannot see. Threshold is
+    // corpus-derived (floored at 50, ~0.67% for a large graph), no hardcoded list.
+    assert_eq!(centrality_usage_threshold(100), 50, "small corpus → floor (50)");
+    assert_eq!(centrality_usage_threshold(30_000), 200, "large corpus → ~0.67%");
+}
+
 /// Create an in-memory SQLite pool with graph schema.
 async fn setup_graph_pool() -> SqlitePool {
     let pool = SqlitePoolOptions::new()
@@ -528,4 +538,43 @@ async fn test_load_adjacency_filtered() {
         .unwrap();
     let out = graph.outgoing.get("a").unwrap();
     assert_eq!(out.len(), 1); // only the CALLS edge
+}
+
+#[tokio::test]
+async fn test_load_adjacency_drops_use_ubiquitous_node() {
+    // A NODE called by far more sites than any real symbol — a unique-name def
+    // whose bare name collides with a stdlib builtin (e.g. `collect`/`iter`), so
+    // the resolver funnels every same-named call onto it — is dropped from
+    // centrality by the USE-ubiquity axis (R3). def_count is 1, so the
+    // definition-count axis cannot catch it; the in-degree axis does. A normally
+    // referenced node and the callers themselves stay.
+    let pool = setup_graph_pool().await;
+
+    insert_node(&pool, "t1", "hub", "collect", "method").await;
+    insert_node(&pool, "t1", "norm", "enqueue_unified", "method").await;
+
+    // 60 distinct callers all calling the hub (> the floor-50 default threshold);
+    // two of them also call the normal node (in-degree 2, well under threshold).
+    for i in 0..60 {
+        let cid = format!("c{i}");
+        insert_node(&pool, "t1", &cid, &format!("caller_{i}"), "function").await;
+        insert_edge(&pool, "t1", &cid, "hub", "CALLS").await;
+    }
+    insert_edge(&pool, "t1", "c0", "norm", "CALLS").await;
+    insert_edge(&pool, "t1", "c1", "norm", "CALLS").await;
+
+    let graph = load_adjacency_graph(&pool, "t1", None).await.unwrap();
+
+    assert!(
+        !graph.nodes.contains_key("hub"),
+        "use-ubiquitous node (in-degree 60 > floor 50) must be dropped from centrality"
+    );
+    assert!(
+        graph.nodes.contains_key("norm"),
+        "a normally-referenced node (in-degree 2) must be kept"
+    );
+    assert!(
+        graph.nodes.contains_key("c0"),
+        "caller nodes must be kept"
+    );
 }

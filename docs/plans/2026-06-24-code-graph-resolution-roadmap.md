@@ -92,6 +92,25 @@ metric to prove it, de-noise hotspots. All tree-sitter-only, no new extraction.
 3. Fabricated stats — `34%→76%`, ACER's six confidence constants, `>90% Sourcegraph` —
    **not in sources; do not cite.** The qualitative levers are real; the numbers are not.
 
+## Status updates
+
+- **2026-06-25 — R3 second axis (use-ubiquity) shipped.** R3's first cut (#164,
+  deployed) demotes by **definition** count, which is structurally blind to the
+  dominant live noise: a name **defined once** (`def_count == 1`) whose bare name
+  collides with a stdlib builtin (`collect`, `iter`, `Result`, `send`, `bind`,
+  `insert`, `read`…). The by-name stub resolver repoints every same-named stdlib
+  call onto that single node via the tenant-unique tier (weight 0.7), so it enters
+  centrality with implausible in-degree (measured live on `367157a01d98`:
+  `Result`=1044, `iter`=813, `collect`=761, `bind`=501, `insert`=394 — all
+  `def_count == 1`). Added a **use-ubiquity axis** to `load_adjacency_graph`: drop a
+  NODE whose high-confidence (weight ≥ 0.6) in-degree exceeds a corpus-derived
+  threshold `max(50, total/150)`, env-tunable via
+  `WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD` (0 disables). Centrality-only (search /
+  grep / relations / impact / usages unaffected — they bypass this loader). The
+  live in-degree distribution separates cleanly: real domain fns (`enqueue_unified`
+  =111, `search_exact`=81) sit below the noise floor. Expected to also unglue the
+  giant catch-all `modules` community (these hubs were its glue).
+
 ## Key files
 
 - Resolver root cause: `src/rust/daemon/core/src/graph/sqlite_store.rs` (`pick` L450-467;

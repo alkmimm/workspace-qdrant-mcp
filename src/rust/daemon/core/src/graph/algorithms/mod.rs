@@ -101,6 +101,31 @@ fn centrality_generic_threshold(total_definitions: usize) -> usize {
     }
 }
 
+/// In-degree (call/use ubiquity) threshold above which a file-backed NODE is
+/// dropped from centrality. Complements `centrality_generic_threshold`, which
+/// only sees DEFINITION ubiquity (a name defined in many places). It is blind to
+/// the dominant noise class: a name DEFINED ONCE but CALLED everywhere — a project
+/// method/type whose bare name collides with a stdlib builtin (`collect`, `iter`,
+/// `Result`, `send`), so the by-name stub resolver repoints every same-named
+/// stdlib call onto that single node (tenant-unique tier, weight 0.7). Such a node
+/// has implausibly high in-degree and is central by ubiquity, not importance
+/// (aider/deprank model), burying the real hotspots and gluing unrelated modules
+/// into one giant community. Corpus-derived and LANGUAGE-AGNOSTIC (~0.67%, floored
+/// at 50); override with `WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD` (0 disables). (R3)
+fn centrality_usage_threshold(total_definitions: usize) -> usize {
+    static OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
+    let ov = OVERRIDE.get_or_init(|| {
+        std::env::var("WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+    });
+    match *ov {
+        Some(0) => usize::MAX, // explicitly disabled
+        Some(n) => n,
+        None => std::cmp::max(50, total_definitions / 150),
+    }
+}
+
 /// Load the full adjacency graph for a tenant from SQLite.
 pub(super) async fn load_adjacency_graph(
     pool: &SqlitePool,
@@ -125,8 +150,43 @@ pub(super) async fn load_adjacency_graph(
             *def_count.entry(row.get("symbol_name")).or_default() += 1;
         }
     }
-    let generic_threshold = centrality_generic_threshold(def_count.values().copied().sum());
+    let total_defs: usize = def_count.values().copied().sum();
+    let generic_threshold = centrality_generic_threshold(total_defs);
+    let usage_threshold = centrality_usage_threshold(total_defs);
     let manual_skip = centrality_manual_skip_symbols();
+
+    // Pre-pass (R3, usage axis): high-confidence in-degree per file-backed node,
+    // for the call/use-ubiquity filter below. Mirrors the centrality edge load
+    // exactly (weight >= 0.6 + the same optional edge_types), so a node's measured
+    // in-degree matches the graph centrality will actually walk. Skipped entirely
+    // when the filter is disabled (threshold = usize::MAX).
+    let mut indeg_by_node: HashMap<String, usize> = HashMap::new();
+    if usage_threshold != usize::MAX {
+        let indeg_rows = if let Some(types) = edge_types {
+            let placeholders: Vec<String> = types.iter().map(|t| format!("'{}'", t)).collect();
+            let query = format!(
+                "SELECT target_node_id, COUNT(*) AS indeg FROM graph_edges
+                 WHERE tenant_id = ?1 AND weight >= 0.6 AND edge_type IN ({})
+                 GROUP BY target_node_id",
+                placeholders.join(", ")
+            );
+            sqlx::query(&query).bind(tenant_id).fetch_all(pool).await?
+        } else {
+            sqlx::query(
+                "SELECT target_node_id, COUNT(*) AS indeg FROM graph_edges
+                 WHERE tenant_id = ?1 AND weight >= 0.6
+                 GROUP BY target_node_id",
+            )
+            .bind(tenant_id)
+            .fetch_all(pool)
+            .await?
+        };
+        for row in &indeg_rows {
+            let nid: String = row.get("target_node_id");
+            let indeg: i64 = row.get("indeg");
+            indeg_by_node.insert(nid, indeg.max(0) as usize);
+        }
+    }
 
     let mut nodes = HashMap::with_capacity(node_rows.len());
     let exclude = centrality_exclude_patterns();
@@ -153,18 +213,24 @@ pub(super) async fn load_adjacency_graph(
             continue;
         }
         let symbol_name: String = row.get("symbol_name");
-        // Dynamic genericity filter (R3): a name defined in MORE than the
-        // corpus-derived threshold is generic-by-ubiquity (toString/build/get — any
-        // language) and central by ubiquity, not importance → drop from centrality.
-        // Plus the optional manual env override. NO hardcoded per-language list.
-        // Centrality only; search/grep/relations/impact see the full graph.
+        let node_id: String = row.get("node_id");
+        // Dynamic genericity filter (R3), two language-agnostic axes — both flag
+        // "central by ubiquity, not importance" and drop from centrality only
+        // (search/grep/relations/impact see the full graph). NO hardcoded list.
+        //   1. DEFINITION ubiquity: a name defined in more places than the
+        //      corpus-derived threshold (toString/build/get — any language).
+        //   2. USE ubiquity: a NODE whose high-confidence in-degree exceeds the
+        //      usage threshold — catches a unique def whose bare name collides
+        //      with a stdlib builtin (collect/iter/Result), which axis 1 cannot
+        //      see (def_count == 1). Also unglues the giant catch-all community.
+        // Plus the optional manual symbol-name env override.
         if def_count.get(&symbol_name).copied().unwrap_or(0) > generic_threshold
+            || indeg_by_node.get(&node_id).copied().unwrap_or(0) > usage_threshold
             || manual_skip.contains(&symbol_name)
         {
             excluded += 1;
             continue;
         }
-        let node_id: String = row.get("node_id");
         nodes.insert(
             node_id,
             NodeInfo {
