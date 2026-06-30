@@ -31,6 +31,12 @@ export interface SessionState {
   watchPath: string | null;
   isWorktree: boolean;
   /**
+   * Tenant id of the MCP self-repo (workspace-qdrant-mcp), captured when it
+   * registers so the heartbeat loop can keep its stable "self-repo" session
+   * alive. `null` until the self-repo registers (or if `WQM_REPO_DIR` is unset).
+   */
+  selfRepoProjectId: string | null;
+  /**
    * Current git branch for `projectPath`, refreshed lazily by the tool
    * dispatcher (see `ensureProjectFresh`). `null` when the project is not
    * a git repo or git is unavailable. Tools that accept a `branch` filter

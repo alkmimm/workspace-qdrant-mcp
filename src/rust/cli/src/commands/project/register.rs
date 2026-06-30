@@ -20,6 +20,7 @@ async fn call_daemon_register(
     match DaemonClient::connect_default().await {
         Ok(mut client) => {
             let request = RegisterProjectRequest {
+                session_id: None,
                 path: abs_path.display().to_string(),
                 project_id: project_id.clone(),
                 name: Some(project_name),

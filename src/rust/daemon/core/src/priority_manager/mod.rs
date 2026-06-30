@@ -5,17 +5,24 @@
 //! and collection type — the stored `priority` column in `unified_queue` is NOT used
 //! for dequeue ordering (see `queue_operations::dequeue_unified`).
 //!
-//! This module manages only `watch_folders.is_active` and `last_activity_at`:
-//! - `register_session`: Sets is_active=1, updates last_activity_at
-//! - `heartbeat`: Updates last_activity_at timestamp for active projects
-//! - `unregister_session`: Sets is_active=0
-//! - `set_priority`: Maps "high"/"normal" to is_active=1/0
-//! - `cleanup_orphaned_sessions`: Detects stale active projects (>60s without heartbeat)
+//! Live sessions are tracked one-row-per-session in `project_sessions`
+//! (migration v42), and `watch_folders.is_active` is the *projection* of that
+//! table — `COUNT(*)` of live sessions per `(tenant, collection)`. This makes
+//! every transition idempotent and impossible to leak (the previous free-running
+//! `is_active += 1` counter leaked whenever a session ended without a clean
+//! unregister, e.g. the MCP self-repo re-registering on every restart):
+//! - `register_session`: upsert the caller's `session_id` row, re-project is_active
+//! - `heartbeat`: refresh the caller's `last_heartbeat_at` (keeps the session live)
+//! - `unregister_session`: delete the caller's row, re-project is_active
+//! - `cleanup_orphaned_sessions`: reap rows with no heartbeat within the timeout,
+//!   re-project is_active for affected projects
+//! - `set_priority`: maps "high"/"normal" to is_active=1/0 (admin/test-only path)
 //!
 //! ## Schema Compliance (docs/specs/04-write-path.md)
 //!
-//! This module uses only the `watch_folders` table for activity state.
-//! Queue ordering is computed at dequeue time, not stored.
+//! Activity state lives in `watch_folders.is_active` (projected) and
+//! `project_sessions` (source of truth). Queue ordering is computed at dequeue
+//! time, not stored.
 
 mod manager;
 mod session_monitor;

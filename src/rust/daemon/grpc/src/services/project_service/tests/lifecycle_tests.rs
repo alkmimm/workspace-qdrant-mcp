@@ -66,6 +66,7 @@ async fn test_deferred_shutdown_scheduled_when_delay_set() {
     let service = build_test_service(pool, 30);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path,
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -76,6 +77,7 @@ async fn test_deferred_shutdown_scheduled_when_delay_set() {
     service.register_project(request).await.unwrap();
 
     let request = Request::new(DeprioritizeProjectRequest {
+        session_id: None,
         project_id: "abcd12345678".to_string(),
         watch_path: None,
     });
@@ -97,6 +99,7 @@ async fn test_reactivation_cancels_deferred_shutdown() {
     let service = build_test_service(pool, 60);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path.clone(),
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -107,6 +110,7 @@ async fn test_reactivation_cancels_deferred_shutdown() {
     service.register_project(request).await.unwrap();
 
     let request = Request::new(DeprioritizeProjectRequest {
+        session_id: None,
         project_id: "abcd12345678".to_string(),
         watch_path: None,
     });
@@ -118,6 +122,7 @@ async fn test_reactivation_cancels_deferred_shutdown() {
         .contains_key("abcd12345678"));
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path,
         project_id: "abcd12345678".to_string(),
         name: None,

@@ -31,6 +31,7 @@ async fn test_deprioritize_project() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path.clone(),
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -41,6 +42,7 @@ async fn test_deprioritize_project() {
     service.register_project(request).await.unwrap();
 
     let request = Request::new(DeprioritizeProjectRequest {
+        session_id: None,
         project_id: "abcd12345678".to_string(),
         watch_path: None,
     });
@@ -71,6 +73,7 @@ async fn test_get_project_status() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path.clone(),
         project_id: "abcd12345678".to_string(),
         name: Some("My Project".to_string()),
@@ -178,6 +181,7 @@ async fn test_list_projects_active_only() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path,
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -188,6 +192,7 @@ async fn test_list_projects_active_only() {
     service.register_project(request).await.unwrap();
 
     let request = Request::new(DeprioritizeProjectRequest {
+        session_id: None,
         project_id: "abcd12345678".to_string(),
         watch_path: None,
     });
@@ -249,6 +254,7 @@ async fn test_heartbeat() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path,
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -259,6 +265,7 @@ async fn test_heartbeat() {
     service.register_project(request).await.unwrap();
 
     let request = Request::new(HeartbeatRequest {
+        session_id: None,
         project_id: "abcd12345678".to_string(),
     });
 

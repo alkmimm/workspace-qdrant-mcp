@@ -25,6 +25,11 @@ async fn setup_test_db() -> (SqlitePool, tempfile::TempDir) {
         .await
         .unwrap();
 
+    sqlx::query(crate::schema_version::v42::CREATE_PROJECT_SESSIONS_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     (pool, temp_dir)
 }
 
@@ -134,7 +139,7 @@ async fn test_heartbeat_updates_timestamp() {
 
     // Wait briefly and send heartbeat
     tokio::time::sleep(Duration::from_millis(10)).await;
-    let updated = priority_manager.heartbeat("abcd12345678").await.unwrap();
+    let updated = priority_manager.heartbeat("abcd12345678", "main").await.unwrap();
     assert!(updated);
 
     // Verify timestamp updated
@@ -157,7 +162,7 @@ async fn test_heartbeat_no_op_for_inactive_project() {
     // Heartbeat should not update a project with no active sessions.
     // With reference counting, only live sessions can keep a project active;
     // heartbeat cannot resurrect a project with 0 sessions.
-    let updated = priority_manager.heartbeat("abcd12345678").await.unwrap();
+    let updated = priority_manager.heartbeat("abcd12345678", "main").await.unwrap();
     assert!(!updated);
 
     // Verify project remains inactive
@@ -175,7 +180,10 @@ async fn test_heartbeat_returns_false_for_unknown_project() {
     let priority_manager = PriorityManager::new(pool.clone());
 
     // Heartbeat for a project that doesn't exist should return false
-    let updated = priority_manager.heartbeat("nonexistent12").await.unwrap();
+    let updated = priority_manager
+        .heartbeat("nonexistent12", "main")
+        .await
+        .unwrap();
     assert!(!updated);
 }
 
@@ -193,10 +201,12 @@ async fn test_cleanup_orphaned_sessions() {
         .await
         .unwrap();
 
-    // Manually set last_activity_at to old timestamp to simulate orphaned session
+    // Manually age the session's heartbeat to simulate an orphaned session
+    // (the MCP server died without unregistering). Use the production ISO-Z
+    // format so the lexical `last_heartbeat_at < cutoff` comparison matches.
     let old_time = Utc::now() - ChronoDuration::minutes(5);
-    sqlx::query("UPDATE watch_folders SET last_activity_at = ?1 WHERE tenant_id = ?2")
-        .bind(old_time.to_rfc3339())
+    sqlx::query("UPDATE project_sessions SET last_heartbeat_at = ?1 WHERE tenant_id = ?2")
+        .bind(wqm_common::timestamps::format_utc(&old_time))
         .bind("abcd12345678")
         .execute(&pool)
         .await
@@ -453,6 +463,6 @@ async fn test_heartbeat_active_session() {
         .unwrap();
 
     // Heartbeat on an active project (is_active > 0) should return true
-    let updated = priority_manager.heartbeat("abcd12345678").await.unwrap();
+    let updated = priority_manager.heartbeat("abcd12345678", "main").await.unwrap();
     assert!(updated);
 }

@@ -15,6 +15,7 @@ pub(super) async fn activate_project(project: Option<&str>) -> Result<()> {
         Ok(mut client) => {
             // Use RegisterProject with priority="high" and register_if_new=false
             let request = RegisterProjectRequest {
+                session_id: None,
                 path: String::new(), // Not needed for existing projects
                 project_id: project_id.clone(),
                 name: None,
@@ -52,6 +53,7 @@ pub(super) async fn deactivate_project(project: Option<&str>) -> Result<()> {
     match DaemonClient::connect_default().await {
         Ok(mut client) => {
             let request = DeprioritizeProjectRequest {
+                session_id: None,
                 project_id: project_id.clone(),
                 watch_path: None,
             };

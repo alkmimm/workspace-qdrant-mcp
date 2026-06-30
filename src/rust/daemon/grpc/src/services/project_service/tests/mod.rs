@@ -39,6 +39,11 @@ async fn setup_test_db() -> (SqlitePool, tempfile::TempDir) {
         .await
         .unwrap();
 
+    sqlx::query(workspace_qdrant_core::schema_version::v42::CREATE_PROJECT_SESSIONS_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     (pool, temp_dir)
 }
 

@@ -20,7 +20,7 @@
 //! | startup::reconciliation  | `validate_watch_folders`        |
 
 use sqlx::SqlitePool;
-use tracing::info;
+use tracing::{debug, info};
 use wqm_common::timestamps;
 
 /// Errors originating from watch folder lifecycle transitions.
@@ -227,6 +227,47 @@ impl WatchFolderLifecycle {
             collection,
             i32::from(active),
             rows
+        );
+        Ok(rows)
+    }
+
+    /// Recompute `is_active` for a `(tenant_id, collection)` pair as the live
+    /// row count in `project_sessions` (migration v42). This is the single
+    /// projection point for the per-session model: `register_session`,
+    /// `unregister_session`, `heartbeat` (indirectly) and
+    /// `cleanup_orphaned_sessions` mutate `project_sessions`, then call this so
+    /// `watch_folders.is_active` always equals the number of live sessions —
+    /// idempotent, and impossible to leak.
+    pub async fn sync_is_active_from_sessions(
+        &self,
+        tenant_id: &str,
+        collection: &str,
+    ) -> Result<u64, WatchFolderLifecycleError> {
+        let now = timestamps::format_utc(&chrono::Utc::now());
+        let result = sqlx::query(
+            r#"
+            UPDATE watch_folders
+            SET is_active = (
+                    SELECT COUNT(*) FROM project_sessions ps
+                    WHERE ps.tenant_id = watch_folders.tenant_id
+                      AND ps.collection = watch_folders.collection
+                ),
+                updated_at = ?1
+            WHERE tenant_id = ?2
+              AND collection = ?3
+            "#,
+        )
+        .bind(&now)
+        .bind(tenant_id)
+        .bind(collection)
+        .execute(&self.pool)
+        .await?;
+
+        let rows = result.rows_affected();
+        debug!(
+            "watch_folder lifecycle: sync_is_active_from_sessions tenant_id={} \
+             collection={} ({} rows)",
+            tenant_id, collection, rows
         );
         Ok(rows)
     }
