@@ -36,6 +36,20 @@
 //! 4. Never prune a branch named `main` or `master` (default-name safety net).
 //!
 //! Only a branch that is absent from git AND passes all guards is pruned.
+//!
+//! ## Delete-side contract (this module only enqueues; `file/delete.rs` executes)
+//!
+//! Each pruned file is enqueued as `file|delete` stamped with
+//! [`BRANCH_PRUNE_DELETE_METADATA`] so `process_file_delete` bypasses its
+//! "skip a stale delete for a file still on disk" guard — a pruned branch's
+//! files usually still exist on the live branch, and without the bypass the
+//! delete is skipped, the tag never clears, and every startup re-enqueues it.
+//! The delete is reference-counted: it drops the dead branch's tag and removes
+//! the shared Qdrant point only when no live branch references it. As a final
+//! backstop, `delete_tracked_file` PRESERVES the entry (no deletion) when
+//! dropping the branch would empty the set AND the file is still on disk — a
+//! present-but-mislabeled file, left for reconciliation to re-tag.
+//! See `docs/specs/21-cross-branch-dedup.md` §C.
 
 use std::collections::HashSet;
 
