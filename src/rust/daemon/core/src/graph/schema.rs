@@ -11,7 +11,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 /// Current schema version for graph.db.
-pub const GRAPH_SCHEMA_VERSION: i32 = 1;
+pub const GRAPH_SCHEMA_VERSION: i32 = 2;
 
 /// Default graph database filename.
 pub const GRAPH_DB_FILENAME: &str = "graph.db";
@@ -164,6 +164,7 @@ impl GraphDbManager {
     async fn run_migration(&self, version: i32) -> GraphDbResult<()> {
         match version {
             1 => self.migrate_v1().await,
+            2 => self.migrate_v2().await,
             _ => Err(GraphDbError::Migration(format!(
                 "Unknown graph migration version: {}",
                 version
@@ -243,6 +244,23 @@ impl GraphDbManager {
         tx.commit().await?;
         Ok(())
     }
+
+    /// v2: covering index for the per-`(tenant_id, edge_type)` aggregate that the
+    /// graph-metrics exporter runs on a timer. Without it, `GROUP BY tenant_id,
+    /// edge_type` falls back to a full table scan + sort (~1.2s on a ~700k-edge
+    /// graph — the recurring "slow statement" in the logs); the composite index
+    /// turns it into an index-only group scan. `IF NOT EXISTS` keeps the
+    /// migration idempotent on a partially-applied DB.
+    async fn migrate_v2(&self) -> GraphDbResult<()> {
+        info!("Graph migration v2: adding covering index idx_edges_tenant_type");
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_edges_tenant_type \
+             ON graph_edges(tenant_id, edge_type)",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 impl Clone for GraphDbManager {
@@ -251,5 +269,41 @@ impl Clone for GraphDbManager {
             pool: self.pool.clone(),
             path: self.path.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn migrations_apply_v2_covering_index_and_are_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("graph.db");
+
+        // `new` opens the DB and runs all pending migrations (v1 → v2).
+        let mgr = GraphDbManager::new(&db).await.expect("open graph db");
+
+        // Schema lands at the latest version.
+        let version: i32 = sqlx::query_scalar("SELECT MAX(version) FROM graph_schema_version")
+            .fetch_one(&mgr.pool)
+            .await
+            .expect("read schema version");
+        assert_eq!(version, GRAPH_SCHEMA_VERSION);
+        assert_eq!(version, 2, "v2 must be applied");
+
+        // The v2 covering index for the metrics aggregate exists.
+        let idx: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_edges_tenant_type'",
+        )
+        .fetch_optional(&mgr.pool)
+        .await
+        .expect("query sqlite_master");
+        assert_eq!(idx.as_deref(), Some("idx_edges_tenant_type"));
+
+        // Re-running migrations on an up-to-date DB is a no-op (no error, no
+        // duplicate-index failure thanks to IF NOT EXISTS / early return).
+        mgr.run_migrations().await.expect("re-run is idempotent");
     }
 }
