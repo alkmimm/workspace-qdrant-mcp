@@ -721,7 +721,7 @@ pub fn start_graph_stub_resolver(
     })
 }
 
-/// Spawn the graph metrics exporter (60-second loop).
+/// Spawn the graph metrics exporter (5-minute loop).
 ///
 /// Refreshes the per-tenant graph gauges (`graph_nodes`, `graph_edges`,
 /// `graph_unresolved_stubs`) from `graph.db` so the Grafana "Code Graph"
@@ -735,8 +735,12 @@ pub fn start_graph_metrics_refresh(
     graph_store: crate::database::ConcreteGraphStore,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        info!("Graph metrics exporter started (60s interval)");
+        // 5-minute cadence: these are Grafana dashboard gauges (node/edge counts
+        // per tenant) that move only with ingestion, so a 60s full-table scan was
+        // wasteful background DB load. With the v2 covering index each pass is also
+        // an index-only scan rather than a full table scan + sort.
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+        info!("Graph metrics exporter started (300s interval)");
         loop {
             interval.tick().await;
 
