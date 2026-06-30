@@ -313,18 +313,19 @@ function renderRegistered(snap) {
     <tr>
       <td><span class="path">${escapeHtml(r.path)}</span></td>
       <td><code>${escapeHtml(r.tenantId)}</code></td>
-      <td>${r.isActive ? pill('active', 'ok') : pill('idle', 'muted')}</td>
+      <td>${r.isPaused ? pill('paused', 'warn') : r.isActive ? pill('active', 'ok') : pill('idle', 'muted')}</td>
       <td>${renderIndexingCell(r.indexing)}</td>
       <td class="dim">${escapeHtml(fmtTime(r.lastActivityAt))}</td>
       <td class="nowrap">
-        <button class="secondary small"
-                data-action="watch-pause"
-                data-watch-id="${escapeHtml(r.path)}"
-                title="Set is_paused=1 for this watch folder">Pause</button>
-        <button class="secondary small"
+        ${r.isPaused
+          ? `<button class="secondary small"
                 data-action="watch-resume"
                 data-watch-id="${escapeHtml(r.path)}"
-                title="Set is_paused=0 for this watch folder">Resume</button>
+                title="Set is_paused=0 for this watch folder">Resume</button>`
+          : `<button class="secondary small"
+                data-action="watch-pause"
+                data-watch-id="${escapeHtml(r.path)}"
+                title="Set is_paused=1 for this watch folder">Pause</button>`}
         <button class="secondary small"
                 data-action="project-reindex"
                 data-id="${escapeHtml(r.tenantId)}"
