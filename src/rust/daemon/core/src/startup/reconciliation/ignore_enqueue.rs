@@ -16,6 +16,15 @@ use crate::watching_queue::get_current_branch;
 
 use super::ignore_sync::ReconcileStats;
 
+/// `reason` stamped (in the **payload**) on every stale `file|delete` enqueued by
+/// ignore-rule reconciliation: the file is now excluded by a `.wqmignore` rule
+/// but is still on disk. The file-delete processor keys on this
+/// (`strategies::processing::file::delete::is_ignore_excluded_delete`) to bypass
+/// its "skip a stale delete for a file still on disk" guard, so the now-ignored
+/// file actually leaves the index instead of lingering. See
+/// `docs/specs/21-cross-branch-dedup.md` §C.
+pub(crate) const IGNORE_RULE_CHANGE_REASON: &str = "ignore_rule_change";
+
 /// Enqueue delete + add operations for stale and missing files.
 ///
 /// `stale` and `missing` carry relative paths (forward-slash, normalized).
@@ -43,7 +52,7 @@ pub(super) async fn enqueue_reconcile_ops(
         collection,
         QueueOperation::Delete,
         stale,
-        "ignore_rule_change",
+        IGNORE_RULE_CHANGE_REASON,
         branch_ref,
     )
     .await;

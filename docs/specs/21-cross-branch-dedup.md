@@ -161,6 +161,28 @@ branch, a `main`/`master` label, or any project whose HEAD isn't in the live set
 > the live branch on a later pass. (Verified live: across the branch-prune sweep
 > every processed delete reported `delete_points=false`; the preserve guard fired
 > on the genuinely exclusive-on-disk files; no point was deleted.)
+>
+> **Sibling fixes from the vicinity audit (same PR).** Two adjacent defects in
+> the same neighbourhood of `file|delete` producers:
+>
+> 1. **`ignore_sync` had the identical bug.** When a `.wqmignore` rule starts
+>    excluding an *already-indexed* file that is still on disk, `ignore_sync`
+>    enqueues a `file|delete` (with `reason:"ignore_rule_change"` in the **payload**,
+>    `IGNORE_RULE_CHANGE_REASON`) — and the on-disk skip silently dropped it, so the
+>    now-ignored file stayed searchable (the reconciler that is supposed to keep the
+>    index consistent when ignore rules change did nothing for on-disk files). It
+>    now bypasses the skip via `is_ignore_excluded_delete` / `bypasses_on_disk_skip`,
+>    but — UNLIKE branch pruning — it does NOT preserve: an ignored file must leave
+>    the index entirely, so the preserve guard is gated on `is_branch_prune_delete`
+>    only. (Of all `file|delete` producers, only branch-prune and ignore-exclusion
+>    enqueue deletes for files still on disk; watcher / folder / branch-switch
+>    deletes fire only once the file is already gone.)
+> 2. **The `"default"` mislabel source.** `branch_switch::{handle_branch_switch,
+>    handle_new_commit}` fell back to a literal `"default"` branch when a git event
+>    carried no branch name — labelling re-keyed files under a non-existent branch
+>    that branch-scoped search misses and `branch_prune` then churns on every
+>    startup. Both now fall back to `get_current_branch(root)` (the repo's real
+>    HEAD), matching the sibling `old_branch` resolution.
 
 ## Original design (Layer 1 as proposed, plus the open Layer 2)
 

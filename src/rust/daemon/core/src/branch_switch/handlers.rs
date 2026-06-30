@@ -83,7 +83,15 @@ async fn handle_branch_switch(
     tenant_id: &str,
 ) -> Result<BranchSwitchStats, String> {
     let root = Path::new(project_root);
-    let new_branch = event.branch.as_deref().unwrap_or("default");
+    // Fall back to the repo's actual current branch (HEAD), NOT a literal
+    // "default": a branch-switch event without a resolved branch name would
+    // otherwise label every re-keyed file under the bogus branch "default" —
+    // invisible to branch-scoped search on the real branch, and later churned by
+    // `branch_prune` (which finds "default" absent from git). Mirrors `old_branch`.
+    let new_branch = event
+        .branch
+        .as_deref()
+        .unwrap_or_else(|| get_current_branch(root).leak());
     let old_branch = event
         .old_branch
         .as_deref()
@@ -260,7 +268,12 @@ async fn handle_new_commit(
     tenant_id: &str,
 ) -> Result<BranchSwitchStats, String> {
     let root = Path::new(project_root);
-    let branch = event.branch.as_deref().unwrap_or("default");
+    // Fall back to the repo's actual current branch (HEAD), not a literal
+    // "default" — see the rationale on `new_branch` in `handle_branch_switch`.
+    let branch = event
+        .branch
+        .as_deref()
+        .unwrap_or_else(|| get_current_branch(root).leak());
 
     info!(
         "New commit on branch {} for {} (old_sha={:.8}, new_sha={:.8})",
