@@ -121,13 +121,24 @@ state:
 - **Tenant ID** — the project's `tenant_id` (e.g. `local_5288aa13ad6c`
   for path-derived or a 12-char hex for remote-derived). Stable
   across worktrees of the same repo when a remote is configured.
-- **Active** — pill `active` (one or more live MCP sessions) or
-  `idle`.
+- **Status** — pill `paused` (amber) when the watch is paused
+  (`is_paused = 1`); otherwise `active` (one or more live MCP sessions) or
+  `idle`. The paused state takes precedence, so a paused watch is visually
+  distinct from a running one (the snapshot route surfaces `isPaused` per
+  project by merging `ListWatches` into the registered-projects list).
 - **Last activity** — relative time since `last_activity_at`.
 
-The **Deactivate** button sends a `DeprioritizeProject` gRPC. Note
-this only decrements the session counter; the watch folder persists
-in the database and the daemon keeps the index intact.
+Per-row actions adapt to the current state:
+
+- **Pause** / **Resume** — shown one at a time: **Pause** when the watch is
+  running (`POST /admin/api/watches/pause`, sets `is_paused = 1`), **Resume**
+  when it is already paused (`/admin/api/watches/resume`). Pausing suspends the
+  file watcher (new file events stop being enqueued) without dropping the
+  index; resuming re-arms it.
+- **Reindex** / **Re-embed** — rebuild computed indexes / re-embed all files.
+- **Deactivate** — sends a `DeprioritizeProject` gRPC. Note this only drops the
+  caller's session (decrementing the live-session count); the watch folder
+  persists in the database and the daemon keeps the index intact.
 
 ### Debug snapshot
 

@@ -125,6 +125,7 @@ const handleSnapshot: RouteHandler = async (_req, res, { daemonClient, stateMana
     path: string;
     remoteUrl: string;
     isActive: boolean;
+    isPaused: boolean;
     lastActivityAt: string | null;
     indexing: {
       pending: number;
@@ -144,11 +145,29 @@ const handleSnapshot: RouteHandler = async (_req, res, { daemonClient, stateMana
       path: p.project_root,
       remoteUrl: '',
       isActive: p.is_active,
+      isPaused: false,
       lastActivityAt: p.last_active
         ? new Date(p.last_active.seconds * 1000).toISOString()
         : null,
       indexing: null,
     }));
+
+    // Merge in paused state: ListProjects omits is_paused, but ListWatches
+    // (WatchInfo) carries it. Match the top-level watch by path so the
+    // dashboard can badge paused projects and surface the right pause/resume
+    // control. Non-fatal: leave isPaused=false if the watches RPC is unavailable.
+    try {
+      const watchesResp = await daemonClient.listWatches({});
+      const pausedByPath = new Map<string, boolean>();
+      for (const w of watchesResp.watches ?? []) {
+        pausedByPath.set(w.path, w.is_paused);
+      }
+      for (const proj of base) {
+        proj.isPaused = pausedByPath.get(proj.path) ?? false;
+      }
+    } catch {
+      // Watches RPC failed — keep the default isPaused=false on every row.
+    }
 
     // Enrich each project with per-tenant indexing progress, in parallel.
     // Falls back to `null` on per-project error so the dashboard can render
