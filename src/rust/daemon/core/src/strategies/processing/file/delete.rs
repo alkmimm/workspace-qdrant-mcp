@@ -135,10 +135,27 @@ pub(super) async fn delete_tracked_file(
     //   - r_new_empty: dropping item.branch empties THIS row's set (row vanishes).
     //   - other_refs_bp: another row (clone) still references base_point.
     //   - other_holds_x: another row still holds item.branch for base_point.
-    let r_new_empty = existing
-        .branches
-        .iter()
-        .all(|b| b.as_str() == item.branch.as_str());
+    let r_new_empty = would_remove_last_tag(&existing.branches, item.branch.as_str());
+
+    // Branch-prune safety net (paired with the marker bypass in
+    // `process_file_delete`): when dropping `item.branch` would empty this file's
+    // branch set — removing its last index entry, not just one tag — but the file
+    // is still present on disk, it is a present-but-mislabeled file, NOT a deleted
+    // one. Preserve the entry: a stale-branch label is benign, deleting the index
+    // of a working-tree file is not (the corpus-wipe this module's guards exist to
+    // prevent). Reconciliation re-tags it under the live branch on a later pass.
+    // Watcher/folder deletes never trip this — they reach `delete_tracked_file`
+    // only once the file is gone from disk, so the on-disk check is false.
+    if r_new_empty && delete_target_still_exists(Path::new(abs_file_path)) {
+        info!(
+            "Preserving index for '{}': pruned branch '{}' is its only tag but the \
+             file is still on disk (mislabeled, not deleted) — leaving entry for \
+             reconciliation to re-tag",
+            relative_path, item.branch
+        );
+        return Ok(());
+    }
+
     let (other_refs_bp, other_holds_x) = match bp {
         Some(bp) => (
             ctx.queue_manager
@@ -385,6 +402,14 @@ fn delete_target_still_exists(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True when dropping `branch` would empty this file's branch set — i.e. it is
+/// the file's last remaining tag, so removing it deletes the whole index entry
+/// (Qdrant point + tracked row), not just one branch label. A multi-branch file
+/// returns false: dropping one tag leaves the others (and the shared point).
+fn would_remove_last_tag(branches: &[String], branch: &str) -> bool {
+    branches.iter().all(|b| b.as_str() == branch)
+}
+
 /// True when this `file|delete` was enqueued by branch pruning (cleanup of a
 /// now-deleted git branch's tags), identified by the `metadata` marker
 /// [`crate::startup::reconciliation::branch_prune::BRANCH_PRUNE_DELETE_METADATA`]
@@ -503,8 +528,21 @@ pub(super) async fn handle_qdrant_failure(
 
 #[cfg(test)]
 mod tests {
-    use super::{delete_target_still_exists, is_branch_prune_delete};
+    use super::{delete_target_still_exists, is_branch_prune_delete, would_remove_last_tag};
     use crate::unified_queue_schema::{ItemType, QueueOperation, QueueStatus, UnifiedQueueItem};
+
+    #[test]
+    fn would_remove_last_tag_only_when_branch_is_sole_tag() {
+        let b = |s: &str| s.to_string();
+        // Sole tag → removing it empties the set (the index entry would vanish).
+        assert!(would_remove_last_tag(&[b("fix/feature")], "fix/feature"));
+        // Multi-branch → dropping one tag leaves the others (point survives).
+        assert!(!would_remove_last_tag(
+            &[b("fix/feature"), b("main")],
+            "fix/feature"
+        ));
+        assert!(!would_remove_last_tag(&[b("main"), b("dev")], "fix/feature"));
+    }
 
     #[test]
     fn delete_target_still_exists_only_for_files() {
