@@ -156,7 +156,7 @@ export async function initializeSession(
     if (sessionState.projectPath) await registerProject(sessionState, daemonClient);
     // Keep this checkout registered for LSP regardless of the client's project
     // (cwd-detection can't find the self-repo in the container — see fn docs).
-    await ensureSelfRepoRegistered(daemonClient);
+    await ensureSelfRepoRegistered(daemonClient, sessionState);
     startHeartbeatFn();
   } catch (error) {
     sessionState.daemonConnected = false;
@@ -212,6 +212,7 @@ export async function registerProject(
       gitRemote,
       sessionState.projectId ?? '',
       false,
+      sessionState.sessionId ?? '',
       false
     );
 
@@ -227,6 +228,7 @@ export async function registerProject(
         gitRemote,
         '',
         true,
+        sessionState.sessionId ?? '',
         false
       );
     }
@@ -269,6 +271,7 @@ async function callRegisterProject(
   gitRemote: string | null,
   projectId: string,
   registerIfNew: boolean,
+  sessionId: string,
   logEvent = true
 ): Promise<RegisterProjectResponse> {
   const response = await daemonClient.registerProject({
@@ -277,6 +280,7 @@ async function callRegisterProject(
     name,
     register_if_new: registerIfNew,
     priority: 'high',
+    session_id: sessionId,
     ...(gitRemote ? { git_remote: gitRemote } : {}),
   });
   if (logEvent && (response.created || response.is_active || registerIfNew)) {
@@ -303,10 +307,15 @@ async function callRegisterProject(
  * never registers this checkout — leaving Rust/TS grey on the LSP dashboard
  * after a (re)start. `WQM_REPO_DIR` is the exact container path of the checkout,
  * so register it explicitly. Idempotent (`register_if_new`) and best-effort: a
- * failure here must never break session startup. Does not touch `sessionState`
- * — this is independent of whatever project the connecting client is in.
+ * failure here must never break session startup. Records the self-repo tenant
+ * on `sessionState` (`selfRepoProjectId`) so the heartbeat loop can keep its
+ * "self-repo" session alive; otherwise independent of whatever project the
+ * connecting client is in.
  */
-export async function ensureSelfRepoRegistered(daemonClient: DaemonClient): Promise<void> {
+export async function ensureSelfRepoRegistered(
+  daemonClient: DaemonClient,
+  sessionState: SessionState
+): Promise<void> {
   const repoDir = process.env['WQM_REPO_DIR'];
   if (!repoDir) return;
   try {
@@ -319,8 +328,12 @@ export async function ensureSelfRepoRegistered(daemonClient: DaemonClient): Prom
       gitRemote,
       '',
       true, // register_if_new
+      'self-repo', // stable session id — idempotent across restarts (no leak)
       false // housekeeping call — don't emit a session 'register' event
     );
+    // Remember the self-repo tenant so the heartbeat loop keeps its "self-repo"
+    // session alive while this server runs (it expires ~timeout after we stop).
+    sessionState.selfRepoProjectId = response.project_id;
     logDebug('Self-repo registered for LSP', {
       repo_dir: resolvedPath,
       project_id: response.project_id,
@@ -357,6 +370,7 @@ export async function registerProjectFromTool(
     gitRemote,
     '',
     true,
+    sessionState.sessionId ?? '',
     true
   );
 
@@ -395,26 +409,44 @@ export async function sendHeartbeat(
   sessionState: SessionState,
   daemonClient: DaemonClient
 ): Promise<void> {
-  if (!sessionState.projectId || !sessionState.daemonConnected) {
+  if (!sessionState.daemonConnected) {
     return;
   }
 
-  try {
-    const response = await daemonClient.heartbeat({
-      project_id: sessionState.projectId,
-    });
-
-    if (response.acknowledged) {
-      logSessionEvent('heartbeat', {
+  // Keep this client session's project alive (when this session has one).
+  if (sessionState.projectId) {
+    try {
+      const response = await daemonClient.heartbeat({
         project_id: sessionState.projectId,
-        acknowledged: true,
+        ...(sessionState.sessionId ? { session_id: sessionState.sessionId } : {}),
       });
+
+      if (response.acknowledged) {
+        logSessionEvent('heartbeat', {
+          project_id: sessionState.projectId,
+          acknowledged: true,
+        });
+      }
+    } catch (error) {
+      logError('Heartbeat failed', error, { project_id: sessionState.projectId });
+      sessionState.daemonConnected = false;
+      logDaemonStatus(false, { reason: 'heartbeat_failed' });
+      recordDaemonFallback('session', 'heartbeat_failed');
+      return;
     }
-  } catch (error) {
-    logError('Heartbeat failed', error, { project_id: sessionState.projectId });
-    sessionState.daemonConnected = false;
-    logDaemonStatus(false, { reason: 'heartbeat_failed' });
-    recordDaemonFallback('session', 'heartbeat_failed');
+  }
+
+  // Keep the MCP self-repo's "self-repo" session alive so its LSP/priority
+  // persist while this server runs; it expires shortly after the server stops.
+  if (sessionState.selfRepoProjectId) {
+    try {
+      await daemonClient.heartbeat({
+        project_id: sessionState.selfRepoProjectId,
+        session_id: 'self-repo',
+      });
+    } catch (error) {
+      logDebug('Self-repo heartbeat failed (non-fatal)', { error: String(error) });
+    }
   }
 }
 
@@ -442,6 +474,7 @@ export async function cleanup(
       const projectId = sessionState.projectId!;
       const response = await daemonClient.deprioritizeProject({
         project_id: projectId,
+        ...(sessionState.sessionId ? { session_id: sessionState.sessionId } : {}),
         ...(sessionState.isWorktree && sessionState.watchPath
           ? { watch_path: sessionState.watchPath }
           : {}),

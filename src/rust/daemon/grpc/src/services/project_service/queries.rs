@@ -547,7 +547,11 @@ impl ProjectServiceImpl {
 
         debug!("Heartbeat received: {}", req.project_id);
 
-        match self.priority_manager.heartbeat(&req.project_id).await {
+        match self
+            .priority_manager
+            .heartbeat(&req.project_id, req.session_id.as_deref().unwrap_or(""))
+            .await
+        {
             Ok(acknowledged) => {
                 if acknowledged {
                     self.propagate_heartbeat_activity(&req.project_id).await;

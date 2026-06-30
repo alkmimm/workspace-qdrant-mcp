@@ -433,12 +433,12 @@ impl ProjectServiceImpl {
             }
 
             if is_high_priority {
-                // Second arg is an ignored legacy `_branch` parameter (see
-                // priority_manager::register_session); pass a stable label so
-                // it can't be mistaken for a real git ref.
+                // Track this session's liveness (migration v42). `is_active` is
+                // the live-session count, so re-registering the same session_id
+                // (e.g. the MCP self-repo on every restart) is a no-op, not a leak.
                 match self
                     .priority_manager
-                    .register_session(project_id, "session")
+                    .register_session(project_id, req.session_id.as_deref().unwrap_or(""))
                     .await
                 {
                     Ok(_) => Ok(RegistrationAction::ExistingActivated),

@@ -28,6 +28,7 @@ async fn test_register_new_project_with_register_if_new() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path,
         project_id: "abcd12345678".to_string(),
         name: Some("Test Project".to_string()),
@@ -56,6 +57,7 @@ async fn test_register_new_project_without_register_if_new() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path,
         project_id: "abcd12345678".to_string(),
         name: Some("Test Project".to_string()),
@@ -91,6 +93,7 @@ async fn test_register_existing_project() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: canonical_path.clone(),
         project_id: "abcd12345678".to_string(),
         name: Some("Test Project".to_string()),
@@ -101,6 +104,7 @@ async fn test_register_existing_project() {
     service.register_project(request).await.unwrap();
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: canonical_path,
         project_id: "abcd12345678".to_string(),
         name: Some("Test Project".to_string()),
@@ -143,6 +147,7 @@ async fn test_register_sibling_clone_of_existing_tenant() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: clone_b_path,
         project_id: "abcd12345678".to_string(),
         name: Some("Clone B".to_string()),
@@ -182,6 +187,7 @@ async fn test_reregister_same_path_is_still_noop() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: canonical_path,
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -213,6 +219,7 @@ async fn test_invalid_project_id_format() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path,
         project_id: "short".to_string(),
         name: None,
@@ -236,6 +243,7 @@ async fn test_empty_project_id_generates_local_id() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: project_path,
         project_id: "".to_string(),
         name: None,
@@ -262,6 +270,7 @@ async fn test_empty_path_and_project_id_returns_error() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: "".to_string(),
         project_id: "".to_string(),
         name: None,
@@ -284,6 +293,7 @@ async fn test_empty_path_with_project_id_is_allowed_for_activation() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: "".to_string(),
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -311,6 +321,7 @@ async fn test_nonexistent_path_rejected() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: "/nonexistent/path/that/does/not/exist".to_string(),
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -335,6 +346,7 @@ async fn test_file_path_rejected_not_directory() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: file_path.to_string_lossy().to_string(),
         project_id: "abcd12345678".to_string(),
         name: None,

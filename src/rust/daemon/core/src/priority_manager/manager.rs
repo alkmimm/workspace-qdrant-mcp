@@ -32,55 +32,103 @@ impl PriorityManager {
     // Session Tracking Methods (using watch_folders.is_active)
     // =========================================================================
 
-    /// Increment is_active for a project session.
+    /// Register a live session for a project (migration v42 model).
     ///
-    /// Increments the session counter and updates last_activity_at.
-    /// Queue ordering is computed at dequeue time based on is_active,
-    /// so no queue updates are needed here.
+    /// Upserts one row in `project_sessions` keyed by `(tenant_id,
+    /// COLLECTION_PROJECTS, session_id)`, then projects the live-session count
+    /// onto `watch_folders.is_active`. Idempotent: re-registering the same
+    /// `session_id` (e.g. the MCP self-repo on every restart) refreshes the
+    /// heartbeat instead of incrementing, so `is_active` can never leak.
+    ///
+    /// Returns the resulting live-session count.
     pub async fn register_session(
         &self,
         tenant_id: &str,
-        _session_tag: &str,
+        session_id: &str,
     ) -> PriorityResult<i32> {
         if tenant_id.is_empty() {
             return Err(PriorityError::EmptyParameter);
         }
+        let session_id: &str = if session_id.trim().is_empty() {
+            "legacy"
+        } else {
+            session_id
+        };
 
-        // Delegate is_active mutation to WatchFolderLifecycle
-        let lifecycle = WatchFolderLifecycle::new(self.db_pool.clone());
-        let rows = lifecycle
-            .activate_by_tenant(tenant_id, COLLECTION_PROJECTS)
-            .await?;
-
-        if rows == 0 {
+        // The project must exist (a watch_folders row for this tenant).
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM watch_folders WHERE tenant_id = ?1 AND collection = ?2 LIMIT 1",
+        )
+        .bind(tenant_id)
+        .bind(COLLECTION_PROJECTS)
+        .fetch_optional(&self.db_pool)
+        .await?;
+        if exists.is_none() {
             return Err(PriorityError::ProjectNotFound(tenant_id.to_string()));
         }
 
-        // Record session metrics
+        let now = timestamps::format_utc(&Utc::now());
+        sqlx::query(
+            r#"
+            INSERT INTO project_sessions
+                (tenant_id, collection, session_id, registered_at, last_heartbeat_at)
+            VALUES (?1, ?2, ?3, ?4, ?4)
+            ON CONFLICT(tenant_id, collection, session_id)
+            DO UPDATE SET last_heartbeat_at = ?4
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(COLLECTION_PROJECTS)
+        .bind(session_id)
+        .bind(&now)
+        .execute(&self.db_pool)
+        .await?;
+
+        let lifecycle = WatchFolderLifecycle::new(self.db_pool.clone());
+        lifecycle
+            .sync_is_active_from_sessions(tenant_id, COLLECTION_PROJECTS)
+            .await?;
+        let active = self.live_session_count(tenant_id).await?;
+
         METRICS.session_started(tenant_id, "high");
-
         info!(
-            "Session registered for project {}: marked as active",
-            tenant_id
+            "Session '{}' registered for project {}: {} live session(s)",
+            session_id, tenant_id, active
         );
-
-        // Return 1 to indicate active (maintains API compatibility)
-        Ok(1)
+        Ok(active)
     }
 
-    /// Decrement is_active for a project session.
+    /// Count live sessions for a project (`project_sessions` rows).
+    async fn live_session_count(&self, tenant_id: &str) -> PriorityResult<i32> {
+        let count: i32 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM project_sessions WHERE tenant_id = ?1 AND collection = ?2",
+        )
+        .bind(tenant_id)
+        .bind(COLLECTION_PROJECTS)
+        .fetch_one(&self.db_pool)
+        .await?;
+        Ok(count)
+    }
+
+    /// Drop a live session for a project (migration v42 model).
     ///
-    /// Returns the is_active value after decrement. The caller uses this
-    /// to decide whether side effects (LSP shutdown, watch refresh) should
-    /// fire — they only fire when the count reaches 0.
+    /// Deletes the `project_sessions` row for `session_id` (if any), then
+    /// re-projects the live-session count onto `is_active`. Returns the
+    /// remaining live-session count — the caller fires teardown side effects
+    /// (LSP shutdown, watch refresh) only when it reaches 0.
     pub async fn unregister_session(
         &self,
         tenant_id: &str,
-        _session_tag: &str,
+        session_id: &str,
     ) -> PriorityResult<i32> {
         if tenant_id.is_empty() {
             return Err(PriorityError::EmptyParameter);
         }
+        let session_id: &str = if session_id.trim().is_empty() {
+            "legacy"
+        } else {
+            session_id
+        };
 
         // Check if project exists
         let exists: Option<i32> = sqlx::query_scalar(
@@ -95,30 +143,27 @@ impl PriorityManager {
             return Err(PriorityError::ProjectNotFound(tenant_id.to_string()));
         }
 
-        // Delegate is_active mutation to WatchFolderLifecycle
-        let lifecycle = WatchFolderLifecycle::new(self.db_pool.clone());
-        lifecycle
-            .deactivate_by_tenant(tenant_id, COLLECTION_PROJECTS)
-            .await?;
-
-        // Read back the updated value to inform the caller
-        let remaining: i32 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(is_active), 0) FROM watch_folders \
-             WHERE tenant_id = ?1 AND collection = ?2",
+        sqlx::query(
+            "DELETE FROM project_sessions \
+             WHERE tenant_id = ?1 AND collection = ?2 AND session_id = ?3",
         )
         .bind(tenant_id)
         .bind(COLLECTION_PROJECTS)
-        .fetch_one(&self.db_pool)
+        .bind(session_id)
+        .execute(&self.db_pool)
         .await?;
 
-        // Record session end metrics
+        let lifecycle = WatchFolderLifecycle::new(self.db_pool.clone());
+        lifecycle
+            .sync_is_active_from_sessions(tenant_id, COLLECTION_PROJECTS)
+            .await?;
+        let remaining = self.live_session_count(tenant_id).await?;
+
         METRICS.session_ended(tenant_id, "normal", 0.0);
-
         info!(
-            "Session unregistered for project {}: is_active={}",
-            tenant_id, remaining
+            "Session '{}' unregistered for project {}: {} live session(s) remain",
+            session_id, tenant_id, remaining
         );
-
         Ok(remaining)
     }
 
@@ -228,57 +273,69 @@ impl PriorityManager {
         Ok((previous_priority.to_string(), 0))
     }
 
-    /// Update heartbeat timestamp for a project
+    /// Refresh a session's heartbeat (migration v42 model).
     ///
-    /// Called periodically by MCP servers to indicate they're still alive.
-    /// Updates the last_activity_at timestamp to the current time.
-    pub async fn heartbeat(&self, tenant_id: &str) -> PriorityResult<bool> {
+    /// Updates `last_heartbeat_at` on the caller's `project_sessions` row so the
+    /// orphan reaper keeps it alive, and mirrors the activity timestamp onto
+    /// `watch_folders` for status/ETA views. A heartbeat for a session that is
+    /// not registered (or a project with no live sessions) updates 0 rows and
+    /// returns `false` — it cannot resurrect a session, preserving the
+    /// register/unregister lifecycle as the source of truth for `is_active`.
+    pub async fn heartbeat(&self, tenant_id: &str, session_id: &str) -> PriorityResult<bool> {
         if tenant_id.is_empty() {
             return Err(PriorityError::EmptyParameter);
         }
+        let session_id: &str = if session_id.trim().is_empty() {
+            "legacy"
+        } else {
+            session_id
+        };
 
-        // Measure heartbeat latency
         let start = Instant::now();
+        let now = timestamps::format_utc(&Utc::now());
 
-        let now = Utc::now();
-
-        // A heartbeat refreshes the activity timestamp for a project that has at least
-        // one active session (is_active > 0). With reference counting, is_active
-        // accurately reflects the number of live sessions — a heartbeat cannot
-        // resurrect a project with 0 sessions, because that would bypass the register/
-        // unregister lifecycle. The race condition that required `SET is_active = 1`
-        // (Task 518) is resolved by reference counting: one session ending no longer
-        // drops the count to 0 while another session is still alive.
         let result = sqlx::query(
             r#"
-            UPDATE watch_folders
-            SET last_activity_at = ?1,
-                updated_at = ?1
+            UPDATE project_sessions
+            SET last_heartbeat_at = ?1
             WHERE tenant_id = ?2
               AND collection = ?3
-              AND is_active > 0
+              AND session_id = ?4
             "#,
         )
-        .bind(timestamps::format_utc(&now))
+        .bind(&now)
         .bind(tenant_id)
         .bind(COLLECTION_PROJECTS)
+        .bind(session_id)
         .execute(&self.db_pool)
         .await?;
 
         let updated = result.rows_affected() > 0;
 
-        // Record heartbeat latency metric
+        // Mirror the activity timestamp onto watch_folders for status/ETA views.
+        if updated {
+            sqlx::query(
+                "UPDATE watch_folders SET last_activity_at = ?1, updated_at = ?1 \
+                 WHERE tenant_id = ?2 AND collection = ?3",
+            )
+            .bind(&now)
+            .bind(tenant_id)
+            .bind(COLLECTION_PROJECTS)
+            .execute(&self.db_pool)
+            .await?;
+        }
+
         let latency_secs = start.elapsed().as_secs_f64();
         if updated {
             METRICS.heartbeat_processed(tenant_id, latency_secs);
             debug!(
-                "Heartbeat received for project {} (latency: {:.3}s)",
-                tenant_id, latency_secs
+                "Heartbeat for session '{}' project {} (latency: {:.3}s)",
+                session_id, tenant_id, latency_secs
             );
         } else {
-            warn!(
-                "Heartbeat for project {} not found (tenant_id={})",
-                tenant_id, tenant_id
+            debug!(
+                "Heartbeat ignored: no live session '{}' for project {}",
+                session_id, tenant_id
             );
         }
 
@@ -324,11 +381,14 @@ impl PriorityManager {
         }
     }
 
-    /// Cleanup orphaned sessions
+    /// Reap sessions whose heartbeat is older than `timeout_secs` (migration v42
+    /// model) and re-project `is_active` for every affected project.
     ///
-    /// Detects projects with is_active=1 but last_activity_at older than
-    /// the heartbeat timeout. These are sessions where the MCP server died
-    /// without sending a proper shutdown notification.
+    /// These are sessions whose MCP server died without a clean unregister.
+    /// Deleting the stale `project_sessions` rows and recomputing the count
+    /// naturally demotes a project to idle once its last live session expires —
+    /// while leaving projects that still have a live (heartbeating) session
+    /// untouched.
     pub async fn cleanup_orphaned_sessions(
         &self,
         timeout_secs: u64,
@@ -336,33 +396,44 @@ impl PriorityManager {
         let cutoff = Utc::now() - ChronoDuration::seconds(timeout_secs as i64);
         let cutoff_str = timestamps::format_utc(&cutoff);
 
-        // Delegate finding and deactivation to WatchFolderLifecycle
+        // Capture affected tenants before the delete (for the is_active
+        // re-projection and the returned summary).
+        let stale_tenants: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT tenant_id FROM project_sessions \
+             WHERE collection = ?1 AND last_heartbeat_at < ?2",
+        )
+        .bind(COLLECTION_PROJECTS)
+        .bind(&cutoff_str)
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let deleted = sqlx::query(
+            "DELETE FROM project_sessions WHERE collection = ?1 AND last_heartbeat_at < ?2",
+        )
+        .bind(COLLECTION_PROJECTS)
+        .bind(&cutoff_str)
+        .execute(&self.db_pool)
+        .await?;
+        let sessions_cleaned = deleted.rows_affected() as i32;
+
         let lifecycle = WatchFolderLifecycle::new(self.db_pool.clone());
-
-        let demoted_projects = lifecycle
-            .find_stale_active_tenants(COLLECTION_PROJECTS, &cutoff_str)
-            .await?;
-
-        // Record metrics for each orphaned session
-        for tenant_id in &demoted_projects {
+        for tenant_id in &stale_tenants {
+            lifecycle
+                .sync_is_active_from_sessions(tenant_id, COLLECTION_PROJECTS)
+                .await?;
             METRICS.session_ended(tenant_id, "high", 0.0);
         }
 
-        // Bulk deactivate in a single transaction
-        lifecycle
-            .deactivate_orphaned_tenants(&demoted_projects, COLLECTION_PROJECTS)
-            .await?;
-
         let cleanup = OrphanedSessionCleanup {
-            projects_affected: demoted_projects.len(),
-            sessions_cleaned: demoted_projects.len() as i32,
-            demoted_projects: demoted_projects.clone(),
+            projects_affected: stale_tenants.len(),
+            sessions_cleaned,
+            demoted_projects: stale_tenants,
         };
 
         if cleanup.projects_affected > 0 {
             warn!(
-                "Cleaned up {} orphaned sessions: {:?}",
-                cleanup.sessions_cleaned, cleanup.demoted_projects
+                "Reaped {} orphaned session(s) across {} project(s): {:?}",
+                cleanup.sessions_cleaned, cleanup.projects_affected, cleanup.demoted_projects
             );
         } else {
             debug!("No orphaned sessions found (timeout: {}s)", timeout_secs);

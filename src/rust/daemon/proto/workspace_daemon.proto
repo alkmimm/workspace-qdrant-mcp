@@ -459,6 +459,10 @@ message RegisterProjectRequest {
     optional string git_remote = 4;               // Git remote URL (for normalization)
     bool register_if_new = 5;                     // If false, only activate existing projects
     optional string priority = 6;                 // "high" or "normal"; defaults to "normal" if absent
+    optional string session_id = 7;               // Caller's session identity (UUID for client sessions,
+                                                  // stable "self-repo" for the MCP self-registration). Tracks
+                                                  // one live-session row so is_active reflects real sessions
+                                                  // (idempotent register, no leak on restart).
 }
 
 message RegisterProjectResponse {
@@ -475,6 +479,8 @@ message RegisterProjectResponse {
 message DeprioritizeProjectRequest {
     string project_id = 1;                        // 12-char hex identifier
     optional string watch_path = 2;               // [canonical] Absolute path to specific watch root
+    optional string session_id = 3;               // Session identity to drop (matches RegisterProject).
+                                                  // Empty removes the legacy/unnamed session for back-compat.
 }
 
 message DeprioritizeProjectResponse {
@@ -592,6 +598,8 @@ message WatchInfo {
 // Heartbeat Request/Response
 message HeartbeatRequest {
     string project_id = 1;                        // 12-char hex identifier
+    optional string session_id = 2;               // Session identity to keep alive (matches RegisterProject).
+                                                  // Refreshes that session's last_heartbeat_at.
 }
 
 message HeartbeatResponse {

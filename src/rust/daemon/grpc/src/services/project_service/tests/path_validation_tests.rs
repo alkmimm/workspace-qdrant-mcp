@@ -18,6 +18,7 @@ async fn test_register_relative_path_rejected() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: "relative/path".to_string(),
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -38,6 +39,7 @@ async fn test_register_parent_dir_path_rejected() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: "/Users/chris/../other".to_string(),
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -65,6 +67,7 @@ async fn test_deprioritize_relative_watch_path_rejected() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(DeprioritizeProjectRequest {
+        session_id: None,
         project_id: "abcd12345678".to_string(),
         watch_path: Some("relative/path".to_string()),
     });
@@ -86,6 +89,7 @@ async fn test_deprioritize_parent_dir_watch_path_rejected() {
     let service = ProjectServiceImpl::new(pool);
 
     let request = Request::new(DeprioritizeProjectRequest {
+        session_id: None,
         project_id: "abcd12345678".to_string(),
         watch_path: Some("/Users/chris/../escape".to_string()),
     });
@@ -113,6 +117,7 @@ async fn test_deprioritize_empty_watch_path_allowed() {
 
     // Register first so we can deprioritize.
     let request = Request::new(RegisterProjectRequest {
+        session_id: None,
         path: canonical,
         project_id: "abcd12345678".to_string(),
         name: None,
@@ -123,6 +128,7 @@ async fn test_deprioritize_empty_watch_path_allowed() {
     service.register_project(request).await.unwrap();
 
     let request = Request::new(DeprioritizeProjectRequest {
+        session_id: None,
         project_id: "abcd12345678".to_string(),
         watch_path: Some(String::new()), // empty = tenant-wide
     });

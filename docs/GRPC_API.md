@@ -289,6 +289,13 @@ rpc RegisterProject(RegisterProjectRequest) returns (RegisterProjectResponse);
 - `project_id`: 12-char hex tenant identifier (required)
 - `name`: Human-readable project name (optional)
 - `git_remote`: Git remote URL for normalization (optional)
+- `session_id`: Caller's session identity (optional) — a per-session UUID for
+  client sessions, or the stable id `"self-repo"` for the MCP server's own LSP
+  self-registration. Tracked one-row-per-session in the `project_sessions` table,
+  so `active_sessions` is the **count of live sessions** and re-registering the
+  same `session_id` is idempotent: it never double-counts and survives MCP
+  restarts without leaking the activity counter. Empty → a single shared
+  `"legacy"` session.
 
 **Response:**
 - `created`: True if new project, false if existing
@@ -312,6 +319,11 @@ print(f"Priority: {response.priority}, Sessions: {response.active_sessions}")
 ```
 
 **Priority Behavior:**
+- `active_sessions` (the `watch_folders.is_active` flag) is the **live-session
+  count** projected from `project_sessions`. `register` / `heartbeat` /
+  `unregister` are idempotent per `session_id`, and sessions with no heartbeat
+  within the timeout are reaped by the session monitor — so the counter reflects
+  reality and cannot leak.
 - When `active_sessions > 0`: Priority is HIGH (queue position 1)
 - When `active_sessions == 0`: Priority is NORMAL (queue position 5)
 - File changes for HIGH priority projects are processed immediately
@@ -326,6 +338,9 @@ rpc DeprioritizeProject(DeprioritizeProjectRequest) returns (DeprioritizeProject
 
 **Request:**
 - `project_id`: 12-char hex identifier
+- `watch_path`: Absolute path to a specific watch root (optional; worktree-scoped)
+- `session_id`: Session identity to drop (optional; matches `RegisterProject`).
+  Empty drops the shared `"legacy"` session.
 
 **Response:**
 - `success`: Boolean

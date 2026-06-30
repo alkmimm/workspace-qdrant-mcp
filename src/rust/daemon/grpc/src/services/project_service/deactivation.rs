@@ -37,7 +37,11 @@ impl ProjectServiceImpl {
         if let Some(ref path) = watch_path {
             self.deprioritize_by_path(&req.project_id, path).await
         } else {
-            self.deprioritize_tenant_wide(&req.project_id).await
+            self.deprioritize_tenant_wide(
+                &req.project_id,
+                req.session_id.as_deref().unwrap_or(""),
+            )
+            .await
         }
     }
 
@@ -47,15 +51,15 @@ impl ProjectServiceImpl {
     async fn deprioritize_tenant_wide(
         &self,
         project_id: &str,
+        session_id: &str,
     ) -> Result<DeprioritizeProjectResponse, Status> {
         info!("Deprioritizing project (tenant-wide): {}", project_id);
 
-        // Second arg is an ignored legacy `_branch` parameter (see
-        // priority_manager::unregister_session); pass a stable label so
-        // it can't be mistaken for a real git ref.
+        // Drop this session's liveness row (migration v42). `is_active` is the
+        // live-session count, so teardown side effects fire only when it hits 0.
         match self
             .priority_manager
-            .unregister_session(project_id, "session")
+            .unregister_session(project_id, session_id)
             .await
         {
             Ok(active_flag) => {

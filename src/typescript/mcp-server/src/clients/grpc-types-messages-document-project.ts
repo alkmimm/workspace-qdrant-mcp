@@ -45,6 +45,10 @@ export interface RegisterProjectRequest {
   git_remote?: string;
   register_if_new?: boolean;
   priority?: string;
+  /** Caller's session identity (UUID for client sessions, stable "self-repo"
+   *  for the MCP self-registration). Tracks one live-session row so is_active
+   *  reflects real sessions (idempotent register, no leak on restart). */
+  session_id?: string;
 }
 
 export interface RegisterProjectResponse {
@@ -60,6 +64,8 @@ export interface RegisterProjectResponse {
 export interface DeprioritizeProjectRequest {
   project_id: string;
   watch_path?: string;
+  /** Session identity to drop (matches RegisterProject). */
+  session_id?: string;
 }
 
 export interface DeprioritizeProjectResponse {
@@ -145,6 +151,8 @@ export interface ListWatchesResponse {
 
 export interface HeartbeatRequest {
   project_id: string;
+  /** Session identity to keep alive (matches RegisterProject). */
+  session_id?: string;
 }
 
 export interface HeartbeatResponse {
