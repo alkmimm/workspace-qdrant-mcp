@@ -39,12 +39,25 @@ pub(super) async fn process_file_delete(
     let detected_language = detect_language(target_path);
 
     if delete_target_still_exists(target_path) {
-        info!(
-            "Skipping stale delete for existing file on disk: {}",
-            abs_file_path
-        );
-        record_delete_timings(ctx, item, pool, detected_language, &timings).await;
-        return Ok(());
+        if is_branch_prune_delete(item) {
+            // Branch-prune cleanup: the file is present on the *live* branch, but
+            // this delete targets a now-deleted branch's tag. Fall through to the
+            // branch-scoped, reference-counted removal below — the shared Qdrant
+            // point survives (other branches still hold it); only the dead
+            // branch's tag is dropped.
+            debug!(
+                "Branch-prune delete for '{}' on branch '{}': file still on disk \
+                 (lives on another branch) — proceeding with branch-scoped tag removal",
+                abs_file_path, item.branch
+            );
+        } else {
+            info!(
+                "Skipping stale delete for existing file on disk: {}",
+                abs_file_path
+            );
+            record_delete_timings(ctx, item, pool, detected_language, &timings).await;
+            return Ok(());
+        }
     }
 
     if let Ok(true) = tracked_files_schema::is_incremental(pool, abs_file_path).await {
@@ -372,6 +385,24 @@ fn delete_target_still_exists(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True when this `file|delete` was enqueued by branch pruning (cleanup of a
+/// now-deleted git branch's tags), identified by the `metadata` marker
+/// [`crate::startup::reconciliation::branch_prune::BRANCH_PRUNE_DELETE_METADATA`]
+/// stamps. Such deletes must run the branch-scoped, reference-counted removal
+/// even when the file still exists on disk: the file lives on the live branch,
+/// but its tag for the *pruned* branch must be dropped. Watcher and folder
+/// deletes carry no such marker, so they keep the stale-file-on-disk skip.
+fn is_branch_prune_delete(item: &UnifiedQueueItem) -> bool {
+    use crate::startup::reconciliation::branch_prune::BRANCH_PRUNE_REASON;
+    let Some(meta) = item.metadata.as_deref() else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(meta) else {
+        return false;
+    };
+    value.get("reason").and_then(|r| r.as_str()) == Some(BRANCH_PRUNE_REASON)
+}
+
 /// Clean up tracked records and Qdrant points for a file that no longer exists on disk.
 ///
 /// **F-035:** if Qdrant deletion fails, returns `Err` and leaves the
@@ -472,7 +503,8 @@ pub(super) async fn handle_qdrant_failure(
 
 #[cfg(test)]
 mod tests {
-    use super::delete_target_still_exists;
+    use super::{delete_target_still_exists, is_branch_prune_delete};
+    use crate::unified_queue_schema::{ItemType, QueueOperation, QueueStatus, UnifiedQueueItem};
 
     #[test]
     fn delete_target_still_exists_only_for_files() {
@@ -483,5 +515,54 @@ mod tests {
         assert!(delete_target_still_exists(&file));
         assert!(!delete_target_still_exists(tmp.path()));
         assert!(!delete_target_still_exists(&tmp.path().join("missing.ts")));
+    }
+
+    fn delete_item_with_metadata(metadata: Option<&str>) -> UnifiedQueueItem {
+        UnifiedQueueItem {
+            queue_id: "q1".to_string(),
+            idempotency_key: "k1".to_string(),
+            item_type: ItemType::File,
+            op: QueueOperation::Delete,
+            tenant_id: "t1".to_string(),
+            collection: "projects".to_string(),
+            status: QueueStatus::Pending,
+            branch: "claude/deleted-feature".to_string(),
+            payload_json: "{}".to_string(),
+            metadata: metadata.map(str::to_string),
+            created_at: "2026-06-30T00:00:00Z".to_string(),
+            updated_at: "2026-06-30T00:00:00Z".to_string(),
+            lease_until: None,
+            worker_id: None,
+            retry_count: 0,
+            error_message: None,
+            last_error_at: None,
+            file_path: Some("src/a.ts".to_string()),
+            qdrant_status: None,
+            search_status: None,
+            decision_json: None,
+        }
+    }
+
+    #[test]
+    fn branch_prune_delete_detected_only_for_marked_items() {
+        use crate::startup::reconciliation::branch_prune::BRANCH_PRUNE_DELETE_METADATA;
+
+        // The exact marker branch_prune stamps must be recognized (also guards
+        // against drift between the metadata JSON and the reason token).
+        assert!(is_branch_prune_delete(&delete_item_with_metadata(Some(
+            BRANCH_PRUNE_DELETE_METADATA
+        ))));
+
+        // Watcher/folder deletes carry no marker → keep the stale-file-on-disk skip.
+        assert!(!is_branch_prune_delete(&delete_item_with_metadata(None)));
+        assert!(!is_branch_prune_delete(&delete_item_with_metadata(Some("{}"))));
+        assert!(!is_branch_prune_delete(&delete_item_with_metadata(Some(
+            r#"{"reason":"watcher"}"#
+        ))));
+
+        // Malformed metadata must never be mistaken for a prune marker.
+        assert!(!is_branch_prune_delete(&delete_item_with_metadata(Some(
+            "not json"
+        ))));
     }
 }
