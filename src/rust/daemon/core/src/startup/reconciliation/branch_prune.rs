@@ -15,10 +15,11 @@
 //! ## Branch isolation is safe
 //!
 //! The file-delete processor reference-counts Qdrant points by `base_point`
-//! (see `strategies/processing/file/delete.rs::check_qdrant_deletion_needed`):
-//! deleting a branch's `tracked_files` rows only removes Qdrant points that no
-//! other branch (e.g. `main`) still references. A shared point survives until
-//! its last referencing branch is gone.
+//! (see `strategies/processing/file/delete.rs::delete_tracked_file`, which
+//! ref-counts via `QueueManager::has_other_references`): deleting a branch's
+//! `tracked_files` rows only removes Qdrant points that no other branch
+//! (e.g. `main`) still references. A shared point survives until its last
+//! referencing branch is gone.
 //!
 //! ## Safety guards (never over-prune)
 //!
