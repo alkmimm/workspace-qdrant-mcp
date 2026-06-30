@@ -1,4 +1,4 @@
-# Reference example for ~/.codex/config.toml (stdio variant).
+# Reference example for ~/.codex/config.toml (HTTP variant).
 # Canonical values for `enabled_tools`, `startup_timeout_sec`, `tool_timeout_sec`
 # live in src/typescript/mcp-server/src/constants/mcp-public-config.json.
 # If you change them here, update the JSON too — drift is verified by the
@@ -11,12 +11,16 @@ trust_level = "trusted"
 trust_level = "trusted"
 
 [mcp_servers.workspace-qdrant]
-command = "node"
-args = ["C:/Users/alber/Documents/repositorios/workspace-qdrant-mcp/src/typescript/mcp-server/dist/index.js"]
+enabled = true
 startup_timeout_sec = 20
 tool_timeout_sec = 120
-required = true
-enabled_tools = ["search", "retrieve", "grep", "list", "store", "rules", "workspace_index", "graph"]
+enabled_tools = ["search", "retrieve", "grep", "list", "store", "scratchpad", "rules", "workspace_index", "graph"]
+url = "http://localhost:6335/mcp"
+bearer_token_env_var = "MCP_HTTP_TOKEN"
+
+[mcp_servers.workspace-qdrant.http_headers]
+Authorization = "Bearer 0123456789abcdef0123456789abcdef"
+
 
 [mcp_servers.workspace-qdrant.env]
 QDRANT_URL = "http://localhost:6333"
