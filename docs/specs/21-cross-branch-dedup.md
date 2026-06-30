@@ -119,6 +119,71 @@ Net effect: switching or branching skips the (dominant) embed cost; only
 genuinely changed files pay the full pipeline. Storage still duplicates per
 branch — that is what Layer 2 removes.
 
+### C. Branch pruning — orphaned-branch tag removal (delete side)
+
+The inverse of dedup-append. [`startup/reconciliation/branch_prune.rs`](../../src/rust/daemon/core/src/startup/reconciliation/branch_prune.rs)
+(`prune_orphaned_branches`, run from the startup/admin reconciliation entrypoint)
+compares the branches present in `tracked_files` against the repo's **live** git
+branches and enqueues `file|delete` for every tracked file on a branch that no
+longer exists — otherwise a deleted branch's tags linger in the index forever.
+Each delete carries the dead branch and flows through the **branch-scoped,
+reference-counted** removal in [`file/delete.rs`](../../src/rust/daemon/core/src/strategies/processing/file/delete.rs)
+(`delete_tracked_file`): it drops the branch from the shared `base_point`'s
+`branches[]` (Qdrant `remove_branch_from_base_point`) and the row's JSON set, and
+deletes the physical point **only** when that empties the set AND no other clone
+references the `base_point`. branch_prune's own guards never prune the corpus
+branch, a `main`/`master` label, or any project whose HEAD isn't in the live set.
+
+> **Fix 2026-06-30 (PR #181) — branch-prune deletes vs. the on-disk skip.**
+> `process_file_delete` skips any delete whose target **still exists on disk**
+> (`"Skipping stale delete for existing file on disk"`) — correct for stale
+> *watcher* events (a file re-created after a transient remove). But a deleted
+> feature branch shares almost all of its files with the live branch, so those
+> files *do* still exist on disk: every branch-prune delete was skipped, the
+> orphaned tags never cleared, and each startup re-enqueued the same thousands of
+> no-op deletes (clogging the queue, starving file indexing). Fix: branch_prune
+> stamps its deletes with `metadata = {"reason":"branch_prune"}`
+> (`BRANCH_PRUNE_DELETE_METADATA`); `process_file_delete` (`is_branch_prune_delete`)
+> recognizes the marker and bypasses the on-disk skip, falling through to the
+> reference-counted removal above. Watcher/folder deletes carry no marker and keep
+> the skip. The marker is **not** part of the idempotency key, so deletes already
+> queued before the fix drain as skips and the tags clear on the next prune pass.
+>
+> **Safety net (same PR).** Bypassing the skip is safe only when dropping the
+> branch leaves *other* branches (a tag trim — the shared point survives). A file
+> tagged **exclusively** with the dead branch yet still on disk is a
+> present-but-*mislabeled* file, not a deleted one: dropping its last tag would
+> delete the whole index entry of a file that is in the working tree (the
+> corpus-wipe these guards exist to prevent). `delete_tracked_file` therefore
+> **preserves** the entry when `would_remove_last_tag(branches, item.branch)` AND
+> the file still exists on disk — it logs `"Preserving index …"` and returns
+> without touching Qdrant/SQLite, leaving reconciliation to re-tag the file under
+> the live branch on a later pass. (Verified live: across the branch-prune sweep
+> every processed delete reported `delete_points=false`; the preserve guard fired
+> on the genuinely exclusive-on-disk files; no point was deleted.)
+>
+> **Sibling fixes from the vicinity audit (same PR).** Two adjacent defects in
+> the same neighbourhood of `file|delete` producers:
+>
+> 1. **`ignore_sync` had the identical bug.** When a `.wqmignore` rule starts
+>    excluding an *already-indexed* file that is still on disk, `ignore_sync`
+>    enqueues a `file|delete` (with `reason:"ignore_rule_change"` in the **payload**,
+>    `IGNORE_RULE_CHANGE_REASON`) — and the on-disk skip silently dropped it, so the
+>    now-ignored file stayed searchable (the reconciler that is supposed to keep the
+>    index consistent when ignore rules change did nothing for on-disk files). It
+>    now bypasses the skip via `is_ignore_excluded_delete` / `bypasses_on_disk_skip`,
+>    but — UNLIKE branch pruning — it does NOT preserve: an ignored file must leave
+>    the index entirely, so the preserve guard is gated on `is_branch_prune_delete`
+>    only. (Of all `file|delete` producers, only branch-prune and ignore-exclusion
+>    enqueue deletes for files still on disk; watcher / folder / branch-switch
+>    deletes fire only once the file is already gone.)
+> 2. **The `"default"` mislabel source.** `branch_switch::{handle_branch_switch,
+>    handle_new_commit}` fell back to a literal `"default"` branch when a git event
+>    carried no branch name — labelling re-keyed files under a non-existent branch
+>    that branch-scoped search misses and `branch_prune` then churns on every
+>    startup. Both now fall back to `get_current_branch(root)` (the repo's real
+>    HEAD), matching the sibling `old_branch` resolution.
+
 ## Original design (Layer 1 as proposed, plus the open Layer 2)
 
 ### Layer 1: Skip the embed step (cheap) — SHIPPED, see [What shipped](#what-shipped)

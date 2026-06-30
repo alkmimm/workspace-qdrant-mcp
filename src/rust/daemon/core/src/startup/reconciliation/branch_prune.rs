@@ -15,10 +15,11 @@
 //! ## Branch isolation is safe
 //!
 //! The file-delete processor reference-counts Qdrant points by `base_point`
-//! (see `strategies/processing/file/delete.rs::check_qdrant_deletion_needed`):
-//! deleting a branch's `tracked_files` rows only removes Qdrant points that no
-//! other branch (e.g. `main`) still references. A shared point survives until
-//! its last referencing branch is gone.
+//! (see `strategies/processing/file/delete.rs::delete_tracked_file`, which
+//! ref-counts via `QueueManager::has_other_references`): deleting a branch's
+//! `tracked_files` rows only removes Qdrant points that no other branch
+//! (e.g. `main`) still references. A shared point survives until its last
+//! referencing branch is gone.
 //!
 //! ## Safety guards (never over-prune)
 //!
@@ -36,6 +37,20 @@
 //! 4. Never prune a branch named `main` or `master` (default-name safety net).
 //!
 //! Only a branch that is absent from git AND passes all guards is pruned.
+//!
+//! ## Delete-side contract (this module only enqueues; `file/delete.rs` executes)
+//!
+//! Each pruned file is enqueued as `file|delete` stamped with
+//! [`BRANCH_PRUNE_DELETE_METADATA`] so `process_file_delete` bypasses its
+//! "skip a stale delete for a file still on disk" guard — a pruned branch's
+//! files usually still exist on the live branch, and without the bypass the
+//! delete is skipped, the tag never clears, and every startup re-enqueues it.
+//! The delete is reference-counted: it drops the dead branch's tag and removes
+//! the shared Qdrant point only when no live branch references it. As a final
+//! backstop, `delete_tracked_file` PRESERVES the entry (no deletion) when
+//! dropping the branch would empty the set AND the file is still on disk — a
+//! present-but-mislabeled file, left for reconciliation to re-tag.
+//! See `docs/specs/21-cross-branch-dedup.md` §C.
 
 use std::collections::HashSet;
 
@@ -47,6 +62,22 @@ use crate::queue_operations::QueueManager;
 use crate::unified_queue_schema::{FilePayload, ItemType, QueueOperation};
 use crate::watching_queue::WatchManager;
 use wqm_common::paths::RelativePath;
+
+/// The `reason` token carried in the `metadata` of every `file|delete` enqueued
+/// by branch pruning. The file-delete processor matches this exact value.
+pub(crate) const BRANCH_PRUNE_REASON: &str = "branch_prune";
+
+/// `metadata` JSON stamped on every `file|delete` enqueued by branch pruning.
+///
+/// The file-delete processor (`strategies::processing::file::delete`) keys on
+/// this to bypass its "file still exists on disk" skip. A pruned branch's tag
+/// must be removed even though the file is still present on the live branch:
+/// content is shared across branches via `base_point` reference counting, so
+/// the shared Qdrant point survives — only the dead branch's tag is dropped.
+/// Without the marker these deletes are skipped as "stale", the orphaned branch
+/// tags never clear, and every startup re-enqueues the same no-op deletes
+/// (defeating the whole purpose of this reconciler and clogging the queue).
+pub(crate) const BRANCH_PRUNE_DELETE_METADATA: &str = r#"{"reason":"branch_prune"}"#;
 
 /// Totals returned by [`prune_orphaned_branches`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -259,7 +290,7 @@ async fn enqueue_branch_deletes(
                 "projects",
                 &payload_json,
                 Some(branch),
-                None,
+                Some(BRANCH_PRUNE_DELETE_METADATA),
             )
             .await
         {

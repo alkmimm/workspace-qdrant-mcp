@@ -39,12 +39,25 @@ pub(super) async fn process_file_delete(
     let detected_language = detect_language(target_path);
 
     if delete_target_still_exists(target_path) {
-        info!(
-            "Skipping stale delete for existing file on disk: {}",
-            abs_file_path
-        );
-        record_delete_timings(ctx, item, pool, detected_language, &timings).await;
-        return Ok(());
+        if bypasses_on_disk_skip(item) {
+            // Reconciler-driven delete (branch pruning or ignore-rule exclusion),
+            // NOT a stale watcher event: the file is still on disk but its index
+            // entry must be reconciled anyway — a pruned branch's tag dropped, or a
+            // now-ignored file removed. Fall through to the reference-counted
+            // removal below.
+            debug!(
+                "Reconciler delete for '{}' on branch '{}': file still on disk \
+                 — proceeding (not a stale watcher event)",
+                abs_file_path, item.branch
+            );
+        } else {
+            info!(
+                "Skipping stale delete for existing file on disk: {}",
+                abs_file_path
+            );
+            record_delete_timings(ctx, item, pool, detected_language, &timings).await;
+            return Ok(());
+        }
     }
 
     if let Ok(true) = tracked_files_schema::is_incremental(pool, abs_file_path).await {
@@ -122,10 +135,34 @@ pub(super) async fn delete_tracked_file(
     //   - r_new_empty: dropping item.branch empties THIS row's set (row vanishes).
     //   - other_refs_bp: another row (clone) still references base_point.
     //   - other_holds_x: another row still holds item.branch for base_point.
-    let r_new_empty = existing
-        .branches
-        .iter()
-        .all(|b| b.as_str() == item.branch.as_str());
+    let r_new_empty = would_remove_last_tag(&existing.branches, item.branch.as_str());
+
+    // Branch-prune safety net (paired with the marker bypass in
+    // `process_file_delete`): when dropping `item.branch` would empty this file's
+    // branch set — removing its last index entry, not just one tag — but the file
+    // is still present on disk, it is a present-but-mislabeled file, NOT a deleted
+    // one. Preserve the entry: a stale-branch label is benign, deleting the index
+    // of a working-tree file is not (the corpus-wipe this module's guards exist to
+    // prevent). Reconciliation re-tags it under the live branch on a later pass.
+    // Watcher/folder deletes never trip this — they reach `delete_tracked_file`
+    // only once the file is gone from disk, so the on-disk check is false. The
+    // `is_branch_prune_delete` gate scopes the preserve to branch pruning ONLY:
+    // an ignore-rule exclusion (`is_ignore_excluded_delete`) wants the now-ignored
+    // file gone from the index entirely, so it must fall through and delete even
+    // its last tag.
+    if r_new_empty
+        && delete_target_still_exists(Path::new(abs_file_path))
+        && is_branch_prune_delete(item)
+    {
+        info!(
+            "Preserving index for '{}': pruned branch '{}' is its only tag but the \
+             file is still on disk (mislabeled, not deleted) — leaving entry for \
+             reconciliation to re-tag",
+            relative_path, item.branch
+        );
+        return Ok(());
+    }
+
     let (other_refs_bp, other_holds_x) = match bp {
         Some(bp) => (
             ctx.queue_manager
@@ -372,6 +409,57 @@ fn delete_target_still_exists(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True when dropping `branch` would empty this file's branch set — i.e. it is
+/// the file's last remaining tag, so removing it deletes the whole index entry
+/// (Qdrant point + tracked row), not just one branch label. A multi-branch file
+/// returns false: dropping one tag leaves the others (and the shared point).
+fn would_remove_last_tag(branches: &[String], branch: &str) -> bool {
+    branches.iter().all(|b| b.as_str() == branch)
+}
+
+/// True when this `file|delete` was enqueued by branch pruning (cleanup of a
+/// now-deleted git branch's tags), identified by the `metadata` marker
+/// [`crate::startup::reconciliation::branch_prune::BRANCH_PRUNE_DELETE_METADATA`]
+/// stamps. Such deletes must run the branch-scoped, reference-counted removal
+/// even when the file still exists on disk: the file lives on the live branch,
+/// but its tag for the *pruned* branch must be dropped. Watcher and folder
+/// deletes carry no such marker, so they keep the stale-file-on-disk skip.
+fn is_branch_prune_delete(item: &UnifiedQueueItem) -> bool {
+    use crate::startup::reconciliation::branch_prune::BRANCH_PRUNE_REASON;
+    let Some(meta) = item.metadata.as_deref() else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(meta) else {
+        return false;
+    };
+    value.get("reason").and_then(|r| r.as_str()) == Some(BRANCH_PRUNE_REASON)
+}
+
+/// True when this `file|delete` was enqueued by ignore-rule reconciliation
+/// (`ignore_sync`) because the file is now excluded by a `.wqmignore` rule yet is
+/// still on disk. Identified by the `reason` field in the **payload** (where
+/// `ignore_enqueue::build_payload` puts it — `IGNORE_RULE_CHANGE_REASON`), not
+/// the metadata. Like a branch-prune delete it must bypass the stale-file-on-disk
+/// skip — the file exists but its index entry must go because it is now ignored —
+/// but UNLIKE branch pruning it removes the entry entirely (it is NOT gated by the
+/// preserve guard): an ignored file should leave the index even when it is its own
+/// last tag.
+fn is_ignore_excluded_delete(item: &UnifiedQueueItem) -> bool {
+    use crate::startup::reconciliation::ignore_enqueue::IGNORE_RULE_CHANGE_REASON;
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&item.payload_json) else {
+        return false;
+    };
+    value.get("reason").and_then(|r| r.as_str()) == Some(IGNORE_RULE_CHANGE_REASON)
+}
+
+/// True when a delete is reconciler-driven (branch pruning or ignore-rule
+/// exclusion) and must therefore bypass the "skip a stale delete for a file still
+/// on disk" guard. Watcher and folder deletes carry no such marker and keep the
+/// skip — that guard exists to absorb their stale events.
+fn bypasses_on_disk_skip(item: &UnifiedQueueItem) -> bool {
+    is_branch_prune_delete(item) || is_ignore_excluded_delete(item)
+}
+
 /// Clean up tracked records and Qdrant points for a file that no longer exists on disk.
 ///
 /// **F-035:** if Qdrant deletion fails, returns `Err` and leaves the
@@ -472,7 +560,24 @@ pub(super) async fn handle_qdrant_failure(
 
 #[cfg(test)]
 mod tests {
-    use super::delete_target_still_exists;
+    use super::{
+        bypasses_on_disk_skip, delete_target_still_exists, is_branch_prune_delete,
+        is_ignore_excluded_delete, would_remove_last_tag,
+    };
+    use crate::unified_queue_schema::{ItemType, QueueOperation, QueueStatus, UnifiedQueueItem};
+
+    #[test]
+    fn would_remove_last_tag_only_when_branch_is_sole_tag() {
+        let b = |s: &str| s.to_string();
+        // Sole tag → removing it empties the set (the index entry would vanish).
+        assert!(would_remove_last_tag(&[b("fix/feature")], "fix/feature"));
+        // Multi-branch → dropping one tag leaves the others (point survives).
+        assert!(!would_remove_last_tag(
+            &[b("fix/feature"), b("main")],
+            "fix/feature"
+        ));
+        assert!(!would_remove_last_tag(&[b("main"), b("dev")], "fix/feature"));
+    }
 
     #[test]
     fn delete_target_still_exists_only_for_files() {
@@ -483,5 +588,86 @@ mod tests {
         assert!(delete_target_still_exists(&file));
         assert!(!delete_target_still_exists(tmp.path()));
         assert!(!delete_target_still_exists(&tmp.path().join("missing.ts")));
+    }
+
+    fn delete_item_with_metadata(metadata: Option<&str>) -> UnifiedQueueItem {
+        UnifiedQueueItem {
+            queue_id: "q1".to_string(),
+            idempotency_key: "k1".to_string(),
+            item_type: ItemType::File,
+            op: QueueOperation::Delete,
+            tenant_id: "t1".to_string(),
+            collection: "projects".to_string(),
+            status: QueueStatus::Pending,
+            branch: "claude/deleted-feature".to_string(),
+            payload_json: "{}".to_string(),
+            metadata: metadata.map(str::to_string),
+            created_at: "2026-06-30T00:00:00Z".to_string(),
+            updated_at: "2026-06-30T00:00:00Z".to_string(),
+            lease_until: None,
+            worker_id: None,
+            retry_count: 0,
+            error_message: None,
+            last_error_at: None,
+            file_path: Some("src/a.ts".to_string()),
+            qdrant_status: None,
+            search_status: None,
+            decision_json: None,
+        }
+    }
+
+    #[test]
+    fn branch_prune_delete_detected_only_for_marked_items() {
+        use crate::startup::reconciliation::branch_prune::BRANCH_PRUNE_DELETE_METADATA;
+
+        // The exact marker branch_prune stamps must be recognized (also guards
+        // against drift between the metadata JSON and the reason token).
+        assert!(is_branch_prune_delete(&delete_item_with_metadata(Some(
+            BRANCH_PRUNE_DELETE_METADATA
+        ))));
+
+        // Watcher/folder deletes carry no marker → keep the stale-file-on-disk skip.
+        assert!(!is_branch_prune_delete(&delete_item_with_metadata(None)));
+        assert!(!is_branch_prune_delete(&delete_item_with_metadata(Some("{}"))));
+        assert!(!is_branch_prune_delete(&delete_item_with_metadata(Some(
+            r#"{"reason":"watcher"}"#
+        ))));
+
+        // Malformed metadata must never be mistaken for a prune marker.
+        assert!(!is_branch_prune_delete(&delete_item_with_metadata(Some(
+            "not json"
+        ))));
+    }
+
+    #[test]
+    fn ignore_excluded_delete_detected_from_payload_reason() {
+        use crate::startup::reconciliation::branch_prune::BRANCH_PRUNE_DELETE_METADATA;
+        use crate::startup::reconciliation::ignore_enqueue::IGNORE_RULE_CHANGE_REASON;
+
+        // ignore_sync stamps the reason in the PAYLOAD (not metadata).
+        let mut ignored = delete_item_with_metadata(None);
+        ignored.payload_json =
+            format!(r#"{{"file_path":"src/a.ts","reason":"{IGNORE_RULE_CHANGE_REASON}"}}"#);
+        assert!(is_ignore_excluded_delete(&ignored));
+        assert!(bypasses_on_disk_skip(&ignored));
+        // ...but it is NOT a branch-prune delete → the preserve guard must NOT apply
+        // (an ignored file must leave the index even as its own last tag).
+        assert!(!is_branch_prune_delete(&ignored));
+
+        // Branch-prune deletes bypass the skip too, but are not ignore-excluded.
+        let pruned = delete_item_with_metadata(Some(BRANCH_PRUNE_DELETE_METADATA));
+        assert!(bypasses_on_disk_skip(&pruned));
+        assert!(!is_ignore_excluded_delete(&pruned));
+
+        // A plain watcher delete (FilePayload, no reason) bypasses nothing.
+        let watcher = delete_item_with_metadata(None);
+        assert!(!is_ignore_excluded_delete(&watcher));
+        assert!(!bypasses_on_disk_skip(&watcher));
+
+        // A different payload reason is not ignore-exclusion.
+        let mut other = delete_item_with_metadata(None);
+        other.payload_json =
+            r#"{"file_path":"src/a.ts","reason":"something_else"}"#.to_string();
+        assert!(!is_ignore_excluded_delete(&other));
     }
 }
