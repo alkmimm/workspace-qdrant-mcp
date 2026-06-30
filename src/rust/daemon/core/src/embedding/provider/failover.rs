@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::DenseProvider;
 use crate::embedding::types::{DenseEmbedding, EmbeddingError};
@@ -97,6 +97,29 @@ impl FailoverDenseProvider {
     }
 }
 
+/// True when a primary error is a permanent payload rejection the fallback
+/// cannot recover from. HTTP 400/413/422 (e.g. `string_too_long`) mean the
+/// input itself is unacceptable — both endpoints serve the same model with the
+/// same input cap, so the fallback would reject the identical input the same
+/// way. Failing over would only burn a second call, and demoting the (healthy)
+/// primary would route ALL traffic to the slower fallback for the whole memo
+/// window over one poison document.
+///
+/// These are exactly the codes the queue processor's error classifier keys as
+/// `permanent_data` (`unified_queue_processor::metrics`); matching the
+/// structured variant here keeps the two in lockstep without re-parsing the
+/// Display string. Every other error (5xx, connection refused, timeout, auth)
+/// is treated as an endpoint failure and triggers failover.
+fn is_permanent_payload_rejection(err: &EmbeddingError) -> bool {
+    matches!(
+        err,
+        EmbeddingError::RemoteError {
+            status_code: 400 | 413 | 422,
+            ..
+        }
+    )
+}
+
 #[async_trait]
 impl DenseProvider for FailoverDenseProvider {
     async fn embed(&self, texts: &[&str]) -> Result<Vec<DenseEmbedding>, EmbeddingError> {
@@ -105,6 +128,19 @@ impl DenseProvider for FailoverDenseProvider {
                 Ok(out) => {
                     self.clear_primary_down();
                     return Ok(out);
+                }
+                // A permanent payload rejection is about the INPUT, not the
+                // endpoint: the fallback would reject it identically. Propagate
+                // directly — do not demote the (healthy) primary, do not waste a
+                // fallback attempt. The downstream classifier marks it
+                // `permanent_data` so the item is dropped without a retry.
+                Err(e) if is_permanent_payload_rejection(&e) => {
+                    debug!(
+                        primary = %self.primary.provider_label(),
+                        error = %e,
+                        "Primary rejected input as a permanent payload error — propagating without failover"
+                    );
+                    return Err(e);
                 }
                 Err(e) => {
                     warn!(
@@ -168,6 +204,11 @@ mod tests {
         name: &'static str,
         dim: usize,
         fail: AtomicBool,
+        /// When `fail` is set and this is `Some(code)`, the provider fails with
+        /// a structured `RemoteError` carrying that HTTP status instead of the
+        /// default `GenerationError`. Lets a test drive the 4xx payload-
+        /// rejection path. Immutable after construction.
+        remote_status: Option<u16>,
         embed_calls: AtomicUsize,
     }
 
@@ -177,6 +218,20 @@ mod tests {
                 name,
                 dim: 4,
                 fail: AtomicBool::new(fail),
+                remote_status: None,
+                embed_calls: AtomicUsize::new(0),
+            })
+        }
+
+        /// A provider whose `embed` fails with a `RemoteError` carrying
+        /// `status` (a permanent 4xx payload rejection). Flip `fail` to `false`
+        /// afterwards to make it healthy again.
+        fn new_remote_error(name: &'static str, status: u16) -> Arc<Self> {
+            Arc::new(Self {
+                name,
+                dim: 4,
+                fail: AtomicBool::new(true),
+                remote_status: Some(status),
                 embed_calls: AtomicUsize::new(0),
             })
         }
@@ -187,8 +242,14 @@ mod tests {
         async fn embed(&self, texts: &[&str]) -> Result<Vec<DenseEmbedding>, EmbeddingError> {
             self.embed_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail.load(Ordering::SeqCst) {
-                return Err(EmbeddingError::GenerationError {
-                    message: format!("{} down", self.name),
+                return Err(match self.remote_status {
+                    Some(status_code) => EmbeddingError::RemoteError {
+                        status_code,
+                        message: format!("{} rejected input", self.name),
+                    },
+                    None => EmbeddingError::GenerationError {
+                        message: format!("{} down", self.name),
+                    },
                 });
             }
             Ok(texts
@@ -260,6 +321,44 @@ mod tests {
         assert_eq!(out[0].model_name, "cpu");
         assert_eq!(primary.embed_calls.load(Ordering::SeqCst), 1);
         assert_eq!(fallback.embed_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn permanent_payload_rejection_propagates_without_failover_or_memo() {
+        // A 4xx payload rejection (e.g. 422 string_too_long) is a property of
+        // the INPUT, not the endpoint: the fallback serves the same model with
+        // the same cap and would reject it identically. So the primary must NOT
+        // be demoted (one poison doc must not route all traffic to the slower
+        // fallback for the memo window) and the fallback must NOT be dialed.
+        let primary = MockProvider::new_remote_error("gpu", 422);
+        let fallback = MockProvider::new("cpu", false);
+        let failover = FailoverDenseProvider::with_retry_after(
+            primary.clone(),
+            fallback.clone(),
+            Duration::from_secs(3600),
+        );
+
+        let err = failover
+            .embed(&["poison"])
+            .await
+            .expect_err("422 payload rejection must propagate");
+        assert!(
+            matches!(err, EmbeddingError::RemoteError { status_code: 422, .. }),
+            "expected the primary's 422 to propagate verbatim, got: {err}"
+        );
+        assert_eq!(primary.embed_calls.load(Ordering::SeqCst), 1);
+        // Fallback never dialed — it can't succeed where the primary failed on
+        // the same input.
+        assert_eq!(fallback.embed_calls.load(Ordering::SeqCst), 0);
+
+        // Primary was NOT memoized down: a subsequent healthy call still tries
+        // the primary first and wins (had it been demoted, this would route to
+        // the "cpu" fallback instead).
+        primary.fail.store(false, Ordering::SeqCst);
+        let out = failover.embed(&["b"]).await.expect("primary serves");
+        assert_eq!(out[0].model_name, "gpu");
+        assert_eq!(primary.embed_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fallback.embed_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
