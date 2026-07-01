@@ -92,8 +92,9 @@ everything), then **R8.2 backfill** using the DB primitive below.
   resolves an LSP `(name, file, line)` to the **real callee node** by `(file,
   name)` + nearest `start_line` — so a Dart `.build()` binds to its **Method**
   node, not a Function-typed guess (the whole point of R8). Dormant until wired.
-- **R8.3b NEXT (memexd task — the gating integration):** a flag-gated
-  (`WQM_GRAPH_LSP_BACKFILL`) periodic task, serial across tenants, that:
+- **R8.3b DONE (memexd task, flag-gated OFF — deploy-verified):**
+  `background::start_graph_lsp_backfill`, wired in `main.rs`; behind
+  `WQM_GRAPH_LSP_BACKFILL=1`. A periodic task, serial across tenants, that:
   (1) reads each tenant's `project_root` from `watch_folders`; (2) starts the
   tenant's dominant language server via `start_server` — **the cap is the
   linchpin** (`max_global_servers`, default 3, saturated): give the backfill a

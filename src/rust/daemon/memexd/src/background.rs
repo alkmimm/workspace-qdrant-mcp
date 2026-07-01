@@ -16,7 +16,7 @@ use workspace_qdrant_core::config::PrometheusExportConfig;
 use workspace_qdrant_core::search_db::SearchDbManager;
 use workspace_qdrant_core::{
     check_git_state_changes, check_remote_url_changes, metrics_history, poll_pause_state,
-    processing_timings, LanguageServerManager, MetricsServer, METRICS,
+    processing_timings, Language, LanguageServerManager, MetricsServer, METRICS,
 };
 
 /// Handles for all background tasks so the orchestrator can abort them on shutdown.
@@ -765,6 +765,100 @@ pub fn start_graph_stub_resolver(
                     Err(e) => {
                         warn!(tenant = %tenant, error = %e, "Graph stub resolution failed")
                     }
+                }
+            }
+        }
+    })
+}
+
+/// Spawn the LSP-authoritative CALLS backfill (R8.3b) — flag-gated, OFF by default.
+///
+/// When `WQM_GRAPH_LSP_BACKFILL=1`, after a settle delay it walks each tenant
+/// SERIALLY: reads the project root from `watch_folders`, picks the tenant's
+/// dominant language, starts that LSP server (subject to the global server cap —
+/// raise `WQM_LSP_MAX_SERVERS` to give the backfill a slot; a cap refusal just
+/// skips the tenant and never stops a live enrichment server), runs
+/// `run_backfill_tenant` to stamp precise CALLS over the fuzzy fan-out, then stops
+/// the server. Dormant and zero-cost unless the flag is set. This is the
+/// deploy-verified R8.3b integration: enable on one tenant (DOC-V2) and watch the
+/// `resolution:"lsp"` edge count before trusting it broadly.
+pub fn start_graph_lsp_backfill(
+    graph_store: crate::database::ConcreteGraphStore,
+    lsp_manager: Arc<tokio::sync::RwLock<LanguageServerManager>>,
+    state_pool: SqlitePool,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if std::env::var("WQM_GRAPH_LSP_BACKFILL").ok().as_deref() != Some("1") {
+            info!("Graph LSP backfill disabled (set WQM_GRAPH_LSP_BACKFILL=1 to enable)");
+            return;
+        }
+        // Let ingestion/indexing quiesce before activating heavyweight LSP servers.
+        tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(6 * 3600));
+        info!("Graph LSP backfill enabled (6h interval)");
+        loop {
+            interval.tick().await;
+            let tenants: Vec<String> = {
+                let guard = graph_store.read().await;
+                sqlx::query_scalar("SELECT DISTINCT tenant_id FROM graph_nodes")
+                    .fetch_all(guard.pool())
+                    .await
+                    .unwrap_or_default()
+            };
+            for tenant in tenants {
+                // Absolute project root for this tenant (LSP needs absolute paths).
+                let root: Option<String> = sqlx::query_scalar(
+                    "SELECT path FROM watch_folders WHERE tenant_id = ?1 AND enabled = 1 LIMIT 1",
+                )
+                .bind(&tenant)
+                .fetch_optional(&state_pool)
+                .await
+                .ok()
+                .flatten();
+                let Some(root) = root else { continue };
+
+                // Dominant language of the tenant's graph — the one worth a server.
+                let lang_id: Option<String> = {
+                    let guard = graph_store.read().await;
+                    sqlx::query_scalar(
+                        "SELECT language FROM graph_nodes \
+                         WHERE tenant_id = ?1 AND language IS NOT NULL AND language <> '' \
+                         GROUP BY language ORDER BY COUNT(*) DESC LIMIT 1",
+                    )
+                    .bind(&tenant)
+                    .fetch_optional(guard.pool())
+                    .await
+                    .ok()
+                    .flatten()
+                };
+                let Some(lang_id) = lang_id else { continue };
+                let language = Language::from_id(&lang_id);
+
+                // Start the server (respects the global cap; refusal skips the tenant).
+                let started = {
+                    let mgr = lsp_manager.read().await;
+                    mgr.start_server(&tenant, language.clone(), std::path::Path::new(&root))
+                        .await
+                };
+                if let Err(e) = started {
+                    warn!(tenant = %tenant, language = %lang_id, error = %e,
+                        "LSP backfill: could not start server (cap/unsupported) — skipping tenant");
+                    continue;
+                }
+
+                let superseded = workspace_qdrant_core::graph::lsp_backfill::run_backfill_tenant(
+                    &graph_store,
+                    &lsp_manager,
+                    &tenant,
+                    &root,
+                )
+                .await;
+                info!(tenant = %tenant, language = %lang_id, superseded,
+                    "LSP backfill: superseded fuzzy CALLS with precise LSP edges");
+
+                let mgr = lsp_manager.read().await;
+                if let Err(e) = mgr.stop_server(&tenant, language).await {
+                    warn!(tenant = %tenant, error = %e, "LSP backfill: stop_server failed");
                 }
             }
         }

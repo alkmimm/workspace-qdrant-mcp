@@ -15,8 +15,10 @@
 //! R8 exists to fix, so getting the kind right is load-bearing.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use sqlx::Row;
+use tokio::sync::RwLock;
 
 use super::{NodeType, SharedGraphStore, SqliteGraphStore};
 use crate::lsp::{symbol_column_in_line, LanguageServerManager, ResolvedCall};
@@ -144,7 +146,7 @@ pub(crate) async fn authoritative_args_for_caller(
 /// speculatively.
 pub async fn run_backfill_tenant(
     store: &SharedGraphStore<SqliteGraphStore>,
-    lsp: &LanguageServerManager,
+    lsp: &Arc<RwLock<LanguageServerManager>>,
     tenant_id: &str,
     project_root: &str,
 ) -> u64 {
@@ -164,10 +166,12 @@ pub async fn run_backfill_tenant(
                     .map(|l| symbol_column_in_line(l, &caller.symbol_name))
             })
             .unwrap_or(0);
-        let resolved = lsp
-            .resolved_outgoing_calls(Path::new(&abs), caller.start_line, column)
-            .await
-            .unwrap_or_default();
+        let resolved = {
+            let mgr = lsp.read().await;
+            mgr.resolved_outgoing_calls(Path::new(&abs), caller.start_line, column)
+                .await
+                .unwrap_or_default()
+        };
         if resolved.is_empty() {
             continue;
         }
