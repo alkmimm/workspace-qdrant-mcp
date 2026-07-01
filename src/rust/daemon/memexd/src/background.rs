@@ -1030,7 +1030,7 @@ pub fn start_graph_metrics_refresh(
             // Snapshot counts under the read guard, then drop it before touching
             // the Prometheus registry (mirrors start_graph_stub_resolver, which
             // also avoids holding the store lock across unrelated work).
-            let (nodes, stubs, edges) = {
+            let (nodes, stubs, edges, by_language) = {
                 let guard = graph_store.read().await;
                 let pool = guard.pool();
                 let nodes: Vec<(String, String, i64)> = sqlx::query_as(
@@ -1070,7 +1070,17 @@ pub fn start_graph_metrics_refresh(
                 .fetch_all(pool)
                 .await
                 .unwrap_or_default();
-                (nodes, stubs, edges)
+                // Project x language: node count per tenant per language (NULL/''
+                // folded to 'unknown'). Powers the "Project x Language" view.
+                let by_language: Vec<(String, String, i64)> = sqlx::query_as(
+                    "SELECT tenant_id, COALESCE(NULLIF(language, ''), 'unknown') AS language, \
+                            COUNT(*) \
+                     FROM graph_nodes GROUP BY tenant_id, language",
+                )
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+                (nodes, stubs, edges, by_language)
             };
 
             METRICS.graph_nodes.reset();
@@ -1092,6 +1102,13 @@ pub fn start_graph_metrics_refresh(
                 METRICS
                     .graph_edges
                     .with_label_values(&[tenant.as_str(), edge_type.as_str()])
+                    .set(*n);
+            }
+            METRICS.graph_nodes_by_language.reset();
+            for (tenant, language, n) in &by_language {
+                METRICS
+                    .graph_nodes_by_language
+                    .with_label_values(&[tenant.as_str(), language.as_str()])
                     .set(*n);
             }
         }

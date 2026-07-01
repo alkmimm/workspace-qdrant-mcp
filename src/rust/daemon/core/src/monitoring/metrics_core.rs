@@ -253,6 +253,10 @@ pub struct DaemonMetrics {
     /// Graph node count by tenant and node type. Labels: tenant_id, node_type
     pub graph_nodes: IntGaugeVec,
 
+    /// Graph node count by tenant (project) and language — the project x language
+    /// breakdown. Labels: tenant_id, language
+    pub graph_nodes_by_language: IntGaugeVec,
+
     /// Graph edge count by tenant and edge type. Labels: tenant_id, edge_type
     pub graph_edges: IntGaugeVec,
 
@@ -324,6 +328,7 @@ struct CreatedMetrics {
     lsp_available_languages: IntGauge,
     lsp_active_servers: IntGauge,
     graph_nodes: IntGaugeVec,
+    graph_nodes_by_language: IntGaugeVec,
     graph_edges: IntGaugeVec,
     graph_unresolved_stubs: IntGaugeVec,
     graph_stub_resolved_total: IntCounterVec,
@@ -421,6 +426,7 @@ fn create_all_metrics() -> CreatedMetrics {
 
     let (
         graph_nodes,
+        graph_nodes_by_language,
         graph_edges,
         graph_unresolved_stubs,
         graph_stub_resolved_total,
@@ -482,6 +488,7 @@ fn create_all_metrics() -> CreatedMetrics {
         lsp_available_languages,
         lsp_active_servers,
         graph_nodes,
+        graph_nodes_by_language,
         graph_edges,
         graph_unresolved_stubs,
         graph_stub_resolved_total,
@@ -548,6 +555,7 @@ fn register_metrics(registry: &Registry, m: &CreatedMetrics) {
             Box::new(m.lsp_available_languages.clone()),
             Box::new(m.lsp_active_servers.clone()),
             Box::new(m.graph_nodes.clone()),
+            Box::new(m.graph_nodes_by_language.clone()),
             Box::new(m.graph_edges.clone()),
             Box::new(m.graph_unresolved_stubs.clone()),
             Box::new(m.graph_stub_resolved_total.clone()),
@@ -619,6 +627,7 @@ impl DaemonMetrics {
             lsp_available_languages: m.lsp_available_languages,
             lsp_active_servers: m.lsp_active_servers,
             graph_nodes: m.graph_nodes,
+            graph_nodes_by_language: m.graph_nodes_by_language,
             graph_edges: m.graph_edges,
             graph_unresolved_stubs: m.graph_unresolved_stubs,
             graph_stub_resolved_total: m.graph_stub_resolved_total,

@@ -1,0 +1,149 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "schemaVersion": 38,
+  "tags": ["memexd", "graph", "project", "language"],
+  "title": "Project × Language",
+  "uid": "memexd-project-language",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Code graph — project × language",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Graph nodes by project × language (matrix)",
+      "description": "Code-relationship graph node count per project (rows) and language (columns), from memexd_graph_nodes_by_language. Project name is the watch-folder basename (joined via memexd_indexed_project_tracked_files); language 'unknown' = nodes with no detected language. Symbol-level view of each project's language mix.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "color-background", "mode": "gradient" } },
+          "color": { "mode": "continuous-BlPu" },
+          "unit": "short",
+          "mappings": []
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "name" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "custom.filterable", "value": true }] }
+        ]
+      },
+      "options": { "showHeader": true, "footer": { "show": true, "reducer": ["sum"], "fields": "" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (tenant_id, language) (memexd_graph_nodes_by_language) * on (tenant_id) group_left(name) (label_replace(max by (tenant_id, path) (memexd_indexed_project_tracked_files), \"name\", \"$1\", \"path\", \".*/([^/]+)/?$\") * 0 + 1)",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": { "columnField": "language", "rowField": "name", "valueField": "Value" }
+        },
+        {
+          "id": "organize",
+          "options": { "renameByName": { "name\\language": "Project" } }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Graph nodes by project and language (list)",
+      "description": "Long-format fallback of the matrix above: one row per (project, language). Robust even if a project is missing the name join (then blank Project).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 12, "w": 12, "x": 0, "y": 13 },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": true }, "mappings": [] } },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (tenant_id, language) (memexd_graph_nodes_by_language) * on (tenant_id) group_left(name) (label_replace(max by (tenant_id, path) (memexd_indexed_project_tracked_files), \"name\", \"$1\", \"path\", \".*/([^/]+)/?$\") * 0 + 1)",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "__name__": true, "job": true, "instance": true, "tenant_id": true },
+            "renameByName": { "name": "Project", "language": "Language", "Value": "Nodes" }
+          }
+        },
+        { "id": "sortBy", "options": { "fields": "", "sort": [{ "field": "Nodes", "desc": true }] } }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "barchart",
+      "title": "Language distribution across all projects",
+      "description": "Total code-graph nodes per language summed over every project (memexd_graph_nodes_by_language). The global language mix of the indexed corpus.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 12, "w": 12, "x": 12, "y": 13 },
+      "fieldConfig": { "defaults": { "custom": { "lineWidth": 1, "fillOpacity": 80 }, "unit": "short", "mappings": [] } },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "legend": { "showLegend": false },
+        "tooltip": { "mode": "single" },
+        "xTickLabelRotation": 0
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sort_desc(sum by (language) (memexd_graph_nodes_by_language))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{language}}",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "__name__": true, "job": true, "instance": true },
+            "renameByName": { "Value": "nodes" }
+          }
+        }
+      ]
+    }
+  ]
+}

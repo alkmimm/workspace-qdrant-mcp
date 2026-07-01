@@ -493,6 +493,7 @@ pub(super) fn create_graph_metrics() -> (
     IntGaugeVec,
     IntGaugeVec,
     IntGaugeVec,
+    IntGaugeVec,
     IntCounterVec,
     IntCounterVec,
 ) {
@@ -500,6 +501,12 @@ pub(super) fn create_graph_metrics() -> (
         "graph_nodes",
         "Code-relationship graph node count by tenant and node type",
         &["tenant_id", "node_type"],
+    );
+    let graph_nodes_by_language = int_gauge_vec(
+        "graph_nodes_by_language",
+        "Code-relationship graph node count by tenant (project) and language — \
+         the project x language breakdown",
+        &["tenant_id", "language"],
     );
     let graph_edges = int_gauge_vec(
         "graph_edges",
@@ -526,6 +533,7 @@ pub(super) fn create_graph_metrics() -> (
     );
     (
         graph_nodes,
+        graph_nodes_by_language,
         graph_edges,
         graph_unresolved_stubs,
         graph_stub_resolved_total,
