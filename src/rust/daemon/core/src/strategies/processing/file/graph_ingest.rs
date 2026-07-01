@@ -15,10 +15,10 @@ use std::path::Path;
 use tracing::{debug, warn};
 
 use crate::context::ProcessingContext;
-use crate::graph::compute_node_id;
 use crate::graph::extractor::{
     extract_edges_from_text_chunks, node_type_from_display_name, ExtractionResult,
 };
+use crate::graph::{compute_node_id, EdgeType, GraphEdge, NodeType};
 use crate::lsp::{resolved_call_edges, symbol_column_in_line};
 use crate::TextChunk;
 
@@ -169,6 +169,14 @@ async fn resolve_calls_via_lsp(
         }
 
         let caller_id = compute_node_id(tenant_id, file_path, symbol, node_type);
+        // R8.1 — the LSP is AUTHORITATIVE for the calls it resolved: drop this
+        // caller's tree-sitter fuzzy stub CALLS edges for those callee names so
+        // `resolve_stub_edges` cannot fan them out to every same-named method.
+        // Names the LSP did NOT resolve (stdlib / unresolved) keep their fuzzy
+        // stub as the fallback — precise-where-available, fuzzy-fallback per call.
+        let resolved_names: std::collections::HashSet<&str> =
+            calls.iter().map(|c| c.name.as_str()).collect();
+        suppress_fuzzy_calls(&mut extraction.edges, tenant_id, &caller_id, &resolved_names);
         let (nodes, edges) =
             resolved_call_edges(tenant_id, &caller_id, file_path, &project_root, &calls);
         debug!(
@@ -179,6 +187,32 @@ async fn resolve_calls_via_lsp(
         extraction.nodes.extend(nodes);
         extraction.edges.extend(edges);
     }
+}
+
+/// R8.1 — make the LSP-resolved calls authoritative for `caller_id`: remove the
+/// tree-sitter fuzzy stub CALLS edges from this caller whose callee NAME the LSP
+/// resolved (a precise edge to the real callee replaces them). Fuzzy stubs for
+/// names the LSP could not resolve stay as the fallback. A name-only callee stub
+/// is keyed `compute_node_id(tenant, "", name, Function)` (see the extractor's
+/// `add_calls_edges`), so the same id reconstructs the edge target to drop.
+fn suppress_fuzzy_calls(
+    edges: &mut Vec<GraphEdge>,
+    tenant_id: &str,
+    caller_id: &str,
+    resolved_names: &std::collections::HashSet<&str>,
+) {
+    if resolved_names.is_empty() {
+        return;
+    }
+    let stub_ids: std::collections::HashSet<String> = resolved_names
+        .iter()
+        .map(|n| compute_node_id(tenant_id, "", n, NodeType::Function))
+        .collect();
+    edges.retain(|e| {
+        !(e.edge_type == EdgeType::Calls
+            && e.source_node_id == caller_id
+            && stub_ids.contains(&e.target_node_id))
+    });
 }
 
 /// Delete graph edges for a file (called during file deletion).
@@ -198,5 +232,66 @@ pub(super) async fn delete_graph_edges(ctx: &ProcessingContext, tenant_id: &str,
             "Graph edge deletion failed for {} (tenant {}): {}",
             file_path, tenant_id, e
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn stub_id(t: &str, name: &str) -> String {
+        compute_node_id(t, "", name, NodeType::Function)
+    }
+
+    #[test]
+    fn suppress_fuzzy_calls_drops_only_the_callers_resolved_call_stubs() {
+        let t = "t1";
+        let caller = compute_node_id(t, "a.rs", "caller", NodeType::Function);
+        let other = compute_node_id(t, "a.rs", "other", NodeType::Function);
+        let mut edges = vec![
+            // The caller's fuzzy CALLS stubs — `add`/`build` are LSP-resolved.
+            GraphEdge::new(t, &caller, stub_id(t, "add"), EdgeType::Calls, "a.rs"),
+            GraphEdge::new(t, &caller, stub_id(t, "build"), EdgeType::Calls, "a.rs"),
+            // `localOnly` was NOT resolved by the LSP → keep it (fuzzy fallback).
+            GraphEdge::new(t, &caller, stub_id(t, "localOnly"), EdgeType::Calls, "a.rs"),
+            // A CONTAINS edge (different type) must be untouched.
+            GraphEdge::new(t, &caller, stub_id(t, "add"), EdgeType::Contains, "a.rs"),
+            // Another caller's CALLS to `add` must be untouched.
+            GraphEdge::new(t, &other, stub_id(t, "add"), EdgeType::Calls, "a.rs"),
+        ];
+        let resolved: HashSet<&str> = ["add", "build"].into_iter().collect();
+        suppress_fuzzy_calls(&mut edges, t, &caller, &resolved);
+
+        // The caller's resolved fuzzy CALLS stubs are gone.
+        assert!(!edges.iter().any(|e| e.source_node_id == caller
+            && e.edge_type == EdgeType::Calls
+            && (e.target_node_id == stub_id(t, "add")
+                || e.target_node_id == stub_id(t, "build"))));
+        // The unresolved call keeps its fuzzy stub (fallback).
+        assert!(edges
+            .iter()
+            .any(|e| e.target_node_id == stub_id(t, "localOnly")));
+        // The CONTAINS edge and the OTHER caller's CALLS survive.
+        assert!(edges.iter().any(|e| e.edge_type == EdgeType::Contains));
+        assert!(edges
+            .iter()
+            .any(|e| e.source_node_id == other && e.edge_type == EdgeType::Calls));
+        assert_eq!(edges.len(), 3);
+    }
+
+    #[test]
+    fn suppress_fuzzy_calls_is_a_noop_when_nothing_resolved() {
+        let t = "t1";
+        let caller = compute_node_id(t, "a.rs", "caller", NodeType::Function);
+        let mut edges = vec![GraphEdge::new(
+            t,
+            &caller,
+            stub_id(t, "add"),
+            EdgeType::Calls,
+            "a.rs",
+        )];
+        suppress_fuzzy_calls(&mut edges, t, &caller, &HashSet::new());
+        assert_eq!(edges.len(), 1, "empty LSP result must not drop fuzzy edges");
     }
 }
