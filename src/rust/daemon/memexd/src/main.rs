@@ -153,6 +153,17 @@ async fn run_daemon(
         .graph_store
         .as_ref()
         .map(|gs| background::start_graph_metrics_refresh(gs.clone()));
+    // R8.3b: LSP-authoritative CALLS backfill — flag-gated (WQM_GRAPH_LSP_BACKFILL),
+    // dormant by default. Supersedes the fuzzy method-call fan-out with precise
+    // LSP-resolved edges where a server can be activated for the tenant.
+    let _graph_lsp_backfill = match (db_handles.graph_store.as_ref(), lsp_manager.as_ref()) {
+        (Some(gs), Some(lsp)) => Some(background::start_graph_lsp_backfill(
+            gs.clone(),
+            Arc::clone(lsp),
+            db_handles.queue_pool.clone(),
+        )),
+        _ => None,
+    };
     let watch_refresh_signal = Arc::new(Notify::new());
 
     // Phase 5: IPC + Queue processor

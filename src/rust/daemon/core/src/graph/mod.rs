@@ -12,6 +12,7 @@
 pub mod algorithms;
 pub mod extractor;
 pub mod factory;
+pub mod lsp_backfill;
 pub mod migrator;
 mod schema;
 mod shared;
@@ -391,6 +392,26 @@ pub trait GraphStore: Send + Sync {
     /// Default impl is a no-op for backends that don't produce stub edges.
     /// Returns the number of edges repointed.
     async fn resolve_stub_edges(&self, _tenant_id: &str) -> GraphDbResult<u64> {
+        Ok(0)
+    }
+
+    /// Make a caller's LSP-resolved CALLS authoritative (R8.2 backfill).
+    ///
+    /// Deletes the caller's fuzzy CALLS edges to ANY node whose `symbol_name` is
+    /// in `resolved_names` (the by-name fan-out the LSP supersedes — by backfill
+    /// time the stub has usually already fanned out, so this clears by target
+    /// name, not by stub id), then inserts a precise CALLS edge to each
+    /// `precise_targets` node id (weight 1.0, `metadata.resolution = "lsp"`,
+    /// owned by `source_file` so a later re-ingest of that file cleans them up).
+    /// Returns the number of fuzzy edges deleted. Default impl: no-op.
+    async fn make_calls_authoritative(
+        &self,
+        _tenant_id: &str,
+        _caller_id: &str,
+        _source_file: &str,
+        _resolved_names: &[String],
+        _precise_targets: &[String],
+    ) -> GraphDbResult<u64> {
         Ok(0)
     }
 }

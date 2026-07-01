@@ -296,6 +296,74 @@ impl GraphStore for SqliteGraphStore {
         Ok(count)
     }
 
+    async fn make_calls_authoritative(
+        &self,
+        tenant_id: &str,
+        caller_id: &str,
+        source_file: &str,
+        resolved_names: &[String],
+        precise_targets: &[String],
+    ) -> GraphDbResult<u64> {
+        if resolved_names.is_empty() {
+            return Ok(0);
+        }
+        let now = now_utc();
+        let mut tx = self.pool.begin().await?;
+
+        // Drop the caller's fuzzy CALLS to ANY node named one of resolved_names
+        // (the by-name fan-out — including a pre-existing edge to the precise
+        // target, which is re-inserted below at full confidence).
+        let name_ph: Vec<String> = (0..resolved_names.len())
+            .map(|i| format!("?{}", i + 3))
+            .collect();
+        let del_sql = format!(
+            "DELETE FROM graph_edges
+             WHERE tenant_id = ?1 AND edge_type = 'CALLS' AND source_node_id = ?2
+               AND target_node_id IN (
+                   SELECT node_id FROM graph_nodes
+                   WHERE tenant_id = ?1 AND symbol_name IN ({})
+               )",
+            name_ph.join(", ")
+        );
+        let mut dq = sqlx::query(&del_sql).bind(tenant_id).bind(caller_id);
+        for n in resolved_names {
+            dq = dq.bind(n);
+        }
+        let deleted = dq.execute(&mut *tx).await?.rows_affected();
+
+        // Insert the precise LSP edges (weight 1.0, resolution "lsp", owned by the
+        // caller's file so a later re-ingest of that file cleans them up).
+        for target in precise_targets {
+            if target == caller_id {
+                continue; // no self-loops
+            }
+            let edge_id = compute_edge_id(caller_id, target, EdgeType::Calls);
+            sqlx::query(
+                "INSERT OR IGNORE INTO graph_edges
+                    (edge_id, tenant_id, source_node_id, target_node_id, edge_type,
+                     source_file, weight, metadata_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'CALLS', ?5, 1.0, '{\"resolution\":\"lsp\"}', ?6)",
+            )
+            .bind(&edge_id)
+            .bind(tenant_id)
+            .bind(caller_id)
+            .bind(target)
+            .bind(source_file)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        debug!(
+            "make_calls_authoritative: caller {} dropped {} fuzzy, added {} precise",
+            caller_id,
+            deleted,
+            precise_targets.len()
+        );
+        Ok(deleted)
+    }
+
     async fn delete_tenant(&self, tenant_id: &str) -> GraphDbResult<u64> {
         let mut tx = self.pool.begin().await?;
 

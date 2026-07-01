@@ -52,6 +52,63 @@ an authoritative edge source.
   precision/recall of fuzzy vs import-anchored vs R8-LSP, so the
   keep-heuristics-vs-adopt-indexer call rests on our numbers (survey recommendation #4).
 
+## Verification findings (2026-07-01 — probe of the live daemon)
+
+Before building the backfill loop we probed the running daemon's LSP metrics/logs
+(survey rec #4: measure before investing). **Decisive — and it reshapes R8.2/R8.3:**
+
+- `memexd_lsp_server_state{language="dart"} 0` — **the Dart LSP is NOT running.**
+  Active servers: `c`, `python`, `shellscript` (3 total).
+- `memexd_lsp_active_servers 3` + repeated log `Global LSP server cap reached;
+  refusing to start new server … running=3 max=3` — there is a **global cap of 3
+  LSP servers**, already saturated. Dart (and Go/Rust/TS/Java/…) are refused.
+- The registrations logged are all for the *active* repo tenant (`367157a01d98`),
+  not DOC-V2 — DOC-V2's LSP is not registered/warm.
+
+**Implication:** the R8.2 backfill loop, built naively, would deliver **zero** —
+`is_server_ready_for_file` returns false for Dart. The real linchpin is a
+**server-slot / activation policy**, not the loop:
+- Raise / rework the `max=3` cap (it is a memory guard — LSP servers are heavy),
+  or make it **on-demand per (tenant, language) for a bounded backfill window**
+  (start Dart → resolve the tenant's callers → stop), or a small dedicated slot.
+- Register + warm the Dart LSP for the target tenant (DOC-V2), then run backfill.
+
+So the corrected sequence is: **R8.3 activation/cap policy FIRST** (it gates
+everything), then **R8.2 backfill** using the DB primitive below.
+
+## Status
+
+- **DB primitive DONE:** `GraphStore::make_calls_authoritative(tenant, caller,
+  source_file, resolved_names, precise_targets)` — deletes the caller's fuzzy
+  CALLS to any node named a resolved name, inserts the precise LSP edges (weight
+  1.0, `resolution:"lsp"`, file-owned). This is the authoritative-write the
+  backfill needs; correct regardless of the activation work. Unit-tested
+  (`test_make_calls_authoritative_replaces_fanout_with_precise`).
+- **R8.1 DONE** (merged #191).
+- **R8.3a DONE (core-crate backfill):** `graph::lsp_backfill` —
+  `run_backfill_tenant(store, lsp, tenant, project_root)` iterates the tenant's
+  callers, resolves each via `resolved_outgoing_calls`, and stamps authoritative
+  edges. Correctness-critical, unit-tested piece: `authoritative_args_for_caller`
+  resolves an LSP `(name, file, line)` to the **real callee node** by `(file,
+  name)` + nearest `start_line` — so a Dart `.build()` binds to its **Method**
+  node, not a Function-typed guess (the whole point of R8). Dormant until wired.
+- **R8.3b DONE (memexd task, flag-gated OFF — deploy-verified):**
+  `background::start_graph_lsp_backfill`, wired in `main.rs`; behind
+  `WQM_GRAPH_LSP_BACKFILL=1`. A periodic task, serial across tenants, that:
+  (1) reads each tenant's `project_root` from `watch_folders`; (2) starts the
+  tenant's dominant language server via `start_server` — **the cap is the
+  linchpin** (`max_global_servers`, default 3, saturated): give the backfill a
+  slot by raising `WQM_LSP_MAX_SERVERS` for the run, or a dedicated transient
+  slot, and never stop a live enrichment server; (3) waits for warmup (start_server
+  already blocks on the start semaphore); (4) calls `run_backfill_tenant`;
+  (5) `stop_server`. Then **R8.4 measure** on DOC-V2.
+- **Open subtleties for R8.3b (noted so the build is de-risked):** caller `column`
+  is read best-effort from source (`symbol_column_in_line`); `start_line`
+  0-indexing must match the LSP; dominant-language detection from
+  `graph_nodes.language`; the whole thing is deploy-verified (no unit test spins a
+  real Dart LSP) — enable on DOC-V2 first and watch the `resolution:"lsp"` edge
+  count before trusting it broadly.
+
 ## Non-goals / guardrails
 
 - Keep tree-sitter as the always-on baseline for the ~43 languages without a
