@@ -736,6 +736,20 @@ impl GraphStore for SqliteGraphStore {
             }
         }
 
+        // Fan-out ceiling: beyond this many equally-plausible candidates the 1/N
+        // keep-all is noise, not recall — each edge is below the centrality gate
+        // anyway, and N-1 wrong callees pollute impact/usages (a `.build()` /
+        // `.add()` call otherwise becomes a false caller of every same-named
+        // method: build has ~300 defs, collection methods ~200). Past the ceiling
+        // the call is left UNRESOLVED (honest) instead of fanned out. Env-tunable
+        // via WQM_GRAPH_FANOUT_CEILING; 0 disables it (pure keep-all). Only the
+        // precision tiers above (own-file / class / import / proximity / tenant-
+        // unique) can still resolve a hyper-common name when a unique signal exists.
+        let fanout_ceiling: usize = std::env::var("WQM_GRAPH_FANOUT_CEILING")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(16);
+
         // Resolve a stub name to real definition node(s), each with a CONFIDENCE
         // weight (see docs/plans/2026-06-24-code-graph-resolution-roadmap.md, R1/R2):
         //   own-file definition        -> [(node, 1.0)]       precise
@@ -746,7 +760,8 @@ impl GraphStore for SqliteGraphStore {
         //                                 matches (CALLS/USES_TYPE)
         //   same-package (R2.5 prox.)  -> [(node, 0.85)] when a UNIQUE candidate is
         //                                 in the caller's deepest dir (CALLS/USES_TYPE)
-        //   ambiguous (N>1)            -> [(c, 1/N) for each] KEEP ALL (recall>precision)
+        //   ambiguous (2..=ceiling)    -> [(c, 1/N) for each] KEEP ALL (recall>precision)
+        //   hyper-ambiguous (N>ceiling)-> []                  UNRESOLVED (fan-out is noise)
         //   external / no match        -> []                  leave it a stub
         // Keeping ambiguous edges (instead of dropping them) restores impact/usages
         // recall when same-named callees (build/of/toString/domain methods) collide
@@ -852,6 +867,12 @@ impl GraphStore for SqliteGraphStore {
                     }
                     // Not unique → keep-all below (conservative: no candidate dropped).
                 }
+            }
+            // Fan-out ceiling: past this many equally-plausible candidates the
+            // resolution carries no signal (1/N ≈ 0), so leave the call unresolved
+            // rather than emit N mostly-wrong edges that pollute impact/usages.
+            if fanout_ceiling > 0 && pool.len() > fanout_ceiling {
+                return Vec::new();
             }
             // Ambiguous: keep EVERY candidate, confidence 1/N. The fan-out is
             // normalized so centrality (which consumes only high-confidence edges,

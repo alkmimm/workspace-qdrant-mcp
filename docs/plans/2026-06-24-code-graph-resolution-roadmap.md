@@ -94,6 +94,26 @@ metric to prove it, de-noise hotspots. All tree-sitter-only, no new extraction.
 
 ## Status updates
 
+- **2026-07-01 — Fan-out ceiling shipped (the actual lever for DOC-V2).** After
+  R2.5+R4 landed, a fan-out audit on DOC-V2 (`685731a5e037`) showed the ~617k
+  `ambiguous` edges are the UNTOUCHED cause: **99.7% target `method`** (no
+  spurious-kind to prune), and the cost is dominated by a mega-fan-out TAIL —
+  distinct `(caller, name)` groups fanning to N=27/37/66/82/167/194 candidates
+  (`build` alone has ~301 defs; collection/stream methods `add`/`stream`/`map`
+  ~200). A 1/194 edge is not recall — it makes each of the 194 a FALSE caller in
+  impact/usages (centrality was already immune via the ≥0.6 gate, but
+  impact/usages were polluted — so it was NOT purely cosmetic). Added a ceiling
+  in `pick_all`: past `WQM_GRAPH_FANOUT_CEILING` (default 16) equally-plausible
+  candidates, leave the call UNRESOLVED instead of fanning out — the precision
+  tiers (own-file/class/import/proximity/tenant-unique) still resolve a
+  hyper-common name when a unique signal exists. Strips the tail (~60% of CALLS
+  edges) and de-pollutes impact/usages, honest about what a compiler-free CST
+  cannot resolve. The principled alternative — **R7 receiver-type** (`list.add()`
+  → `List.add`) — is the only thing that would RESOLVE (not suppress) these; it
+  is the next increment (CST-lite for `this`/typed receivers, LSP for the rest).
+  Test: `test_resolve_stub_edges_fanout_ceiling_leaves_hyper_ambiguous_unresolved`.
+  NOTE: needs a graph re-extraction (reembed) to apply to an existing corpus.
+
 - **2026-07-01 — R4 import-anchored resolution shipped (first cut).** The
   principled cross-package tier: the extractor now RETAINS the import module
   locator (`extract_imports_from_content` stamps `{"module":"…"}` on each IMPORTS
