@@ -129,9 +129,18 @@ impl StorageClient {
 
         let count = qdrant_ids.len() as u64;
 
+        // wait(false): per-file point deletes are eventually consistent. The
+        // caller (`process_file_delete`) only reaches here when the base_point is
+        // truly orphaned, and the tracked_files/mirror already reflects the
+        // removal, so a point that lingers briefly is reclaimed by the orphan-GC /
+        // mirror_repair self-heal. Under reembed load `wait(true)` here blocked
+        // ~10s per delete waiting for Qdrant to commit behind in-flight upserts
+        // and segment optimisation — the dominant cost of a delete backlog and a
+        // hard starve of the (fast) uplift queue. Transport faults still propagate
+        // (the queue row retries); only the async segment application is deferred.
         let delete_request = DeletePointsBuilder::new(collection_name)
             .points(qdrant_ids)
-            .wait(true);
+            .wait(false);
 
         self.retry_operation(|| async {
             self.client
