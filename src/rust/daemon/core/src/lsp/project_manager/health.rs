@@ -1,8 +1,9 @@
 //! Health monitoring: periodic checks, crash detection, restart with backoff.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::sync::RwLock;
@@ -20,6 +21,8 @@ impl LanguageServerManager {
         let instances = Arc::clone(&self.instances);
         let servers = Arc::clone(&self.servers);
         let running = Arc::clone(&self.running);
+        let ready_at = Arc::clone(&self.ready_at);
+        let ready_signals = Arc::clone(&self.ready_signals);
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -32,8 +35,15 @@ impl LanguageServerManager {
                     break;
                 }
 
-                Self::perform_health_checks(&instances, &servers, max_restarts, stability_reset)
-                    .await;
+                Self::perform_health_checks(
+                    &instances,
+                    &servers,
+                    max_restarts,
+                    stability_reset,
+                    &ready_at,
+                    &ready_signals,
+                )
+                .await;
             }
         });
 
@@ -52,6 +62,8 @@ impl LanguageServerManager {
         servers: &Arc<RwLock<HashMap<ProjectLanguageKey, ProjectServerState>>>,
         max_restarts: u32,
         stability_reset: Duration,
+        ready_at: &Arc<RwLock<HashMap<ProjectLanguageKey, Instant>>>,
+        ready_signals: &Arc<RwLock<HashMap<ProjectLanguageKey, Arc<AtomicBool>>>>,
     ) {
         let keys: Vec<_> = {
             let inst = instances.read().await;
@@ -69,12 +81,27 @@ impl LanguageServerManager {
             };
 
             let mut inst_guard = instance.lock().await;
+
+            // Warm-up exemption: a server still building its initial index (a large
+            // Dart/Java monorepo takes minutes) cannot answer the RPC ping in time —
+            // and the ping is a `shutdown` request, so sending it to a busy server
+            // risks leaving it half-shut. While the server is not yet ready, only
+            // verify the OS process is alive; skip the RPC probe entirely so we never
+            // restart a server mid-analysis (which merely restarts the analysis and
+            // loops forever). A dead process is still detected and restarted.
+            if !Self::server_is_ready(&key, ready_at, ready_signals).await {
+                if !inst_guard.is_alive().await {
+                    Self::handle_unhealthy_server(&key, &mut inst_guard, servers, max_restarts)
+                        .await;
+                }
+                continue;
+            }
+
             let health_result = inst_guard.health_check().await;
 
             match health_result {
-                Ok(health_metrics) => {
-                    let is_healthy = matches!(health_metrics.status, ServerStatus::Running);
-                    if is_healthy {
+                Ok(health_metrics) => match health_metrics.status {
+                    ServerStatus::Running => {
                         Self::handle_healthy_server(
                             &key,
                             &mut inst_guard,
@@ -82,11 +109,17 @@ impl LanguageServerManager {
                             stability_reset,
                         )
                         .await;
-                    } else {
+                    }
+                    // Only a hard `Failed` restarts. `health_check` escalates to
+                    // Failed only after >3 consecutive misses; a transient `Degraded`
+                    // (a busy analyzer missing a single ping) is tolerated — restarting
+                    // on the first miss is what drove the analyze→restart→analyze loop.
+                    ServerStatus::Failed => {
                         Self::handle_unhealthy_server(&key, &mut inst_guard, servers, max_restarts)
                             .await;
                     }
-                }
+                    _ => {}
+                },
                 Err(e) => {
                     tracing::warn!(
                         project_id = %key.project_id,
@@ -97,6 +130,30 @@ impl LanguageServerManager {
                 }
             }
         }
+    }
+
+    /// Mirror of `is_server_ready_for_file`'s readiness test: ready once the server
+    /// has signalled its initial indexing finished, or once its warm-up grace has
+    /// elapsed (a missing entry is treated as ready). Used to EXEMPT a still-warming
+    /// server from the disruptive RPC health probe.
+    async fn server_is_ready(
+        key: &ProjectLanguageKey,
+        ready_at: &Arc<RwLock<HashMap<ProjectLanguageKey, Instant>>>,
+        ready_signals: &Arc<RwLock<HashMap<ProjectLanguageKey, Arc<AtomicBool>>>>,
+    ) -> bool {
+        {
+            let signals = ready_signals.read().await;
+            if let Some(sig) = signals.get(key) {
+                if sig.load(Ordering::Relaxed) {
+                    return true;
+                }
+            }
+        }
+        let ready_at = ready_at.read().await;
+        ready_at
+            .get(key)
+            .map(|&t| Instant::now() >= t)
+            .unwrap_or(true)
     }
 
     /// Update state for a healthy server, resetting restart count after stability period
@@ -391,4 +448,55 @@ enum SingleHealthResult {
     Ok,
     Restarted,
     Failed,
+}
+
+#[cfg(test)]
+mod readiness_exemption_tests {
+    use super::{
+        AtomicBool, Arc, Duration, HashMap, Instant, LanguageServerManager, ProjectLanguageKey,
+        RwLock,
+    };
+    use crate::lsp::Language;
+
+    fn key() -> ProjectLanguageKey {
+        ProjectLanguageKey::new("t1", Language::Dart)
+    }
+
+    #[tokio::test]
+    async fn missing_ready_at_is_ready() {
+        let ready_at = Arc::new(RwLock::new(HashMap::new()));
+        let signals = Arc::new(RwLock::new(HashMap::new()));
+        assert!(LanguageServerManager::server_is_ready(&key(), &ready_at, &signals).await);
+    }
+
+    #[tokio::test]
+    async fn warming_server_is_not_ready() {
+        // ready_at in the future → still within the warm-up grace → exempt from probe.
+        let mut m = HashMap::new();
+        m.insert(key(), Instant::now() + Duration::from_secs(120));
+        let ready_at = Arc::new(RwLock::new(m));
+        let signals = Arc::new(RwLock::new(HashMap::new()));
+        assert!(!LanguageServerManager::server_is_ready(&key(), &ready_at, &signals).await);
+    }
+
+    #[tokio::test]
+    async fn past_grace_is_ready() {
+        let mut m = HashMap::new();
+        m.insert(key(), Instant::now() - Duration::from_secs(1));
+        let ready_at = Arc::new(RwLock::new(m));
+        let signals = Arc::new(RwLock::new(HashMap::new()));
+        assert!(LanguageServerManager::server_is_ready(&key(), &ready_at, &signals).await);
+    }
+
+    #[tokio::test]
+    async fn index_signal_overrides_pending_grace() {
+        // Signalled index-done → ready even though the grace has not elapsed.
+        let mut m = HashMap::new();
+        m.insert(key(), Instant::now() + Duration::from_secs(120));
+        let ready_at = Arc::new(RwLock::new(m));
+        let mut sigs = HashMap::new();
+        sigs.insert(key(), Arc::new(AtomicBool::new(true)));
+        let signals = Arc::new(RwLock::new(sigs));
+        assert!(LanguageServerManager::server_is_ready(&key(), &ready_at, &signals).await);
+    }
 }
