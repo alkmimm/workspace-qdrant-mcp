@@ -85,7 +85,28 @@ everything), then **R8.2 backfill** using the DB primitive below.
   backfill needs; correct regardless of the activation work. Unit-tested
   (`test_make_calls_authoritative_replaces_fanout_with_precise`).
 - **R8.1 DONE** (merged #191).
-- **NEXT — R8.3 (activation/cap)** is now the gating step, per the probe above.
+- **R8.3a DONE (core-crate backfill):** `graph::lsp_backfill` —
+  `run_backfill_tenant(store, lsp, tenant, project_root)` iterates the tenant's
+  callers, resolves each via `resolved_outgoing_calls`, and stamps authoritative
+  edges. Correctness-critical, unit-tested piece: `authoritative_args_for_caller`
+  resolves an LSP `(name, file, line)` to the **real callee node** by `(file,
+  name)` + nearest `start_line` — so a Dart `.build()` binds to its **Method**
+  node, not a Function-typed guess (the whole point of R8). Dormant until wired.
+- **R8.3b NEXT (memexd task — the gating integration):** a flag-gated
+  (`WQM_GRAPH_LSP_BACKFILL`) periodic task, serial across tenants, that:
+  (1) reads each tenant's `project_root` from `watch_folders`; (2) starts the
+  tenant's dominant language server via `start_server` — **the cap is the
+  linchpin** (`max_global_servers`, default 3, saturated): give the backfill a
+  slot by raising `WQM_LSP_MAX_SERVERS` for the run, or a dedicated transient
+  slot, and never stop a live enrichment server; (3) waits for warmup (start_server
+  already blocks on the start semaphore); (4) calls `run_backfill_tenant`;
+  (5) `stop_server`. Then **R8.4 measure** on DOC-V2.
+- **Open subtleties for R8.3b (noted so the build is de-risked):** caller `column`
+  is read best-effort from source (`symbol_column_in_line`); `start_line`
+  0-indexing must match the LSP; dominant-language detection from
+  `graph_nodes.language`; the whole thing is deploy-verified (no unit test spins a
+  real Dart LSP) — enable on DOC-V2 first and watch the `resolution:"lsp"` edge
+  count before trusting it broadly.
 
 ## Non-goals / guardrails
 
