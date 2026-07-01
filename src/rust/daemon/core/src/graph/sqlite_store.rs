@@ -39,6 +39,31 @@ impl SqliteGraphStore {
         )
     }
 
+    /// Number of leading DIRECTORY components two file paths share (the file
+    /// name — the final path segment — is ignored, so two files in the same
+    /// directory share their full directory depth). `resolve_stub_edges` uses
+    /// this for proximity precedence (R2.5): among otherwise-equal ambiguous
+    /// candidates, the one in the caller's own package is overwhelmingly the
+    /// true callee of an unqualified same-name call, so the 1/N fan-out is
+    /// collapsed toward it. Repo-root files (no separator) share depth 0, which
+    /// leaves the keep-all fan-out untouched when there is no directory signal.
+    /// Both `/` and `\` are accepted so a Windows-authored `file_path` is not a
+    /// silent no-op (the ingest path normalizes elsewhere, this is defence in depth).
+    fn shared_dir_depth(a: &str, b: &str) -> usize {
+        fn dirs(p: &str) -> Vec<&str> {
+            let is_sep = |c: char| c == '/' || c == '\\';
+            match p.rsplit_once(is_sep) {
+                Some((dir, _file)) => dir.split(is_sep).filter(|s| !s.is_empty()).collect(),
+                None => Vec::new(),
+            }
+        }
+        dirs(a)
+            .iter()
+            .zip(dirs(b).iter())
+            .take_while(|(x, y)| x == y)
+            .count()
+    }
+
     /// Get a reference to the pool (for advanced queries in tests).
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
@@ -611,11 +636,13 @@ impl GraphStore for SqliteGraphStore {
 
         // Resolve a stub name to real definition node(s), each with a CONFIDENCE
         // weight (see docs/plans/2026-06-24-code-graph-resolution-roadmap.md, R1/R2):
-        //   own-file definition       -> [(node, 1.0)]       precise
-        //   caller's class (R2 scope) -> [(node, 0.95)]      scoped
-        //   unique tenant-wide        -> [(node, 0.7)]       likely
-        //   ambiguous (N>1)           -> [(c, 1/N) for each] KEEP ALL (recall>precision)
-        //   external / no match       -> []                  leave it a stub
+        //   own-file definition        -> [(node, 1.0)]       precise
+        //   caller's class (R2 scope)  -> [(node, 0.95)]      scoped
+        //   unique tenant-wide         -> [(node, 0.7)]       likely
+        //   same-package (R2.5 prox.)  -> [(node, 0.85)] when a UNIQUE candidate is
+        //                                 in the caller's deepest dir (CALLS/USES_TYPE)
+        //   ambiguous (N>1)            -> [(c, 1/N) for each] KEEP ALL (recall>precision)
+        //   external / no match        -> []                  leave it a stub
         // Keeping ambiguous edges (instead of dropping them) restores impact/usages
         // recall when same-named callees (build/of/toString/domain methods) collide
         // across files; the scope tier then recovers PRECISION for the common
@@ -664,6 +691,41 @@ impl GraphStore for SqliteGraphStore {
             if pool.len() == 1 {
                 return vec![(pool[0].0.to_string(), 0.7)];
             }
+            // R2.5 — proximity precedence: when EXACTLY ONE candidate sits in the
+            // deepest shared directory prefix with the caller's file, collapse the
+            // ambiguous fan-out onto it — an unqualified same-name call resolves to
+            // the caller's own package far more often than elsewhere. This cuts the
+            // cosmetic CALLS edge inflation and sharpens impact/usages precision
+            // using only the file_path already on both nodes; cross-*package*
+            // resolution stays R4's import/FQN job. Two deliberate guards keep it
+            // conservative (a review of the aggressive first cut narrowed it):
+            //   - `!container_only`: CALLS/USES_TYPE only. A CONTAINS parent is
+            //     structurally 1:1 and must never be guessed by proximity — Pass 2
+            //     keeps its own-file / tenant-unique contract.
+            //   - unique bucket ONLY: if the deepest bucket has >1 member (or every
+            //     candidate shares the same shallow prefix) we do NOT narrow —
+            //     fall through to keep-all, preserving R1 recall (never drop a
+            //     candidate without a single decisive proximity signal).
+            if !container_only {
+                let max_depth = pool
+                    .iter()
+                    .map(|(_, fp)| Self::shared_dir_depth(own_file, fp))
+                    .max()
+                    .unwrap_or(0);
+                if max_depth >= 1 {
+                    let bucket: Vec<&str> = pool
+                        .iter()
+                        .filter(|(_, fp)| Self::shared_dir_depth(own_file, fp) == max_depth)
+                        .map(|(nid, _)| *nid)
+                        .collect();
+                    if bucket.len() == 1 {
+                        // Unique same-package definition — a confident resolution
+                        // that (like tenant-unique 0.7) enters centrality (>= 0.6).
+                        return vec![(bucket[0].to_string(), 0.85)];
+                    }
+                    // Not unique → keep-all below (conservative: no candidate dropped).
+                }
+            }
             // Ambiguous: keep EVERY candidate, confidence 1/N. The fan-out is
             // normalized so centrality (which consumes only high-confidence edges,
             // weight >= 0.6) is not inflated, while impact/usages see all candidates.
@@ -678,6 +740,8 @@ impl GraphStore for SqliteGraphStore {
                 "in_file"
             } else if confidence >= 0.9 {
                 "scoped"
+            } else if confidence >= 0.8 {
+                "proximity"
             } else if n == 1 {
                 "tenant_unique"
             } else {
