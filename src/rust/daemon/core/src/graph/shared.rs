@@ -138,6 +138,27 @@ impl<S: GraphStore> SharedGraphStore<S> {
         let guard = self.inner.write().await;
         guard.resolve_stub_edges(tenant_id).await
     }
+
+    /// Make a caller's LSP-resolved CALLS authoritative (exclusive lock, R8.2).
+    pub async fn make_calls_authoritative(
+        &self,
+        tenant_id: &str,
+        caller_id: &str,
+        source_file: &str,
+        resolved_names: &[String],
+        precise_targets: &[String],
+    ) -> GraphDbResult<u64> {
+        let guard = self.inner.write().await;
+        guard
+            .make_calls_authoritative(
+                tenant_id,
+                caller_id,
+                source_file,
+                resolved_names,
+                precise_targets,
+            )
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -1025,5 +1046,70 @@ mod tests {
         let stats2 = clone2.stats(Some(T)).await.unwrap();
         assert_eq!(stats1.total_nodes, 1);
         assert_eq!(stats2.total_nodes, 1);
+    }
+
+    #[tokio::test]
+    async fn test_make_calls_authoritative_replaces_fanout_with_precise() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // caller (a/caller.rs) fuzzily fanned `save` out to two candidates.
+        let caller = GraphNode::new(T, "a/caller.rs", "caller", NodeType::Function);
+        let save1 = GraphNode::new(T, "pkg1/repo.rs", "save", NodeType::Function);
+        let save2 = GraphNode::new(T, "pkg2/repo.rs", "save", NodeType::Function);
+        store
+            .upsert_nodes(&[caller.clone(), save1.clone(), save2.clone()])
+            .await
+            .unwrap();
+        store
+            .insert_edges(&[
+                GraphEdge::new(T, &caller.node_id, &save1.node_id, EdgeType::Calls, "a/caller.rs"),
+                GraphEdge::new(T, &caller.node_id, &save2.node_id, EdgeType::Calls, "a/caller.rs"),
+            ])
+            .await
+            .unwrap();
+
+        // The LSP resolved `save` to pkg1's save — make it authoritative.
+        let deleted = store
+            .make_calls_authoritative(
+                T,
+                &caller.node_id,
+                "a/caller.rs",
+                &["save".to_string()],
+                &[save1.node_id.clone()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2, "both fuzzy `save` edges dropped");
+
+        // Only pkg1's save remains reachable from the caller.
+        let ids: std::collections::HashSet<String> = store
+            .query_related(T, &caller.node_id, 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        assert!(
+            ids.contains(&save1.node_id) && !ids.contains(&save2.node_id),
+            "authoritative edge points only at the LSP-resolved save, got {ids:?}"
+        );
+
+        // ...at precise weight 1.0 (enters centrality as a real edge).
+        let guard = store.read().await;
+        let w: f64 = sqlx::query_scalar(
+            "SELECT weight FROM graph_edges
+             WHERE tenant_id = ?1 AND source_node_id = ?2 AND target_node_id = ?3",
+        )
+        .bind(T)
+        .bind(&caller.node_id)
+        .bind(&save1.node_id)
+        .fetch_one(guard.pool())
+        .await
+        .unwrap();
+        assert!(
+            (w - 1.0).abs() < 1e-9,
+            "precise LSP edge should carry weight 1.0, got {w}"
+        );
     }
 }

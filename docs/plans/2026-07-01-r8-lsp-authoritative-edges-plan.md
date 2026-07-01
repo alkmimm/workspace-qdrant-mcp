@@ -52,6 +52,41 @@ an authoritative edge source.
   precision/recall of fuzzy vs import-anchored vs R8-LSP, so the
   keep-heuristics-vs-adopt-indexer call rests on our numbers (survey recommendation #4).
 
+## Verification findings (2026-07-01 — probe of the live daemon)
+
+Before building the backfill loop we probed the running daemon's LSP metrics/logs
+(survey rec #4: measure before investing). **Decisive — and it reshapes R8.2/R8.3:**
+
+- `memexd_lsp_server_state{language="dart"} 0` — **the Dart LSP is NOT running.**
+  Active servers: `c`, `python`, `shellscript` (3 total).
+- `memexd_lsp_active_servers 3` + repeated log `Global LSP server cap reached;
+  refusing to start new server … running=3 max=3` — there is a **global cap of 3
+  LSP servers**, already saturated. Dart (and Go/Rust/TS/Java/…) are refused.
+- The registrations logged are all for the *active* repo tenant (`367157a01d98`),
+  not DOC-V2 — DOC-V2's LSP is not registered/warm.
+
+**Implication:** the R8.2 backfill loop, built naively, would deliver **zero** —
+`is_server_ready_for_file` returns false for Dart. The real linchpin is a
+**server-slot / activation policy**, not the loop:
+- Raise / rework the `max=3` cap (it is a memory guard — LSP servers are heavy),
+  or make it **on-demand per (tenant, language) for a bounded backfill window**
+  (start Dart → resolve the tenant's callers → stop), or a small dedicated slot.
+- Register + warm the Dart LSP for the target tenant (DOC-V2), then run backfill.
+
+So the corrected sequence is: **R8.3 activation/cap policy FIRST** (it gates
+everything), then **R8.2 backfill** using the DB primitive below.
+
+## Status
+
+- **DB primitive DONE:** `GraphStore::make_calls_authoritative(tenant, caller,
+  source_file, resolved_names, precise_targets)` — deletes the caller's fuzzy
+  CALLS to any node named a resolved name, inserts the precise LSP edges (weight
+  1.0, `resolution:"lsp"`, file-owned). This is the authoritative-write the
+  backfill needs; correct regardless of the activation work. Unit-tested
+  (`test_make_calls_authoritative_replaces_fanout_with_precise`).
+- **R8.1 DONE** (merged #191).
+- **NEXT — R8.3 (activation/cap)** is now the gating step, per the probe above.
+
 ## Non-goals / guardrails
 
 - Keep tree-sitter as the always-on baseline for the ~43 languages without a
