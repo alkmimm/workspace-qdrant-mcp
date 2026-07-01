@@ -22,22 +22,120 @@ pub(crate) fn extract_imports_from_content(
 
     for line in content.lines() {
         let line = line.trim();
+        // R4: retain the module/path locator for this import line so
+        // `resolve_stub_edges` can anchor an ambiguous call to the definition file
+        // the caller actually imported. All symbols on one line share the locator.
+        let module = parse_import_module(line, language);
         let imports = parse_import_line(line, language);
         for symbol in imports {
             if symbol.is_empty() || symbol.len() < 2 {
                 continue;
             }
             let stub = GraphNode::stub(tenant_id, &symbol, NodeType::Module);
-            let edge = GraphEdge::new(
+            let mut edge = GraphEdge::new(
                 tenant_id,
                 &file_node_id,
                 &stub.node_id,
                 EdgeType::Imports,
                 file_path,
             );
+            if let Some(ref m) = module {
+                edge.metadata_json = Some(format!("{{\"module\":{}}}", json_quote(m)));
+            }
             result.nodes.push(stub);
             result.edges.push(edge);
         }
+    }
+}
+
+/// Minimal JSON string-quoter for the import module locator (escapes the only
+/// two characters that can break the object: `"` and `\`). Import paths are
+/// otherwise plain (`::`, `.`, `/`, identifiers), so this is sufficient and
+/// avoids a serde_json round-trip for one field.
+fn json_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Extract the MODULE / path locator from an import line — the "where" the
+/// imported symbols come from (the path before the imported names, or the quoted
+/// URI). Retained on the IMPORTS edge metadata for R4 import-anchored resolution;
+/// normalization to comparable segments happens at match time. Returns None when
+/// the line is not an import or carries no usable locator (wildcards included).
+pub(crate) fn parse_import_module(line: &str, language: &str) -> Option<String> {
+    let line = line.trim();
+    let non_empty = |s: &str| {
+        let s = s.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    };
+    match language {
+        "rust" => {
+            let l = line.trim_end_matches(';');
+            let path = l.strip_prefix("use ")?.trim();
+            if path.ends_with("::*") {
+                return None;
+            }
+            // Grouped `use a::b::{...}` -> `a::b`.
+            if let Some(brace) = path.find('{') {
+                return non_empty(path[..brace].trim().trim_end_matches("::"));
+            }
+            // Simple `use a::b::C` -> `a::b`.
+            if let Some(pos) = path.rfind("::") {
+                return non_empty(&path[..pos]);
+            }
+            non_empty(path) // `use serde`
+        }
+        "python" => {
+            if let Some(rest) = line.strip_prefix("from ") {
+                return non_empty(rest.split(" import ").next()?);
+            }
+            if let Some(rest) = line.strip_prefix("import ") {
+                let first = rest.split(',').next()?.trim();
+                return non_empty(first.split(" as ").next().unwrap_or(first));
+            }
+            None
+        }
+        "javascript" | "typescript" | "tsx" | "jsx" => {
+            let l = line.trim_end_matches(';');
+            let after = &l[l.find(" from ")? + 6..];
+            non_empty(after.trim().trim_matches(|c| c == '\'' || c == '"' || c == '`'))
+        }
+        "go" => {
+            let start = line.find('"')?;
+            let end = line[start + 1..].find('"')?;
+            non_empty(&line[start + 1..start + 1 + end])
+        }
+        "java" | "kotlin" => {
+            let l = line.trim_end_matches(';').trim();
+            let rest = l
+                .strip_prefix("import static ")
+                .or_else(|| l.strip_prefix("import "))?
+                .trim();
+            let rest = rest.split(" as ").next().unwrap_or(rest).trim();
+            if rest.ends_with(".*") {
+                return non_empty(rest.trim_end_matches(".*"));
+            }
+            non_empty(rest)
+        }
+        "dart" => {
+            if !(line.starts_with("import ") || line.starts_with("export ")) {
+                return None;
+            }
+            let start = line.find(['\'', '"'])?;
+            let quote = line.as_bytes()[start] as char;
+            let rel_end = line[start + 1..].find(quote)?;
+            non_empty(&line[start + 1..start + 1 + rel_end])
+        }
+        _ => None,
     }
 }
 

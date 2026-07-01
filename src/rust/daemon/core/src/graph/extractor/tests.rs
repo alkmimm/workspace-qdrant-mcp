@@ -210,6 +210,41 @@ fn test_dart_export_relative() {
     assert_eq!(imports, vec!["bar"]);
 }
 
+// -- parse_import_module (R4 locator retention) ---------------------------
+
+#[test]
+fn test_import_module_rust() {
+    let m = import_parsers::parse_import_module;
+    // Simple use -> path minus the final symbol.
+    assert_eq!(m("use std::collections::HashMap;", "rust").as_deref(), Some("std::collections"));
+    // Grouped use -> prefix before the brace.
+    assert_eq!(m("use crate::graph::{GraphNode, GraphEdge};", "rust").as_deref(), Some("crate::graph"));
+    // Wildcard -> no locator.
+    assert_eq!(m("use super::*;", "rust"), None);
+    // Single segment.
+    assert_eq!(m("use serde;", "rust").as_deref(), Some("serde"));
+}
+
+#[test]
+fn test_import_module_python_js_go() {
+    let m = import_parsers::parse_import_module;
+    assert_eq!(m("from graph.store import Foo", "python").as_deref(), Some("graph.store"));
+    assert_eq!(m("import numpy as np", "python").as_deref(), Some("numpy"));
+    assert_eq!(m("import { A, B } from 'react';", "typescript").as_deref(), Some("react"));
+    assert_eq!(m("import Foo from './graph/store';", "javascript").as_deref(), Some("./graph/store"));
+    assert_eq!(m("\"encoding/json\"", "go").as_deref(), Some("encoding/json"));
+}
+
+#[test]
+fn test_import_module_java_dart() {
+    let m = import_parsers::parse_import_module;
+    assert_eq!(m("import com.example.model.User;", "java").as_deref(), Some("com.example.model.User"));
+    assert_eq!(m("import static com.example.Bar.baz;", "java").as_deref(), Some("com.example.Bar.baz"));
+    assert_eq!(m("import com.example.*;", "java").as_deref(), Some("com.example"));
+    assert_eq!(m("import 'src/graph/foo.dart' as foo;", "dart").as_deref(), Some("src/graph/foo.dart"));
+    assert_eq!(m("import 'package:flutter/material.dart';", "dart").as_deref(), Some("package:flutter/material.dart"));
+}
+
 // -- extract_edges integration --------------------------------------------
 
 #[test]

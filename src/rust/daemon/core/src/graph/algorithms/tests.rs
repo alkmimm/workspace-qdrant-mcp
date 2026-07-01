@@ -215,7 +215,11 @@ async fn test_pagerank_single_node() {
     let config = PageRankConfig::default();
     let results = compute_pagerank(&pool, "t1", &config, None).await.unwrap();
     assert_eq!(results.len(), 1);
-    assert!((results[0].score - 1.0).abs() < 0.01); // single node gets all rank
+    // compute_pagerank applies the R3 IDF demotion (score *= ln(total/count)). A
+    // lone unique symbol has total == count == 1 → ln(1) == 0, so its final score
+    // is 0 even though the raw power-iteration gives it all the rank. Assert the
+    // node is returned rather than an (IDF-erased) absolute score.
+    assert_eq!(results[0].node_id, "a");
 }
 
 #[tokio::test]
@@ -247,12 +251,14 @@ async fn test_pagerank_chain() {
     let results = compute_pagerank(&pool, "t1", &config, None).await.unwrap();
     assert_eq!(results.len(), 5);
 
-    // All scores should sum to approximately 1.0
+    // Raw PageRank sums to ~1.0. compute_pagerank scales each score by the R3 IDF
+    // factor, which for these all-distinct names is the uniform ln(total); divide
+    // it back out to check the underlying normalization survives.
     let total: f64 = results.iter().map(|r| r.score).sum();
+    let raw_total = total / (results.len() as f64).ln();
     assert!(
-        (total - 1.0).abs() < 0.01,
-        "PageRank scores should sum to ~1.0, got {}",
-        total
+        (raw_total - 1.0).abs() < 0.01,
+        "raw PageRank should sum to ~1.0 (IDF-weighted total {total}), got raw {raw_total}"
     );
 }
 
@@ -269,9 +275,11 @@ async fn test_pagerank_convergence() {
     };
     let results = compute_pagerank(&pool, "t1", &config, None).await.unwrap();
 
-    // Should converge to stable values
+    // Should converge to stable values. Divide out the uniform R3 IDF factor
+    // (ln(total), all names distinct) to check the raw distribution sums to ~1.0.
     let total: f64 = results.iter().map(|r| r.score).sum();
-    assert!((total - 1.0).abs() < 1e-6);
+    let raw_total = total / (results.len() as f64).ln();
+    assert!((raw_total - 1.0).abs() < 1e-6);
 }
 
 #[tokio::test]

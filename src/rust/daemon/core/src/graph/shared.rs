@@ -702,6 +702,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_stub_edges_import_anchored_resolution() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // Caller in pkg/a calls the ambiguous name `handle`. Two real `handle`
+        // defs share the stem `handler` in DIFFERENT packages (pkg/x, pkg/y).
+        // The caller's file IMPORTS `handle` from module `pkg::x::handler`, so R4
+        // must anchor the call to pkg/x's handle (@0.90) — proximity alone can't
+        // (both are equally far from pkg/a).
+        let caller = GraphNode::new(T, "pkg/a/caller.rs", "caller", NodeType::Function);
+        let hx = GraphNode::new(T, "pkg/x/handler.rs", "handle", NodeType::Function);
+        let hy = GraphNode::new(T, "pkg/y/handler.rs", "handle", NodeType::Function);
+        let file_node = GraphNode::new(T, "pkg/a/caller.rs", "pkg/a/caller.rs", NodeType::File);
+        let call_stub = GraphNode::stub(T, "handle", NodeType::Function);
+        let import_stub = GraphNode::stub(T, "handle", NodeType::Module);
+        store
+            .upsert_nodes(&[
+                caller.clone(),
+                hx.clone(),
+                hy.clone(),
+                file_node.clone(),
+                call_stub.clone(),
+                import_stub.clone(),
+            ])
+            .await
+            .unwrap();
+
+        let call_edge =
+            GraphEdge::new(T, &caller.node_id, &call_stub.node_id, EdgeType::Calls, "pkg/a/caller.rs");
+        // IMPORTS file -> stub(handle), carrying the module locator (as the
+        // extractor stamps it).
+        let mut import_edge = GraphEdge::new(
+            T,
+            &file_node.node_id,
+            &import_stub.node_id,
+            EdgeType::Imports,
+            "pkg/a/caller.rs",
+        );
+        import_edge.metadata_json = Some("{\"module\":\"pkg::x::handler\"}".to_string());
+        store.insert_edges(&[call_edge, import_edge]).await.unwrap();
+
+        store.resolve_stub_edges(T).await.unwrap();
+
+        let ids: std::collections::HashSet<String> = store
+            .query_related(T, &caller.node_id, 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        assert!(
+            ids.contains(&hx.node_id),
+            "call must anchor to the IMPORTED pkg/x handle, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&hy.node_id),
+            "call must NOT reach the non-imported pkg/y handle, got {ids:?}"
+        );
+
+        // ...at import-anchored confidence 0.90 (enters centrality as a real edge).
+        let guard = store.read().await;
+        let w: f64 = sqlx::query_scalar(
+            "SELECT weight FROM graph_edges
+             WHERE tenant_id = ?1 AND source_node_id = ?2 AND target_node_id = ?3",
+        )
+        .bind(T)
+        .bind(&caller.node_id)
+        .bind(&hx.node_id)
+        .fetch_one(guard.pool())
+        .await
+        .unwrap();
+        assert!(
+            (w - 0.9).abs() < 1e-9,
+            "import-anchored edge should carry confidence 0.90, got {w}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_resolve_stub_edges_scope_prefers_caller_class() {
         use super::super::{EdgeType, NodeType};
         let store = test_shared_store().await;
