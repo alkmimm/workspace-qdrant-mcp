@@ -194,6 +194,56 @@ pub fn start_metrics_collection(pool: SqlitePool) -> JoinHandle<()> {
     handle
 }
 
+/// Periodically checkpoint the WAL to keep it bounded (#5 of the SQLite
+/// write-contention work).
+///
+/// SQLite's automatic `wal_autocheckpoint` runs a PASSIVE checkpoint inline, but
+/// PASSIVE can be starved by long-lived readers (the queue-depth / inventory
+/// exporters, git/pause monitors), letting the WAL grow unbounded under
+/// sustained write load — observed at ~730 MB during a reembed. A large WAL both
+/// wastes disk and keeps read snapshots stale, which feeds SQLITE_BUSY_SNAPSHOT.
+/// This loop runs a PASSIVE checkpoint every tick and forces a TRUNCATE once the
+/// WAL crosses a frame threshold, so it stays bounded without churning readers
+/// on every tick.
+pub fn start_wal_checkpoint_loop(pool: SqlitePool) -> JoinHandle<()> {
+    use workspace_qdrant_core::queue_config::{checkpoint_wal, CheckpointMode};
+
+    // A WAL frame is one DB page (~4 KiB). Truncate once the log exceeds ~20k
+    // frames (~80 MiB) so it stays bounded while TRUNCATE (which waits for
+    // readers) fires rarely rather than on every tick.
+    const TRUNCATE_THRESHOLD_FRAMES: i32 = 20_000;
+
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            match checkpoint_wal(&pool, CheckpointMode::Passive).await {
+                Ok(result) => {
+                    if result.log_size > TRUNCATE_THRESHOLD_FRAMES {
+                        debug!(
+                            "WAL large ({} frames; {} checkpointed passively), forcing TRUNCATE",
+                            result.log_size, result.checkpointed
+                        );
+                        match checkpoint_wal(&pool, CheckpointMode::Truncate).await {
+                            Ok(t) => debug!(
+                                "WAL TRUNCATE: busy={}, log_size={}, checkpointed={}",
+                                t.busy, t.log_size, t.checkpointed
+                            ),
+                            Err(e) => warn!("WAL TRUNCATE checkpoint failed: {}", e),
+                        }
+                    }
+                }
+                Err(e) => warn!("WAL passive checkpoint failed: {}", e),
+            }
+        }
+    });
+    info!(
+        "WAL checkpoint loop started (30s PASSIVE, TRUNCATE above {} frames)",
+        TRUNCATE_THRESHOLD_FRAMES
+    );
+    handle
+}
+
 /// Periodically refresh unified queue depth gauges (issue-64 Task 4).
 ///
 /// Queries the queue for pending/in_progress/failed counts grouped by
@@ -835,6 +885,7 @@ pub fn spawn_all(
     let _remote = start_remote_url_monitor(pool.clone());
     let _git_state = start_git_state_monitor(pool.clone());
     let _queue_depth = start_queue_depth_exporter(pool.clone());
+    let _wal_checkpoint = start_wal_checkpoint_loop(pool.clone());
     let _project_inventory = start_indexed_project_inventory_exporter(pool.clone());
     let _chunking_coverage = start_chunking_coverage_exporter(pool.clone());
     let _file_metadata = start_file_metadata_exporter(Arc::clone(search_db));
