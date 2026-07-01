@@ -94,6 +94,41 @@ metric to prove it, de-noise hotspots. All tree-sitter-only, no new extraction.
 
 ## Status updates
 
+- **2026-07-01 — R2.5 proximity precedence shipped (CALLS fan-out dedup).** The
+  R1 keep-all-candidates tier is correct for recall but inflates the physical
+  CALLS edge count ~8× on DOC-V2: every ambiguous callee (`save`, `build`, `of`,
+  `getId`, domain verbs) fans out to N file-backed candidates at weight `1/N`.
+  That inflation is invisible to centrality (already gated at `weight >= 0.6`, so
+  `1/N ≤ 0.5` is excluded) but bloats `graph stats` and dilutes impact/usages
+  precision. Added a tier BETWEEN tenant-unique and keep-all in `pick_all`
+  (`sqlite_store.rs`): among the ambiguous pool, keep only the DEEPEST
+  shared-directory-prefix bucket vs the caller's file — the intra-package
+  definition is overwhelmingly the true callee of an unqualified same-name call.
+  **Only a UNIQUE deepest-prefix candidate collapses** → one edge at `0.85`
+  (enters centrality as a real edge, like tenant-unique `0.7`); everything else
+  (non-unique deepest bucket, or all candidates at the same shallow prefix)
+  falls through to the unchanged keep-all `1/N`. Repo-root files share depth 0 so
+  the guard `max_depth >= 1` leaves the no-signal case exactly as before (the
+  existing `test_resolve_stub_edges_keeps_ambiguous` is untouched). Uses only the
+  `file_path` already on both nodes — no new extraction, no reembed; a graph
+  re-extraction applies it to the existing corpus, fresh ingest picks it up
+  automatically. This is a partial, path-proximity proxy for R4 (full import/FQN
+  anchoring remains the cross-package end-state).
+
+  **Post-review narrowing (10-finder review, same day).** The first cut also had
+  a `1/k` "narrower same-package overload set" branch and applied to every stub
+  type. Two changes landed from the review: (1) the `1/k` branch was **removed** —
+  collapsing only on a *unique* deepest match, so a non-unique bucket never drops
+  a cross-package candidate (preserves R1 recall on a non-decisive signal); (2)
+  proximity is now **CALLS/USES_TYPE only** (`!container_only`) — a CONTAINS parent
+  is structurally 1:1 and must not be guessed, so Pass 2 keeps its own-file /
+  tenant-unique contract (a proximity `0.85` would otherwise have cleared Pass 2's
+  `>= 0.7` gate and grafted a member onto the wrong same-named container).
+  Regression tests in `graph/shared.rs`:
+  `test_resolve_stub_edges_proximity_collapses_fanout` (unique → 0.85, far pruned),
+  `_keeps_same_package_overloads` + `_keeps_all_when_bucket_not_unique` (keep-all
+  fall-through, weight `< 0.6`), `_not_applied_to_contains` (Pass 2 gate).
+
 - **2026-06-25 — R3 second axis (use-ubiquity) shipped.** R3's first cut (#164,
   deployed) demotes by **definition** count, which is structurally blind to the
   dominant live noise: a name **defined once** (`def_count == 1`) whose bare name

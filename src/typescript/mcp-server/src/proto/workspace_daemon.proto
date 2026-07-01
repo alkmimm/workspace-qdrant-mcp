@@ -737,7 +737,7 @@ message TraversalNodeProto {
     string edge_type = 5;                         // EdgeType as string (e.g., "CALLS")
     uint32 depth = 6;                             // Hops from source node
     string path = 7;                              // Traversal path description
-    double confidence = 8;                        // Best-path edge-weight product in [0,1]: resolution certainty (1.0 precise, 0.95 scoped, 0.7 unique, <0.6 ambiguous)
+    double confidence = 8;                        // Best-path edge-weight product in [0,1]: resolution certainty (1.0 precise, 0.95 scoped, 0.85 proximity, 0.7 unique, <0.6 ambiguous)
 }
 
 // ImpactAnalysis Request
@@ -762,7 +762,7 @@ message ImpactNodeProto {
     string file_path = 3;
     string impact_type = 4;                       // "direct_caller", "indirect_caller", etc.
     uint32 distance = 5;                          // Hops from changed symbol
-    double confidence = 6;                        // Best-path edge-weight product in [0,1]: resolution certainty (1.0 precise, 0.95 scoped, 0.7 unique, <0.6 ambiguous)
+    double confidence = 6;                        // Best-path edge-weight product in [0,1]: resolution certainty (1.0 precise, 0.95 scoped, 0.85 proximity, 0.7 unique, <0.6 ambiguous)
 }
 
 // GraphStats Request

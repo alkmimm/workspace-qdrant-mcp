@@ -458,6 +458,250 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_stub_edges_proximity_collapses_fanout() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // A caller in `pkg/a/` calls the ambiguous name `save`. Three real `save`
+        // defs exist: one in the caller's OWN package (`pkg/a/`), two in a far
+        // package (`pkg/z/`). R2.5 proximity precedence must collapse the fan-out
+        // to the single same-package definition, dropping the far ones — cutting
+        // the CALLS inflation while keeping the most-likely target.
+        let caller = GraphNode::new(T, "pkg/a/caller.rs", "caller", NodeType::Function);
+        let near = GraphNode::new(T, "pkg/a/repo.rs", "save", NodeType::Function);
+        let far1 = GraphNode::new(T, "pkg/z/one.rs", "save", NodeType::Function);
+        let far2 = GraphNode::new(T, "pkg/z/two.rs", "save", NodeType::Function);
+        let stub = GraphNode::stub(T, "save", NodeType::Function);
+        store
+            .upsert_nodes(&[
+                caller.clone(),
+                near.clone(),
+                far1.clone(),
+                far2.clone(),
+                stub.clone(),
+            ])
+            .await
+            .unwrap();
+        let dangling = GraphEdge::new(
+            T,
+            &caller.node_id,
+            &stub.node_id,
+            EdgeType::Calls,
+            "pkg/a/caller.rs",
+        );
+        store.insert_edges(&[dangling]).await.unwrap();
+
+        let repointed = store.resolve_stub_edges(T).await.unwrap();
+        assert_eq!(repointed, 1, "the ambiguous stub resolves");
+
+        let ids: std::collections::HashSet<String> = store
+            .query_related(T, &caller.node_id, 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        assert!(
+            ids.contains(&near.node_id),
+            "must resolve to the same-package definition (pkg/a/repo.rs)"
+        );
+        assert!(
+            !ids.contains(&far1.node_id) && !ids.contains(&far2.node_id),
+            "far-package same-name candidates must be pruned by proximity, got {ids:?}"
+        );
+
+        // The collapsed edge is high-confidence (0.85) — a real resolution that
+        // enters centrality, not a diluted 1/N fan-out.
+        let guard = store.read().await;
+        let weight: f64 = sqlx::query_scalar(
+            "SELECT weight FROM graph_edges
+             WHERE tenant_id = ?1 AND source_node_id = ?2 AND target_node_id = ?3",
+        )
+        .bind(T)
+        .bind(&caller.node_id)
+        .bind(&near.node_id)
+        .fetch_one(guard.pool())
+        .await
+        .unwrap();
+        assert!(
+            (weight - 0.85).abs() < 1e-9,
+            "proximity-unique resolution should carry confidence 0.85, got {weight}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_stub_edges_proximity_keeps_same_package_overloads() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // Both `save` defs live in the caller's OWN package (`pkg/a/`) — a genuine
+        // same-package overload set. Proximity gives no tiebreak (equal depth), so
+        // the fan-out is preserved: impact/usages still reach both (recall floor).
+        let caller = GraphNode::new(T, "pkg/a/caller.rs", "caller", NodeType::Function);
+        let s1 = GraphNode::new(T, "pkg/a/one.rs", "save", NodeType::Function);
+        let s2 = GraphNode::new(T, "pkg/a/two.rs", "save", NodeType::Function);
+        let stub = GraphNode::stub(T, "save", NodeType::Function);
+        store
+            .upsert_nodes(&[caller.clone(), s1.clone(), s2.clone(), stub.clone()])
+            .await
+            .unwrap();
+        store
+            .insert_edges(&[GraphEdge::new(
+                T,
+                &caller.node_id,
+                &stub.node_id,
+                EdgeType::Calls,
+                "pkg/a/caller.rs",
+            )])
+            .await
+            .unwrap();
+
+        store.resolve_stub_edges(T).await.unwrap();
+
+        let ids: std::collections::HashSet<String> = store
+            .query_related(T, &caller.node_id, 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        assert!(
+            ids.contains(&s1.node_id) && ids.contains(&s2.node_id),
+            "same-package overloads must both remain reachable, got {ids:?}"
+        );
+
+        // Keep-all fan-out weights each edge 1/N (=0.5 here): below the 0.6
+        // centrality gate, so a same-package overload set is NOT promoted into
+        // PageRank/betweenness — the invariant the fan-out normalization protects.
+        let guard = store.read().await;
+        let w: f64 = sqlx::query_scalar(
+            "SELECT weight FROM graph_edges
+             WHERE tenant_id = ?1 AND source_node_id = ?2 AND target_node_id = ?3",
+        )
+        .bind(T)
+        .bind(&caller.node_id)
+        .bind(&s1.node_id)
+        .fetch_one(guard.pool())
+        .await
+        .unwrap();
+        assert!(
+            w < 0.6 && (w - 0.5).abs() < 1e-9,
+            "same-package overload edge must stay at 1/N=0.5 (< 0.6 centrality gate), got {w}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_stub_edges_proximity_keeps_all_when_bucket_not_unique() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // Two `save` defs in the caller's package (`pkg/a/`, depth 2) + one far
+        // (`pkg/z/`, depth 1). The deepest bucket is NOT unique (two at depth 2),
+        // so proximity must NOT narrow: the conservative choice keeps ALL candidates
+        // (incl. the far one) reachable rather than dropping cross-package recall on
+        // a non-decisive signal. (This is the branch the aggressive `1/k` tier used
+        // to collapse; the review removed it.)
+        let caller = GraphNode::new(T, "pkg/a/caller.rs", "caller", NodeType::Function);
+        let near1 = GraphNode::new(T, "pkg/a/one.rs", "save", NodeType::Function);
+        let near2 = GraphNode::new(T, "pkg/a/two.rs", "save", NodeType::Function);
+        let far = GraphNode::new(T, "pkg/z/svc.rs", "save", NodeType::Function);
+        let stub = GraphNode::stub(T, "save", NodeType::Function);
+        store
+            .upsert_nodes(&[
+                caller.clone(),
+                near1.clone(),
+                near2.clone(),
+                far.clone(),
+                stub.clone(),
+            ])
+            .await
+            .unwrap();
+        store
+            .insert_edges(&[GraphEdge::new(
+                T,
+                &caller.node_id,
+                &stub.node_id,
+                EdgeType::Calls,
+                "pkg/a/caller.rs",
+            )])
+            .await
+            .unwrap();
+
+        store.resolve_stub_edges(T).await.unwrap();
+
+        let ids: std::collections::HashSet<String> = store
+            .query_related(T, &caller.node_id, 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.node_id)
+            .collect();
+        assert!(
+            ids.contains(&near1.node_id)
+                && ids.contains(&near2.node_id)
+                && ids.contains(&far.node_id),
+            "non-unique deepest bucket must NOT narrow — all candidates kept, got {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_stub_edges_proximity_not_applied_to_contains() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // A file-less CONTAINS parent stub `Config` whose member `load` lives in
+        // `pkg/a/sub/helpers.rs`. Two real `Config` containers exist: one uniquely
+        // deepest by directory (`pkg/a/sub/config.rs`, depth 3) and one far
+        // (`pkg/z/config.rs`, depth 1). A CALLS stub in this position WOULD collapse
+        // onto the near one by proximity — but containment is structurally 1:1, so
+        // the `!container_only` guard must SKIP proximity here and, finding no
+        // own-file / tenant-unique match, leave the CONTAINS dangling (never guess).
+        let cfg_near = GraphNode::new(T, "pkg/a/sub/config.rs", "Config", NodeType::Class);
+        let cfg_far = GraphNode::new(T, "pkg/z/config.rs", "Config", NodeType::Class);
+        let load = GraphNode::new(T, "pkg/a/sub/helpers.rs", "load", NodeType::Method);
+        let parent_stub = GraphNode::stub(T, "Config", NodeType::Class);
+        store
+            .upsert_nodes(&[
+                cfg_near.clone(),
+                cfg_far.clone(),
+                load.clone(),
+                parent_stub.clone(),
+            ])
+            .await
+            .unwrap();
+        // CONTAINS authored from the file-less parent stub -> member.
+        store
+            .insert_edges(&[GraphEdge::new(
+                T,
+                &parent_stub.node_id,
+                &load.node_id,
+                EdgeType::Contains,
+                "pkg/a/sub/helpers.rs",
+            )])
+            .await
+            .unwrap();
+
+        let repointed = store.resolve_stub_edges(T).await.unwrap();
+        assert_eq!(
+            repointed, 0,
+            "an ambiguous CONTAINS container must NOT be proximity-resolved"
+        );
+
+        // Neither real Config captured the member via a proximity guess.
+        for cfg in [&cfg_near, &cfg_far] {
+            let reached = store
+                .query_related(T, &cfg.node_id, 1, Some(&[EdgeType::Contains]))
+                .await
+                .unwrap();
+            assert!(
+                !reached.iter().any(|n| n.symbol_name == "load"),
+                "container {} must not own the member via proximity",
+                cfg.file_path
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_resolve_stub_edges_scope_prefers_caller_class() {
         use super::super::{EdgeType, NodeType};
         let store = test_shared_store().await;
