@@ -42,11 +42,11 @@ use super::super::types::{MultiTenantInitResult, StorageError};
 /// this collection. Adding a new filter field without updating this list
 /// is a performance bug; see `multi_tenant_indexes` test below.
 pub(crate) const PROJECTS_PAYLOAD_INDEX_FIELDS: &[&str] =
-    &["tenant_id", "file_path", "branch", "project_id"];
+    &["tenant_id", "file_path", "branch", "project_id", "base_point"];
 
 /// Payload-index fields for the `libraries` collection.
 pub(crate) const LIBRARIES_PAYLOAD_INDEX_FIELDS: &[&str] =
-    &["tenant_id", "library_name", "file_path", "branch"];
+    &["tenant_id", "library_name", "file_path", "branch", "base_point"];
 
 /// Payload-index fields for the `rules` collection.
 pub(crate) const RULES_PAYLOAD_INDEX_FIELDS: &[&str] = &["tenant_id"];
@@ -451,8 +451,11 @@ mod tests {
     /// `storage/points/*.rs`, update both the manifest above AND this list.
     #[test]
     fn projects_indexes_cover_production_filter_fields() {
-        // From storage/points/delete.rs::delete_points_by_filter
-        let required = ["tenant_id", "file_path"];
+        // tenant_id/file_path: storage/points/delete.rs::delete_points_by_filter.
+        // base_point: storage/points/update.rs::remove_branch_from_base_point
+        // (read_branch_set + set_payload_by_filter) — the Layer-2 branch-drop path,
+        // which without this index full-scanned the collection at ~10s per op.
+        let required = ["tenant_id", "file_path", "base_point"];
         for field in required {
             assert!(
                 PROJECTS_PAYLOAD_INDEX_FIELDS.contains(&field),
@@ -465,8 +468,9 @@ mod tests {
 
     #[test]
     fn libraries_indexes_cover_production_filter_fields() {
-        // Libraries collection uses the same delete_points_by_filter path.
-        let required = ["tenant_id", "file_path"];
+        // Libraries collection uses the same delete_points_by_filter +
+        // remove_branch_from_base_point paths.
+        let required = ["tenant_id", "file_path", "base_point"];
         for field in required {
             assert!(
                 LIBRARIES_PAYLOAD_INDEX_FIELDS.contains(&field),
