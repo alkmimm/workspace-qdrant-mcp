@@ -94,6 +94,28 @@ metric to prove it, de-noise hotspots. All tree-sitter-only, no new extraction.
 
 ## Status updates
 
+- **2026-07-01 — R4 import-anchored resolution shipped (first cut).** The
+  principled cross-package tier: the extractor now RETAINS the import module
+  locator (`extract_imports_from_content` stamps `{"module":"…"}` on each IMPORTS
+  edge via a new `parse_import_module`, parsers otherwise untouched), and
+  `resolve_stub_edges` builds a `(source_file, imported_symbol) -> module[]` map
+  and adds an import-anchored tier to `pick_all` ABOVE proximity: for an ambiguous
+  call whose name the caller's file imports, if EXACTLY ONE candidate's file is
+  anchored by an imported module (`import_anchors_file`: last-segment/parent match
+  on normalized path tails, extension-stripped, both `/` and `\`), resolve to it
+  @0.90 (enters centrality). CALLS/USES_TYPE only; unique anchor only, else fall
+  through — never guess. **Scope (honest):** anchors DIRECT calls to imported
+  symbols (callee == imported name) — Rust free fns, JS/TS named imports, Python
+  from-imports, Java/Dart file imports. Method-via-receiver (`Foo.bar()`) needs
+  the call qualifier (currently discarded in `parse_qualified_name`) → that is the
+  next increment (R7-adjacent), not this cut. The map is fullest right after a
+  (re)ingest (a repointed IMPORTS edge loses the locator); an anchor miss is
+  harmless (proximity/keep-all). Tests: `import_anchors_file` +
+  `extract_module_field` unit tests in `sqlite_store.rs`; `parse_import_module`
+  per-language tests in `extractor/tests.rs`;
+  `test_resolve_stub_edges_import_anchored_resolution` in `graph/shared.rs`.
+  NOTE: applying to the existing corpus needs a graph re-extraction (reembed).
+
 - **2026-07-01 — R2.5 proximity precedence shipped (CALLS fan-out dedup).** The
   R1 keep-all-candidates tier is correct for recall but inflates the physical
   CALLS edge count ~8× on DOC-V2: every ambiguous callee (`save`, `build`, `of`,

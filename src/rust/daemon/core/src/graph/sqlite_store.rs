@@ -64,6 +64,82 @@ impl SqliteGraphStore {
             .count()
     }
 
+    /// Does an import `module` locator anchor a candidate `file`? (R4)
+    ///
+    /// An import path names WHERE a symbol comes from; in almost every language
+    /// that path maps onto a file path (`crate::graph::sqlite_store` ↔
+    /// `…/graph/sqlite_store.rs`, `graph.store` ↔ `…/graph/store.py`,
+    /// `./graph/store` ↔ `…/graph/store.ts`, `com.example.Foo` ↔ `…/Foo.java`,
+    /// `src/graph/foo.dart` ↔ `…/graph/foo.dart`). Both sides are normalized to
+    /// lowercase segments (trailing code extension stripped) and matched on the
+    /// file's tail: the module's last segment must equal the file stem AND — when
+    /// both carry a parent segment — the parent must align too (rejecting a
+    /// stem-only collision like two `store` files in different packages); or the
+    /// file's `[parent, stem]` appears contiguously deeper in the module path.
+    /// Conservative on purpose: a miss falls through to the proximity/keep-all
+    /// tiers, never a wrong anchor.
+    fn import_anchors_file(module: &str, file: &str) -> bool {
+        fn strip_code_ext(s: &str) -> &str {
+            for ext in [
+                ".dart", ".rs", ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".kt",
+                ".mjs", ".cjs",
+            ] {
+                if let Some(p) = s.strip_suffix(ext) {
+                    return p;
+                }
+            }
+            s
+        }
+        let msegs: Vec<String> = strip_code_ext(module)
+            .split(|c| c == ':' || c == '.' || c == '/' || c == '\\')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty() && s != "." && s != "..")
+            .collect();
+        let raw: Vec<&str> = file
+            .split(|c| c == '/' || c == '\\')
+            .filter(|s| !s.is_empty())
+            .collect();
+        let fsegs: Vec<String> = raw
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                if i + 1 == raw.len() {
+                    strip_code_ext(s).to_ascii_lowercase()
+                } else {
+                    s.to_ascii_lowercase()
+                }
+            })
+            .collect();
+        let (Some(stem), Some(mlast)) = (fsegs.last(), msegs.last()) else {
+            return false;
+        };
+        if mlast == stem {
+            // Stem matches; when both sides carry a parent, require it to align
+            // too so a bare stem shared across packages does not false-anchor.
+            if msegs.len() >= 2 && fsegs.len() >= 2 {
+                return msegs[msegs.len() - 2] == fsegs[fsegs.len() - 2];
+            }
+            return true;
+        }
+        // The file's [parent, stem] appears contiguously deeper in the module.
+        if fsegs.len() >= 2 {
+            let parent = &fsegs[fsegs.len() - 2];
+            return msegs.windows(2).any(|w| &w[0] == parent && &w[1] == stem);
+        }
+        false
+    }
+
+    /// Read the `module` field out of an IMPORTS edge's `metadata_json`
+    /// (`{"module":"…"}`, written by `extract_imports_from_content`). Import
+    /// locators never contain an unescaped quote, so a literal scan suffices.
+    fn extract_module_field(metadata_json: &str) -> Option<String> {
+        let key = "\"module\":\"";
+        let start = metadata_json.find(key)? + key.len();
+        let rest = &metadata_json[start..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    }
+
     /// Get a reference to the pool (for advanced queries in tests).
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
@@ -634,11 +710,40 @@ impl GraphStore for SqliteGraphStore {
         .map(|r| (r.get::<String, _>("member_id"), r.get::<String, _>("class_id")))
         .collect();
 
+        // R4 import map: (source_file, imported_symbol) -> module locators, read
+        // from IMPORTS edge metadata ({"module":"…"} stamped at extraction). Lets
+        // a call to an imported name anchor to the definition file the caller
+        // actually imported — the precise cross-package tier above proximity.
+        // Freshly-extracted edges carry the locator; already-repointed IMPORTS
+        // edges may not, so this is fullest right after a (re)ingest — an anchor
+        // miss simply falls through to proximity/keep-all.
+        let import_rows = sqlx::query(
+            "SELECT e.source_file AS sf, n.symbol_name AS sym, e.metadata_json AS mj
+             FROM graph_edges e JOIN graph_nodes n ON e.target_node_id = n.node_id
+             WHERE e.tenant_id = ?1 AND e.edge_type = 'IMPORTS'
+               AND e.metadata_json LIKE '%\"module\"%'",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut imports_by_symbol: HashMap<(String, String), Vec<String>> = HashMap::new();
+        for r in &import_rows {
+            let mj: String = r.get("mj");
+            if let Some(module) = Self::extract_module_field(&mj) {
+                let sf: String = r.get("sf");
+                let sym: String = r.get("sym");
+                imports_by_symbol.entry((sf, sym)).or_default().push(module);
+            }
+        }
+
         // Resolve a stub name to real definition node(s), each with a CONFIDENCE
         // weight (see docs/plans/2026-06-24-code-graph-resolution-roadmap.md, R1/R2):
         //   own-file definition        -> [(node, 1.0)]       precise
         //   caller's class (R2 scope)  -> [(node, 0.95)]      scoped
         //   unique tenant-wide         -> [(node, 0.7)]       likely
+        //   import-anchored (R4)       -> [(node, 0.90)] when the caller imports THIS
+        //                                 name from a module a UNIQUE candidate's file
+        //                                 matches (CALLS/USES_TYPE)
         //   same-package (R2.5 prox.)  -> [(node, 0.85)] when a UNIQUE candidate is
         //                                 in the caller's deepest dir (CALLS/USES_TYPE)
         //   ambiguous (N>1)            -> [(c, 1/N) for each] KEEP ALL (recall>precision)
@@ -691,6 +796,28 @@ impl GraphStore for SqliteGraphStore {
             if pool.len() == 1 {
                 return vec![(pool[0].0.to_string(), 0.7)];
             }
+            // R4 — import-anchored precedence: if the caller's file imports THIS
+            // name from a specific module and EXACTLY ONE candidate's file is
+            // anchored by that module, resolve to it (@0.90). An explicit import is
+            // a stronger cross-package signal than directory proximity, so it is
+            // tried first. CALLS/USES_TYPE only (a CONTAINS parent is never guessed);
+            // a unique anchor only, else fall through — never guess on ambiguity.
+            if !container_only {
+                if let Some(modules) =
+                    imports_by_symbol.get(&(own_file.to_string(), name.to_string()))
+                {
+                    let anchored: Vec<&str> = pool
+                        .iter()
+                        .filter(|(_, fp)| {
+                            modules.iter().any(|m| Self::import_anchors_file(m, fp))
+                        })
+                        .map(|(nid, _)| *nid)
+                        .collect();
+                    if anchored.len() == 1 {
+                        return vec![(anchored[0].to_string(), 0.9)];
+                    }
+                }
+            }
             // R2.5 — proximity precedence: when EXACTLY ONE candidate sits in the
             // deepest shared directory prefix with the caller's file, collapse the
             // ambiguous fan-out onto it — an unqualified same-name call resolves to
@@ -738,8 +865,10 @@ impl GraphStore for SqliteGraphStore {
         let resolution_metadata = |confidence: f64, n: usize| -> String {
             let tier = if confidence >= 0.99 {
                 "in_file"
-            } else if confidence >= 0.9 {
+            } else if confidence >= 0.93 {
                 "scoped"
+            } else if confidence >= 0.88 {
+                "import"
             } else if confidence >= 0.8 {
                 "proximity"
             } else if n == 1 {
@@ -1052,5 +1181,60 @@ impl SqliteGraphStore {
                 })
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod matcher_tests {
+    use super::SqliteGraphStore as S;
+
+    #[test]
+    fn import_anchors_file_matches_each_language_shape() {
+        // Rust: `use crate::graph::sqlite_store::Foo` -> module `crate::graph::sqlite_store`.
+        assert!(S::import_anchors_file(
+            "crate::graph::sqlite_store",
+            "src/rust/daemon/core/src/graph/sqlite_store.rs"
+        ));
+        // Python: `from graph.store import Foo`.
+        assert!(S::import_anchors_file("graph.store", "app/graph/store.py"));
+        // JS/TS relative import.
+        assert!(S::import_anchors_file("./graph/store", "src/graph/store.ts"));
+        // Java FQN -> file named after the class, package mirrors the path.
+        assert!(S::import_anchors_file(
+            "com.example.model.User",
+            "src/main/java/com/example/model/User.java"
+        ));
+        // Dart URI import (extension stripped on both sides).
+        assert!(S::import_anchors_file("src/graph/foo.dart", "lib/src/graph/foo.dart"));
+        // Single-segment module (only a stem to go on).
+        assert!(S::import_anchors_file("serde", "src/serde.rs"));
+    }
+
+    #[test]
+    fn import_anchors_file_rejects_stem_only_collision() {
+        // Same file stem `store` but a DIFFERENT parent package -> NOT anchored
+        // (this is what keeps the R4 tier from false-anchoring across packages).
+        assert!(!S::import_anchors_file("graph.store", "app/other/store.py"));
+        // Unrelated import / file.
+        assert!(!S::import_anchors_file("react", "src/components/Button.tsx"));
+        // Module names a directory, not the file (`graph/mod.rs`) -> no stem match.
+        assert!(!S::import_anchors_file("crate::graph", "src/graph/mod.rs"));
+    }
+
+    #[test]
+    fn extract_module_field_reads_module_only() {
+        assert_eq!(
+            S::extract_module_field("{\"module\":\"crate::graph\"}").as_deref(),
+            Some("crate::graph")
+        );
+        assert_eq!(
+            S::extract_module_field("{\"module\":\"src/graph/foo.dart\"}").as_deref(),
+            Some("src/graph/foo.dart")
+        );
+        // A resolution-metadata blob carries no module.
+        assert_eq!(
+            S::extract_module_field("{\"resolution\":\"import\",\"confidence\":0.9000}"),
+            None
+        );
     }
 }
