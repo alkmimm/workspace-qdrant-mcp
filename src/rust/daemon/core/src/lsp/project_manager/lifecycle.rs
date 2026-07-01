@@ -21,11 +21,15 @@ fn warmup_grace_for(language: &Language, floor: Duration) -> Duration {
     let lang_min = match language {
         // jdtls indexes the whole workspace + resolves the build before answering.
         Language::Java => Duration::from_secs(120),
-        // rust-analyzer runs `cargo metadata` and indexes the crate graph.
-        Language::Rust => Duration::from_secs(60),
+        // the Dart analysis server indexes the whole (Melos) workspace and its pub
+        // packages before it answers — a large Flutter monorepo takes minutes.
+        Language::Dart => Duration::from_secs(180),
+        // rust-analyzer runs `cargo metadata` and indexes the crate graph; a big
+        // workspace is minutes, not one.
+        Language::Rust => Duration::from_secs(120),
         // gopls loads the module/workspace; clangd parses the compile DB.
         Language::Go | Language::C | Language::Cpp => Duration::from_secs(30),
-        // pyright / tsserver / bash-ls / dart / intelephense: fast to answer.
+        // pyright / tsserver / bash-ls / intelephense: fast to answer.
         _ => Duration::from_secs(5),
     };
     floor.max(lang_min)
@@ -440,8 +444,12 @@ mod warmup_grace_tests {
             Duration::from_secs(120)
         );
         assert_eq!(
+            warmup_grace_for(&Language::Dart, floor),
+            Duration::from_secs(180)
+        );
+        assert_eq!(
             warmup_grace_for(&Language::Rust, floor),
-            Duration::from_secs(60)
+            Duration::from_secs(120)
         );
         assert_eq!(
             warmup_grace_for(&Language::Go, floor),
