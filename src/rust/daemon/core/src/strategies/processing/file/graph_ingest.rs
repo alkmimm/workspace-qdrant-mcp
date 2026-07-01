@@ -134,6 +134,11 @@ async fn resolve_calls_via_lsp(
         return; // Can't derive root (path layout unexpected) — skip safely.
     };
 
+    // Open the file so the server answers call-hierarchy for it (didOpen; most
+    // servers only serve open documents). One open per file, closed after.
+    let _ = mgr.open_document(abs_path).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
     for chunk in chunks {
         let meta = &chunk.metadata;
         let Some(chunk_type) = meta.get("chunk_type") else {
@@ -160,8 +165,9 @@ async fn resolve_calls_via_lsp(
         let first_line = chunk.content.lines().next().unwrap_or("");
         let column = symbol_column_in_line(first_line, symbol);
 
+        // start_line is 1-indexed; LSP positions are 0-indexed.
         let calls = mgr
-            .resolved_outgoing_calls(abs_path, line, column)
+            .resolved_outgoing_calls(abs_path, line.saturating_sub(1), column)
             .await
             .unwrap_or_default();
         if calls.is_empty() {
@@ -187,6 +193,8 @@ async fn resolve_calls_via_lsp(
         extraction.nodes.extend(nodes);
         extraction.edges.extend(edges);
     }
+    // Close the document opened above.
+    let _ = mgr.close_document(abs_path).await;
 }
 
 /// R8.1 — make the LSP-resolved calls authoritative for `caller_id`: remove the

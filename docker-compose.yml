@@ -232,6 +232,21 @@ services:
       WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD: ${WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD:-}
       WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS: ${WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS:-}
       WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD: ${WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD:-}
+      # ── R8.3b: LSP-authoritative CALLS backfill (graph resolution precision) ──
+      # WQM_GRAPH_LSP_BACKFILL=1 arms start_graph_lsp_backfill: after a 300s
+      # settle, walk each tenant serially, start its dominant-language LSP, stamp
+      # precise CALLS over the fuzzy fan-out (resolution:"lsp"), then stop it.
+      # The global LSP cap (default 3) gates it — WQM_LSP_MAX_GLOBAL_SERVERS raises
+      # the ceiling so Dart/etc. get a slot for the backfill window. (NB: the code
+      # reads WQM_LSP_MAX_GLOBAL_SERVERS, not the WQM_LSP_MAX_SERVERS named in the
+      # R8 plan/comment — see mod.rs::default_max_global_servers.)
+      WQM_GRAPH_LSP_BACKFILL: ${WQM_GRAPH_LSP_BACKFILL:-}
+      WQM_LSP_MAX_GLOBAL_SERVERS: ${WQM_LSP_MAX_GLOBAL_SERVERS:-}
+      # R8.4 warm-up knobs (seconds): how long to dwell after a server reports
+      # ready before resolving, and the overall warm-up timeout. Large projects
+      # (a 3k-file Dart monorepo) keep analysing past the readiness grace.
+      WQM_GRAPH_LSP_BACKFILL_WARM_SECS: ${WQM_GRAPH_LSP_BACKFILL_WARM_SECS:-}
+      WQM_GRAPH_LSP_BACKFILL_TIMEOUT_SECS: ${WQM_GRAPH_LSP_BACKFILL_TIMEOUT_SECS:-}
       # Daemon DB lives on the memexd_db named volume — see volumes section
       # above. Bind-mount on Docker Desktop 9P breaks SQLite WAL.
       WQM_DATABASE_PATH: /var/lib/memexd/memexd.db
