@@ -780,6 +780,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_stub_edges_fanout_ceiling_leaves_hyper_ambiguous_unresolved() {
+        use super::super::{EdgeType, NodeType};
+        let store = test_shared_store().await;
+
+        // `over` has 17 same-language defs across unrelated packages (> the default
+        // ceiling of 16), with no own-file/class/import/proximity signal. Fanning
+        // out to 17 edges @ ~0.06 is noise, not recall (and would make each of the
+        // 17 a false caller in impact/usages), so the call is left UNRESOLVED.
+        let caller = GraphNode::new(T, "a/caller.rs", "caller", NodeType::Function);
+        let stub = GraphNode::stub(T, "over", NodeType::Function);
+        let mut nodes = vec![caller.clone(), stub.clone()];
+        for i in 0..17 {
+            nodes.push(GraphNode::new(
+                T,
+                format!("pkg{i}/f.rs"),
+                "over",
+                NodeType::Function,
+            ));
+        }
+        store.upsert_nodes(&nodes).await.unwrap();
+        store
+            .insert_edges(&[GraphEdge::new(
+                T,
+                &caller.node_id,
+                &stub.node_id,
+                EdgeType::Calls,
+                "a/caller.rs",
+            )])
+            .await
+            .unwrap();
+
+        let repointed = store.resolve_stub_edges(T).await.unwrap();
+        assert_eq!(repointed, 0, "a hyper-ambiguous call must not fan out");
+
+        // Nothing real is reached — the call rests on the file-less stub only.
+        let reached = store
+            .query_related(T, &caller.node_id, 1, Some(&[EdgeType::Calls]))
+            .await
+            .unwrap();
+        assert!(
+            reached.iter().all(|n| n.file_path.is_empty()),
+            "hyper-ambiguous call must stay unresolved, reached: {:?}",
+            reached.iter().map(|n| &n.file_path).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn test_resolve_stub_edges_scope_prefers_caller_class() {
         use super::super::{EdgeType, NodeType};
         let store = test_shared_store().await;
