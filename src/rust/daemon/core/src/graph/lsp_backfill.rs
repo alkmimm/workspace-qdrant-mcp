@@ -42,23 +42,36 @@ fn relativize(abs_file: &str, project_root: &str) -> Option<String> {
     (!rel.is_empty()).then(|| rel.to_string())
 }
 
-/// All callable definitions for a tenant (functions/methods with a known line) —
-/// the set the backfill asks the LSP to resolve outgoing calls for.
+/// All callable definitions for a tenant (functions/methods with a known line)
+/// in the given `language_ids` — the set the backfill asks that language's LSP
+/// to resolve outgoing calls for. Scoped by language because the backfill starts
+/// ONE server at a time (e.g. Dart), so asking it to resolve a Java file is
+/// wasted work; empty `language_ids` returns nothing.
 pub(crate) async fn tenant_callers(
     store: &SharedGraphStore<SqliteGraphStore>,
     tenant_id: &str,
+    language_ids: &[String],
 ) -> Vec<CallerNode> {
+    if language_ids.is_empty() {
+        return Vec::new();
+    }
     let guard = store.read().await;
-    let rows = sqlx::query(
+    let lang_ph: Vec<String> = (0..language_ids.len())
+        .map(|i| format!("?{}", i + 2))
+        .collect();
+    let sql = format!(
         "SELECT file_path, symbol_name, symbol_type, start_line
          FROM graph_nodes
          WHERE tenant_id = ?1 AND file_path <> '' AND start_line IS NOT NULL
-           AND symbol_type IN ('function','async_function','method')",
-    )
-    .bind(tenant_id)
-    .fetch_all(guard.pool())
-    .await
-    .unwrap_or_default();
+           AND symbol_type IN ('function','async_function','method')
+           AND language IN ({})",
+        lang_ph.join(", ")
+    );
+    let mut q = sqlx::query(&sql).bind(tenant_id);
+    for l in language_ids {
+        q = q.bind(l);
+    }
+    let rows = q.fetch_all(guard.pool()).await.unwrap_or_default();
     rows.iter()
         .filter_map(|r| {
             let st: String = r.get("symbol_type");
@@ -99,7 +112,9 @@ async fn callee_node_id(
             let sl = r
                 .get::<Option<i64>, _>("start_line")
                 .unwrap_or(i64::MAX / 2);
-            (sl - line as i64).unsigned_abs()
+            // graph_nodes.start_line is 1-indexed; the LSP callee `line` is
+            // 0-indexed — compare in the stored convention.
+            (sl - (line as i64 + 1)).unsigned_abs()
         })
         .map(|r| r.get::<String, _>("node_id"))
 }
@@ -149,26 +164,42 @@ pub async fn run_backfill_tenant(
     lsp: &Arc<RwLock<LanguageServerManager>>,
     tenant_id: &str,
     project_root: &str,
+    language_ids: &[String],
 ) -> u64 {
-    let callers = tenant_callers(store, tenant_id).await;
+    let mut callers = tenant_callers(store, tenant_id, language_ids).await;
+    // Group callers by file so we open each document in the LSP exactly ONCE
+    // (didOpen is required for call-hierarchy but too costly to pay per-caller).
+    callers.sort_by(|a, b| a.file_path.cmp(&b.file_path));
     let root = project_root.trim_end_matches('/');
     let mut superseded: u64 = 0;
+    let mut cur_file: Option<String> = None;
+    let mut cur_lines: Vec<String> = Vec::new();
     for caller in &callers {
         let abs = format!("{root}/{}", caller.file_path);
-        // Column of the symbol on its definition line (UTF-16, LSP encoding),
-        // read best-effort from the source (0 if the file/line is unavailable).
-        let column = tokio::fs::read_to_string(&abs)
-            .await
-            .ok()
-            .and_then(|c| {
-                c.lines()
-                    .nth(caller.start_line as usize)
-                    .map(|l| symbol_column_in_line(l, &caller.symbol_name))
-            })
+        // On a new file: close the previous doc, open this one (so the server
+        // answers call-hierarchy), let the didOpen settle, cache its lines.
+        if cur_file.as_deref() != Some(caller.file_path.as_str()) {
+            if let Some(prev) = &cur_file {
+                let prev_abs = format!("{root}/{prev}");
+                let _ = lsp.read().await.close_document(Path::new(&prev_abs)).await;
+            }
+            let _ = lsp.read().await.open_document(Path::new(&abs)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            cur_lines = tokio::fs::read_to_string(&abs)
+                .await
+                .map(|c| c.lines().map(|l| l.to_string()).collect())
+                .unwrap_or_default();
+            cur_file = Some(caller.file_path.clone());
+        }
+        // graph_nodes.start_line is 1-indexed; LSP positions are 0-indexed.
+        let lsp_line = caller.start_line.saturating_sub(1);
+        let column = cur_lines
+            .get(lsp_line as usize)
+            .map(|l| symbol_column_in_line(l, &caller.symbol_name))
             .unwrap_or(0);
         let resolved = {
             let mgr = lsp.read().await;
-            mgr.resolved_outgoing_calls(Path::new(&abs), caller.start_line, column)
+            mgr.resolved_outgoing_calls(Path::new(&abs), lsp_line, column)
                 .await
                 .unwrap_or_default()
         };
@@ -192,6 +223,11 @@ pub async fn run_backfill_tenant(
         {
             superseded += n;
         }
+    }
+    // Close the last opened document.
+    if let Some(prev) = &cur_file {
+        let prev_abs = format!("{root}/{prev}");
+        let _ = lsp.read().await.close_document(Path::new(&prev_abs)).await;
     }
     superseded
 }
@@ -277,5 +313,36 @@ mod tests {
             !names.contains(&"setState".to_string()),
             "out-of-project callee must not clear a fuzzy edge"
         );
+    }
+
+    #[tokio::test]
+    async fn tenant_callers_filters_by_language() {
+        let t = "t1";
+        let store = mk_store().await;
+        let mut dart = GraphNode::new(t, "lib/a.dart", "build", NodeType::Method);
+        dart.start_line = Some(10);
+        dart.language = Some("dart".into());
+        let mut java = GraphNode::new(t, "src/A.java", "run", NodeType::Method);
+        java.start_line = Some(20);
+        java.language = Some("java".into());
+        // A dart node with no start_line must be excluded regardless of language.
+        let mut noline = GraphNode::new(t, "lib/b.dart", "helper", NodeType::Function);
+        noline.language = Some("dart".into());
+        store
+            .upsert_nodes(&[dart.clone(), java.clone(), noline.clone()])
+            .await
+            .unwrap();
+
+        // Per-language scoping: the Dart server's pass sees only Dart callers.
+        let dart_callers = tenant_callers(&store, t, &["dart".to_string()]).await;
+        assert_eq!(dart_callers.len(), 1, "only the dart caller with a start_line");
+        assert_eq!(dart_callers[0].symbol_name, "build");
+
+        let java_callers = tenant_callers(&store, t, &["java".to_string()]).await;
+        assert_eq!(java_callers.len(), 1);
+        assert_eq!(java_callers[0].symbol_name, "run");
+
+        // Empty filter resolves nothing (guards the `IN ()` SQL).
+        assert!(tenant_callers(&store, t, &[]).await.is_empty());
     }
 }

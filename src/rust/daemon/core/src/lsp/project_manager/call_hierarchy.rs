@@ -104,6 +104,82 @@ impl LanguageServerManager {
         tracing::debug!(file = %file.display(), count = calls.len(), "Resolved outgoing calls");
         Ok(calls)
     }
+
+    /// Open `file` in its language server (`textDocument/didOpen`) so
+    /// call-hierarchy requests are answered. Most servers only serve requests for
+    /// OPEN documents — the missing didOpen was why the backfill resolved nothing.
+    /// No-op when no server handles the file. Best-effort. Callers should open a
+    /// file ONCE, resolve all its callers, then `close_document`, so the didOpen
+    /// cost is amortised per-file rather than paid per-call.
+    pub async fn open_document(&self, file: &Path) -> ProjectLspResult<()> {
+        let (_key, server) = self.find_server_for_file(file).await;
+        let Some(instance) = server else {
+            return Ok(());
+        };
+        let rpc_client = {
+            let inst = instance.lock().await;
+            inst.rpc_client()
+        };
+        if let Ok(text) = tokio::fs::read_to_string(file).await {
+            let _ = rpc_client
+                .send_notification(
+                    "textDocument/didOpen",
+                    serde_json::json!({
+                        "textDocument": {
+                            "uri": Self::file_to_uri(file),
+                            "languageId": lsp_language_id(file),
+                            "version": 1,
+                            "text": text,
+                        }
+                    }),
+                )
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Close a document previously opened with `open_document`
+    /// (`textDocument/didClose`) so the server does not accumulate open buffers.
+    pub async fn close_document(&self, file: &Path) -> ProjectLspResult<()> {
+        let (_key, server) = self.find_server_for_file(file).await;
+        let Some(instance) = server else {
+            return Ok(());
+        };
+        let rpc_client = {
+            let inst = instance.lock().await;
+            inst.rpc_client()
+        };
+        let _ = rpc_client
+            .send_notification(
+                "textDocument/didClose",
+                serde_json::json!({ "textDocument": { "uri": Self::file_to_uri(file) } }),
+            )
+            .await;
+        Ok(())
+    }
+}
+
+/// Best-effort LSP `languageId` for a file (used in `textDocument/didOpen`).
+/// Servers key mostly on the document URI; this covers the languages we run.
+fn lsp_language_id(file: &Path) -> &'static str {
+    match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "rs" => "rust",
+        "ts" => "typescript",
+        "tsx" => "typescriptreact",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "javascriptreact",
+        "py" => "python",
+        "dart" => "dart",
+        "go" => "go",
+        "java" => "java",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" | "hxx" => "cpp",
+        "php" => "php",
+        "rb" => "ruby",
+        "cs" => "csharp",
+        "kt" | "kts" => "kotlin",
+        _ => "plaintext",
+    }
 }
 
 /// Relativize an absolute path returned by the LSP server against the project

@@ -2899,8 +2899,8 @@
     },
     {
       "id": 34,
-      "title": "Queue depth by project (tenant)",
-      "description": "Pending / in-progress / failed unified-queue items per project (tenant_id), from memexd_unified_queue_depth_by_tenant. Shows which project owns the backlog (e.g. a reembed). Only non-zero series are drawn. Map tenant_id -> path via the 'Indexed Projects' table above.",
+      "title": "Queue depth by project",
+      "description": "Pending / in-progress / failed unified-queue items per project, from memexd_unified_queue_depth_by_tenant joined to the project name (folder basename of the watch path) via memexd_indexed_project_tracked_files. Shows which project owns the backlog (e.g. a reembed). Only non-zero series are drawn.",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
@@ -2954,8 +2954,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (tenant_id, status) (memexd_unified_queue_depth_by_tenant) > 0",
-          "legendFormat": "{{tenant_id}} / {{status}}",
+          "expr": "(sum by (tenant_id, status) (memexd_unified_queue_depth_by_tenant) > 0) * on (tenant_id) group_left(name) (label_replace(max by (tenant_id, path) (memexd_indexed_project_tracked_files), \"name\", \"$1\", \"path\", \".*/([^/]+)/?$\") * 0 + 1)",
+          "legendFormat": "{{name}} / {{status}}",
           "refId": "A"
         }
       ]

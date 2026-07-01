@@ -5,6 +5,7 @@
 //! remote URL monitoring, git state change detection, uptime tracking, and the
 //! Prometheus metrics endpoint.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::DateTime;
@@ -13,6 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use workspace_qdrant_core::config::PrometheusExportConfig;
+use workspace_qdrant_core::lsp::ServerStatus;
 use workspace_qdrant_core::search_db::SearchDbManager;
 use workspace_qdrant_core::{
     check_git_state_changes, check_remote_url_changes, metrics_history, poll_pause_state,
@@ -771,17 +773,24 @@ pub fn start_graph_stub_resolver(
     })
 }
 
-/// Spawn the LSP-authoritative CALLS backfill (R8.3b) — flag-gated, OFF by default.
+/// Spawn the LSP-authoritative CALLS backfill (R8.3b/R8.4) — flag-gated, OFF by
+/// default.
 ///
 /// When `WQM_GRAPH_LSP_BACKFILL=1`, after a settle delay it walks each tenant
-/// SERIALLY: reads the project root from `watch_folders`, picks the tenant's
-/// dominant language, starts that LSP server (subject to the global server cap —
-/// raise `WQM_LSP_MAX_SERVERS` to give the backfill a slot; a cap refusal just
-/// skips the tenant and never stops a live enrichment server), runs
-/// `run_backfill_tenant` to stamp precise CALLS over the fuzzy fan-out, then stops
-/// the server. Dormant and zero-cost unless the flag is set. This is the
-/// deploy-verified R8.3b integration: enable on one tenant (DOC-V2) and watch the
-/// `resolution:"lsp"` edge count before trusting it broadly.
+/// SERIALLY and, within a tenant, each LANGUAGE that has callers and an available
+/// server — NOT a single "dominant" language (a monorepo like DOC-V2 is
+/// Java-dominant but its Dart `.build()` calls are the whole point). For each
+/// (tenant, language): start the LSP (subject to the global server cap — raise
+/// `WQM_LSP_MAX_GLOBAL_SERVERS` to give the backfill a slot), WAIT for it to warm
+/// (`is_server_ready_for_file` + a settle dwell) because `start_server` returns
+/// before initial indexing finishes so querying it cold resolves nothing, then run
+/// `run_backfill_tenant` (scoped to that language) to stamp precise CALLS over the
+/// fuzzy fan-out, then stop the server. A server that turns unhealthy during
+/// warm-up (a crash-looping jdtls on generated/partial Java) is stopped + skipped
+/// immediately, which also halts the health monitor's restart loop. Dormant and
+/// zero-cost unless the flag is set. Warm/timeout knobs (seconds):
+/// `WQM_GRAPH_LSP_BACKFILL_WARM_SECS` (default 45),
+/// `WQM_GRAPH_LSP_BACKFILL_TIMEOUT_SECS` (default 300).
 pub fn start_graph_lsp_backfill(
     graph_store: crate::database::ConcreteGraphStore,
     lsp_manager: Arc<tokio::sync::RwLock<LanguageServerManager>>,
@@ -796,6 +805,24 @@ pub fn start_graph_lsp_backfill(
         tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(6 * 3600));
         info!("Graph LSP backfill enabled (6h interval)");
+        // Warm-up knobs (env-tunable so the observation can be re-tuned without a
+        // rebuild): how long to keep polling for a server to warm, and how long to
+        // dwell after it reports ready before resolving (large projects — a 3k-file
+        // Dart monorepo — keep analysing past the grace).
+        let warm_after_ready = tokio::time::Duration::from_secs(
+            std::env::var("WQM_GRAPH_LSP_BACKFILL_WARM_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(45),
+        );
+        let ready_timeout = tokio::time::Duration::from_secs(
+            std::env::var("WQM_GRAPH_LSP_BACKFILL_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+        );
+        const POLL_SECS: u64 = 5;
+        const MIN_CALLERS: i64 = 20;
         loop {
             interval.tick().await;
             let tenants: Vec<String> = {
@@ -817,48 +844,160 @@ pub fn start_graph_lsp_backfill(
                 .flatten();
                 let Some(root) = root else { continue };
 
-                // Dominant language of the tenant's graph — the one worth a server.
-                let lang_id: Option<String> = {
+                // Enumerate the tenant's languages by CALLER count, grouped by the
+                // LSP Language they map to (e.g. typescript + tsx -> one server).
+                // Per-language, NOT a single "dominant" language: DOC-V2 is
+                // Java-dominant but its Dart .build() calls are the whole point.
+                let lang_rows: Vec<(String, i64)> = {
                     let guard = graph_store.read().await;
-                    sqlx::query_scalar(
-                        "SELECT language FROM graph_nodes \
+                    sqlx::query_as(
+                        "SELECT language, COUNT(*) c FROM graph_nodes \
                          WHERE tenant_id = ?1 AND language IS NOT NULL AND language <> '' \
-                         GROUP BY language ORDER BY COUNT(*) DESC LIMIT 1",
+                           AND symbol_type IN ('function','async_function','method') \
+                         GROUP BY language",
                     )
                     .bind(&tenant)
-                    .fetch_optional(guard.pool())
+                    .fetch_all(guard.pool())
                     .await
-                    .ok()
-                    .flatten()
+                    .unwrap_or_default()
                 };
-                let Some(lang_id) = lang_id else { continue };
-                let language = Language::from_id(&lang_id);
-
-                // Start the server (respects the global cap; refusal skips the tenant).
-                let started = {
-                    let mgr = lsp_manager.read().await;
-                    mgr.start_server(&tenant, language.clone(), std::path::Path::new(&root))
-                        .await
-                };
-                if let Err(e) = started {
-                    warn!(tenant = %tenant, language = %lang_id, error = %e,
-                        "LSP backfill: could not start server (cap/unsupported) — skipping tenant");
-                    continue;
+                let mut groups: HashMap<Language, (Vec<String>, i64)> = HashMap::new();
+                for (lang_id, c) in lang_rows {
+                    let entry = groups
+                        .entry(Language::from_id(&lang_id))
+                        .or_insert_with(|| (Vec::new(), 0));
+                    entry.0.push(lang_id);
+                    entry.1 += c;
                 }
 
-                let superseded = workspace_qdrant_core::graph::lsp_backfill::run_backfill_tenant(
-                    &graph_store,
-                    &lsp_manager,
-                    &tenant,
-                    &root,
-                )
-                .await;
-                info!(tenant = %tenant, language = %lang_id, superseded,
-                    "LSP backfill: superseded fuzzy CALLS with precise LSP edges");
+                for (language, (lang_ids, callers_n)) in groups {
+                    // Skip trivial languages — not worth a heavyweight server.
+                    if callers_n < MIN_CALLERS {
+                        continue;
+                    }
 
-                let mgr = lsp_manager.read().await;
-                if let Err(e) = mgr.stop_server(&tenant, language).await {
-                    warn!(tenant = %tenant, error = %e, "LSP backfill: stop_server failed");
+                    // Start the server (respects the global cap; refusal skips it).
+                    let started = {
+                        let mgr = lsp_manager.read().await;
+                        mgr.start_server(&tenant, language.clone(), std::path::Path::new(&root))
+                            .await
+                    };
+                    if let Err(e) = started {
+                        warn!(tenant = %tenant, language = ?language, error = %e,
+                            "LSP backfill: could not start server (cap/unsupported) — skipping language");
+                        continue;
+                    }
+
+                    // A representative source file of this language for the
+                    // readiness check (its extension identifies the language).
+                    let rep_abs: Option<String> = {
+                        let guard = graph_store.read().await;
+                        let ph: Vec<String> =
+                            (0..lang_ids.len()).map(|i| format!("?{}", i + 2)).collect();
+                        let sql = format!(
+                            "SELECT file_path FROM graph_nodes \
+                             WHERE tenant_id = ?1 AND file_path <> '' \
+                               AND symbol_type IN ('function','async_function','method') \
+                               AND language IN ({}) LIMIT 1",
+                            ph.join(", ")
+                        );
+                        let mut q = sqlx::query_scalar::<_, String>(&sql).bind(&tenant);
+                        for l in &lang_ids {
+                            q = q.bind(l);
+                        }
+                        q.fetch_optional(guard.pool())
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|rel| format!("{}/{}", root.trim_end_matches('/'), rel))
+                    };
+
+                    // Warm-up wait + health guard. start_server returns before the
+                    // server finishes indexing, so querying it immediately yields
+                    // nothing (the cold-LSP no-op). Poll until ready + a settle
+                    // dwell; bail early if the server turns unhealthy — a
+                    // crash-looping jdtls (generated/partial Java, no build model)
+                    // never becomes healthy, and stopping it here also prevents the
+                    // health monitor's restart loop.
+                    let start = tokio::time::Instant::now();
+                    let mut ready_since: Option<tokio::time::Instant> = None;
+                    let mut warm = false;
+                    loop {
+                        let (gone, unhealthy, ready) = {
+                            let mgr = lsp_manager.read().await;
+                            let state = mgr.get_server_state(&tenant, language.clone()).await;
+                            let gone = state.is_none();
+                            let unhealthy = state
+                                .map(|st| {
+                                    st.marked_unavailable
+                                        || matches!(
+                                            st.status,
+                                            ServerStatus::Failed | ServerStatus::Stopping
+                                        )
+                                })
+                                .unwrap_or(false);
+                            let ready = match rep_abs.as_ref() {
+                                Some(f) => {
+                                    mgr.is_server_ready_for_file(&tenant, std::path::Path::new(f))
+                                        .await
+                                }
+                                None => start.elapsed() >= warm_after_ready,
+                            };
+                            (gone, unhealthy, ready)
+                        };
+                        if gone {
+                            warn!(tenant = %tenant, language = ?language,
+                                "LSP backfill: server vanished during warm-up — skipping");
+                            break;
+                        }
+                        if unhealthy {
+                            warn!(tenant = %tenant, language = ?language,
+                                "LSP backfill: server unhealthy (e.g. crash-looping jdtls) — skipping");
+                            break;
+                        }
+                        if ready {
+                            let since = ready_since.get_or_insert_with(|| {
+                                info!(tenant = %tenant, language = ?language,
+                                    warm_secs = warm_after_ready.as_secs(),
+                                    "LSP backfill: server ready — warming before resolve");
+                                tokio::time::Instant::now()
+                            });
+                            if since.elapsed() >= warm_after_ready {
+                                warm = true;
+                                break;
+                            }
+                        }
+                        if start.elapsed() >= ready_timeout {
+                            warn!(tenant = %tenant, language = ?language,
+                                "LSP backfill: warm-up timed out — skipping");
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(POLL_SECS)).await;
+                    }
+
+                    if warm {
+                        let superseded =
+                            workspace_qdrant_core::graph::lsp_backfill::run_backfill_tenant(
+                                &graph_store,
+                                &lsp_manager,
+                                &tenant,
+                                &root,
+                                &lang_ids,
+                            )
+                            .await;
+                        info!(tenant = %tenant, language = ?language, superseded,
+                            "LSP backfill: superseded fuzzy CALLS with precise LSP edges");
+                    }
+
+                    // Always stop the enrichment server we started (frees the slot
+                    // and deregisters it so the health monitor won't keep an
+                    // unhealthy one alive).
+                    if let Err(e) =
+                        lsp_manager.read().await.stop_server(&tenant, language.clone()).await
+                    {
+                        warn!(tenant = %tenant, language = ?language, error = %e,
+                            "LSP backfill: stop_server failed");
+                    }
                 }
             }
         }
@@ -891,7 +1030,7 @@ pub fn start_graph_metrics_refresh(
             // Snapshot counts under the read guard, then drop it before touching
             // the Prometheus registry (mirrors start_graph_stub_resolver, which
             // also avoids holding the store lock across unrelated work).
-            let (nodes, stubs, edges) = {
+            let (nodes, stubs, edges, by_language) = {
                 let guard = graph_store.read().await;
                 let pool = guard.pool();
                 let nodes: Vec<(String, String, i64)> = sqlx::query_as(
@@ -931,7 +1070,17 @@ pub fn start_graph_metrics_refresh(
                 .fetch_all(pool)
                 .await
                 .unwrap_or_default();
-                (nodes, stubs, edges)
+                // Project x language: node count per tenant per language (NULL/''
+                // folded to 'unknown'). Powers the "Project x Language" view.
+                let by_language: Vec<(String, String, i64)> = sqlx::query_as(
+                    "SELECT tenant_id, COALESCE(NULLIF(language, ''), 'unknown') AS language, \
+                            COUNT(*) \
+                     FROM graph_nodes GROUP BY tenant_id, language",
+                )
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+                (nodes, stubs, edges, by_language)
             };
 
             METRICS.graph_nodes.reset();
@@ -953,6 +1102,13 @@ pub fn start_graph_metrics_refresh(
                 METRICS
                     .graph_edges
                     .with_label_values(&[tenant.as_str(), edge_type.as_str()])
+                    .set(*n);
+            }
+            METRICS.graph_nodes_by_language.reset();
+            for (tenant, language, n) in &by_language {
+                METRICS
+                    .graph_nodes_by_language
+                    .with_label_values(&[tenant.as_str(), language.as_str()])
                     .set(*n);
             }
         }
