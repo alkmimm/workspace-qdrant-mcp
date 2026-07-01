@@ -241,7 +241,10 @@ async fn run_tracking_transaction(
 ) -> Result<i64, UnifiedProcessorError> {
     let meta = build_file_track_meta(file_path, document_content, treesitter_status);
 
-    let mut tx = pool.begin().await.map_err(|e| {
+    // BEGIN IMMEDIATE (see db_retry): takes the SQLite write lock up front so the
+    // read→write body can't hit SQLITE_BUSY_SNAPSHOT (517), and retries the BEGIN
+    // on transient busy/locked with jittered backoff.
+    let mut tx = crate::db_retry::begin_immediate(pool).await.map_err(|e| {
         UnifiedProcessorError::QueueOperation(format!("Failed to begin transaction: {}", e))
     })?;
 

@@ -14,6 +14,7 @@ pub mod config;
 pub mod core_types;
 pub mod cross_project_search;
 pub mod daemon_state;
+pub mod db_retry;
 pub mod document_id;
 pub mod document_processor;
 pub mod embedding;

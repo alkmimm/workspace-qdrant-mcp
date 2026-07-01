@@ -138,9 +138,8 @@ pub(super) async fn try_branch_dedup(
         .map(|s| s.to_lowercase());
     let is_test = crate::file_classification::is_test_file(file_path);
 
-    let mut tx = ctx
-        .pool
-        .begin()
+    // BEGIN IMMEDIATE + busy retry (see db_retry) to avoid SQLITE_BUSY_SNAPSHOT.
+    let mut tx = crate::db_retry::begin_immediate(&ctx.pool)
         .await
         .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("dedup tx begin: {e}")))?;
     let file_id = tracked_files_schema::insert_tracked_file_tx(

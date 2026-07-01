@@ -96,7 +96,8 @@ async fn record_tracked_file(
         UnifiedProcessorError::QueueOperation(format!("tracked_files lookup failed: {}", e))
     })?;
 
-    let mut tx = pool.begin().await.map_err(|e| {
+    // BEGIN IMMEDIATE + busy retry (see db_retry) to avoid SQLITE_BUSY_SNAPSHOT.
+    let mut tx = crate::db_retry::begin_immediate(pool).await.map_err(|e| {
         UnifiedProcessorError::QueueOperation(format!("Failed to begin transaction: {}", e))
     })?;
 
