@@ -319,6 +319,7 @@ graph({
     edgeTypes?: string[],               // Filter: ["CALLS","IMPORTS","CONTAINS","USES_TYPE"] (default: all)
     maxHops?: number,                   // Traversal depth for "relations" (1-5, default: 1)
     topK?: number,                      // Top results for "hotspots"/"bridges" (default: 20)
+    minConfidence?: number,             // "relations"/"impact"/"usages": drop nodes below this best-path confidence (0-1; 0/omit = all; >1 rejected)
     maxSamples?: number,                // "bridges": sample N sources on large graphs (0 = exact)
     minSize?: number,                   // Minimum community size for "modules" (default: 2)
     projectId?: string,                 // Tenant (default: first active project)

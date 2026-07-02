@@ -43,6 +43,24 @@ function num(args: JsonObject, key: string): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }
 
+/**
+ * Extract and validate `minConfidence` (shared by relations/impact/usages).
+ * Confidence is a best-path edge-weight product in [0,1] — NOT a percentage; a
+ * threshold above 1.0 would silently filter out every node (all confidences are
+ * <= 1.0), indistinguishable from "no relations exist", so out-of-range values
+ * are rejected loudly here before any daemon call.
+ */
+function minConfidenceArg(args: JsonObject): number | undefined {
+  const v = num(args, 'minConfidence');
+  if (v !== undefined && (v < 0 || v > 1)) {
+    throw new Error(
+      `\`minConfidence\` must be within [0, 1], got ${v} — confidence is a best-path ` +
+        'edge-weight product (e.g. 0.5), not a percentage.'
+    );
+  }
+  return v;
+}
+
 function strArray(args: JsonObject, key: string): string[] | undefined {
   const v = args[key];
   if (Array.isArray(v)) {
@@ -132,6 +150,9 @@ export async function handleGraph(
       const symbol = str(args, 'symbol');
       if (!symbol) throw new Error(`graph action '${action}' requires \`symbol\``);
       const filePath = str(args, 'filePath');
+      // Precision filter: drop nodes below this best-path confidence at the
+      // daemon (before top_k + total_impacted). Omitted = all. See tool desc.
+      const minConfidence = minConfidenceArg(args);
       // Bound the impacted-node list: the daemon caps to top_k (nearest-by-depth
       // first) and still returns the true total_impacted. topK<=0 = all.
       const req: ImpactAnalysisRequest = {
@@ -139,6 +160,7 @@ export async function handleGraph(
         symbol_name: symbol,
         top_k: num(args, 'topK') ?? 50,
         ...(filePath ? { file_path: filePath } : {}),
+        ...(minConfidence !== undefined ? { min_confidence: minConfidence } : {}),
       };
       const r = await daemonClient.impactAnalysis(req);
       if (action === 'usages') {
@@ -237,6 +259,7 @@ export async function handleGraph(
       }
       const symbolType = str(args, 'symbolType') ?? 'function';
       const nodeId = computeNodeId(tenant, filePath, symbol, symbolType);
+      const minConfidence = minConfidenceArg(args);
       const req: QueryRelatedRequest = {
         tenant_id: tenant,
         node_id: nodeId,
@@ -244,6 +267,9 @@ export async function handleGraph(
         // Daemon caps the traversal list to top_k (nearest-by-depth first) and
         // returns the true total. topK<=0 = all.
         top_k: num(args, 'topK') ?? 50,
+        // Precision filter: drop nodes below this best-path confidence at the
+        // daemon (before top_k + total). Omitted = all. See tool desc.
+        ...(minConfidence !== undefined ? { min_confidence: minConfidence } : {}),
         // Default to dependency edges (exclude CONTAINS membership) so relations
         // is a DEPENDENCY MAP, not an internal member inventory. Explicit
         // `edgeTypes` (e.g. ["CONTAINS"]) overrides — the membership escape hatch.

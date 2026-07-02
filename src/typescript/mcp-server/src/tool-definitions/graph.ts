@@ -14,7 +14,8 @@ export const graphToolDefinition = {
     'Navigate the code-relationship graph: callers/callees, change-impact, importance ranking, and module clusters. ' +
     'Built from symbol relations (calls, contains, uses-type, imports) extracted during indexing. ' +
     'Use this to understand how code connects before editing — e.g. "what calls this function?", "what breaks if I change X?", "what are the most central functions?". ' +
-    'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules → none (project-wide).',
+    'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules → none (project-wide). ' +
+    'Each relations/impact/usages node carries a `confidence` (best-path certainty): ~1.0 precise, 0.7 tenant-unique name, ~1/N (e.g. 0.17) an ambiguous same-name fan-out; pass `minConfidence` (e.g. 0.5) to suppress the low-confidence homonym noise.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -48,12 +49,17 @@ export const graphToolDefinition = {
         type: 'number',
         default: 20,
         description:
-          "Max results: top symbols for 'hotspots'/'bridges', top-K largest clusters for 'modules' (default 20), and max nodes returned for 'impact'/'usages'/'relations' (nearest-first, default 50; 0 = all — the true total is still reported).",
+          "Max results: top symbols for 'hotspots'/'bridges', top-K largest clusters for 'modules' (default 20), and max nodes returned for 'impact'/'usages'/'relations' (nearest-first, default 50; 0 = all — the true total is still reported; when minConfidence is set, totals count the filtered set).",
       },
       maxSamples: {
         type: 'number',
         description:
           "For 'bridges': sample N source nodes for betweenness on large graphs (0/omit = exact).",
+      },
+      minConfidence: {
+        type: 'number',
+        description:
+          "For 'relations'/'impact'/'usages': drop nodes whose best-path `confidence` is below this (0-1), applied at the daemon BEFORE topK and the reported total (so topK fills with passing nodes). Each node's confidence is the best-path edge-weight product: ~1.0 precise, 0.7 tenant-unique name, ~1/N (e.g. 0.17) an ambiguous same-name fan-out. Use ~0.5 for a precise view that suppresses homonym noise. Omitted/0 = no filter; values outside [0,1] are rejected (confidence is a product, not a percentage).",
       },
       minSize: {
         type: 'number',

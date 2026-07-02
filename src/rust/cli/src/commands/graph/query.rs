@@ -11,6 +11,7 @@ pub async fn query_related(
     tenant_id: &str,
     max_hops: u32,
     edge_types: Vec<String>,
+    min_confidence: Option<f64>,
 ) -> Result<()> {
     output::section("Graph Query");
     output::kv("Node ID", node_id);
@@ -18,6 +19,9 @@ pub async fn query_related(
     output::kv("Max Hops", max_hops.to_string());
     if !edge_types.is_empty() {
         output::kv("Edge Types", edge_types.join(", "));
+    }
+    if let Some(mc) = min_confidence {
+        output::kv("Min Confidence", format!("{mc}"));
     }
     output::separator();
 
@@ -38,6 +42,7 @@ pub async fn query_related(
             // can't compute a matching node_id (the MCP relations tool).
             symbol_name: None,
             file_path: None,
+            min_confidence,
         })
         .await
         .context("QueryRelated RPC failed")?

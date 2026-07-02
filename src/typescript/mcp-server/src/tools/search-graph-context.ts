@@ -111,6 +111,10 @@ async function enrichOneResult(
 ): Promise<void> {
   try {
     const response = await Promise.race([
+      // Deliberately NO min_confidence here (unlike the graph tool): this is a
+      // recall-over-precision HINT lane — in a homonym fan-out one of the 1/N
+      // candidates IS the real edge, and dropping all of them would hide it.
+      // Agents wanting a precise view call graph(action=..., minConfidence).
       daemonClient.queryRelated({
         tenant_id: target.tenantId,
         node_id: target.nodeId,

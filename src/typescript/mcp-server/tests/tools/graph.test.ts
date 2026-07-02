@@ -246,6 +246,69 @@ describe('handleGraph', () => {
     });
   });
 
+  it('minConfidence threads to the daemon for relations/impact/usages (and is omitted otherwise)', async () => {
+    const { client, mocks } = mockClient();
+    const { detector } = mockDetector(null);
+
+    // relations: forwarded as min_confidence.
+    await handleGraph(
+      { action: 'relations', symbol: 'x', filePath: 'a.rs', projectId: 't1', minConfidence: 0.5 },
+      client,
+      detector
+    );
+    expect(mocks['queryRelated']).toHaveBeenLastCalledWith(
+      expect.objectContaining({ min_confidence: 0.5 })
+    );
+
+    // impact: forwarded.
+    await handleGraph(
+      { action: 'impact', symbol: 'x', projectId: 't1', minConfidence: 0.7 },
+      client,
+      detector
+    );
+    expect(mocks['impactAnalysis']).toHaveBeenLastCalledWith(
+      expect.objectContaining({ min_confidence: 0.7 })
+    );
+
+    // usages: shares ImpactAnalysis; forwarded too.
+    await handleGraph(
+      { action: 'usages', symbol: 'x', projectId: 't1', minConfidence: 0.9 },
+      client,
+      detector
+    );
+    expect(mocks['impactAnalysis']).toHaveBeenLastCalledWith(
+      expect.objectContaining({ min_confidence: 0.9 })
+    );
+
+    // Omitted: request carries NO min_confidence key (backward-compatible).
+    await handleGraph(
+      { action: 'relations', symbol: 'x', filePath: 'a.rs', projectId: 't1' },
+      client,
+      detector
+    );
+    expect(mocks['queryRelated']).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ min_confidence: expect.anything() })
+    );
+  });
+
+  it('minConfidence outside [0,1] is rejected before any daemon call', async () => {
+    const { client, mocks } = mockClient();
+    const { detector } = mockDetector(null);
+    // > 1 would silently filter out EVERY node daemon-side (confidence <= 1.0).
+    await expect(
+      handleGraph({ action: 'impact', symbol: 'x', projectId: 't1', minConfidence: 2 }, client, detector)
+    ).rejects.toThrow(/minConfidence.*\[0, 1\]/);
+    await expect(
+      handleGraph(
+        { action: 'relations', symbol: 'x', filePath: 'a.rs', projectId: 't1', minConfidence: -0.5 },
+        client,
+        detector
+      )
+    ).rejects.toThrow(/minConfidence.*\[0, 1\]/);
+    expect(mocks['impactAnalysis']).not.toHaveBeenCalled();
+    expect(mocks['queryRelated']).not.toHaveBeenCalled();
+  });
+
   it('relations excludes CONTAINS by default; explicit edgeTypes overrides', async () => {
     const { client, mocks } = mockClient();
     const { detector } = mockDetector(null);

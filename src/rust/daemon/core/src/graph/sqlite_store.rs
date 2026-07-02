@@ -448,22 +448,47 @@ impl GraphStore for SqliteGraphStore {
 
             let mut next: Vec<(String, String, f64)> = Vec::new();
             {
+                use std::collections::hash_map::Entry;
                 let parent: HashMap<&str, (&str, f64)> = frontier
                     .iter()
                     .map(|(n, p, c)| (n.as_str(), (p.as_str(), *c)))
                     .collect();
+                // Aggregate this hop's arrivals per target, keeping the
+                // HIGHEST-confidence edge. Row order is arbitrary (no ORDER BY);
+                // first-wins would record whichever path came back first,
+                // understating `confidence` (documented as the best-path
+                // product) and, under a `min_confidence` filter, wrongly
+                // dropping nodes that also have a strong same-depth path. BFS
+                // min-depth still wins ACROSS hops: a longer stronger path does
+                // not override a shorter weaker one.
+                let mut best: HashMap<String, (String, String, f64)> = HashMap::new();
                 for row in &rows {
                     let tgt: String = row.get("target_node_id");
-                    if !visited.insert(tgt.clone()) {
-                        continue; // already reached at an equal-or-shallower depth
+                    if visited.contains(&tgt) {
+                        continue; // already reached at a shallower depth
                     }
                     let src: String = row.get("source_node_id");
                     let edge_type: String = row.get("edge_type");
                     let weight: f64 = row.get("w");
                     let (ppath, pconf) =
                         parent.get(src.as_str()).copied().unwrap_or((node_id, 1.0));
-                    let path = format!("{ppath} -> {tgt}");
                     let confidence = pconf * weight;
+                    match best.entry(tgt) {
+                        Entry::Vacant(e) => {
+                            e.insert((edge_type, ppath.to_string(), confidence));
+                        }
+                        Entry::Occupied(mut e) => {
+                            if confidence > e.get().2 {
+                                e.insert((edge_type, ppath.to_string(), confidence));
+                            }
+                        }
+                    }
+                }
+                for (tgt, (edge_type, ppath, confidence)) in best {
+                    if !visited.insert(tgt.clone()) {
+                        continue;
+                    }
+                    let path = format!("{ppath} -> {tgt}");
                     hits.push((tgt.clone(), edge_type, depth, path.clone(), confidence));
                     next.push((tgt, path, confidence));
                     if visited.len() >= NODE_BUDGET {
@@ -1188,11 +1213,16 @@ impl SqliteGraphStore {
 
             let mut next: Vec<(String, f64)> = Vec::new();
             {
+                use std::collections::hash_map::Entry;
                 let parent: HashMap<&str, f64> =
                     frontier.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+                // Same best-arrival aggregation as query_related: keep the
+                // HIGHEST-confidence edge per caller within this hop instead of
+                // whichever row the (unordered) query happened to return first.
+                let mut best: HashMap<String, (String, f64)> = HashMap::new();
                 for row in &rows {
                     let src: String = row.get("source_node_id"); // the caller
-                    if !visited.insert(src.clone()) {
+                    if visited.contains(&src) {
                         continue;
                     }
                     let tgt: String = row.get("target_node_id");
@@ -1200,6 +1230,21 @@ impl SqliteGraphStore {
                     let weight: f64 = row.get("w");
                     let pconf = parent.get(tgt.as_str()).copied().unwrap_or(1.0);
                     let confidence = pconf * weight;
+                    match best.entry(src) {
+                        Entry::Vacant(e) => {
+                            e.insert((edge_type, confidence));
+                        }
+                        Entry::Occupied(mut e) => {
+                            if confidence > e.get().1 {
+                                e.insert((edge_type, confidence));
+                            }
+                        }
+                    }
+                }
+                for (src, (edge_type, confidence)) in best {
+                    if !visited.insert(src.clone()) {
+                        continue;
+                    }
                     hits.push((src.clone(), edge_type, distance, confidence));
                     next.push((src, confidence));
                     if visited.len() >= NODE_BUDGET {

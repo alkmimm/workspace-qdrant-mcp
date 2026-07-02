@@ -18,7 +18,7 @@ use crate::proto::{
 };
 use crate::validation::extract_relative_path;
 
-use super::helpers::parse_edge_type_filter;
+use super::helpers::{parse_edge_type_filter, retain_min_confidence};
 use super::service_impl::GraphServiceImpl;
 
 #[tonic::async_trait]
@@ -36,6 +36,14 @@ impl GraphService for GraphServiceImpl {
         if req.node_id.is_empty() && req.symbol_name.as_deref().map_or(true, str::is_empty) {
             return Err(Status::invalid_argument(
                 "either node_id or symbol_name is required",
+            ));
+        }
+        // Confidence is a product in [0,1]; a threshold above 1.0 would silently
+        // filter out EVERY node (indistinguishable from "no relations"), so
+        // reject it loudly — the classic mistake is passing a percentage.
+        if req.min_confidence.is_some_and(|m| m > 1.0) {
+            return Err(Status::invalid_argument(
+                "min_confidence must be within [0.0, 1.0] (best-path edge-weight product, not a percentage)",
             ));
         }
 
@@ -111,6 +119,11 @@ impl GraphService for GraphServiceImpl {
             }
         }
 
+        // Precision filter (MCP `minConfidence`): drop low-confidence homonym
+        // fan-out BEFORE the top_k cap and `total`, so top_k fills with passing
+        // nodes and `total` reflects the filtered set. 0/absent = no filter.
+        retain_min_confidence(&mut nodes, req.min_confidence, |n| n.confidence);
+
         let query_time_ms = start.elapsed().as_millis() as i64;
         let total = nodes.len() as u32;
         let proto_nodes: Vec<TraversalNodeProto> = nodes
@@ -148,6 +161,12 @@ impl GraphService for GraphServiceImpl {
         if req.symbol_name.is_empty() {
             return Err(Status::invalid_argument("symbol_name is required"));
         }
+        // Same guard as query_related: >1.0 would silently empty the result.
+        if req.min_confidence.is_some_and(|m| m > 1.0) {
+            return Err(Status::invalid_argument(
+                "min_confidence must be within [0.0, 1.0] (best-path edge-weight product, not a percentage)",
+            ));
+        }
 
         // Validate optional file_path as RelativePath when present and non-empty.
         let validated_file_path = match req.file_path.as_deref().filter(|p| !p.is_empty()) {
@@ -180,8 +199,20 @@ impl GraphService for GraphServiceImpl {
             .await;
 
         match result {
-            Ok(report) => {
+            Ok(mut report) => {
                 let query_time_ms = start.elapsed().as_millis() as i64;
+
+                // Precision filter (MCP `minConfidence`): drop low-confidence
+                // nodes BEFORE the top_k cap and total_impacted, so both reflect
+                // the filtered set. 0/absent = no filter (CLI output unchanged).
+                retain_min_confidence(&mut report.impacted_nodes, req.min_confidence, |n| {
+                    n.confidence
+                });
+                // Both backends set total_impacted = impacted_nodes.len(), so
+                // recomputing unconditionally is an identity when no filter ran
+                // and correct when it did — no flag to drift from the helper's
+                // internal predicate.
+                let total_impacted = report.impacted_nodes.len() as u32;
 
                 let impacted_nodes: Vec<ImpactNodeProto> = report
                     .impacted_nodes
@@ -196,8 +227,6 @@ impl GraphService for GraphServiceImpl {
                         confidence: n.confidence,
                     })
                     .collect();
-
-                let total_impacted = report.total_impacted;
 
                 Ok(Response::new(ImpactAnalysisResponse {
                     impacted_nodes,

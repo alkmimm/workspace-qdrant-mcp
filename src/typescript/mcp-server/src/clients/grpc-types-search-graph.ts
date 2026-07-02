@@ -57,6 +57,8 @@ export interface QueryRelatedRequest {
   symbol_name?: string;
   /** Optional narrowing for symbol_name resolution. */
   file_path?: string;
+  /** Drop nodes whose best-path confidence < this (0/absent = all); precision filter for homonym fan-out. */
+  min_confidence?: number;
 }
 
 export interface QueryRelatedResponse {
@@ -73,7 +75,7 @@ export interface TraversalNodeProto {
   edge_type: string;
   depth: number;
   path: string;
-  /** Best-path edge-weight product in [0,1]: resolution certainty (1.0 precise, 0.95 scoped, 0.85 same-package, 0.7 tenant-unique, <0.6 ambiguous name-collision). */
+  /** Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.95 scoped, 0.85 same-package, 0.7 tenant-unique, <0.6 ambiguous name-collision. */
   confidence: number;
 }
 
@@ -83,6 +85,8 @@ export interface ImpactAnalysisRequest {
   file_path?: string;
   /** Max impacted nodes returned, nearest-first (0/absent = all). */
   top_k?: number;
+  /** Drop impacted nodes whose best-path confidence < this (0/absent = all). */
+  min_confidence?: number;
 }
 
 export interface ImpactAnalysisResponse {
@@ -97,7 +101,7 @@ export interface ImpactNodeProto {
   file_path: string;
   impact_type: string;
   distance: number;
-  /** Best-path edge-weight product in [0,1]: resolution certainty (1.0 precise, 0.95 scoped, 0.85 same-package, 0.7 tenant-unique, <0.6 ambiguous name-collision). */
+  /** Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.95 scoped, 0.85 same-package, 0.7 tenant-unique, <0.6 ambiguous name-collision. */
   confidence: number;
 }
 

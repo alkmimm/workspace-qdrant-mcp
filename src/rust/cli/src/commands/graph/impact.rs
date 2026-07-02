@@ -10,12 +10,16 @@ pub async fn impact_analysis(
     symbol_name: &str,
     tenant_id: &str,
     file_path: Option<String>,
+    min_confidence: Option<f64>,
 ) -> Result<()> {
     output::section("Impact Analysis");
     output::kv("Symbol", symbol_name);
     output::kv("Tenant", tenant_id);
     if let Some(ref fp) = file_path {
         output::kv("File", fp);
+    }
+    if let Some(mc) = min_confidence {
+        output::kv("Min Confidence", format!("{mc}"));
     }
     output::separator();
 
@@ -31,6 +35,7 @@ pub async fn impact_analysis(
             file_path,
             // CLI shows all impacted nodes; top_k (MCP-only cap) stays unset.
             top_k: None,
+            min_confidence,
         })
         .await
         .context("ImpactAnalysis RPC failed")?
