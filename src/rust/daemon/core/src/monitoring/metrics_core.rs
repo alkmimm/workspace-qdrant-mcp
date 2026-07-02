@@ -239,10 +239,6 @@ pub struct DaemonMetrics {
     /// Labels: language
     pub lsp_server_state: IntGaugeVec,
 
-    /// Cumulative LSP enrichment attempts by outcome.
-    /// Labels: status (success, partial, failed, skipped, pending)
-    pub lsp_enrichments_total: IntCounterVec,
-
     /// Number of language server binaries detected in PATH at last scan.
     pub lsp_available_languages: IntGauge,
 
@@ -324,7 +320,6 @@ struct CreatedMetrics {
     fts5_skipped_files_count: IntGaugeVec,
     fts5_skipped_files_total: IntCounterVec,
     lsp_server_state: IntGaugeVec,
-    lsp_enrichments_total: IntCounterVec,
     lsp_available_languages: IntGauge,
     lsp_active_servers: IntGauge,
     graph_nodes: IntGaugeVec,
@@ -410,7 +405,7 @@ fn create_all_metrics() -> CreatedMetrics {
 
     let tracked_files_by_chunking = create_chunking_coverage_metrics();
 
-    let (lsp_server_state, lsp_enrichments_total) = create_lsp_metrics();
+    let lsp_server_state = create_lsp_metrics();
 
     let lsp_available_languages = IntGauge::new(
         "memexd_lsp_available_languages",
@@ -484,7 +479,6 @@ fn create_all_metrics() -> CreatedMetrics {
         fts5_skipped_files_count,
         fts5_skipped_files_total,
         lsp_server_state,
-        lsp_enrichments_total,
         lsp_available_languages,
         lsp_active_servers,
         graph_nodes,
@@ -551,7 +545,6 @@ fn register_metrics(registry: &Registry, m: &CreatedMetrics) {
             Box::new(m.fts5_skipped_files_count.clone()),
             Box::new(m.fts5_skipped_files_total.clone()),
             Box::new(m.lsp_server_state.clone()),
-            Box::new(m.lsp_enrichments_total.clone()),
             Box::new(m.lsp_available_languages.clone()),
             Box::new(m.lsp_active_servers.clone()),
             Box::new(m.graph_nodes.clone()),
@@ -623,7 +616,6 @@ impl DaemonMetrics {
             fts5_skipped_files_count: m.fts5_skipped_files_count,
             fts5_skipped_files_total: m.fts5_skipped_files_total,
             lsp_server_state: m.lsp_server_state,
-            lsp_enrichments_total: m.lsp_enrichments_total,
             lsp_available_languages: m.lsp_available_languages,
             lsp_active_servers: m.lsp_active_servers,
             graph_nodes: m.graph_nodes,
@@ -725,16 +717,6 @@ impl DaemonMetrics {
 
     // ── LSP helpers ───────────────────────────────────────────────────────
 
-    /// Increment the LSP enrichment counter for one chunk outcome.
-    ///
-    /// Called inline by the chunk-embed pipeline when an enrichment attempt
-    /// completes (or is skipped). `status` should be one of: `"success"`,
-    /// `"partial"`, `"failed"`, `"skipped"`, `"pending"`.
-    pub fn inc_lsp_enrichment(&self, status: &str) {
-        self.lsp_enrichments_total
-            .with_label_values(&[status])
-            .inc();
-    }
 
     /// Set the running state for a language (1 = running, 0 = stopped).
     ///
