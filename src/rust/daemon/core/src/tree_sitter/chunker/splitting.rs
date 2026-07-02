@@ -163,15 +163,29 @@ fn split_chunk_with_overlap(chunk: &SemanticChunk, max_chunk_size: usize) -> Vec
         if actual_end >= content.len() {
             break;
         }
-        // Stride strictly forward by `step_size`, which yields the intended
+        // Stride forward by `step_size`, which yields the intended
         // `FRAGMENT_OVERLAP`-char overlap between consecutive fragments
         // (step_size = target_size - FRAGMENT_OVERLAP). Because `actual_end` is
-        // guaranteed `>= start + step_size` above, this never leaves a gap. The
-        // `actual_end` fallback covers the degenerate `step_size == 1` case
-        // where char-boundary rounding could otherwise stall `start` and loop
-        // forever.
+        // guaranteed `>= start + step_size` above, this never leaves a gap.
         let next_start = safe_char_boundary(content, start + step_size);
-        start = if next_start > start {
+        // Snap the next fragment's start back to the beginning of the line it
+        // lands in, so a fragment begins at a line boundary instead of in the
+        // middle of a token — a stride landing inside `configKey` would
+        // otherwise open the fragment at `gKey`. Only the fragment *end* used
+        // to honor line boundaries; the start did not. Accept the line anchor
+        // only when it is strictly ahead of `start` AND pulls back no more than
+        // the overlap budget: a long run without interior newlines (minified
+        // JS, single-line JSON, lockfiles, base64 blobs) has no usable boundary
+        // there, so fall back to the raw char-boundary stride — mirroring the
+        // `window_end` fallback used for the end above and preserving forward
+        // progress. `next_start` is the floor, so anchoring only ever grows the
+        // overlap and never opens a coverage gap. The final `actual_end`
+        // fallback covers the degenerate `step_size == 1` case where
+        // char-boundary rounding could otherwise stall `start` and loop forever.
+        let line_start = line_start_at(content, next_start);
+        start = if line_start > start && next_start - line_start <= FRAGMENT_OVERLAP {
+            line_start
+        } else if next_start > start {
             next_start
         } else {
             actual_end
@@ -195,6 +209,14 @@ fn find_line_boundary(content: &str, start: usize, end: usize) -> usize {
     } else {
         end
     }
+}
+
+/// Byte index of the start of the line containing `index` — the position just
+/// after the preceding `'\n'`, or 0 when there is none. `'\n'` is single-byte
+/// ASCII, so the returned index is always a valid UTF-8 char boundary.
+fn line_start_at(content: &str, index: usize) -> usize {
+    let index = index.min(content.len());
+    content[..index].rfind('\n').map(|i| i + 1).unwrap_or(0)
 }
 
 /// Create text chunks as a fallback for unsupported languages or parse errors.

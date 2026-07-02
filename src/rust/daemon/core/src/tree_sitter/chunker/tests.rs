@@ -128,6 +128,47 @@ fn test_split_carries_calls_to_first_fragment() {
 }
 
 #[test]
+fn test_fragments_start_at_line_boundary() {
+    // Regression: oversized-chunk fragments must begin at a line boundary, not
+    // mid-token. Before the line-anchored stride, a fragment could start in the
+    // middle of an identifier (e.g. `configKey` surfaced as `gKey...` from a
+    // retrieve) because only the fragment END snapped to a newline while the
+    // next START used the raw char-boundary offset.
+    let chunker = SemanticChunker::new(200); // target_size = 800, step_size = 300
+
+    // Every line begins with the distinctive `token_NNNN` prefix. ~37-char
+    // lines keep line boundaries well within the 300-char stride, so the anchor
+    // always engages; 100 lines (~3700 chars) forces several fragments.
+    let source: String = (0..100)
+        .map(|i| format!("token_{i:04} = some_value_here_padding\n"))
+        .collect();
+    let chunk = SemanticChunk::new(
+        ChunkType::Function,
+        "big_fn",
+        source,
+        1,
+        100,
+        "rust",
+        "test.rs",
+    );
+
+    let fragments = chunker.split_oversized_chunk(&chunk);
+    assert!(
+        fragments.len() > 1,
+        "expected multiple fragments, got {}",
+        fragments.len()
+    );
+    for (i, frag) in fragments.iter().enumerate() {
+        let head_len = frag.content.len().min(24);
+        assert!(
+            frag.content.starts_with("token_"),
+            "fragment {i} starts mid-line, not at a token boundary: {:?}",
+            &frag.content[..head_len]
+        );
+    }
+}
+
+#[test]
 fn test_safe_char_boundary() {
     // ASCII: all byte indices are char boundaries
     assert_eq!(safe_char_boundary("hello", 3), 3);
