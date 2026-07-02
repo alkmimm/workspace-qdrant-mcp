@@ -39,7 +39,7 @@
 | **F0.3** | GC de watches `local_*` órfãos (worktrees `.claude/` mortos) | 0–1 | S–M | baixo | baixo-médio | ☐ |
 | **F1.1** | `minConfidence` em `relations`/`impact`/`usages` (daemon-side) | 1 | M | baixo-méd | **alto** | ◐ PR aberto (review 12 achados aplicados; inclui fix best-path no BFS + CLI `--min-confidence`) |
 | **F1.2** | Documentar semântica de confidence na descrição da tool `graph` | 1 | S | baixo | médio | ◐ mesma PR |
-| **F2.1** | Diagnóstico uplift no-op + decisão: enrichment de chunk × R8-edges | 2 | M (investigação) | médio | alto (destrava) | ◐ decisão registrada (§5) + retirada implementada; card R9 criado no plano R8 |
+| **F2.1** | Diagnóstico uplift no-op + decisão: enrichment de chunk × R8-edges | 2 | M (investigação) | médio | alto (destrava) | ◐ decisão em §5; retirada em PR [#197](https://github.com/alkmimm/workspace-qdrant-mcp/pull/197); card R9 no plano R8 |
 | **F2.2** | Atribuir `language` a nós file/module (~20-25% "unknown") | 2 | S–M | baixo | baixo | ☐ |
 | — | Dart warm-resolve = 0 | — | — | — | — | ⊘ já coberto por `2026-07-01-r8-lsp-authoritative-edges-plan.md` |
 | — | PT cross-lingual (top3 25%) | — | — | — | — | ⊘ já coberto por P2.8/P2.9 do plano de ergonomia 2026-06-22 |
