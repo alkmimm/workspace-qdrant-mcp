@@ -20,6 +20,18 @@ pub struct GraphArgs {
     command: GraphCommand,
 }
 
+/// Confidence is a best-path edge-weight product in [0,1] — not a percentage.
+/// Reject out-of-range values here so `--min-confidence 50` fails loudly instead
+/// of silently filtering out every node (all confidences are <= 1.0).
+fn parse_confidence(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|e| format!("not a number: {e}"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("must be within 0.0..=1.0 (a probability-like product, not a percentage), got {v}"))
+    }
+}
+
 /// Graph subcommands
 #[derive(Subcommand)]
 enum GraphCommand {
@@ -40,6 +52,10 @@ enum GraphCommand {
         /// Edge type filter (comma-separated: CALLS,IMPORTS,CONTAINS,USES_TYPE,EXTENDS,IMPLEMENTS)
         #[arg(long, value_delimiter = ',')]
         edge_types: Vec<String>,
+
+        /// Drop nodes whose best-path confidence is below this (0-1; omit = all)
+        #[arg(long, value_parser = parse_confidence)]
+        min_confidence: Option<f64>,
     },
 
     /// Impact analysis: find nodes affected by changing a symbol
@@ -55,6 +71,10 @@ enum GraphCommand {
         /// Narrow to specific file path
         #[arg(long)]
         file: Option<String>,
+
+        /// Drop impacted nodes whose best-path confidence is below this (0-1; omit = all)
+        #[arg(long, value_parser = parse_confidence)]
+        min_confidence: Option<f64>,
     },
 
     /// Graph statistics (node/edge counts)
@@ -160,12 +180,14 @@ pub async fn execute(args: GraphArgs) -> Result<()> {
             tenant,
             hops,
             edge_types,
-        } => query::query_related(&node_id, &tenant, hops, edge_types).await,
+            min_confidence,
+        } => query::query_related(&node_id, &tenant, hops, edge_types, min_confidence).await,
         GraphCommand::Impact {
             symbol,
             tenant,
             file,
-        } => impact::impact_analysis(&symbol, &tenant, file).await,
+            min_confidence,
+        } => impact::impact_analysis(&symbol, &tenant, file, min_confidence).await,
         GraphCommand::Stats { tenant } => stats::graph_stats(tenant).await,
         GraphCommand::Pagerank {
             tenant,

@@ -119,6 +119,82 @@ async fn test_query_related_edge_type_filter() {
     assert_eq!(results[0].node_id, c.node_id);
 }
 
+#[tokio::test]
+async fn test_query_related_same_depth_keeps_strongest_path_confidence() {
+    let store = test_store().await;
+
+    // s -(0.2)-> m_weak -(1.0)-> c        (product 0.2)
+    // s -(0.9)-> m_strong -(1.0)-> c      (product 0.9)
+    // `c` is reached at depth 2 via BOTH parents; the recorded confidence must
+    // be the strongest same-depth arrival (0.9), not whichever row the
+    // unordered per-hop query returned first. (Regression: first-visit-wins
+    // understated `confidence` and, under a min_confidence filter, wrongly
+    // dropped such nodes.)
+    let s = GraphNode::new(TENANT, "s.rs", "s", NodeType::Function);
+    let m_weak = GraphNode::new(TENANT, "mw.rs", "m_weak", NodeType::Function);
+    let m_strong = GraphNode::new(TENANT, "ms.rs", "m_strong", NodeType::Function);
+    let c = GraphNode::new(TENANT, "c.rs", "c", NodeType::Function);
+    store
+        .upsert_nodes(&[s.clone(), m_weak.clone(), m_strong.clone(), c.clone()])
+        .await
+        .unwrap();
+
+    let mut s_to_weak = GraphEdge::new(TENANT, &s.node_id, &m_weak.node_id, EdgeType::Calls, "s.rs");
+    s_to_weak.weight = 0.2;
+    let mut s_to_strong =
+        GraphEdge::new(TENANT, &s.node_id, &m_strong.node_id, EdgeType::Calls, "s.rs");
+    s_to_strong.weight = 0.9;
+    // Insert the weak path's edge to `c` FIRST: without best-arrival
+    // aggregation, SQLite's insertion-order rows make first-wins record 0.2.
+    let weak_to_c = GraphEdge::new(TENANT, &m_weak.node_id, &c.node_id, EdgeType::Calls, "mw.rs");
+    let strong_to_c =
+        GraphEdge::new(TENANT, &m_strong.node_id, &c.node_id, EdgeType::Calls, "ms.rs");
+    store
+        .insert_edges(&[s_to_weak, s_to_strong, weak_to_c, strong_to_c])
+        .await
+        .unwrap();
+
+    let results = store.query_related(TENANT, &s.node_id, 2, None).await.unwrap();
+    let c_hit = results
+        .iter()
+        .find(|n| n.node_id == c.node_id)
+        .expect("c reached at depth 2");
+    assert_eq!(c_hit.depth, 2);
+    assert!(
+        (c_hit.confidence - 0.9).abs() < 1e-9,
+        "confidence must be the strongest same-depth path product (0.9), got {}",
+        c_hit.confidence
+    );
+}
+
+#[tokio::test]
+async fn test_impact_same_depth_keeps_strongest_caller_confidence() {
+    let store = test_store().await;
+
+    // x references `target` via TWO parallel edges: CALLS (0.2) and
+    // USES_TYPE (0.9). Reverse traversal must record x with the strongest
+    // edge's confidence, same rationale as the forward test above.
+    let target = GraphNode::new(TENANT, "t.rs", "target", NodeType::Function);
+    let x = GraphNode::new(TENANT, "x.rs", "x", NodeType::Function);
+    store.upsert_nodes(&[target.clone(), x.clone()]).await.unwrap();
+
+    let mut weak = GraphEdge::new(TENANT, &x.node_id, &target.node_id, EdgeType::Calls, "x.rs");
+    weak.weight = 0.2;
+    let mut strong =
+        GraphEdge::new(TENANT, &x.node_id, &target.node_id, EdgeType::UsesType, "x.rs");
+    strong.weight = 0.9;
+    // Weak edge first (see forward test).
+    store.insert_edges(&[weak, strong]).await.unwrap();
+
+    let report = store.impact_analysis(TENANT, "target", None).await.unwrap();
+    assert_eq!(report.total_impacted, 1);
+    assert!(
+        (report.impacted_nodes[0].confidence - 0.9).abs() < 1e-9,
+        "strongest same-depth edge must win, got {}",
+        report.impacted_nodes[0].confidence
+    );
+}
+
 /// A re-convergent (diamond) graph — a -> b, a -> c, b -> d, c -> d — must return
 /// each reachable node ONCE at its minimum depth. The old recursive UNION-ALL CTE
 /// emitted `d` twice (one row per path a->b->d and a->c->d); on a hub-heavy graph

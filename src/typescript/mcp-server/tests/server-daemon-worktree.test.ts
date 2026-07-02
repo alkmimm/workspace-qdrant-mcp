@@ -182,9 +182,11 @@ describe('Session lifecycle — worktree and watch_path scenarios', () => {
       await server.stop();
 
       // watch_path must be included in the deprioritizeProject call
+      // (session_id: per-session is_active tracking, #183 — a fresh UUID per run)
       expect(mockInstance.deprioritizeProject).toHaveBeenCalledWith({
         project_id: 'proj-with-path',
         watch_path: realProjectPath,
+        session_id: expect.any(String),
       });
     } finally {
       process.chdir(originalCwd);

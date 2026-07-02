@@ -207,8 +207,10 @@ describe('Server Integration Tests', () => {
         await server.start();
         await server.stop();
 
+        // session_id: per-session is_active tracking, #183 — a fresh UUID per run
         expect(mockDaemonClient.deprioritizeProject).toHaveBeenCalledWith({
           project_id: 'stop-proj-id',
+          session_id: expect.any(String),
         });
       } finally {
         process.chdir(originalCwd);

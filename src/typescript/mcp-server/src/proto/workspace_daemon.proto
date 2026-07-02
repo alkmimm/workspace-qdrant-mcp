@@ -719,6 +719,7 @@ message QueryRelatedRequest {
     optional uint32 top_k = 5;                    // Max nodes returned, nearest-first (0/absent = all)
     optional string symbol_name = 6;              // Fallback: resolve the source node BY NAME when node_id misses (robust to symbolType/path mismatch)
     optional string file_path = 7;                // Optional narrowing for symbol_name resolution
+    optional double min_confidence = 8;           // Drop nodes whose best-path confidence < this (0/absent = all; >1.0 rejected as INVALID_ARGUMENT); precision filter for homonym fan-out
 }
 
 // QueryRelated Response
@@ -737,7 +738,7 @@ message TraversalNodeProto {
     string edge_type = 5;                         // EdgeType as string (e.g., "CALLS")
     uint32 depth = 6;                             // Hops from source node
     string path = 7;                              // Traversal path description
-    double confidence = 8;                        // Best-path edge-weight product in [0,1]: resolution certainty (1.0 precise, 0.95 scoped, 0.85 proximity, 0.7 unique, <0.6 ambiguous)
+    double confidence = 8;                        // Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.95 scoped, 0.85 proximity, 0.7 unique, <0.6 ambiguous
 }
 
 // ImpactAnalysis Request
@@ -746,6 +747,7 @@ message ImpactAnalysisRequest {
     string symbol_name = 2;                       // Symbol to analyze
     optional string file_path = 3;                // Narrow to specific file
     optional uint32 top_k = 4;                    // Max impacted nodes returned, nearest-first (0/absent = all)
+    optional double min_confidence = 5;           // Drop impacted nodes whose best-path confidence < this (0/absent = all; >1.0 rejected as INVALID_ARGUMENT)
 }
 
 // ImpactAnalysis Response
@@ -762,7 +764,7 @@ message ImpactNodeProto {
     string file_path = 3;
     string impact_type = 4;                       // "direct_caller", "indirect_caller", etc.
     uint32 distance = 5;                          // Hops from changed symbol
-    double confidence = 6;                        // Best-path edge-weight product in [0,1]: resolution certainty (1.0 precise, 0.95 scoped, 0.85 proximity, 0.7 unique, <0.6 ambiguous)
+    double confidence = 6;                        // Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.95 scoped, 0.85 proximity, 0.7 unique, <0.6 ambiguous
 }
 
 // GraphStats Request
