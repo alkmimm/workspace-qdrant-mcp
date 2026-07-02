@@ -218,6 +218,27 @@ SystemService, CollectionService, DocumentService, EmbeddingService, ProjectServ
 - **Design Decisions**: Make obvious design decisions that align with project plan and requirements autonomously
 - **Agent Execution Mode**: Execute agents SEQUENTIALLY (one at a time), not in parallel, to conserve API usage
 
+## Subagent Dispatch — MCP Preamble (mandatory)
+
+Subagents do NOT inherit this file, the workspace-qdrant MCP server instructions, or
+the MCP tool descriptions (deferred tools expose names only). Measured: 0 MCP calls
+across 59 subagent transcripts (2026-06-19), replicated with a controlled probe
+(2026-07-01) — an uninstructed subagent answered a codebase question with 43 native
+tool calls / 68k tokens / 6.4 min when one `search` call (~90ms) returned the same
+files. Richer tool descriptions cannot fix this; only the spawn prompt reaches them.
+
+When dispatching ANY subagent that touches this codebase (Agent tool, /batch worker,
+Workflow `agent()`), prepend this preamble to its prompt verbatim:
+
+> This project's codebase is indexed and exposed via the `workspace-qdrant` MCP.
+> Before any codebase discovery, load the tools: `ToolSearch` with query
+> `select:mcp__workspace-qdrant__search,mcp__workspace-qdrant__grep,mcp__workspace-qdrant__list,mcp__workspace-qdrant__retrieve`.
+> Then prefer `search` (semantic/concept queries — write them in ENGLISH; add
+> `fileType:"code"` or a `pathGlob` to bias toward implementation), `grep`
+> (exact/regex substring), and `list` (layout, start `format:"summary"`) over native
+> Grep/Glob for discovery. Use native Read only to pull exact bytes once the MCP
+> located the file.
+
 ## Critical Development Rules
 
 **NO MIGRATION EFFORT**: This project requires NO migration effort of any kind. The project is a work in progress and has not been released - there are no users to migrate.
