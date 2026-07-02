@@ -439,8 +439,13 @@ async function handleIndexingStatus(
       project_id: projectId,
       project_name: status.project_name,
       project_root: status.project_root,
+      // Daemon session-activity projection: `watch_folders.is_active` is the
+      // COUNT of live MCP sessions for this tenant (see priority_manager), used
+      // for dequeue priority — NOT an indexing-health signal. `false` here just
+      // means no MCP session is currently heartbeating this project; the index
+      // can still be 100% complete. (Previously also surfaced under a redundant
+      // `session_active` alias, which implied a second, distinct signal.)
       is_active: status.is_active,
-      session_active: status.is_active,
       indexing_active: inFlight > 0,
       indexing,
       summary,

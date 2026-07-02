@@ -148,7 +148,6 @@ describe('workspace_index status resolution', () => {
       action: 'project_status',
       project_id: '9634ef90c02d',
       is_active: false,
-      session_active: false,
       indexing_active: true,
       indexing: {
         pending: 596,
@@ -156,6 +155,9 @@ describe('workspace_index status resolution', () => {
         total: 3055,
       },
     });
+    // `session_active` was a byte-for-byte alias of `is_active`; it must not
+    // reappear as a redundant, misleading second signal.
+    expect(result).not.toHaveProperty('session_active');
   });
 
   it('list_branches falls back to daemon-indexed projects missing from the registry', async () => {
