@@ -24,7 +24,12 @@ use std::sync::OnceLock;
 /// without touching the registry YAML (splitting rules, GenericExtractor
 /// walker fixes, …). Bump when such a change should propagate to
 /// already-indexed, unchanged files on their next visit.
-const CHUNKER_LOGIC_VERSION: u32 = 1;
+///
+/// - v2: oversized-fragment start is now anchored to a line boundary
+///   (`splitting.rs`) instead of the raw char-boundary stride, so fragments
+///   no longer begin mid-token. Bumped so already-indexed files re-chunk on
+///   their next scan.
+const CHUNKER_LOGIC_VERSION: u32 = 2;
 
 /// Per-language fingerprints, computed once from the bundled registry.
 ///
