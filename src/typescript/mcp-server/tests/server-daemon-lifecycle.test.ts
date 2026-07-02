@@ -180,19 +180,23 @@ describe('Session lifecycle with connected daemon', () => {
       expect(state.projectId).toBe('abc123456789');
 
       // Verify registerProject was called with realpath and register_if_new=false
+      // (session_id: per-session is_active tracking, #183 — a fresh UUID per run)
       expect(mockInstance.registerProject).toHaveBeenCalledWith({
         path: realProjectPath,
         project_id: 'abc123456789',
         name: 'test-project',
         register_if_new: false,
         priority: 'high',
+        session_id: expect.any(String),
       });
 
       await server.stop();
 
       // Verify deprioritizeProject was called on stop
+      // (session_id: per-session is_active tracking, #183 — a fresh UUID per run)
       expect(mockInstance.deprioritizeProject).toHaveBeenCalledWith({
         project_id: 'abc123456789',
+        session_id: expect.any(String),
       });
     } finally {
       process.chdir(originalCwd);
