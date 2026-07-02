@@ -1,8 +1,17 @@
-//! Per-chunk embedding, payload construction, and LSP enrichment.
+//! Per-chunk embedding and payload construction.
 //!
 //! Processes each chunk from the document processor: generates dense/sparse
-//! embeddings, builds Qdrant payload metadata, applies LSP enrichment when
-//! available, and returns assembled `DocumentPoint`s with chunk tracking records.
+//! embeddings, builds Qdrant payload metadata, and returns assembled
+//! `DocumentPoint`s with chunk tracking records.
+//!
+//! Ingest-time LSP chunk enrichment was RETIRED (F2.1, 2026-07-02): its
+//! payload fields had zero consumers and never produced a `success` (no
+//! didOpen + 1/0-based position mismatch — the same bug class #193 fixed on
+//! the R8 lane), and bulk ingest runs exactly while LSP servers are cold.
+//! The LSP query machinery (`LanguageServerManager::get_references` et al.)
+//! is KEPT as raw material for R9 (references-based authoritative graph
+//! edges) in the warm-backfill lane. See
+//! docs/plans/2026-07-01-usability-graph-followups-plan.md §5.
 
 mod dense_text;
 mod payload;
@@ -10,27 +19,22 @@ mod types;
 
 pub(super) use types::{ChunkRecord, EmbedResult};
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use tracing::{debug, info};
 
 use crate::context::ProcessingContext;
-use crate::lsp::EnrichmentStatus;
-use crate::monitoring::METRICS;
 use crate::tracked_files_schema::{self, ChunkType as TrackedChunkType, ProcessingStatus};
 use crate::unified_queue_processor::UnifiedProcessorError;
 use crate::unified_queue_schema::UnifiedQueueItem;
 use crate::DocumentContent;
 
-use super::lsp_payload;
 use payload::{build_chunk_payload, sparse_embedding_to_map};
 
 /// Result of processing a single chunk, to be assembled into `EmbedResult`.
 struct ChunkOutput {
     point: crate::storage::DocumentPoint,
     record: ChunkRecord,
-    lsp_status: ProcessingStatus,
     treesitter_status: ProcessingStatus,
 }
 
@@ -38,8 +42,8 @@ struct ChunkOutput {
 ///
 /// Dense embeddings are batched into a single provider call (the provider
 /// handles sub-chunking by `remote_batch_size` internally). Per-chunk work
-/// (sparse vectors, LSP enrichment, payload construction) runs sequentially
-/// after the batch returns.
+/// (sparse vectors, payload construction) runs sequentially after the batch
+/// returns.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn embed_chunks(
     ctx: &ProcessingContext,
@@ -64,8 +68,6 @@ pub(super) async fn embed_chunks(
             treesitter_status: ProcessingStatus::Skipped,
         });
     }
-
-    let (is_project_active, lsp_mgr_guard) = check_lsp_availability(ctx, item, file_path).await;
 
     let embedding_start = std::time::Instant::now();
     let idf_epoch = ctx.lexicon_manager.corpus_size(&item.collection).await;
@@ -101,8 +103,7 @@ pub(super) async fn embed_chunks(
 
     drop(_permit);
 
-    // Per-chunk: build payload, sparse vectors, LSP enrichment, assemble point.
-    let mut lsp_status = ProcessingStatus::None;
+    // Per-chunk: build payload, sparse vectors, assemble point.
     let mut treesitter_status = ProcessingStatus::None;
     let mut points = Vec::new();
     let mut chunk_records = Vec::new();
@@ -113,7 +114,7 @@ pub(super) async fn embed_chunks(
         .zip(batch_results)
         .enumerate()
     {
-        let mut point_payload = build_chunk_payload(
+        let point_payload = build_chunk_payload(
             &chunk.content,
             chunk.chunk_index,
             item,
@@ -135,21 +136,6 @@ pub(super) async fn embed_chunks(
             ProcessingStatus::None
         };
 
-        let chunk_lsp_status = if let Some(lsp_mgr) = &lsp_mgr_guard {
-            apply_lsp_enrichment(
-                item,
-                file_path,
-                chunk_idx,
-                &chunk.metadata,
-                is_project_active,
-                lsp_mgr,
-                &mut point_payload,
-            )
-            .await
-        } else {
-            ProcessingStatus::None
-        };
-
         let output = assemble_chunk_output(
             ctx,
             item,
@@ -161,16 +147,12 @@ pub(super) async fn embed_chunks(
             symbol_name,
             start_line,
             end_line,
-            chunk_lsp_status,
             ts_status,
             base_point,
             idf_epoch,
         )
         .await;
 
-        if output.lsp_status != ProcessingStatus::None {
-            lsp_status = output.lsp_status;
-        }
         if output.treesitter_status != ProcessingStatus::None {
             treesitter_status = output.treesitter_status;
         }
@@ -187,35 +169,11 @@ pub(super) async fn embed_chunks(
     Ok(EmbedResult {
         points,
         chunk_records,
-        lsp_status,
+        // Chunk-level LSP enrichment retired (see module doc): tracked_files
+        // records it as intentionally-not-done, uniformly.
+        lsp_status: ProcessingStatus::Skipped,
         treesitter_status,
     })
-}
-
-/// Check whether LSP enrichment is available for the project, returning
-/// `(is_project_active, lsp_manager_guard)`.
-async fn check_lsp_availability(
-    ctx: &ProcessingContext,
-    item: &UnifiedQueueItem,
-    file_path: &Path,
-) -> (
-    bool,
-    Option<std::sync::Arc<tokio::sync::RwLock<crate::lsp::LanguageServerManager>>>,
-) {
-    if let Some(lsp_mgr) = &ctx.lsp_manager {
-        let mgr = lsp_mgr.read().await;
-        let is_active = mgr.has_active_servers(&item.tenant_id).await;
-        if is_active {
-            debug!(
-                "LSP enrichment available for project {} on file {}",
-                item.tenant_id,
-                file_path.display()
-            );
-        }
-        (is_active, Some(lsp_mgr.clone()))
-    } else {
-        (false, None)
-    }
 }
 
 /// Generate the sparse vector for a chunk, returning the vector and whether
@@ -259,76 +217,6 @@ async fn generate_sparse(
     }
 }
 
-/// Apply LSP enrichment to `point_payload` for a single chunk, returning the
-/// updated LSP processing status.
-async fn apply_lsp_enrichment(
-    item: &UnifiedQueueItem,
-    file_path: &Path,
-    chunk_idx: usize,
-    chunk_metadata: &HashMap<String, String>,
-    is_project_active: bool,
-    lsp_mgr_guard: &std::sync::Arc<tokio::sync::RwLock<crate::lsp::LanguageServerManager>>,
-    point_payload: &mut HashMap<String, serde_json::Value>,
-) -> ProcessingStatus {
-    let file_lang = file_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(crate::lsp::Language::from_extension);
-
-    if file_lang.as_ref().map_or(false, |l| l.has_lsp_support()) {
-        let mgr = lsp_mgr_guard.read().await;
-
-        let sym_name = chunk_metadata
-            .get("symbol_name")
-            .map(|s| s.as_str())
-            .unwrap_or("unknown");
-
-        let sl = chunk_metadata
-            .get("start_line")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(chunk_idx as u32 * 20);
-
-        let el = chunk_metadata
-            .get("end_line")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(sl + 20);
-
-        let enrichment = mgr
-            .enrich_chunk(
-                &item.tenant_id,
-                file_path,
-                sym_name,
-                sl,
-                el,
-                is_project_active,
-            )
-            .await;
-
-        if enrichment.enrichment_status == EnrichmentStatus::Skipped {
-            // LSP server not ready -- mark as pending for metadata_uplift retry
-            point_payload.insert(
-                "lsp_enrichment_status".to_string(),
-                serde_json::json!("pending"),
-            );
-            METRICS.inc_lsp_enrichment("pending");
-            // Keep lsp_status as None so tracked_files reflects incomplete state
-            ProcessingStatus::None
-        } else {
-            METRICS.inc_lsp_enrichment(enrichment.enrichment_status.as_str());
-            lsp_payload::add_lsp_enrichment_to_payload(point_payload, &enrichment);
-            ProcessingStatus::Done
-        }
-    } else {
-        // Non-code file (markdown, config, etc.) -- skip LSP enrichment
-        point_payload.insert(
-            "lsp_enrichment_status".to_string(),
-            serde_json::json!("skipped"),
-        );
-        METRICS.inc_lsp_enrichment("skipped");
-        ProcessingStatus::Skipped
-    }
-}
-
 /// Extract chunk metadata fields for the tracking record.
 fn extract_chunk_metadata(
     chunk: &crate::TextChunk,
@@ -366,7 +254,6 @@ async fn assemble_chunk_output(
     symbol_name: Option<String>,
     start_line: Option<i32>,
     end_line: Option<i32>,
-    lsp_status: ProcessingStatus,
     treesitter_status: ProcessingStatus,
     base_point: &str,
     idf_epoch: u64,
@@ -399,7 +286,6 @@ async fn assemble_chunk_output(
             start_line,
             end_line,
         },
-        lsp_status,
         treesitter_status,
     }
 }

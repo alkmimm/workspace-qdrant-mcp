@@ -401,15 +401,17 @@ fn test_chunk_record_to_tuple_conversion() {
 
 #[test]
 fn test_embed_result_construction() {
+    // lsp_status is uniformly Skipped since chunk-level LSP enrichment was
+    // retired (F2.1); the field remains for tracked_files compatibility.
     let result = EmbedResult {
         points: vec![],
         chunk_records: vec![],
-        lsp_status: ProcessingStatus::None,
+        lsp_status: ProcessingStatus::Skipped,
         treesitter_status: ProcessingStatus::Done,
     };
 
     assert!(result.points.is_empty());
     assert!(result.chunk_records.is_empty());
-    assert_eq!(result.lsp_status, ProcessingStatus::None);
+    assert_eq!(result.lsp_status, ProcessingStatus::Skipped);
     assert_eq!(result.treesitter_status, ProcessingStatus::Done);
 }

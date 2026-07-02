@@ -1,11 +1,17 @@
 //! Metadata Uplifting Background Process (Task 18).
 //!
 //! When the queue is empty and the system is idle, scans Qdrant for chunks
-//! with failed/partial LSP enrichment or missing tags, and re-attempts
-//! enrichment without re-chunking or re-embedding.
+//! with missing/empty `concept_tags` and backfills them from the dynamic
+//! lexicon, without re-chunking or re-embedding.
 //!
 //! Tracks `uplift_generation` per point to avoid infinite re-processing.
 //! Pauses immediately if new queue items appear.
+//!
+//! The former LSP-enrichment retry lane was retired (F2.1, 2026-07-02): the
+//! uplift never actually re-ran LSP (it only generated tags), so points
+//! marked `pending` at ingest could never become `success` — the filter only
+//! produced perpetual rescans of un-improvable points. Graph LSP resolution
+//! lives on the R8 warm-backfill lane instead.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,10 +58,8 @@ pub struct UpliftStats {
 
 /// Scroll Qdrant for points needing metadata uplift.
 ///
-/// Finds points where:
-/// - `lsp_enrichment_status` = 'failed', 'partial', or 'pending', OR
-/// - `concept_tags` field is missing/empty, OR
-/// - `uplift_generation` < current_generation
+/// Finds points where `concept_tags` is missing/empty AND
+/// `uplift_generation` < current_generation.
 ///
 /// Returns point IDs and their current payloads.
 pub async fn find_points_needing_uplift(
@@ -63,13 +67,10 @@ pub async fn find_points_needing_uplift(
     collection: &str,
     config: &UpliftConfig,
 ) -> Result<Vec<UpliftCandidate>, StorageError> {
-    // Filter: lsp_enrichment_status in ['failed', 'partial', 'pending']
-    // 'pending' = code file where LSP server wasn't ready during initial processing
-    let filter = Filter::should([
-        Condition::matches("lsp_enrichment_status", "failed".to_string()),
-        Condition::matches("lsp_enrichment_status", "partial".to_string()),
-        Condition::matches("lsp_enrichment_status", "pending".to_string()),
-    ]);
+    // Filter: concept_tags missing/empty — the only thing this pass can still
+    // improve. (The former lsp_enrichment_status conditions were retired with
+    // ingest-time chunk enrichment, F2.1 2026-07-02.)
+    let filter = Filter::must([Condition::is_empty("concept_tags")]);
 
     let mut candidates = Vec::new();
     let mut offset: Option<qdrant_client::qdrant::PointId> = None;
@@ -241,16 +242,13 @@ async fn uplift_single_point(
         }
     }
 
-    // Always update uplift_generation
+    // Always stamp uplift_generation — for a point that yielded no tags this
+    // marker is what stops the next pass from re-scanning it (the generation
+    // guard in find_points_needing_uplift).
     updates.insert(
         "uplift_generation".to_string(),
         serde_json::json!(config.current_generation),
     );
-
-    if !changed && has_tags {
-        // Only update the generation marker if nothing else changed
-        // This prevents re-scanning the same point
-    }
 
     // Apply updates via set_payload
     let filter = Filter::must([Condition::matches("chunk_id", candidate.point_id.clone())]);

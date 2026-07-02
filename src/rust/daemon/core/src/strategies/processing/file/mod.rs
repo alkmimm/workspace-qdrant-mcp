@@ -1,15 +1,15 @@
 //! File processing strategy.
 //!
 //! Handles `ItemType::File` queue items: ingestion (add/update) and deletion,
-//! including tracked_files management, Qdrant upsert, FTS5 indexing, LSP
-//! enrichment, and keyword/tag extraction.
+//! including tracked_files management, Qdrant upsert, FTS5 indexing, and
+//! keyword/tag extraction. (Ingest-time LSP chunk enrichment was retired —
+//! F2.1 2026-07-02; graph LSP resolution lives in the R8 warm-backfill lane.)
 //!
 //! Split into focused submodules:
-//! - `chunk_embed` — per-chunk embedding, payload construction, LSP enrichment
+//! - `chunk_embed` — per-chunk embedding, payload construction
 //! - `delete` — delete operation, missing-file cleanup, Qdrant failure handling
 //! - `fts5_index` — FTS5 code search index updates
 //! - `keyword_extract` — keyword/tag extraction pipeline
-//! - `lsp_payload` — LSP enrichment payload serialization
 //! - `store_track` — Qdrant upsert + tracked_files/qdrant_chunks transaction
 //! - `update_preamble` — hash comparison + reference-counted old point deletion
 //! - `zero_byte` — graceful handling of empty (0-byte) files
@@ -24,7 +24,6 @@ mod graph_ingest;
 mod ingest;
 mod keyword_extract;
 mod keyword_persist;
-pub(crate) mod lsp_payload;
 mod store_track;
 mod update_preamble;
 mod zero_byte;

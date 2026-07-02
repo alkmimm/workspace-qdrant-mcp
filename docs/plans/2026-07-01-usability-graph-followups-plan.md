@@ -39,7 +39,7 @@
 | **F0.3** | GC de watches `local_*` órfãos (worktrees `.claude/` mortos) | 0–1 | S–M | baixo | baixo-médio | ☐ |
 | **F1.1** | `minConfidence` em `relations`/`impact`/`usages` (daemon-side) | 1 | M | baixo-méd | **alto** | ◐ PR aberto (review 12 achados aplicados; inclui fix best-path no BFS + CLI `--min-confidence`) |
 | **F1.2** | Documentar semântica de confidence na descrição da tool `graph` | 1 | S | baixo | médio | ◐ mesma PR |
-| **F2.1** | Diagnóstico uplift no-op + decisão: enrichment de chunk × R8-edges | 2 | M (investigação) | médio | alto (destrava) | ☐ |
+| **F2.1** | Diagnóstico uplift no-op + decisão: enrichment de chunk × R8-edges | 2 | M (investigação) | médio | alto (destrava) | ◐ decisão em §5; retirada em PR [#197](https://github.com/alkmimm/workspace-qdrant-mcp/pull/197); card R9 no plano R8 |
 | **F2.2** | Atribuir `language` a nós file/module (~20-25% "unknown") | 2 | S–M | baixo | baixo | ☐ |
 | — | Dart warm-resolve = 0 | — | — | — | — | ⊘ já coberto por `2026-07-01-r8-lsp-authoritative-edges-plan.md` |
 | — | PT cross-lingual (top3 25%) | — | — | — | — | ⊘ já coberto por P2.8/P2.9 do plano de ergonomia 2026-06-22 |
@@ -183,6 +183,54 @@ sem usuários).
 
 **Aceite.** (a): métrica/status removidos, `Uplift pass` some do idle-log ou vira tags-only
 explícito; (b): série `success` crescendo e `pending` drenando em janela de 24h.
+
+### DECISÃO F2.1 — registrada 2026-07-02 (investigação completa)
+
+**Veredito: (a) APOSENTAR o pipeline de enrichment em chunk-payload, REAPROVEITANDO a
+ideia como extensão do R8 (candidata "R9: references-based edges").**
+
+Evidência (toda por leitura direta + métricas ao vivo):
+1. **Dado morto.** Os 9 campos `lsp_*` do payload são escritos por `lsp_payload.rs` e
+   lidos por NINGUÉM (0 refs no TS; 1 arquivo — o escritor — no Rust; o filtro do
+   uplift sobre `lsp_enrichment_status` é auto-referencial). R8 (valor LSP real do
+   grafo) é 100% independente: `call_hierarchy.rs` → RPC ao vivo → `graph_edges`.
+2. **Nunca funcionou — e pelos MESMOS bugs que o #193 consertou no lado R8:**
+   `enrichment.rs` não faz `didOpen` (get_references/get_type_info consultam doc
+   fechado) e usa `chunk_start_line` 1-based com `.nth()`/posição LSP 0-based
+   (off-by-one → coluna 0 → keyword, não símbolo). Mais: erro de transporte vira
+   `Ok(vec![])` (engolido) e `find_server_for_file` ignora `project_id` (casa só
+   por linguagem — pega servidor de OUTRO projeto). Métrica: 0 `success` perpétuo
+   (pós-redeploy: pending=3838/skipped=5140/success ausente).
+3. **Colocação estruturalmente errada.** Enrichment por-chunk no INGEST roda
+   exatamente quando os servidores LSP estão frios (bulk scan no startup) → tudo
+   nasce `pending`; e o uplift nunca re-tenta LSP (só gera concept_tags — o
+   doc-comment "re-attempts enrichment" mente). Bônus de bug: `idle_work.rs:104`
+   incrementa `current_generation` a cada pass sem updates, derrotando o próprio
+   guard → cada ponto pending é re-escaneado e re-escrito (set_payload) para
+   sempre — churn de escrita perpétuo em idle.
+
+**O que reaproveitar (a resposta à pergunta "pode ser reaproveitado?"):**
+`textDocument/references` no símbolo do chunk = arestas autoritativas na direção
+REVERSA (quem usa o símbolo) — complementar ao `outgoingCalls` do R8, e `references`
+é core request (suporte quase universal) enquanto `callHierarchy` é capability
+opcional. Candidata natural para (i) linguagens onde callHierarchy falha — sonda
+discriminante: Dart, o problema aberto "resolve 0 mesmo warm"; (ii) validação cruzada
+de arestas fuzzy pelo lado de uso. O lugar certo é a lane de warm-backfill do R8
+(que JÁ tem didOpen + posições 0-based + health do #193/#194), NUNCA o ingest.
+→ Registrar card "R9 — references-based authoritative edges (probe Dart primeiro)"
+no plano R8 (`2026-07-01-r8-lsp-authoritative-edges-plan.md`).
+
+**Escopo de retirada (ajustado pela investigação):**
+- REMOVER: `apply_lsp_enrichment` + chamada `enrich_chunk` no ingest
+  (`chunk_embed/mod.rs`), `lsp_payload.rs`, o filtro `lsp_enrichment_status` do
+  uplift (mantém uplift de concept_tags, consertando o incremento de generation),
+  métrica `lsp_enrichments_total` + painel Grafana correspondente, campos
+  `lsp_status` upstream se ficarem órfãos.
+- MANTER: `lsp/project_manager/{enrichment,imports}.rs` (métodos de consulta
+  get_references/get_type_info/resolve_imports) — são o insumo do R9; corrigir
+  didOpen/off-by-one/erro-engolido/project_id QUANDO o R9 for implementado, na
+  lane de backfill.
+- Campos `lsp_*` stale nos pontos existentes envelhecem via reembed (sem migração).
 
 ---
 

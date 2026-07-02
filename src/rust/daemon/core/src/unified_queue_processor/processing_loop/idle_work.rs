@@ -100,7 +100,14 @@ async fn run_uplift_pass(
             stats.scanned, stats.updated, stats.skipped, stats.errors
         );
     }
-    if stats.updated == 0 && stats.errors == 0 {
+    // Advance the generation only when the pass actually improved something.
+    // The old no-op-advances rule pushed the global generation permanently
+    // ahead of every point's stored marker, so the same un-improvable points
+    // were re-scanned and re-written (set_payload) every idle pass, forever.
+    // Progress-gated advancement converges: a point that yields no tags is
+    // stamped once and skipped until real progress elsewhere bumps the
+    // generation (a finite pool, since tagged points leave the filter).
+    if stats.updated > 0 && stats.errors == 0 {
         state.uplift_config.current_generation += 1;
     }
     state.last_uplift_attempt = std::time::Instant::now();

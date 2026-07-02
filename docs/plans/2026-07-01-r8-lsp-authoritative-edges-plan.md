@@ -117,3 +117,36 @@ everything), then **R8.2 backfill** using the DB primitive below.
 - The fan-out ceiling ([#190]) and R2.5/R4 tiers stay — they are the fuzzy-tier
   hygiene for the fallback path.
 - Never block ingestion on the LSP; every LSP step is best-effort/no-op on failure.
+
+## R9 (candidata) — references-based authoritative edges · Status: ☐ (registrada 2026-07-02)
+
+Origem: investigação F2.1 (`2026-07-01-usability-graph-followups-plan.md` §5) —
+ao aposentar o enrichment de chunk-payload, o insumo LSP dele revelou-se
+reaproveitável: `textDocument/references` no símbolo de um nó do grafo devolve
+as referências **entrantes** (quem usa o símbolo) — a direção reversa do
+`callHierarchy/outgoingCalls` do R8.
+
+**Por que vale considerar:**
+- `references` é core request do protocolo (suporte quase universal);
+  `callHierarchy` é capability opcional — R9 cobre servidores onde o R8 não
+  consegue. **Sonda discriminante: Dart** (o problema aberto "resolve 0 mesmo
+  warm" é via callHierarchy; se `references` responder, R9 destrava DOC-V2).
+- Valida/suprime arestas fuzzy pelo lado de USO (complementa a supressão
+  autoritativa do R8.1, que age pelo lado da chamada).
+
+**Como (esboço):** na mesma lane de warm-backfill do R8.3b (didOpen + posições
+0-based + health já corretos), por nó definido: `references(file, line, col)` →
+para cada referência entrante, resolver o nó CALLER por `(file, nearest
+start_line)` (mesma mecânica de `authoritative_args_for_caller`, invertida) →
+aresta autoritativa `resolution:"lsp-refs"`. Insumo de código: os métodos de
+consulta KEPT em `lsp/project_manager/{enrichment,imports}.rs`
+(`get_references`/`get_type_info`/`resolve_imports`) — ANTES de usar, corrigir
+os 4 defeitos herdados documentados na decisão F2.1: sem didOpen, off-by-one
+1/0-based, erro de transporte engolido (`Ok(vec![])`), e `find_server_for_file`
+ignorando `project_id`.
+
+**Gate:** sonda Dart primeiro (script standalone como o que provou o
+callHierarchy no R8.4); só construir se a sonda responder onde o callHierarchy
+falha OU se a validação-por-uso medir ganho de precisão real. Nota de
+semântica: `references` inclui usos não-chamada (type refs) — mapear para
+`USES_TYPE`/`CALLS` pelo contexto, ou emitir uma aresta `REFERENCES` dedicada.

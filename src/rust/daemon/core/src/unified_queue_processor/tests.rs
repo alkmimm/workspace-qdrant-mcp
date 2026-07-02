@@ -238,48 +238,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lsp_enrichment_status_lowercase_in_payload() {
-        use crate::lsp::project_manager::{EnrichmentStatus, LspEnrichment};
-        use crate::strategies::processing::file::lsp_payload::add_lsp_enrichment_to_payload;
-
-        let mut payload = std::collections::HashMap::new();
-        let enrichment = LspEnrichment {
-            enrichment_status: EnrichmentStatus::Success,
-            references: vec![],
-            type_info: None,
-            resolved_imports: vec![],
-            definition: None,
-            error_message: None,
-        };
-
-        add_lsp_enrichment_to_payload(&mut payload, &enrichment);
-        let status = payload
-            .get("lsp_enrichment_status")
-            .unwrap()
-            .as_str()
-            .unwrap();
-        assert_eq!(status, "success", "lsp_enrichment_status must be lowercase");
-
-        let mut payload2 = std::collections::HashMap::new();
-        let enrichment2 = LspEnrichment {
-            enrichment_status: EnrichmentStatus::Failed,
-            references: vec![],
-            type_info: None,
-            resolved_imports: vec![],
-            definition: None,
-            error_message: Some("test error".to_string()),
-        };
-
-        add_lsp_enrichment_to_payload(&mut payload2, &enrichment2);
-        let status2 = payload2
-            .get("lsp_enrichment_status")
-            .unwrap()
-            .as_str()
-            .unwrap();
-        assert_eq!(status2, "failed", "lsp_enrichment_status must be lowercase");
-    }
-
-    #[test]
     fn test_file_chunk_tags_construction() {
         use crate::file_classification::is_test_file;
         use crate::DocumentType;

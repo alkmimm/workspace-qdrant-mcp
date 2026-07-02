@@ -22,25 +22,25 @@ The chunker is fed via `extract_chunks` / `extract_chunks_with_provider` and
 its output is consumed downstream by:
 
 - `strategies/processing/file/chunk_embed/` — embed → upsert to Qdrant
-- `strategies/processing/file/lsp_payload.rs` — LSP enrichment merged into Qdrant payload
 - `graph/extractor` — relationship edges (CALLS, CONTAINS, …) into the code graph
 - `keyword_extraction/` and `tagging/` — keyword and tag pipelines
 
 ### Items considered and discarded
 
-#### LSP enrichment fields on `SemanticChunk` — already done
+#### LSP enrichment fields on `SemanticChunk` — RETIRED (F2.1, 2026-07-02)
 
 Initial hypothesis was that the spec promises `references` / `type_info` on the
-chunk payload but the code doesn't deliver. Verification:
+chunk payload but the code doesn't deliver. At the time, verification found the
+pipeline present (`enrichment.rs` computed `LspEnrichment`, `lsp_payload.rs`
+serialized it onto the Qdrant payload). It has since been **retired**: the
+`lsp_*` payload fields had zero consumers and never produced a `success`
+(no `didOpen` + 1/0-based position mismatch), and ingest-time enrichment runs
+exactly while LSP servers are cold. `lsp_payload.rs` was deleted; the query
+machinery in `lsp/project_manager/` is kept as raw material for R9
+(references-based authoritative graph edges) on the R8 warm-backfill lane.
+See `docs/plans/2026-07-01-usability-graph-followups-plan.md` §5.
 
-- [enrichment.rs:36-162](../../src/rust/daemon/core/src/lsp/project_manager/enrichment.rs)
-  computes `LspEnrichment { references, type_info, resolved_imports, definition, … }`
-- [lsp_payload.rs:11-35](../../src/rust/daemon/core/src/strategies/processing/file/lsp_payload.rs)
-  serializes all fields onto the Qdrant payload (`lsp_references`,
-  `lsp_type_signature`, `lsp_imports`, `lsp_definition`, `lsp_enrichment_status`, …)
-
-The architecture intentionally keeps `SemanticChunk` decoupled from LSP — the
-two are merged at write time in the queue processor. **No gap. Item dropped.**
+The architecture keeps `SemanticChunk` decoupled from LSP either way. **Item dropped.**
 
 The only narrow gap inside this area is item #3 below (`definition` query
 never issued, `kind` classifier uses naive string match on hover text).
@@ -213,28 +213,15 @@ hover may format types in ways that miss the heuristics.
 
 `TypeInfo.container` (the enclosing class/module) is also always `None`.
 
-**Gap.** Three fields advertised in the payload (`lsp_definition`, the `kind`
-discriminator, `container`) are either always-null or noisy. Downstream
-consumers (graph extractor, search ranking) can't rely on them.
-
-**Plan.**
-
-1. Issue `textDocument/definition` in `perform_enrichment`. Cache like
-   references / hover already do.
-2. Replace `kind` heuristic with `textDocument/documentSymbol` lookup at file
-   open. Cache per-file. Use LSP `SymbolKind` enum mapped to our `kind`
-   strings.
-3. Populate `container` from the document-symbol parent chain.
-4. Update payload tests in [lsp_payload.rs](../../src/rust/daemon/core/src/strategies/processing/file/lsp_payload.rs).
-
-**Acceptance.**
-
-- Indexed Rust file: at least one chunk has non-null `lsp_definition`.
-- A function named "deconstruct" no longer gets classified as `"function"`
-  via substring match on the docstring; it goes through `SymbolKind::Function`.
-- `container` populated for methods (e.g., `AuthService` for `login`).
-
-**Effort.** S–M. ~1 day.
+**Status: SUPERSEDED (F2.1 retirement, 2026-07-02).** The payload destination
+these improvements targeted was retired — the `lsp_*` chunk-payload fields had
+zero consumers and the ingest-time pipeline never produced a `success`
+(`lsp_payload.rs` deleted). The `parse_hover_response` `kind`-heuristic and
+missing-`definition` critiques above remain valid for the KEPT query machinery
+in `lsp/project_manager/enrichment.rs` and should be revisited if/when R9
+(references-based authoritative graph edges) adopts it on the R8 warm-backfill
+lane — with edges (not payload) as the destination. See
+`docs/plans/2026-07-01-usability-graph-followups-plan.md` §5.
 
 #### 4. Incremental parsing + tree-diff re-embed
 
