@@ -35,7 +35,7 @@
 | Item | Título | Fase | Esforço | Risco | ROI | Status |
 |------|--------|------|---------|-------|-----|--------|
 | **F0.1** | Knobs de centralidade no `docker/.env` (deploy-only) | 0 | S | baixo | **alto** | ☑ (§8) |
-| **F0.2** | PR docs: CLAUDE.md + `.env.example` (já editados no working tree) | 0 | S | ~zero | médio | ☐ |
+| **F0.2** | PR docs: CLAUDE.md + `.env.example` + este plano | 0 | S | ~zero | médio | ◐ PR [#195](https://github.com/alkmimm/workspace-qdrant-mcp/pull/195) aberto |
 | **F0.3** | GC de watches `local_*` órfãos (worktrees `.claude/` mortos) | 0–1 | S–M | baixo | baixo-médio | ☐ |
 | **F1.1** | `minConfidence` em `relations`/`impact`/`usages` (daemon-side) | 1 | M | baixo-méd | **alto** | ☐ |
 | **F1.2** | Documentar semântica de confidence na descrição da tool `graph` | 1 | S | baixo | médio | ☐ |
