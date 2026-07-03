@@ -203,7 +203,6 @@ async fn real_lsp_enrichment_emits_real_trace() {
     mgr.initialize().await.expect("initialize");
 
     let project_id = "trace-demo";
-    mgr.mark_project_active(project_id).await;
 
     if let Err(e) = mgr.start_server(project_id, Language::Rust, root).await {
         eprintln!("SKIP: could not start rust-analyzer: {e}");
@@ -233,7 +232,7 @@ async fn real_lsp_enrichment_emits_real_trace() {
 
     // (1) Real enrichment via the production entry-point — emits the
     //     `lsp.enrich_chunk` parent span + child query spans.
-    let enrichment = mgr.enrich_chunk(project_id, &lib, "add", 0, 0, true).await;
+    let enrichment = mgr.enrich_chunk(project_id, &lib, "add", 0, 0).await;
 
     // (2) Direct reference query at the real `add` definition (line 0,
     //     char 7) to surface real call-site references.

@@ -104,7 +104,6 @@ impl LanguageServerManager {
         symbol_name: &str,
         start_line: u32,
         _end_line: u32,
-        _is_project_active: bool,
     ) -> LspEnrichment {
         let span = tracing::Span::current();
         let language = file

@@ -55,7 +55,6 @@ async fn test_enrich_chunk_increments_metrics() {
             "test_function",
             10,
             20,
-            false,
         )
         .await;
 
@@ -76,7 +75,6 @@ async fn test_enrich_chunk_runs_regardless_of_activity_state() {
             "test_symbol",
             10,
             20,
-            false,
         )
         .await;
 
@@ -100,7 +98,6 @@ async fn test_enrich_chunk_returns_enrichment_structure() {
             "test_symbol",
             10,
             20,
-            true,
         )
         .await;
 
@@ -123,7 +120,6 @@ async fn test_enrich_chunk_skipped_includes_language_info() {
             "test_symbol",
             10,
             20,
-            true,
         )
         .await;
 
@@ -134,38 +130,6 @@ async fn test_enrich_chunk_skipped_includes_language_info() {
 }
 
 // State persistence tests
-
-#[tokio::test]
-async fn test_manager_without_state_persistence() {
-    let config = ProjectLspConfig::default();
-    let manager = LanguageServerManager::new(config).await.unwrap();
-
-    manager.mark_project_active("test-project").await;
-    assert!(manager.is_project_active("test-project").await);
-
-    manager.mark_project_inactive("test-project").await;
-    assert!(!manager.is_project_active("test-project").await);
-}
-
-#[tokio::test]
-async fn test_manager_active_projects_tracking() {
-    let config = ProjectLspConfig::default();
-    let manager = LanguageServerManager::new(config).await.unwrap();
-
-    assert!(!manager.is_project_active("project-1").await);
-    assert!(!manager.is_project_active("project-2").await);
-
-    manager.mark_project_active("project-1").await;
-    manager.mark_project_active("project-2").await;
-
-    assert!(manager.is_project_active("project-1").await);
-    assert!(manager.is_project_active("project-2").await);
-
-    manager.mark_project_inactive("project-1").await;
-
-    assert!(!manager.is_project_active("project-1").await);
-    assert!(manager.is_project_active("project-2").await);
-}
 
 #[tokio::test]
 async fn test_restore_project_servers_returns_empty() {
@@ -256,7 +220,6 @@ async fn test_enrichment_continues_after_query_error() {
             "test_function",
             1,
             10,
-            false,
         )
         .await;
 
@@ -269,7 +232,6 @@ async fn test_enrichment_continues_after_query_error() {
             "test_function",
             1,
             10,
-            true,
         )
         .await;
 

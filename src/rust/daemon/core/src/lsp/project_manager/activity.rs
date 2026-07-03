@@ -1,32 +1,8 @@
-//! Project activation and deactivation tracking.
+//! Idle LSP-server eviction and project-server restore.
 
 use super::{Language, LanguageServerManager, ProjectLspResult};
 
 impl LanguageServerManager {
-    /// Mark a project as active (Task 1.18)
-    ///
-    /// This enables state persistence and allows server recovery for this project.
-    pub async fn mark_project_active(&self, project_id: &str) {
-        let mut active = self.active_projects.write().await;
-        active.insert(project_id.to_string());
-        tracing::debug!(project_id = project_id, "Marked project as active");
-    }
-
-    /// Mark a project as inactive (Task 1.18)
-    ///
-    /// This disables state persistence and server recovery for this project.
-    pub async fn mark_project_inactive(&self, project_id: &str) {
-        let mut active = self.active_projects.write().await;
-        active.remove(project_id);
-        tracing::debug!(project_id = project_id, "Marked project as inactive");
-    }
-
-    /// Check if a project is currently active (Task 1.18)
-    pub async fn is_project_active(&self, project_id: &str) -> bool {
-        let active = self.active_projects.read().await;
-        active.contains(project_id)
-    }
-
     /// Evict LSP servers that haven't been used within `idle_timeout`.
     ///
     /// Returns the list of (project_id, language) pairs that were stopped.

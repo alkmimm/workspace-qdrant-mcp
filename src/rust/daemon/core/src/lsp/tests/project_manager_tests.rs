@@ -40,25 +40,6 @@ async fn test_project_manager_initialization() {
 }
 
 #[tokio::test]
-async fn test_project_activation_tracking() {
-    let config = create_test_project_config();
-    let manager = LanguageServerManager::new(config).await.unwrap();
-
-    let project_id = "test-project-123";
-
-    // Initially not active
-    assert!(!manager.is_project_active(project_id).await);
-
-    // Mark as active
-    manager.mark_project_active(project_id).await;
-    assert!(manager.is_project_active(project_id).await);
-
-    // Mark as inactive
-    manager.mark_project_inactive(project_id).await;
-    assert!(!manager.is_project_active(project_id).await);
-}
-
-#[tokio::test]
 async fn test_enrichment_runs_regardless_of_activity_state() {
     // Activity state no longer affects enrichment - it only affects queue priority.
     // Both active and inactive projects receive full LSP enrichment.
@@ -73,7 +54,6 @@ async fn test_enrichment_runs_regardless_of_activity_state() {
             "test_function",
             10,
             20,
-            false, // is_active = false, but enrichment runs anyway
         )
         .await;
 
@@ -100,7 +80,6 @@ async fn test_enrichment_for_active_project_no_server() {
             "test_function",
             10,
             20,
-            true, // is_active = true
         )
         .await;
 
@@ -122,7 +101,6 @@ async fn test_cache_functionality() {
             "test_function",
             10,
             20,
-            true,
         )
         .await;
 
@@ -137,7 +115,6 @@ async fn test_cache_functionality() {
             "test_function",
             10,
             20,
-            true,
         )
         .await;
 
@@ -167,7 +144,6 @@ async fn test_metrics_tracking() {
             "fn1",
             1,
             10,
-            false, // Activity state doesn't skip enrichment anymore
         )
         .await;
 
@@ -178,7 +154,6 @@ async fn test_metrics_tracking() {
             "fn2",
             11,
             20,
-            false, // Activity state doesn't skip enrichment anymore
         )
         .await;
 
@@ -190,29 +165,6 @@ async fn test_metrics_tracking() {
     manager.reset_metrics().await;
     let reset_metrics = manager.get_metrics().await;
     assert_eq!(reset_metrics.total_enrichment_queries, 0);
-}
-
-#[tokio::test]
-async fn test_multi_project_tracking() {
-    let config = create_test_project_config();
-    let manager = LanguageServerManager::new(config).await.unwrap();
-
-    // Track multiple projects
-    manager.mark_project_active("project-a").await;
-    manager.mark_project_active("project-b").await;
-    manager.mark_project_active("project-c").await;
-
-    assert!(manager.is_project_active("project-a").await);
-    assert!(manager.is_project_active("project-b").await);
-    assert!(manager.is_project_active("project-c").await);
-    assert!(!manager.is_project_active("project-d").await);
-
-    // Deactivate some
-    manager.mark_project_inactive("project-b").await;
-
-    assert!(manager.is_project_active("project-a").await);
-    assert!(!manager.is_project_active("project-b").await);
-    assert!(manager.is_project_active("project-c").await);
 }
 
 #[tokio::test]
