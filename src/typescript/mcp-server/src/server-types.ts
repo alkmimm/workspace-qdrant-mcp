@@ -6,8 +6,14 @@ import type { ServerConfig } from './types/index.js';
 import { BUILD_NUMBER } from './build-info.js';
 import mcpPublicConfig from './constants/mcp-public-config.json' with { type: 'json' };
 
-// Heartbeat interval: 1 hour (in milliseconds)
-export const HEARTBEAT_INTERVAL_MS = 1 * 60 * 60 * 1000;
+// Session heartbeat interval (milliseconds). Kept well below the daemon's
+// session-liveness reaper timeout (WQM_SESSION_HEARTBEAT_TIMEOUT_SECS, default
+// 90s) so a live session is never false-reaped: the reaper deletes
+// `project_sessions` rows whose `last_heartbeat_at` is older than its timeout,
+// which re-projects `is_active` to 0. Do not raise this above ~a third of that
+// timeout without raising the timeout too (see SessionMonitor /
+// start_session_monitor in the daemon).
+export const HEARTBEAT_INTERVAL_MS = 30 * 1000;
 
 // Server name and version for MCP protocol
 export const SERVER_NAME = 'workspace-qdrant-mcp';

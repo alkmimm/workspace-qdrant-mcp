@@ -611,11 +611,14 @@ Claude Code / MCP sessions — `COUNT(*)` of rows in `project_sessions`
 (or an admin/CLI activate) and removed on a clean SessionEnd
 (`unregister_session`). The MCP server registers/heartbeats only the session's
 *own* repo, so cross-project MCP reads never activate the queried project.
-(Note: the heartbeat-timeout auto-reaper `SessionMonitor::cleanup_orphaned_sessions`
-is defined but **not currently wired into daemon startup**, so a session with no
-clean unregister — including a one-shot admin `RegisterProject` priority `high`
-— persists `is_active` **durably** until an explicit deregister/deactivate;
-`wqm project activate` is therefore a sticky lever, not a transient one.)
+(The heartbeat-timeout auto-reaper `SessionMonitor::cleanup_orphaned_sessions`
+runs in the daemon — spawned by `start_session_monitor` — deleting
+`project_sessions` rows whose `last_heartbeat_at` is older than
+`WQM_SESSION_HEARTBEAT_TIMEOUT_SECS` (default 90s) and re-projecting `is_active`.
+So a session that ends without a clean unregister — including a one-shot admin
+`RegisterProject` priority `high` with no follow-up heartbeat — is demoted
+within ~one check interval, not left active indefinitely. See
+[Write Path → Session liveness](04-write-path.md#session-management-direct-grpc).)
 `is_active` gates exactly two things: **dequeue priority** (active projects
 drain first) and **LSP server startup** (per active project, via
 `activate_project_side_effects` on `RegisterProject`). It does **not** gate

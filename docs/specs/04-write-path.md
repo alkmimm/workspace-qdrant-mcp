@@ -76,6 +76,19 @@ Session lifecycle messages go directly to daemon via existing core gRPC services
 | `RegisterProject(path)`     | MCP → Daemon | Project is now active       |
 | `DeprioritizeProject(path)` | MCP → Daemon | Project is no longer active |
 
+**Session liveness & `is_active`.** `is_active` is a projection of live
+`project_sessions` rows (migration v42): `RegisterProject` upserts a row and
+`DeprioritizeProject`/`unregister_session` removes it, so `is_active =
+COUNT(live sessions)`. The MCP server heartbeats each live session every
+`HEARTBEAT_INTERVAL_MS` (30s); the daemon's **session-liveness reaper**
+(`SessionMonitor`, spawned by `start_session_monitor`) deletes rows whose
+`last_heartbeat_at` is older than `WQM_SESSION_HEARTBEAT_TIMEOUT_SECS` (default
+90s, ~3× the heartbeat) and re-projects `is_active`, so a project whose MCP
+session died without a clean unregister — or a fire-and-forget admin activate —
+is demoted within ~one check interval. This is distinct from the coarse idle
+timeout (`start_inactivity_timeout`, `WQM_INACTIVITY_TIMEOUT_SECS`, default 12h),
+which demotes on stale `last_activity_at`.
+
 ### Collection Ownership
 
 - **Daemon owns all collections**: Creates the 4 canonical collections on startup
