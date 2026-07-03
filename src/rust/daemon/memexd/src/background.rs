@@ -457,13 +457,30 @@ pub fn start_chunking_coverage_exporter(pool: SqlitePool) -> JoinHandle<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
         loop {
             interval.tick().await;
+            // Coverage is derived from the qdrant_chunks mirror (ground truth),
+            // not solely from the mutable `treesitter_status` column. A file
+            // counts as semantically chunked when the column says `done` OR the
+            // mirror holds any non-NULL `chunk_type` (function/method/class/…;
+            // text fallback stores NULL). This makes the dashboard immune to
+            // bookkeeping drift — e.g. the branch-dedup path that historically
+            // clobbered `treesitter_status` back to `none` while the shared
+            // semantic points stayed intact.
             let query = r#"
                 SELECT
-                    COALESCE(NULLIF(language, ''), 'unknown') AS language,
-                    COALESCE(NULLIF(chunking_method, ''), 'none') AS chunking_method,
-                    COALESCE(NULLIF(treesitter_status, ''), 'none') AS treesitter_status,
+                    COALESCE(NULLIF(tf.language, ''), 'unknown') AS language,
+                    COALESCE(NULLIF(tf.chunking_method, ''), 'none') AS chunking_method,
+                    CASE
+                        WHEN tf.treesitter_status = 'done'
+                             OR EXISTS (
+                                 SELECT 1 FROM qdrant_chunks qc
+                                  WHERE qc.file_id = tf.file_id
+                                    AND qc.chunk_type IS NOT NULL
+                             )
+                        THEN 'done'
+                        ELSE COALESCE(NULLIF(tf.treesitter_status, ''), 'none')
+                    END AS treesitter_status,
                     COUNT(*) AS file_count
-                FROM tracked_files
+                FROM tracked_files tf
                 GROUP BY language, chunking_method, treesitter_status
             "#;
 
