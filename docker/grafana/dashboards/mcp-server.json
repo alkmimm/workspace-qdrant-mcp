@@ -630,8 +630,8 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "MCP Empty-Result Ratio (24h, by op)",
-      "description": "Fraction of MCP read-tool calls returning 0 results, per op, over the last 24h. Semantic 'search' should stay near 0; a high exact/grep ratio means agents dead-end and fall back to native tools. Sampled from search_events.",
+      "title": "MCP Empty-Result Ratio (24h, agents)",
+      "description": "Fraction of MCP read-tool calls returning 0 results, per op, over the last 24h — AGENT traffic only (actor=\"claude\"). Semantic 'search' should stay near 0; a high exact/grep ratio means agents dead-end and fall back to native tools. The eval/benchmark harness (actor=\"user\") is excluded here because it fires natural-language questions through exact/grep by design (~0 results expected). Sampled from search_events.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -683,7 +683,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "memexd_mcp_search_empty_recent / clamp_min(memexd_mcp_search_events_recent, 1)",
+          "expr": "memexd_mcp_search_empty_recent{actor=\"claude\"} / clamp_min(memexd_mcp_search_events_recent{actor=\"claude\"}, 1)",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
@@ -692,8 +692,8 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "MCP Events (24h, by op) + Project-Resolution Misses",
-      "description": "MCP read-tool event volume by op and project-resolution misses (agent forgot cwd / unresolved tenant) over the last 24h. Sampled from search_events.",
+      "title": "MCP Events (24h, by op & actor) + Project-Resolution Misses",
+      "description": "MCP read-tool event volume by op and actor, plus project-resolution misses (agent forgot cwd / unresolved tenant) over the last 24h. actor=\"claude\" is real agent traffic; actor=\"user\" is the eval/benchmark harness + CLI. Sampled from search_events.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -746,7 +746,7 @@
             "uid": "prometheus"
           },
           "expr": "memexd_mcp_search_events_recent",
-          "legendFormat": "events:{{op}}",
+          "legendFormat": "events:{{op}} · {{actor}}",
           "refId": "A"
         },
         {
@@ -755,7 +755,7 @@
             "uid": "prometheus"
           },
           "expr": "memexd_mcp_search_unresolved_recent",
-          "legendFormat": "unresolved:{{outcome}}",
+          "legendFormat": "unresolved:{{outcome}} · {{actor}}",
           "refId": "B"
         }
       ]
