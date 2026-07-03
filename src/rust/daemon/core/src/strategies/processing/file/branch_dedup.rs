@@ -64,9 +64,15 @@ pub(super) async fn try_branch_dedup(
     // it exists, the shared Qdrant points exist too — we add this branch to them
     // instead of re-embedding. (prepare_update already skipped the case where
     // THIS branch holds the content with a current chunker fingerprint.)
-    type DedupRow = (i32, Option<String>, Option<String>, Option<String>);
+    type DedupRow = (
+        i32,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
     let existing: Option<DedupRow> = sqlx::query_as(
-        "SELECT chunk_count, file_type, language, chunker_version
+        "SELECT chunk_count, file_type, language, chunker_version, treesitter_status
              FROM tracked_files
              WHERE watch_folder_id = ?1
                AND relative_path = ?2
@@ -82,9 +88,24 @@ pub(super) async fn try_branch_dedup(
     .await
     .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("dedup lookup: {e}")))?;
 
-    let Some((chunk_count, file_type, language, src_chunker_version)) = existing else {
+    let Some((chunk_count, file_type, language, src_chunker_version, src_treesitter_status)) =
+        existing
+    else {
         return Ok(None);
     };
+
+    // Carry the source row's tree-sitter status verbatim. The dedup clone shares
+    // the source's `base_point` — hence the exact same Qdrant points, which were
+    // semantically chunked (or not) once, at the source's real ingest. Forcing
+    // `None` here would REBASE an already-`done` file back to `none`: the metric
+    // (`tracked_files_by_chunking`) would under-report semantic coverage, and the
+    // capability-upgrade query (`treesitter_status IN ('none','failed','skipped')`)
+    // would re-enqueue the file forever with nothing to re-chunk. See
+    // docs/specs/21-cross-branch-dedup.md.
+    let carried_treesitter_status = src_treesitter_status
+        .as_deref()
+        .and_then(ProcessingStatus::from_str)
+        .unwrap_or(ProcessingStatus::None);
 
     // Stale-generation guard: only reuse chunks produced by the CURRENT chunking
     // configuration. Reusing a pre-upgrade generation would carry stale chunks
@@ -156,8 +177,11 @@ pub(super) async fn try_branch_dedup(
         // The clone IS the source generation — carry its fingerprint verbatim
         // (the guard above proved it is current or grandfathered).
         src_chunker_version.as_deref(),
+        // lsp_status: chunk-level LSP enrichment is retired; uniformly not-done.
         ProcessingStatus::None,
-        ProcessingStatus::None,
+        // treesitter_status: carry the source's status (see note above) instead
+        // of clobbering an already-`done` file back to `none`.
+        carried_treesitter_status,
         Some(item.collection.as_str()),
         extension.as_deref(),
         is_test,
