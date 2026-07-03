@@ -21,8 +21,18 @@ use wqm_common::constants::COLLECTION_PROJECTS;
 
 use super::ProjectServiceImpl;
 
-/// Default heartbeat timeout in seconds
-const HEARTBEAT_TIMEOUT_SECS: u64 = 60;
+/// Heartbeat deadline window in seconds — how long a client has to send its
+/// next heartbeat before the daemon's session-liveness reaper may treat the
+/// session as stale. Read from `WQM_SESSION_HEARTBEAT_TIMEOUT_SECS` (default 90)
+/// so it matches the reaper's own timeout (see `start_session_monitor`), keeping
+/// the `next_heartbeat_by` deadline — and the client cadence derived from it —
+/// coupled to the reaper without a separately hand-kept constant.
+fn heartbeat_timeout_secs() -> u64 {
+    std::env::var("WQM_SESSION_HEARTBEAT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(90)
+}
 
 /// Per-tenant indexing-progress counts attached to `GetProjectStatusResponse`.
 ///
@@ -606,6 +616,6 @@ fn to_timestamp(dt: chrono::DateTime<Utc>) -> prost_types::Timestamp {
 
 /// Calculate next heartbeat deadline
 fn next_heartbeat_deadline() -> prost_types::Timestamp {
-    let deadline = Utc::now() + chrono::Duration::seconds(HEARTBEAT_TIMEOUT_SECS as i64);
+    let deadline = Utc::now() + chrono::Duration::seconds(heartbeat_timeout_secs() as i64);
     to_timestamp(deadline)
 }

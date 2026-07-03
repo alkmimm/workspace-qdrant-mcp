@@ -386,32 +386,89 @@ export async function registerProjectFromTool(
 }
 
 /**
- * Start the heartbeat interval. Mutates sessionState in place.
+ * Minimum spacing between heartbeats. The daemon's `next_heartbeat_by` deadline
+ * drives the cadence (see {@link nextHeartbeatDelayMs}); this floor stops a
+ * tight or misconfigured deadline from making the client spin.
  */
-export function startHeartbeat(sessionState: SessionState, sendHeartbeatFn: () => void): void {
-  if (sessionState.heartbeatInterval) {
-    clearInterval(sessionState.heartbeatInterval);
+const MIN_HEARTBEAT_MS = 5_000;
+
+/**
+ * Delay (ms) until the next heartbeat, derived from the daemon-provided
+ * `next_heartbeat_by` deadline: aim for ~1/3 of the remaining window so one or
+ * two missed heartbeats never cross the daemon's session-liveness reaper
+ * timeout. This makes the cadence server-driven — the daemon's reaper timeout
+ * dictates how often the client must beat, instead of a constant that has to be
+ * kept in sync by hand. Falls back to `HEARTBEAT_INTERVAL_MS` when the deadline
+ * is absent/already passed, clamped to `[MIN_HEARTBEAT_MS, HEARTBEAT_INTERVAL_MS]`.
+ */
+export function nextHeartbeatDelayMs(response: {
+  next_heartbeat_by?: { seconds: number; nanos: number };
+}): number {
+  const dl = response.next_heartbeat_by;
+  if (dl && typeof dl.seconds === 'number') {
+    const deadlineMs = dl.seconds * 1000 + (dl.nanos ?? 0) / 1e6;
+    const remaining = deadlineMs - Date.now();
+    if (remaining > 0) {
+      const target = Math.floor(remaining / 3);
+      return Math.min(HEARTBEAT_INTERVAL_MS, Math.max(MIN_HEARTBEAT_MS, target));
+    }
   }
-
-  sendHeartbeatFn();
-
-  sessionState.heartbeatInterval = setInterval(() => {
-    sendHeartbeatFn();
-  }, HEARTBEAT_INTERVAL_MS);
-
-  logDebug('Heartbeat started', { interval_minutes: HEARTBEAT_INTERVAL_MS / 1000 / 60 });
+  return HEARTBEAT_INTERVAL_MS;
 }
 
 /**
- * Send a heartbeat to the daemon (fire-and-forget safe).
+ * Start the heartbeat loop. Mutates sessionState in place.
+ *
+ * Uses a self-rescheduling timer (not a fixed `setInterval`) so the cadence can
+ * follow the daemon's `next_heartbeat_by` deadline. The `.then`/`.catch` chain
+ * ALWAYS reschedules, so the heartbeat can never permanently stop — the
+ * property the daemon's session-liveness reaper relies on to not deactivate a
+ * live session.
+ */
+export function startHeartbeat(
+  sessionState: SessionState,
+  sendHeartbeatFn: () => Promise<number>
+): void {
+  if (sessionState.heartbeatInterval) {
+    clearTimeout(sessionState.heartbeatInterval);
+  }
+
+  const scheduleNext = (ms: number): void => {
+    sessionState.heartbeatInterval = setTimeout(runTick, ms);
+  };
+  const runTick = (): void => {
+    void sendHeartbeatFn()
+      .then(scheduleNext)
+      .catch(() => scheduleNext(HEARTBEAT_INTERVAL_MS));
+  };
+
+  runTick();
+  logDebug('Heartbeat started', { max_interval_ms: HEARTBEAT_INTERVAL_MS });
+}
+
+/**
+ * Send a heartbeat to the daemon and return the delay (ms) until the next one.
+ *
+ * Self-healing so an agent's session survives a transient daemon blip AND the
+ * daemon's session-liveness reaper:
+ *  - Does NOT early-return on `daemonConnected`. The daemon client auto-
+ *    reconnects per RPC (callWithRetry/ensureConnected); latching the flag off
+ *    on the first failure used to stop the heartbeat forever, after which the
+ *    reaper would eventually deactivate the still-live session.
+ *  - On a successful heartbeat, marks the daemon connected again (recovers the
+ *    flag other call sites read).
+ *  - When the daemon reports the session is gone (`acknowledged === false` —
+ *    after a reap, or a daemon restart that cleared `project_sessions`),
+ *    re-registers the project so `is_active` is restored.
+ *
+ * Never throws; returns the next-heartbeat delay derived from the daemon's
+ * `next_heartbeat_by` deadline (falling back to `HEARTBEAT_INTERVAL_MS`).
  */
 export async function sendHeartbeat(
   sessionState: SessionState,
   daemonClient: DaemonClient
-): Promise<void> {
-  if (!sessionState.daemonConnected) {
-    return;
-  }
+): Promise<number> {
+  let nextMs = HEARTBEAT_INTERVAL_MS;
 
   // Keep this client session's project alive (when this session has one).
   if (sessionState.projectId) {
@@ -420,34 +477,50 @@ export async function sendHeartbeat(
         project_id: sessionState.projectId,
         ...(sessionState.sessionId ? { session_id: sessionState.sessionId } : {}),
       });
+      // The RPC succeeded (the client reconnected if needed) — recover the flag.
+      sessionState.daemonConnected = true;
+      nextMs = nextHeartbeatDelayMs(response);
 
       if (response.acknowledged) {
         logSessionEvent('heartbeat', {
           project_id: sessionState.projectId,
           acknowledged: true,
         });
+      } else {
+        // The daemon no longer knows this session (reaped, or cleared on a
+        // daemon restart). Re-register so is_active is restored instead of the
+        // project silently losing queue priority + LSP mid-session.
+        logInfo('Heartbeat found no live session; re-registering', {
+          project_id: sessionState.projectId,
+        });
+        await registerProject(sessionState, daemonClient);
       }
     } catch (error) {
       logError('Heartbeat failed', error, { project_id: sessionState.projectId });
       sessionState.daemonConnected = false;
       logDaemonStatus(false, { reason: 'heartbeat_failed' });
       recordDaemonFallback('session', 'heartbeat_failed');
-      return;
+      return HEARTBEAT_INTERVAL_MS; // retry at the default cadence; do not latch off
     }
   }
 
   // Keep the MCP self-repo's "self-repo" session alive so its LSP/priority
-  // persist while this server runs; it expires shortly after the server stops.
+  // persist while this server runs; re-register it if the daemon lost it.
   if (sessionState.selfRepoProjectId) {
     try {
-      await daemonClient.heartbeat({
+      const response = await daemonClient.heartbeat({
         project_id: sessionState.selfRepoProjectId,
         session_id: 'self-repo',
       });
+      if (!response.acknowledged) {
+        await ensureSelfRepoRegistered(daemonClient, sessionState);
+      }
     } catch (error) {
       logDebug('Self-repo heartbeat failed (non-fatal)', { error: String(error) });
     }
   }
+
+  return nextMs;
 }
 
 /**
@@ -464,14 +537,14 @@ export async function cleanup(
   logDebug('Health monitoring stopped');
 
   if (sessionState.heartbeatInterval) {
-    clearInterval(sessionState.heartbeatInterval);
+    clearTimeout(sessionState.heartbeatInterval);
     sessionState.heartbeatInterval = null;
     logDebug('Heartbeat stopped');
   }
 
   if (sessionState.projectId && sessionState.daemonConnected) {
     try {
-      const projectId = sessionState.projectId!;
+      const projectId = sessionState.projectId;
       const response = await daemonClient.deprioritizeProject({
         project_id: projectId,
         ...(sessionState.sessionId ? { session_id: sessionState.sessionId } : {}),
