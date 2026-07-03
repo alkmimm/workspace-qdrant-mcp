@@ -25,6 +25,22 @@ Three SQLite tables track search events and resolutions:
 2. **CLI Wrappers** - `rg-instrumented` and `grep-instrumented` shell scripts
 3. **Future: IDE Plugins** - Log resolution events when users open/expand results
 
+**Read-path activity touch:** All read tools — `search`, `grep`, `list`,
+`retrieve` — funnel through the single `LogSearchEvent` gRPC. When the daemon
+persists a `search_events` row it *also* refreshes
+`watch_folders.last_activity_at` (and `updated_at`) for the event's
+`project_id`. This makes cross-project reads (a query issued against another
+repo's `cwd`) visible in the admin UI / project list, instead of freezing at
+the project's last session registration — batch indexing only refreshes
+`last_activity_at` for projects with `is_active > 0`, so an inactive-but-queried
+project would otherwise show a stale timestamp. The touch is **decoupled from
+`is_active`**: it never creates a session, starts an LSP server, or reorders the
+queue — *activity is not an active session* (see
+[File Watching → Activation](06-file-watching.md#activation-cascade)). It is
+best-effort and tenant-scoped (`collection = 'projects'`); a failure is logged
+and never blocks the event. Implemented in
+`write_actor/exec_tracking.rs::exec_log_search_event`.
+
 ### search_events Table
 
 **Schema:**

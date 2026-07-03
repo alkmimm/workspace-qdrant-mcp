@@ -605,6 +605,32 @@ WHERE watch_id = :watch_id
    );
 ```
 
+**What `is_active` means and gates.** `is_active` is a *projection* of live
+Claude Code / MCP sessions — `COUNT(*)` of rows in `project_sessions`
+(migration v42), not a free-running counter. Sessions are added on SessionStart
+(or an admin/CLI activate) and removed on a clean SessionEnd
+(`unregister_session`). The MCP server registers/heartbeats only the session's
+*own* repo, so cross-project MCP reads never activate the queried project.
+(Note: the heartbeat-timeout auto-reaper `SessionMonitor::cleanup_orphaned_sessions`
+is defined but **not currently wired into daemon startup**, so a session with no
+clean unregister — including a one-shot admin `RegisterProject` priority `high`
+— persists `is_active` **durably** until an explicit deregister/deactivate;
+`wqm project activate` is therefore a sticky lever, not a transient one.)
+`is_active` gates exactly two things: **dequeue priority** (active projects
+drain first) and **LSP server startup** (per active project, via
+`activate_project_side_effects` on `RegisterProject`). It does **not** gate
+watching or search — those run for every `enabled = 1 AND is_paused = 0`
+folder — so inactive projects stay indexed and fully searchable. An inactive
+project's `last_activity_at` is still refreshed whenever it is *read* across
+projects (see
+[Search Instrumentation → Read-path activity touch](09-search-instrumentation.md#architecture)).
+
+> **Note:** LSP lifecycle is driven solely by `RegisterProject` side effects
+> (`activate_project_side_effects` → `start_project_lsp_servers`), not by any
+> in-memory "active projects" set, and per-file enrichment runs regardless of a
+> project's `is_active` state (so activation gates only *whether* a server is
+> started, not enrichment behaviour once one is running).
+
 **Submodule archive safety:**
 
 When archiving a project that has submodules, the system must check cross-references via the junction table before archiving submodule data:
