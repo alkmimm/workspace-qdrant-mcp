@@ -489,6 +489,113 @@ pub fn start_chunking_coverage_exporter(pool: SqlitePool) -> JoinHandle<()> {
     handle
 }
 
+/// One-shot startup sweep: fetch grammars for languages that have stuck
+/// (text-chunked) files but whose grammar was never downloaded.
+///
+/// The per-file grammar-download trigger lives on the full-ingest path and is
+/// skipped by the branch-dedup fast-path. A language whose files only ever hit
+/// dedup (content already indexed on another branch) therefore never fetches its
+/// grammar and stays text-chunked forever (observed: `r`, whose 13 files were all
+/// dedup clones). This sweep closes that gap: for each stuck language with a
+/// downloadable, not-yet-cached grammar, it downloads the grammar and enqueues
+/// File→Uplift for the stuck files so they get semantic chunks.
+///
+/// Churn-free and self-converging: only a NEWLY downloaded grammar triggers
+/// uplifts. A language whose grammar is already cached is skipped (any stuck rows
+/// there are the branch-dedup status-carry concern, recovered by that fix or a
+/// reembed — not a missing grammar). Once a grammar is cached, later startups
+/// skip it, so no repeated re-uplifting.
+pub fn start_grammar_backfill(pool: SqlitePool) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        use workspace_qdrant_core::config::GrammarConfig;
+        use workspace_qdrant_core::queue_operations::QueueManager;
+        use workspace_qdrant_core::strategies::capability_upgrade::trigger_capability_upgrade;
+        use workspace_qdrant_core::tracked_files_schema::UpgradeReason;
+        use workspace_qdrant_core::tree_sitter::GrammarManager;
+        use workspace_qdrant_core::{get_static_language, is_language_supported};
+
+        let langs = match sqlx::query(
+            "SELECT DISTINCT language FROM tracked_files \
+             WHERE treesitter_status IN ('none','failed','skipped') \
+               AND language IS NOT NULL AND language <> ''",
+        )
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                debug!("grammar backfill: language query failed: {e}");
+                return;
+            }
+        };
+        if langs.is_empty() {
+            return;
+        }
+
+        let mut config = GrammarConfig::default();
+        config.auto_download = true;
+        let mut manager = GrammarManager::new(config);
+        let queue_manager = QueueManager::new(pool.clone());
+
+        let mut downloaded = 0u32;
+        for row in &langs {
+            let lang: String = row.get("language");
+            // Static grammars need no download; non-registry labels (unknown,
+            // plain text) cannot be fetched at all.
+            if get_static_language(&lang).is_some() || !is_language_supported(&lang) {
+                continue;
+            }
+            // Already cached → not a "never-downloaded" case; skip to stay
+            // churn-free (avoids re-uplifting on every startup).
+            if manager.cache_paths().grammar_exists(&lang) {
+                continue;
+            }
+            match manager.get_grammar(&lang).await {
+                Ok(_) => {
+                    downloaded += 1;
+                    info!(
+                        language = %lang,
+                        "grammar backfill: downloaded never-fetched grammar — uplifting stuck files"
+                    );
+                    for tenant in distinct_tenants_with_stuck_language(&pool, &lang).await {
+                        trigger_capability_upgrade(
+                            &pool,
+                            &queue_manager,
+                            &tenant,
+                            UpgradeReason::GrammarAvailable,
+                            Some(&lang),
+                        )
+                        .await;
+                    }
+                }
+                Err(e) => {
+                    warn!(language = %lang, error = %e, "grammar backfill: grammar download failed");
+                }
+            }
+        }
+        if downloaded > 0 {
+            info!("grammar backfill complete: {downloaded} never-fetched grammar(s) downloaded");
+        }
+    })
+}
+
+/// Tenants (via `watch_folders`) that own stuck files of `language`.
+async fn distinct_tenants_with_stuck_language(pool: &SqlitePool, language: &str) -> Vec<String> {
+    sqlx::query(
+        "SELECT DISTINCT wf.tenant_id \
+         FROM tracked_files tf JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id \
+         WHERE tf.language = ?1 \
+           AND tf.treesitter_status IN ('none','failed','skipped')",
+    )
+    .bind(language)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .iter()
+    .map(|r| r.get::<String, _>("tenant_id"))
+    .collect()
+}
+
 /// Start hourly metrics maintenance: aggregation + retention (Task 544.11-14).
 pub fn start_metrics_maintenance(pool: SqlitePool) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -1269,6 +1376,7 @@ pub fn spawn_all(
     let _project_inventory = start_indexed_project_inventory_exporter(pool.clone());
     let _search_adoption = start_search_adoption_sampler(pool.clone());
     let _chunking_coverage = start_chunking_coverage_exporter(pool.clone());
+    let _grammar_backfill = start_grammar_backfill(pool.clone());
     let _file_metadata = start_file_metadata_exporter(Arc::clone(search_db));
 
     BackgroundHandles {
