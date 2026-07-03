@@ -219,6 +219,22 @@ function branchWideningMessage(branch: string): string {
   );
 }
 
+function scopeWideningMessage(count: number): string {
+  return (
+    `No matches in the current project — widened to ALL indexed projects and found ${count}. ` +
+    'Pass scope:"all" to search across every repository directly next time.'
+  );
+}
+
+function grepEmptyRecoveryHint(pattern: string): string {
+  return (
+    `No matches for "${pattern}" in any indexed project or branch. ` +
+    'If you are looking for a concept rather than a literal string, use the `search` tool ' +
+    '(semantic); otherwise broaden the pattern, drop any pathGlob filter, or check the spelling. ' +
+    'Retrying the same pattern verbatim will return the same empty result.'
+  );
+}
+
 /** Build an empty failure GrepResponse. */
 function grepError(message: string, latency_ms: number): GrepResponse {
   return { success: false, matches: [], total_matches: 0, truncated: false, latency_ms, message };
@@ -423,6 +439,32 @@ export class GrepTool {
           message = widened.message;
         }
       }
+      // Scope-widen: still empty AND this was a project-scoped grep (tenantId
+      // set) → the literal often lives in another repository (measured: ~90% of
+      // empty exact/grep hits were cross-project). Re-run across ALL projects.
+      // Fires only on a genuinely empty project-scoped result.
+      if (matches.length === 0 && tenantId) {
+        const widened = await this.widenGrepToAllProjects(
+          pattern,
+          regex,
+          caseSensitive,
+          contextLines,
+          maxResults,
+          pathGlob
+        );
+        if (widened) {
+          matches = widened.matches;
+          duplicatesDropped = widened.duplicatesDropped;
+          truncated = widened.truncated;
+          totalMatches = widened.totalMatches;
+          message = widened.message;
+        }
+      }
+      // Recovery hint: nothing anywhere. Point the agent at the next best move
+      // instead of a bare empty result, which agents tend to retry verbatim.
+      if (matches.length === 0 && message === undefined) {
+        message = grepEmptyRecoveryHint(pattern);
+      }
       const economy = computeGrepEconomy(matches);
       const latencyMs = Date.now() - startTime;
       finishToolEvent(this.daemonClient, eventId, {
@@ -465,6 +507,61 @@ export class GrepTool {
         `Grep failed: ${error instanceof Error ? error.message : 'unknown error'}`,
         latencyMs
       );
+    }
+  }
+
+  /**
+   * On an empty result that was scoped to a single project, re-run the grep
+   * across ALL projects and ALL branches — the literal often lives in another
+   * repository. (Measured: ~90% of empty exact/grep events were cross-project.)
+   * Fires only when the project-scoped result is already empty, so a good
+   * project result is never diluted.
+   *
+   * Returns `undefined` when the cross-project query is also empty.
+   */
+  private async widenGrepToAllProjects(
+    pattern: string,
+    regex: boolean,
+    caseSensitive: boolean,
+    contextLines: number,
+    maxResults: number,
+    pathGlob: string | undefined
+  ): Promise<
+    | {
+        matches: GrepMatch[];
+        truncated: boolean;
+        totalMatches: number;
+        duplicatesDropped: number;
+        message: string;
+      }
+    | undefined
+  > {
+    try {
+      const resp = await this.daemonClient.textSearch(
+        buildGrepRequest(
+          pattern,
+          regex,
+          caseSensitive,
+          contextLines,
+          maxResults,
+          undefined, // no tenant filter → search every indexed project
+          '*', // all branches too
+          pathGlob
+        )
+      );
+      const rawMatches = mapGrepMatches(resp.matches);
+      const dedupedMatches = dedupGrepMatches(rawMatches);
+      const matches = dedupedMatches.slice(0, maxResults);
+      if (matches.length === 0) return undefined;
+      return {
+        matches,
+        duplicatesDropped: rawMatches.length - dedupedMatches.length,
+        truncated: resp.truncated || dedupedMatches.length > matches.length,
+        totalMatches: resp.total_matches,
+        message: scopeWideningMessage(matches.length),
+      };
+    } catch {
+      return undefined;
     }
   }
 
