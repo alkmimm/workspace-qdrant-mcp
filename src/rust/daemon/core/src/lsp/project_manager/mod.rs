@@ -16,7 +16,7 @@
 //! - [`lifecycle`]: Start/stop/restart server delegation
 //! - [`enrichment`]: Chunk enrichment, references, type info, imports
 //! - [`health`]: Periodic health checks, crash handling, backoff
-//! - [`activity`]: Project activation and deactivation tracking
+//! - [`activity`]: Idle-server eviction and project-server restore
 //! - [`metrics`]: Usage metrics and statistics
 
 mod activity;
@@ -30,7 +30,7 @@ mod metrics;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -435,8 +435,6 @@ pub struct LanguageServerManager {
     pub(crate) running: Arc<RwLock<bool>>,
     /// Usage metrics (Task 1.17)
     pub(crate) metrics: Arc<RwLock<LspMetrics>>,
-    /// Set of currently active project IDs (for restore filtering)
-    pub(crate) active_projects: Arc<RwLock<HashSet<String>>>,
     /// Limits how many servers may be in their start + warm-up/index window at
     /// once (Phase 3 stagger). A permit is acquired before spawning and released
     /// after the warm-up grace, so heavy indexers don't all run concurrently.
@@ -456,7 +454,6 @@ impl LanguageServerManager {
             available_servers: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(RwLock::new(false)),
             metrics: Arc::new(RwLock::new(LspMetrics::new())),
-            active_projects: Arc::new(RwLock::new(HashSet::new())),
             start_semaphore: Arc::new(Semaphore::new(default_max_concurrent_starts())),
         })
     }

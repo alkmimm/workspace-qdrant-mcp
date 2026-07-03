@@ -34,6 +34,36 @@ impl WriteActor {
         .await
         .map_err(|e| format!("failed to log search event: {}", e))?;
 
+        // Read-path activity touch: refresh `last_activity_at` for the project
+        // this event targets, so cross-project reads (search/grep/list/retrieve
+        // issued from another repo's cwd, which all funnel through
+        // LogSearchEvent) surface in the admin UI / project list instead of
+        // freezing at the last session registration.
+        //
+        // Deliberately does NOT touch `is_active`: activity is not an active
+        // session. `is_active` remains the leak-proof projection of live
+        // `project_sessions` rows (migration v42), so this touch never spins up
+        // LSP servers or reorders the dequeue priority. Best-effort — a failure
+        // here must not fail the already-persisted search event.
+        if let Some(project_id) = data.project_id.as_deref() {
+            if let Err(e) = sqlx::query(
+                "UPDATE watch_folders \
+                 SET last_activity_at = ?1, updated_at = ?1 \
+                 WHERE tenant_id = ?2 AND collection = 'projects'",
+            )
+            .bind(&now)
+            .bind(project_id)
+            .execute(&self.pool)
+            .await
+            {
+                tracing::warn!(
+                    project_id = %project_id,
+                    "failed to touch last_activity_at on search event (non-fatal): {}",
+                    e
+                );
+            }
+        }
+
         Ok(())
     }
 
