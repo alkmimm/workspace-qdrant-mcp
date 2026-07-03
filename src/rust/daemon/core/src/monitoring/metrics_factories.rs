@@ -51,6 +51,32 @@ pub(super) fn register_all(registry: &Registry, collectors: Vec<Box<dyn Collecto
 
 // ── Per-subsystem metric factories ───────────────────────────────────────
 
+/// MCP read-tool adoption/health gauges, sampled from `search_events` by
+/// `start_search_adoption_sampler`. Returns
+/// `(events_recent, empty_recent, unresolved_recent)`.
+pub(super) fn create_search_adoption_metrics() -> (IntGaugeVec, IntGaugeVec, IntGaugeVec) {
+    let mcp_search_events_recent = int_gauge_vec(
+        "mcp_search_events_recent",
+        "MCP read-tool events in the last 24h, by op",
+        &["op"],
+    );
+    let mcp_search_empty_recent = int_gauge_vec(
+        "mcp_search_empty_recent",
+        "Empty (0-result) MCP read-tool events in the last 24h, by op",
+        &["op"],
+    );
+    let mcp_search_unresolved_recent = int_gauge_vec(
+        "mcp_search_unresolved_recent",
+        "MCP read-tool events that could not resolve a project in the last 24h, by outcome",
+        &["outcome"],
+    );
+    (
+        mcp_search_events_recent,
+        mcp_search_empty_recent,
+        mcp_search_unresolved_recent,
+    )
+}
+
 pub(super) fn create_session_metrics() -> (IntGaugeVec, IntCounterVec, HistogramVec) {
     let active_sessions = int_gauge_vec(
         "active_sessions",

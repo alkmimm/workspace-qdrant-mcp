@@ -575,6 +575,77 @@ pub fn start_inactivity_timeout(pool: SqlitePool) -> JoinHandle<()> {
     handle
 }
 
+/// Sample MCP read-tool adoption/health from `search_events` into Prometheus
+/// gauges, so agent usage and friction are visible in Grafana:
+///   - `memexd_mcp_search_events_recent{op}`  — events in the last 24h by op
+///   - `memexd_mcp_search_empty_recent{op}`   — empty (0-result) events by op
+///   - `memexd_mcp_search_unresolved_recent{outcome}` — project-resolution misses
+/// The empty ratio (empty/events) and unresolved rate are the adoption signals:
+/// semantic `search` should stay near-zero empty; a rising exact/grep empty ratio
+/// means agents dead-end and fall back to native tools.
+pub fn start_search_adoption_sampler(pool: SqlitePool) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+
+            // Cutoff in the SAME ISO-Z format search_events.ts is stored in, so the
+            // TEXT `ts >= cutoff` comparison is a correct lexical compare.
+            let by_op = r#"
+                SELECT op,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN result_count = 0 THEN 1 ELSE 0 END) AS empty
+                FROM search_events
+                WHERE ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')
+                GROUP BY op
+            "#;
+            match sqlx::query(by_op).fetch_all(&pool).await {
+                Ok(rows) => {
+                    // reset() drops stale label series so a no-longer-used op disappears.
+                    METRICS.mcp_search_events_recent.reset();
+                    METRICS.mcp_search_empty_recent.reset();
+                    for row in rows {
+                        let op: String = row.try_get("op").unwrap_or_default();
+                        let total: i64 = row.try_get("total").unwrap_or(0);
+                        let empty: i64 = row.try_get("empty").unwrap_or(0);
+                        METRICS
+                            .mcp_search_events_recent
+                            .with_label_values(&[&op])
+                            .set(total);
+                        METRICS
+                            .mcp_search_empty_recent
+                            .with_label_values(&[&op])
+                            .set(empty);
+                    }
+                }
+                Err(e) => warn!("search-adoption sampler (by op) failed: {}", e),
+            }
+
+            let unresolved = r#"
+                SELECT outcome, COUNT(*) AS n
+                FROM search_events
+                WHERE ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')
+                  AND outcome IN ('unresolved_tenant', 'unresolved_project', 'error')
+                GROUP BY outcome
+            "#;
+            match sqlx::query(unresolved).fetch_all(&pool).await {
+                Ok(rows) => {
+                    METRICS.mcp_search_unresolved_recent.reset();
+                    for row in rows {
+                        let outcome: String = row.try_get("outcome").unwrap_or_default();
+                        let n: i64 = row.try_get("n").unwrap_or(0);
+                        METRICS
+                            .mcp_search_unresolved_recent
+                            .with_label_values(&[&outcome])
+                            .set(n);
+                    }
+                }
+                Err(e) => warn!("search-adoption sampler (unresolved) failed: {}", e),
+            }
+        }
+    })
+}
+
 /// Start the session-liveness reaper (migration v42 model).
 ///
 /// Deletes `project_sessions` rows whose `last_heartbeat_at` has gone stale and
@@ -1187,6 +1258,7 @@ pub fn spawn_all(
     let _queue_depth = start_queue_depth_exporter(pool.clone());
     let _wal_checkpoint = start_wal_checkpoint_loop(pool.clone());
     let _project_inventory = start_indexed_project_inventory_exporter(pool.clone());
+    let _search_adoption = start_search_adoption_sampler(pool.clone());
     let _chunking_coverage = start_chunking_coverage_exporter(pool.clone());
     let _file_metadata = start_file_metadata_exporter(Arc::clone(search_db));
 
