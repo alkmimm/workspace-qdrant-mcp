@@ -577,12 +577,18 @@ pub fn start_inactivity_timeout(pool: SqlitePool) -> JoinHandle<()> {
 
 /// Sample MCP read-tool adoption/health from `search_events` into Prometheus
 /// gauges, so agent usage and friction are visible in Grafana:
-///   - `memexd_mcp_search_events_recent{op}`  — events in the last 24h by op
-///   - `memexd_mcp_search_empty_recent{op}`   — empty (0-result) events by op
-///   - `memexd_mcp_search_unresolved_recent{outcome}` — project-resolution misses
+///   - `memexd_mcp_search_events_recent{op,actor}`  — events in the last 24h
+///   - `memexd_mcp_search_empty_recent{op,actor}`   — empty (0-result) events
+///   - `memexd_mcp_search_unresolved_recent{outcome,actor}` — resolution misses
 /// The empty ratio (empty/events) and unresolved rate are the adoption signals:
 /// semantic `search` should stay near-zero empty; a rising exact/grep empty ratio
 /// means agents dead-end and fall back to native tools.
+///
+/// The `actor` label is load-bearing: the search-quality benchmark runs as
+/// `actor='user'` and fires natural-language questions through exact/grep mode
+/// (where ~0 results is expected by design), which would otherwise pin the
+/// exact/grep empty ratio high and mask the real, agent-only (`actor='claude'`)
+/// signal. Grouping by actor keeps both queryable and separable.
 pub fn start_search_adoption_sampler(pool: SqlitePool) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
@@ -593,28 +599,30 @@ pub fn start_search_adoption_sampler(pool: SqlitePool) -> JoinHandle<()> {
             // TEXT `ts >= cutoff` comparison is a correct lexical compare.
             let by_op = r#"
                 SELECT op,
+                       actor,
                        COUNT(*) AS total,
                        SUM(CASE WHEN result_count = 0 THEN 1 ELSE 0 END) AS empty
                 FROM search_events
                 WHERE ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')
-                GROUP BY op
+                GROUP BY op, actor
             "#;
             match sqlx::query(by_op).fetch_all(&pool).await {
                 Ok(rows) => {
-                    // reset() drops stale label series so a no-longer-used op disappears.
+                    // reset() drops stale label series so a no-longer-used (op,actor) disappears.
                     METRICS.mcp_search_events_recent.reset();
                     METRICS.mcp_search_empty_recent.reset();
                     for row in rows {
                         let op: String = row.try_get("op").unwrap_or_default();
+                        let actor: String = row.try_get("actor").unwrap_or_default();
                         let total: i64 = row.try_get("total").unwrap_or(0);
                         let empty: i64 = row.try_get("empty").unwrap_or(0);
                         METRICS
                             .mcp_search_events_recent
-                            .with_label_values(&[&op])
+                            .with_label_values(&[&op, &actor])
                             .set(total);
                         METRICS
                             .mcp_search_empty_recent
-                            .with_label_values(&[&op])
+                            .with_label_values(&[&op, &actor])
                             .set(empty);
                     }
                 }
@@ -622,21 +630,22 @@ pub fn start_search_adoption_sampler(pool: SqlitePool) -> JoinHandle<()> {
             }
 
             let unresolved = r#"
-                SELECT outcome, COUNT(*) AS n
+                SELECT outcome, actor, COUNT(*) AS n
                 FROM search_events
                 WHERE ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')
                   AND outcome IN ('unresolved_tenant', 'unresolved_project', 'error')
-                GROUP BY outcome
+                GROUP BY outcome, actor
             "#;
             match sqlx::query(unresolved).fetch_all(&pool).await {
                 Ok(rows) => {
                     METRICS.mcp_search_unresolved_recent.reset();
                     for row in rows {
                         let outcome: String = row.try_get("outcome").unwrap_or_default();
+                        let actor: String = row.try_get("actor").unwrap_or_default();
                         let n: i64 = row.try_get("n").unwrap_or(0);
                         METRICS
                             .mcp_search_unresolved_recent
-                            .with_label_values(&[&outcome])
+                            .with_label_values(&[&outcome, &actor])
                             .set(n);
                     }
                 }

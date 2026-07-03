@@ -55,20 +55,27 @@ pub(super) fn register_all(registry: &Registry, collectors: Vec<Box<dyn Collecto
 /// `start_search_adoption_sampler`. Returns
 /// `(events_recent, empty_recent, unresolved_recent)`.
 pub(super) fn create_search_adoption_metrics() -> (IntGaugeVec, IntGaugeVec, IntGaugeVec) {
+    // The `actor` label separates real agent traffic (actor="claude") from the
+    // eval/benchmark harness and CLI (actor="user") and internal daemon reads
+    // (actor="daemon"). Without it the search-quality benchmark — which fires
+    // natural-language questions through exact/grep mode, where ~0 results is
+    // expected by design — pins the exact/grep empty ratio high regardless of
+    // real agent friction. Panels default to {actor="claude"} for the adoption
+    // signal; the other actors stay queryable.
     let mcp_search_events_recent = int_gauge_vec(
         "mcp_search_events_recent",
-        "MCP read-tool events in the last 24h, by op",
-        &["op"],
+        "MCP read-tool events in the last 24h, by op and actor",
+        &["op", "actor"],
     );
     let mcp_search_empty_recent = int_gauge_vec(
         "mcp_search_empty_recent",
-        "Empty (0-result) MCP read-tool events in the last 24h, by op",
-        &["op"],
+        "Empty (0-result) MCP read-tool events in the last 24h, by op and actor",
+        &["op", "actor"],
     );
     let mcp_search_unresolved_recent = int_gauge_vec(
         "mcp_search_unresolved_recent",
-        "MCP read-tool events that could not resolve a project in the last 24h, by outcome",
-        &["outcome"],
+        "MCP read-tool events that could not resolve a project in the last 24h, by outcome and actor",
+        &["outcome", "actor"],
     );
     (
         mcp_search_events_recent,
