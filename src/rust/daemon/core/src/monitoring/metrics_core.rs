@@ -15,8 +15,9 @@ use super::metrics_factories::{
     create_chunking_coverage_metrics, create_dependency_metrics, create_file_metadata_metrics,
     create_graph_metrics, create_indexed_project_metrics, create_lsp_metrics,
     create_per_tenant_eta_metric, create_per_tenant_indexing_metric, create_queue_metrics,
-    create_session_metrics, create_system_metrics, create_telemetry_extension_metrics,
-    create_tenant_metrics, create_unified_queue_metrics, create_watch_metrics, register_all,
+    create_search_adoption_metrics, create_session_metrics, create_system_metrics,
+    create_telemetry_extension_metrics, create_tenant_metrics, create_unified_queue_metrics,
+    create_watch_metrics, register_all,
 };
 
 /// Global metrics registry
@@ -266,6 +267,15 @@ pub struct DaemonMetrics {
 
     /// Cumulative graph edges written during ingest. Labels: tenant_id, edge_type
     pub graph_edges_ingested_total: IntCounterVec,
+
+    // MCP adoption/health (sampled from search_events by start_search_adoption_sampler)
+    /// MCP read-tool events in the last 24h, by op. Labels: op
+    pub mcp_search_events_recent: IntGaugeVec,
+    /// Empty (0-result) MCP read-tool events in the last 24h, by op. Labels: op
+    pub mcp_search_empty_recent: IntGaugeVec,
+    /// MCP read-tool events that could not resolve a project in the last 24h.
+    /// Labels: outcome (unresolved_tenant, unresolved_project, error)
+    pub mcp_search_unresolved_recent: IntGaugeVec,
 }
 
 /// Intermediate struct holding all created metrics before registration.
@@ -328,6 +338,9 @@ struct CreatedMetrics {
     graph_unresolved_stubs: IntGaugeVec,
     graph_stub_resolved_total: IntCounterVec,
     graph_edges_ingested_total: IntCounterVec,
+    mcp_search_events_recent: IntGaugeVec,
+    mcp_search_empty_recent: IntGaugeVec,
+    mcp_search_unresolved_recent: IntGaugeVec,
 }
 
 /// Create all metric instances from subsystem factories.
@@ -428,6 +441,9 @@ fn create_all_metrics() -> CreatedMetrics {
         graph_edges_ingested_total,
     ) = create_graph_metrics();
 
+    let (mcp_search_events_recent, mcp_search_empty_recent, mcp_search_unresolved_recent) =
+        create_search_adoption_metrics();
+
     CreatedMetrics {
         active_sessions,
         total_sessions,
@@ -487,6 +503,9 @@ fn create_all_metrics() -> CreatedMetrics {
         graph_unresolved_stubs,
         graph_stub_resolved_total,
         graph_edges_ingested_total,
+        mcp_search_events_recent,
+        mcp_search_empty_recent,
+        mcp_search_unresolved_recent,
     }
 }
 
@@ -553,6 +572,9 @@ fn register_metrics(registry: &Registry, m: &CreatedMetrics) {
             Box::new(m.graph_unresolved_stubs.clone()),
             Box::new(m.graph_stub_resolved_total.clone()),
             Box::new(m.graph_edges_ingested_total.clone()),
+            Box::new(m.mcp_search_events_recent.clone()),
+            Box::new(m.mcp_search_empty_recent.clone()),
+            Box::new(m.mcp_search_unresolved_recent.clone()),
         ],
     );
 }
@@ -624,6 +646,9 @@ impl DaemonMetrics {
             graph_unresolved_stubs: m.graph_unresolved_stubs,
             graph_stub_resolved_total: m.graph_stub_resolved_total,
             graph_edges_ingested_total: m.graph_edges_ingested_total,
+            mcp_search_events_recent: m.mcp_search_events_recent,
+            mcp_search_empty_recent: m.mcp_search_empty_recent,
+            mcp_search_unresolved_recent: m.mcp_search_unresolved_recent,
         }
     }
 
