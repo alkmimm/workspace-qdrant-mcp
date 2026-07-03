@@ -381,6 +381,24 @@ async function executeAndLogSearch(
         branchWidened = true;
       }
     }
+    // Scope-widen on empty (parity with grep): still empty AND this was a
+    // project-scoped exact search (tenantId set) → the literal often lives in
+    // another repository (measured: ~90% of empty exact hits were cross-project).
+    // Re-run across ALL projects. Fires only on a genuinely empty project result.
+    let scopeWidened = false;
+    if (dedupedResults.length === 0 && tenantId) {
+      const widenedResponse = await daemonClient.textSearch(
+        buildExactSearchRequest({ ...options, branch: '*' }, undefined) // no tenant → all projects
+      );
+      const widenedRaw = mapExactResults(widenedResponse.matches, undefined);
+      const widened = dedupeExactResults(widenedRaw);
+      if (widened.length > 0) {
+        responses.push(widenedResponse);
+        dedupedResults = widened;
+        duplicatesDropped = widenedRaw.length - widened.length;
+        scopeWidened = true;
+      }
+    }
     const limit = options.limit ?? 100;
     // Pagination parity with the vector path (P1.5 C): honor `offset` by slicing
     // the deduped result list; set next_offset below when more remain.
@@ -404,8 +422,12 @@ async function executeAndLogSearch(
       collections_searched: [PROJECTS_COLLECTION],
     };
     if (dedupedResults.length > offset + limit) successResponse.next_offset = offset + results.length;
-    if (branchWidened && requestedBranch) {
+    if (scopeWidened) {
+      successResponse.hint = `No exact matches in the current project — widened to ALL projects (${dedupedResults.length} found). Pass scope:"all" to search across repositories directly next time.`;
+    } else if (branchWidened && requestedBranch) {
       successResponse.hint = `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`;
+    } else if (dedupedResults.length === 0) {
+      successResponse.hint = `No exact matches for "${options.query}" in any indexed project or branch. If you are looking for a concept rather than a literal string, use the search tool (semantic); otherwise broaden it or drop filters. Retrying the same query verbatim returns the same empty result.`;
     }
     await attachIndexingProgress(successResponse, daemonClient, successResponse.scope, tenantId);
     return successResponse;
