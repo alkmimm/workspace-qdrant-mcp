@@ -265,6 +265,69 @@ async fn test_no_orphaned_sessions_with_recent_heartbeat() {
     assert_eq!(info.priority, "high");
 }
 
+/// End-to-end: a running `SessionMonitor` (as wired by the daemon's
+/// `start_session_monitor`) reaps a stale session and re-projects `is_active`
+/// to 0 on its own timer — not just when `cleanup_orphaned_sessions` is called
+/// directly. Uses a 1s window so the reaper fires quickly; the poll is bounded
+/// so the test can never hang.
+#[tokio::test]
+async fn test_session_monitor_reaps_stale_session_when_running() {
+    let (pool, _temp_dir) = setup_test_db().await;
+    let priority_manager = PriorityManager::new(pool.clone());
+
+    create_test_project(&pool, "abcd12345678", "/test/project").await;
+    priority_manager
+        .register_session("abcd12345678", "main")
+        .await
+        .unwrap();
+    assert!(
+        priority_manager
+            .get_session_info("abcd12345678")
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active,
+        "sanity: project active after register"
+    );
+
+    // Age the heartbeat so the session is orphaned (MCP died without unregister).
+    let old_time = Utc::now() - ChronoDuration::minutes(5);
+    sqlx::query("UPDATE project_sessions SET last_heartbeat_at = ?1 WHERE tenant_id = ?2")
+        .bind(wqm_common::timestamps::format_utc(&old_time))
+        .bind("abcd12345678")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Start the monitor loop with a short window and let IT reap the session.
+    let monitor = SessionMonitor::new(
+        priority_manager.clone(),
+        SessionMonitorConfig {
+            heartbeat_timeout_secs: 1,
+            check_interval_secs: 1,
+        },
+    );
+    monitor.start().await.unwrap();
+
+    let mut demoted = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let info = priority_manager
+            .get_session_info("abcd12345678")
+            .await
+            .unwrap()
+            .unwrap();
+        if !info.is_active {
+            demoted = true;
+            break;
+        }
+    }
+    assert!(
+        demoted,
+        "running SessionMonitor should reap the stale session and demote is_active to 0"
+    );
+}
+
 #[tokio::test]
 async fn test_get_high_priority_projects() {
     let (pool, _temp_dir) = setup_test_db().await;

@@ -18,7 +18,8 @@ use workspace_qdrant_core::lsp::ServerStatus;
 use workspace_qdrant_core::search_db::SearchDbManager;
 use workspace_qdrant_core::{
     check_git_state_changes, check_remote_url_changes, metrics_history, poll_pause_state,
-    processing_timings, Language, LanguageServerManager, MetricsServer, METRICS,
+    processing_timings, Language, LanguageServerManager, MetricsServer, PriorityManager,
+    SessionMonitor, SessionMonitorConfig, METRICS,
 };
 
 /// Handles for all background tasks so the orchestrator can abort them on shutdown.
@@ -572,6 +573,54 @@ pub fn start_inactivity_timeout(pool: SqlitePool) -> JoinHandle<()> {
         std::env::var("WQM_INACTIVITY_TIMEOUT_SECS").unwrap_or_else(|_| "43200".to_string())
     );
     handle
+}
+
+/// Start the session-liveness reaper (migration v42 model).
+///
+/// Deletes `project_sessions` rows whose `last_heartbeat_at` has gone stale and
+/// re-projects `watch_folders.is_active = COUNT(live sessions)`, so a project
+/// whose MCP session died WITHOUT a clean `unregister_session` — a crashed
+/// client, or a fire-and-forget admin `RegisterProject` activate — is demoted
+/// within ~one check interval instead of leaking `is_active` until the coarse
+/// 12h inactivity timeout (`start_inactivity_timeout`, a separate
+/// `last_activity_at`-based backstop this complements).
+///
+/// `heartbeat_timeout_secs` (default 90s) is ~3x the MCP heartbeat interval
+/// (`HEARTBEAT_INTERVAL_MS`, 30s) so a single missed heartbeat never
+/// false-reaps a live session. Override with `WQM_SESSION_HEARTBEAT_TIMEOUT_SECS`
+/// / `WQM_SESSION_CHECK_INTERVAL_SECS`.
+pub fn start_session_monitor(pool: SqlitePool) -> JoinHandle<()> {
+    let heartbeat_timeout_secs: u64 = std::env::var("WQM_SESSION_HEARTBEAT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(90);
+    let check_interval_secs: u64 = std::env::var("WQM_SESSION_CHECK_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+
+    tokio::spawn(async move {
+        let monitor = SessionMonitor::new(
+            PriorityManager::new(pool),
+            SessionMonitorConfig {
+                heartbeat_timeout_secs,
+                check_interval_secs,
+            },
+        );
+        if let Err(e) = monitor.start().await {
+            error!("Failed to start session-liveness reaper: {}", e);
+            return;
+        }
+        info!(
+            "Session-liveness reaper started (heartbeat_timeout={}s, check_interval={}s)",
+            heartbeat_timeout_secs, check_interval_secs
+        );
+        // `start()` detached the reaper loop; hold `monitor` (and thus its
+        // cancellation token) for the daemon's lifetime so the loop keeps
+        // running. This task ends only when the process exits.
+        let _monitor = monitor;
+        std::future::pending::<()>().await;
+    })
 }
 
 /// Start periodic remote URL change detection (Task 584).
@@ -1132,6 +1181,7 @@ pub fn spawn_all(
     let _timings = start_timings_cleanup(pool.clone());
     let _log_prune = start_log_pruning(pool.clone());
     let _inactivity = start_inactivity_timeout(pool.clone());
+    let _session_monitor = start_session_monitor(pool.clone());
     let _remote = start_remote_url_monitor(pool.clone());
     let _git_state = start_git_state_monitor(pool.clone());
     let _queue_depth = start_queue_depth_exporter(pool.clone());
