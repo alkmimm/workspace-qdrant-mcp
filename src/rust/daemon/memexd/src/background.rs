@@ -1278,14 +1278,15 @@ pub fn start_graph_lsp_backfill(
                             .await;
                         info!(tenant = %tenant, language = ?language, superseded,
                             "LSP backfill: superseded fuzzy CALLS with precise LSP edges");
-                        // Label with the canonical lowercase id (e.g. "dart",
-                        // "typescript") — the same vocabulary the sibling
+                        // Label with the classifier/graph vocabulary (e.g. "dart",
+                        // "typescript", "bash") — the same ids the sibling
                         // `graph_nodes_by_language` metric uses — NOT the enum's
-                        // Debug form ("Dart", `Other("cmake")`), so the two graph
+                        // Debug form ("Dart", `Other("cmake")`) nor the LSP
+                        // languageId ("shellscript" for Shell), so the two graph
                         // language metrics line up on dashboards.
                         METRICS
                             .graph_lsp_superseded_total
-                            .with_label_values(&[tenant.as_str(), language.identifier()])
+                            .with_label_values(&[tenant.as_str(), language.classifier_id()])
                             .inc_by(superseded);
                     }
 

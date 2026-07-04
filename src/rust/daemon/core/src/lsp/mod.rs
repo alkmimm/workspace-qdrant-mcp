@@ -189,6 +189,21 @@ impl Language {
         }
     }
 
+    /// The id the classifier/graph tables use for this language — i.e. the value
+    /// stored in `graph_nodes.language` and used as the `graph_nodes_by_language`
+    /// metric label. Equals [`identifier`](Self::identifier) EXCEPT where the LSP
+    /// `languageId` diverges from the source vocabulary: Shell's LSP `languageId`
+    /// is `"shellscript"` but the classifier tags shell files `"bash"`.
+    ///
+    /// Use this for metric labels that must line up with the graph metrics; use
+    /// [`identifier`](Self::identifier) for the LSP protocol (`didOpen` languageId).
+    pub fn classifier_id(&self) -> &str {
+        match self {
+            Language::Shell => "bash",
+            other => other.identifier(),
+        }
+    }
+
     /// Create language from file extension.
     ///
     /// Uses the language registry for extension→language mapping, then
