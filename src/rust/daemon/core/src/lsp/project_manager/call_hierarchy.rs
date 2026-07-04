@@ -164,10 +164,13 @@ impl LanguageServerManager {
     /// Dart's analysis server answers `callHierarchy/outgoingCalls` with an empty
     /// result while a freshly opened document is still being analyzed — a fixed
     /// short sleep was why the backfill resolved 0 Dart edges. After a brief
-    /// settle (lets the analyzer flip `isAnalyzing` true), this polls until it
-    /// clears or `timeout` elapses. Servers that never emit `$/analyzerStatus`
-    /// (typescript-language-server, pyright) stay idle, so this returns right
-    /// after the settle — negligible cost for the fast path.
+    /// settle (lets the analyzer flip `is_analyzing()` true), this polls until it
+    /// clears or the 12s cap elapses. `is_analyzing()` tracks NON-indexing
+    /// `$/progress` (the post-`didOpen` (re)analysis, e.g. Dart's "Analyzing…");
+    /// background index/workspace-load progress is excluded (see process.rs), so
+    /// servers whose only progress is indexing (typescript-language-server,
+    /// pyright, and rust-analyzer/gopls once indexed) stay idle and this returns
+    /// right after the settle — negligible cost for the fast path.
     pub async fn wait_for_analysis_idle(&self, file: &Path) {
         let (_key, server) = self.find_server_for_file(file).await;
         let Some(instance) = server else {
@@ -193,7 +196,10 @@ impl LanguageServerManager {
     /// `ANALYZING` workDoneProgress token a few seconds after `didOpen`), then
     /// waits for that to clear. A large Dart monorepo takes ~1 min; call-hierarchy
     /// returns empty until it finishes, so this is what actually unblocks Dart.
-    /// No-op for servers that never report progress (they answer immediately).
+    /// "Busy" is NON-indexing `$/progress` only (see process.rs), so a server
+    /// still doing background indexing does not falsely satisfy phase 1 and pin
+    /// phase 2 on unrelated work. No-op for servers that never report a
+    /// non-indexing progress after `didOpen` (they answer immediately).
     pub async fn wait_for_initial_analysis(&self, file: &Path) {
         let (_key, server) = self.find_server_for_file(file).await;
         let Some(instance) = server else {

@@ -554,7 +554,15 @@ pub fn start_grammar_backfill(pool: SqlitePool) -> JoinHandle<()> {
         let mut manager = GrammarManager::new(config);
         let queue_manager = QueueManager::new(pool.clone());
 
-        let mut downloaded = 0u32;
+        // Group the stuck labels by the canonical grammar they resolve to. The
+        // grammar cache + loader key off the canonical id (`tree_sitter_<id>`
+        // symbol), and MULTIPLE classifier labels can share one grammar (e.g.
+        // "sh"/"shell"/"zsh" → "bash"). Downloading a grammar triggers the uplift,
+        // so we must uplift EVERY label that maps to it in the same pass —
+        // otherwise the first label downloads it and the rest see it already
+        // cached and get skipped, leaving their stuck files text-chunked.
+        let mut by_canonical: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for row in &langs {
             // `lang` is the tracked_files label — which may be an ALIAS (the
             // classifier tags `.sh` as "shell", not the canonical "bash").
@@ -564,37 +572,46 @@ pub fn start_grammar_backfill(pool: SqlitePool) -> JoinHandle<()> {
             if get_static_language(&lang).is_some() || !is_language_supported(&lang) {
                 continue;
             }
-            // Grammar cache + loader key off the canonical id (`tree_sitter_<id>`
-            // symbol); fetching by the raw alias "shell" would look up a
-            // non-existent `tree_sitter_shell` and fail. Resolve it here — but
-            // still uplift by the ORIGINAL label below (that is how the files are
+            // Fetching by the raw alias "shell" would look up a non-existent
+            // `tree_sitter_shell` and fail — resolve to the canonical id, but keep
+            // the ORIGINAL label(s) for the uplift (that is how the files are
             // tagged in tracked_files).
             let canonical = canonical_language(&lang).unwrap_or_else(|| lang.clone());
+            by_canonical.entry(canonical).or_default().push(lang);
+        }
+
+        let mut downloaded = 0u32;
+        for (canonical, labels) in &by_canonical {
             // Already cached → not a "never-downloaded" case; skip to stay
-            // churn-free (avoids re-uplifting on every startup).
-            if manager.cache_paths().grammar_exists(&canonical) {
+            // churn-free (avoids re-uplifting on every startup). Any stuck rows
+            // here are the branch-dedup status-carry concern, recovered by that
+            // fix or a reembed — not a missing grammar.
+            if manager.cache_paths().grammar_exists(canonical) {
                 continue;
             }
-            match manager.get_grammar(&canonical).await {
+            match manager.get_grammar(canonical).await {
                 Ok(_) => {
                     downloaded += 1;
                     info!(
-                        language = %lang,
+                        canonical = %canonical,
+                        labels = ?labels,
                         "grammar backfill: downloaded never-fetched grammar — uplifting stuck files"
                     );
-                    for tenant in distinct_tenants_with_stuck_language(&pool, &lang).await {
-                        trigger_capability_upgrade(
-                            &pool,
-                            &queue_manager,
-                            &tenant,
-                            UpgradeReason::GrammarAvailable,
-                            Some(&lang),
-                        )
-                        .await;
+                    for lang in labels {
+                        for tenant in distinct_tenants_with_stuck_language(&pool, lang).await {
+                            trigger_capability_upgrade(
+                                &pool,
+                                &queue_manager,
+                                &tenant,
+                                UpgradeReason::GrammarAvailable,
+                                Some(lang.as_str()),
+                            )
+                            .await;
+                        }
                     }
                 }
                 Err(e) => {
-                    warn!(language = %lang, error = %e, "grammar backfill: grammar download failed");
+                    warn!(canonical = %canonical, error = %e, "grammar backfill: grammar download failed");
                 }
             }
         }
@@ -1261,10 +1278,14 @@ pub fn start_graph_lsp_backfill(
                             .await;
                         info!(tenant = %tenant, language = ?language, superseded,
                             "LSP backfill: superseded fuzzy CALLS with precise LSP edges");
-                        let lang_label = format!("{language:?}");
+                        // Label with the canonical lowercase id (e.g. "dart",
+                        // "typescript") — the same vocabulary the sibling
+                        // `graph_nodes_by_language` metric uses — NOT the enum's
+                        // Debug form ("Dart", `Other("cmake")`), so the two graph
+                        // language metrics line up on dashboards.
                         METRICS
                             .graph_lsp_superseded_total
-                            .with_label_values(&[tenant.as_str(), &lang_label])
+                            .with_label_values(&[tenant.as_str(), language.identifier()])
                             .inc_by(superseded);
                     }
 

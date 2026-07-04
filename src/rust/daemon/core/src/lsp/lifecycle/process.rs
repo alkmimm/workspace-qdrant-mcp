@@ -222,11 +222,17 @@ impl ServerInstance {
             let analyzing = self.analyzing.clone();
             let indexing_tokens: Arc<StdMutex<HashSet<String>>> =
                 Arc::new(StdMutex::new(HashSet::new()));
-            // Every in-flight `$/progress` token (any title). `analyzing` is true
-            // while this set is non-empty — the "server is busy" signal the graph
-            // backfill waits on. Dart's analysis pass is a workDoneProgress token
-            // (title "Analyzing…"), gated on our reply to workDoneProgress/create
-            // (see transport.rs) — which is why this only works once we answer it.
+            // In-flight NON-indexing `$/progress` tokens — i.e. post-`didOpen`
+            // (re)analysis, NOT background index/workspace-load passes (those go
+            // to `indexing_tokens` for the readiness signal only). `analyzing` is
+            // true while this set is non-empty — the "server is (re)analyzing an
+            // open document" signal the graph backfill waits on. Dart's analysis
+            // pass is a workDoneProgress token (title "Analyzing…", not an indexing
+            // title), gated on our reply to workDoneProgress/create (see
+            // transport.rs) — which is why this only works once we answer it.
+            // Excluding indexing titles keeps the fast path a near no-op for
+            // servers whose only progress is background indexing (rust-analyzer,
+            // gopls, clangd) instead of making them pay the analysis-idle waits.
             let active_progress: Arc<StdMutex<HashSet<String>>> =
                 Arc::new(StdMutex::new(HashSet::new()));
             self.rpc_client
@@ -241,23 +247,30 @@ impl ServerInstance {
                             let value = params.get("value");
                             match value.and_then(|v| v.get("kind")).and_then(|k| k.as_str()) {
                                 Some("begin") => {
-                                    if let Some(tok) = token.clone() {
-                                        // Any in-flight progress ⇒ server busy.
-                                        if let Ok(mut set) = active_progress.lock() {
-                                            set.insert(tok);
-                                        }
-                                        analyzing.store(true, Ordering::Relaxed);
-                                    }
                                     let title = value
                                         .and_then(|v| v.get("title"))
                                         .and_then(|t| t.as_str())
                                         .unwrap_or("");
                                     if is_indexing_title(title) {
+                                        // Heavy initial-indexing progress: tracked
+                                        // for the readiness signal only, NOT treated
+                                        // as "analyzing" — otherwise the backfill's
+                                        // per-file / per-tenant analysis waits fire
+                                        // on every background index pass of every
+                                        // server, not just the post-`didOpen`
+                                        // (re)analysis they exist for.
                                         if let (Some(tok), Ok(mut set)) =
                                             (token, indexing_tokens.lock())
                                         {
                                             set.insert(tok);
                                         }
+                                    } else if let Some(tok) = token {
+                                        // Non-indexing progress ⇒ the server is
+                                        // (re)analyzing an open document.
+                                        if let Ok(mut set) = active_progress.lock() {
+                                            set.insert(tok);
+                                        }
+                                        analyzing.store(true, Ordering::Relaxed);
                                     }
                                 }
                                 Some("end") => {

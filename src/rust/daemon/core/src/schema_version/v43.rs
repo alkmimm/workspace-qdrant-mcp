@@ -14,9 +14,16 @@
 //!   treats these files as perpetual re-chunk candidates that never converge.
 //!
 //! This migration re-derives the truth from the mirror: a file whose
-//! `qdrant_chunks` contains ANY non-NULL `chunk_type` (function/method/class/…;
-//! text fallback stores NULL) was tree-sitter chunked, so its `treesitter_status`
-//! is set back to `'done'`. Rows with only text chunks are left untouched.
+//! `qdrant_chunks` contains ANY non-NULL `chunk_type` (function/method/class/…)
+//! was tree-sitter chunked, so its `treesitter_status` is set back to `'done'`.
+//!
+//! LIMITATION — `chunk_type IS NULL` is ambiguous: it is stored both by the text
+//! fallback (genuinely NOT tree-sitter chunked) AND by STRUCTURAL chunking of
+//! no-pattern grammars (css/html/json), which is legitimately `'done'`. This
+//! migration cannot tell them apart, so a structurally-chunked file that was
+//! clobbered to `'none'` is NOT recovered here and stays a re-chunk candidate
+//! until a genuine content change or the startup grammar-backfill sweep re-runs
+//! it. Only files with a non-NULL `chunk_type` in the mirror are repaired.
 //!
 //! The companion `branch_dedup` fix (carry the source row's status) prevents new
 //! corruption; this migration cleans up rows already clobbered before that fix.

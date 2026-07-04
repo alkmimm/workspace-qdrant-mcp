@@ -6,7 +6,7 @@ import type { QdrantClient } from '@qdrant/js-client-rest';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
-import type { SearchOptions, SearchResult, SearchResponse, FilterParams } from './search-types.js';
+import type { SearchOptions, SearchResult, SearchResponse, FilterParams, SearchScope } from './search-types.js';
 import { PROJECTS_COLLECTION } from './search-types.js';
 import { attachIndexingProgress } from './search-helpers.js';
 import { buildFilter } from './search-filters.js';
@@ -413,12 +413,17 @@ async function executeAndLogSearch(
       resultCount: results.length,
       latencyMs: Date.now() - startTime,
     });
+    // On a scope-widen the results are cross-project, so report scope 'all' — not
+    // the caller's 'project'. Otherwise the structured `scope` (and the indexing
+    // progress attached below, which is project-scoped) would contradict the
+    // cross-project results and only the free-text hint would reveal the widen.
+    const effectiveScope: SearchScope = scopeWidened ? 'all' : (options.scope ?? 'project');
     const successResponse: SearchResponse = {
       results,
       total,
       query: options.query,
       mode: 'keyword',
-      scope: options.scope ?? 'project',
+      scope: effectiveScope,
       collections_searched: [PROJECTS_COLLECTION],
     };
     if (dedupedResults.length > offset + limit) successResponse.next_offset = offset + results.length;
@@ -429,7 +434,9 @@ async function executeAndLogSearch(
     } else if (dedupedResults.length === 0) {
       successResponse.hint = `No exact matches for "${options.query}" in any indexed project or branch. If you are looking for a concept rather than a literal string, use the search tool (semantic); otherwise broaden it or drop filters. Retrying the same query verbatim returns the same empty result.`;
     }
-    await attachIndexingProgress(successResponse, daemonClient, successResponse.scope, tenantId);
+    // `attachIndexingProgress` is a no-op unless scope==='project', so a widened
+    // ('all') response correctly gets no project-scoped indexing progress.
+    await attachIndexingProgress(successResponse, daemonClient, effectiveScope, tenantId);
     return successResponse;
   } catch (error) {
     stateManager.updateSearchEvent(eventId, { resultCount: 0, latencyMs: Date.now() - startTime });
