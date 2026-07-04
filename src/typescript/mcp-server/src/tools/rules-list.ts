@@ -105,6 +105,33 @@ function readRulesFromMirror(
   }
 }
 
+/**
+ * Cold-start guard: a freshly (re)started MCP container pays connection warmup
+ * on its FIRST Qdrant call, which can exceed the MCP client's request timeout
+ * (surfacing as -32001) even though a retry — hitting a warm connection —
+ * succeeds. Bound the scroll so a slow cold call degrades to the local mirror
+ * fast instead of hanging. Warm scrolls of the small rules collection finish in
+ * milliseconds, so this deadline is never hit on the normal path.
+ */
+const RULES_SCROLL_DEADLINE_MS = 2500;
+
+/**
+ * Resolve `p`, or `null` if it has not settled within `ms`. A rejection that
+ * arrives AFTER the deadline is swallowed so it does not surface as an unhandled
+ * rejection; a rejection BEFORE the deadline still rejects the race, so the
+ * caller's catch (its existing error→mirror path) handles a genuine failure.
+ */
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  p.catch(() => undefined);
+  return Promise.race([p, deadline]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 /** List rules by scope from Qdrant, with rules_mirror fallback. */
 export async function listRules(
   qdrantClient: QdrantClient,
@@ -126,15 +153,28 @@ export async function listRules(
 
   try {
     const filter = buildListFilter(scope, resolvedProjectId);
-    const scrollResult = await qdrantClient.scroll(
-      RULES_COLLECTION,
-      buildScrollRequest(limit, filter)
+    const scrollResult = await withDeadline(
+      qdrantClient.scroll(RULES_COLLECTION, buildScrollRequest(limit, filter)),
+      RULES_SCROLL_DEADLINE_MS
     );
-    const rules: Rule[] = scrollResult.points.map(pointToRule);
-    const message = unresolvedProjectScope
-      ? `Found ${rules.length} rule(s) across ALL projects — the current project could not be detected, so this listing is not scoped. Each rule's "owner" field identifies its project (or "global"). Pass cwd or projectId to scope to one project.`
-      : `Found ${rules.length} rule(s)`;
-    return { success: true, action: 'list', rules, message };
+    if (scrollResult) {
+      const rules: Rule[] = scrollResult.points.map(pointToRule);
+      const message = unresolvedProjectScope
+        ? `Found ${rules.length} rule(s) across ALL projects — the current project could not be detected, so this listing is not scoped. Each rule's "owner" field identifies its project (or "global"). Pass cwd or projectId to scope to one project.`
+        : `Found ${rules.length} rule(s)`;
+      return { success: true, action: 'list', rules, message };
+    }
+    // Deadline hit — a slow COLD Qdrant scroll. Serve the local mirror fast so
+    // the caller gets its rules instead of an MCP client timeout (-32001).
+    const mirror = readRulesFromMirror(stateManager, scope, resolvedProjectId, limit);
+    if (mirror) return mirror;
+    return {
+      success: false,
+      action: 'list',
+      rules: [],
+      message:
+        'Rules backend (Qdrant) was slow to respond (cold start) and no local mirror was available; retry shortly.',
+    };
   } catch (error) {
     const mirror = readRulesFromMirror(stateManager, scope, resolvedProjectId, limit);
     if (mirror) return mirror;
