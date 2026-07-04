@@ -407,16 +407,39 @@ async fn handle_incoming_message(
             // gates the server's `$/progress` stream on the ack — Dart withholds
             // its analysis progress (and thus the graph backfill's analysis-idle
             // signal) until we reply. Acknowledge that request (null result);
-            // reply "method not found" to anything else so no server hangs on us.
-            let response = if request.method == "window/workDoneProgress/create" {
-                serde_json::json!({ "jsonrpc": "2.0", "id": request.id, "result": null })
-            } else {
-                debug!("Unhandled request from LSP server: {}", request.method);
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": request.id,
-                    "error": { "code": -32601, "message": "method not supported by client" }
-                })
+            // answer `workspace/configuration` with nulls so the server falls back
+            // to its defaults (an error reply makes some servers surface a config
+            // failure); reply "method not found" to anything else so no server
+            // hangs on us.
+            let response = match request.method.as_str() {
+                "window/workDoneProgress/create" => {
+                    serde_json::json!({ "jsonrpc": "2.0", "id": request.id.clone(), "result": null })
+                }
+                "workspace/configuration" => {
+                    // The result is an array with one entry per requested item; we
+                    // hold no per-section config, so answer `null` for each (the
+                    // server then uses its defaults / initializationOptions).
+                    let n = request
+                        .params
+                        .as_ref()
+                        .and_then(|p| p.get("items"))
+                        .and_then(|i| i.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(1);
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request.id.clone(),
+                        "result": vec![serde_json::Value::Null; n]
+                    })
+                }
+                other => {
+                    debug!("Unhandled request from LSP server: {other}");
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request.id.clone(),
+                        "error": { "code": -32601, "message": "method not supported by client" }
+                    })
+                }
             };
             let _ = response_tx.send(response.to_string());
         }
