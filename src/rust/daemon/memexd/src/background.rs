@@ -1237,6 +1237,19 @@ pub fn start_graph_lsp_backfill(
                     }
 
                     if warm {
+                        // Trigger + await the initial project analysis ONCE, before
+                        // the resolve loop. call-hierarchy returns empty until the
+                        // analyzer finishes; opening a representative file here (and
+                        // waiting for that analysis to settle) is what unblocks slow
+                        // analyzers (Dart ~1min) — paid once per tenant, not per file.
+                        if let Some(f) = rep_abs.as_ref() {
+                            let mgr = lsp_manager.read().await;
+                            let p = std::path::Path::new(f);
+                            let _ = mgr.open_document(p).await;
+                            mgr.wait_for_initial_analysis(p).await;
+                            // Leave it open — the resolve loop keeps ≥1 doc open so
+                            // the project stays analysed throughout.
+                        }
                         let superseded =
                             workspace_qdrant_core::graph::lsp_backfill::run_backfill_tenant(
                                 &graph_store,
