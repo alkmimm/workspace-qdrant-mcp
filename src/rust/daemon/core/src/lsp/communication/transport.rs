@@ -58,6 +58,9 @@ impl JsonRpcClient {
 
         // Create message channel
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        // A clone the read loop uses to REPLY to server→client requests
+        // (e.g. window/workDoneProgress/create) without waiting on the client API.
+        let response_tx = tx.clone();
         *self.message_sender.lock().await = Some(tx);
 
         // Spawn task to write to stdin
@@ -87,6 +90,7 @@ impl JsonRpcClient {
                 &mut BufReader::new(stdout),
                 &pending_requests,
                 &notification_handler,
+                &response_tx,
             )
             .await;
         };
@@ -333,6 +337,7 @@ async fn read_stdout_loop(
     reader: &mut BufReader<ChildStdout>,
     pending_requests: &Arc<RwLock<HashMap<u64, PendingRequest>>>,
     notification_handler: &Arc<Mutex<Option<Box<dyn Fn(JsonRpcNotification) + Send + Sync>>>>,
+    response_tx: &mpsc::UnboundedSender<String>,
 ) {
     loop {
         match read_message(reader).await {
@@ -342,9 +347,13 @@ async fn read_stdout_loop(
                     continue; // malformed / zero-length frame
                 }
                 trace!("Received: {}", message_text);
-                if let Err(e) =
-                    handle_incoming_message(&message_text, pending_requests, notification_handler)
-                        .await
+                if let Err(e) = handle_incoming_message(
+                    &message_text,
+                    pending_requests,
+                    notification_handler,
+                    response_tx,
+                )
+                .await
                 {
                     warn!("Error handling message: {}", e);
                 }
@@ -364,6 +373,7 @@ async fn handle_incoming_message(
     message_text: &str,
     pending_requests: &Arc<RwLock<HashMap<u64, PendingRequest>>>,
     notification_handler: &Arc<Mutex<Option<Box<dyn Fn(JsonRpcNotification) + Send + Sync>>>>,
+    response_tx: &mpsc::UnboundedSender<String>,
 ) -> LspResult<()> {
     let message = JsonRpcMessage::parse(message_text)?;
 
@@ -392,7 +402,23 @@ async fn handle_incoming_message(
             }
         }
         JsonRpcMessage::Request(request) => {
-            warn!("Received request from LSP server: {}", request.method);
+            // Servers send client-bound requests and BLOCK dependent output until
+            // they are answered. In particular `window/workDoneProgress/create`
+            // gates the server's `$/progress` stream on the ack — Dart withholds
+            // its analysis progress (and thus the graph backfill's analysis-idle
+            // signal) until we reply. Acknowledge that request (null result);
+            // reply "method not found" to anything else so no server hangs on us.
+            let response = if request.method == "window/workDoneProgress/create" {
+                serde_json::json!({ "jsonrpc": "2.0", "id": request.id, "result": null })
+            } else {
+                debug!("Unhandled request from LSP server: {}", request.method);
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request.id,
+                    "error": { "code": -32601, "message": "method not supported by client" }
+                })
+            };
+            let _ = response_tx.send(response.to_string());
         }
     }
 

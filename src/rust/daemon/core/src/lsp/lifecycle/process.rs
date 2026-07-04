@@ -222,6 +222,13 @@ impl ServerInstance {
             let analyzing = self.analyzing.clone();
             let indexing_tokens: Arc<StdMutex<HashSet<String>>> =
                 Arc::new(StdMutex::new(HashSet::new()));
+            // Every in-flight `$/progress` token (any title). `analyzing` is true
+            // while this set is non-empty — the "server is busy" signal the graph
+            // backfill waits on. Dart's analysis pass is a workDoneProgress token
+            // (title "Analyzing…"), gated on our reply to workDoneProgress/create
+            // (see transport.rs) — which is why this only works once we answer it.
+            let active_progress: Arc<StdMutex<HashSet<String>>> =
+                Arc::new(StdMutex::new(HashSet::new()));
             self.rpc_client
                 .set_notification_handler(move |notif| {
                     let params = match notif.params.as_ref() {
@@ -234,6 +241,13 @@ impl ServerInstance {
                             let value = params.get("value");
                             match value.and_then(|v| v.get("kind")).and_then(|k| k.as_str()) {
                                 Some("begin") => {
+                                    if let Some(tok) = token.clone() {
+                                        // Any in-flight progress ⇒ server busy.
+                                        if let Ok(mut set) = active_progress.lock() {
+                                            set.insert(tok);
+                                        }
+                                        analyzing.store(true, Ordering::Relaxed);
+                                    }
                                     let title = value
                                         .and_then(|v| v.get("title"))
                                         .and_then(|t| t.as_str())
@@ -255,6 +269,14 @@ impl ServerInstance {
                                         if was_indexing {
                                             ready_signal.store(true, Ordering::Relaxed);
                                         }
+                                        let still_busy = active_progress
+                                            .lock()
+                                            .map(|mut s| {
+                                                s.remove(&tok);
+                                                !s.is_empty()
+                                            })
+                                            .unwrap_or(false);
+                                        analyzing.store(still_busy, Ordering::Relaxed);
                                     }
                                 }
                                 _ => {}

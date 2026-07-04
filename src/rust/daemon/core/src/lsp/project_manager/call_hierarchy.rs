@@ -185,6 +185,43 @@ impl LanguageServerManager {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
     }
+
+    /// Wait for the server's INITIAL project analysis to complete after opening a
+    /// representative file — paid ONCE per tenant during warm-up, before the
+    /// resolve loop. Unlike [`wait_for_analysis_idle`] (a short per-file settle),
+    /// this first waits for the analyzer to report it is busy (Dart requests its
+    /// `ANALYZING` workDoneProgress token a few seconds after `didOpen`), then
+    /// waits for that to clear. A large Dart monorepo takes ~1 min; call-hierarchy
+    /// returns empty until it finishes, so this is what actually unblocks Dart.
+    /// No-op for servers that never report progress (they answer immediately).
+    pub async fn wait_for_initial_analysis(&self, file: &Path) {
+        let (_key, server) = self.find_server_for_file(file).await;
+        let Some(instance) = server else {
+            return;
+        };
+        // Phase 1: wait for analysis to START (server reports busy). If it never
+        // does within the window, the server needs no wait — return.
+        let start_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
+        let mut started = false;
+        while tokio::time::Instant::now() < start_deadline {
+            if instance.lock().await.is_analyzing() {
+                started = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        if !started {
+            return;
+        }
+        // Phase 2: wait for it to FINISH (generous — large projects analyse slowly).
+        let done_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+        while tokio::time::Instant::now() < done_deadline {
+            if !instance.lock().await.is_analyzing() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
 }
 
 /// Best-effort LSP `languageId` for a file (used in `textDocument/didOpen`).
