@@ -40,7 +40,8 @@ export const searchToolDefinition = {
       scope: {
         type: 'string',
         enum: ['project', 'global', 'all'],
-        description: 'Search scope: project (current), global, or all (default: project)',
+        description:
+          'Search scope. "project" (default) searches ONLY the current repo. "all" searches across every indexed repository — this crosses project/tenant boundaries and is opt-in. An exact search (exact:true) that finds nothing in the project does NOT auto-fall-back to other repos; pass "all" to do so.',
       },
       limit: {
         type: 'number',

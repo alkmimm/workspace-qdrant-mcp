@@ -381,24 +381,12 @@ async function executeAndLogSearch(
         branchWidened = true;
       }
     }
-    // Scope-widen on empty (parity with grep): still empty AND this was a
-    // project-scoped exact search (tenantId set) → the literal often lives in
-    // another repository (measured: ~90% of empty exact hits were cross-project).
-    // Re-run across ALL projects. Fires only on a genuinely empty project result.
-    let scopeWidened = false;
-    if (dedupedResults.length === 0 && tenantId) {
-      const widenedResponse = await daemonClient.textSearch(
-        buildExactSearchRequest({ ...options, branch: '*' }, undefined) // no tenant → all projects
-      );
-      const widenedRaw = mapExactResults(widenedResponse.matches, undefined);
-      const widened = dedupeExactResults(widenedRaw);
-      if (widened.length > 0) {
-        responses.push(widenedResponse);
-        dedupedResults = widened;
-        duplicatesDropped = widenedRaw.length - widened.length;
-        scopeWidened = true;
-      }
-    }
+    // NO automatic cross-project widen. A project-scoped exact search (tenantId
+    // set) that finds nothing must NOT silently return hits from OTHER tenants —
+    // that crosses the tenant data-isolation boundary without the caller opting
+    // in (a confidential repo indexed in the same instance would leak into an
+    // unrelated project's session). On an empty project result we surface a hint
+    // offering scope:"all" (below) instead of fetching cross-project data here.
     const limit = options.limit ?? 100;
     // Pagination parity with the vector path (P1.5 C): honor `offset` by slicing
     // the deduped result list; set next_offset below when more remain.
@@ -413,11 +401,7 @@ async function executeAndLogSearch(
       resultCount: results.length,
       latencyMs: Date.now() - startTime,
     });
-    // On a scope-widen the results are cross-project, so report scope 'all' — not
-    // the caller's 'project'. Otherwise the structured `scope` (and the indexing
-    // progress attached below, which is project-scoped) would contradict the
-    // cross-project results and only the free-text hint would reveal the widen.
-    const effectiveScope: SearchScope = scopeWidened ? 'all' : (options.scope ?? 'project');
+    const effectiveScope: SearchScope = options.scope ?? 'project';
     const successResponse: SearchResponse = {
       results,
       total,
@@ -427,15 +411,15 @@ async function executeAndLogSearch(
       collections_searched: [PROJECTS_COLLECTION],
     };
     if (dedupedResults.length > offset + limit) successResponse.next_offset = offset + results.length;
-    if (scopeWidened) {
-      successResponse.hint = `No exact matches in the current project — widened to ALL projects (${dedupedResults.length} found). Pass scope:"all" to search across repositories directly next time.`;
-    } else if (branchWidened && requestedBranch) {
+    if (branchWidened && requestedBranch) {
       successResponse.hint = `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`;
+    } else if (dedupedResults.length === 0 && tenantId) {
+      // Project-scoped miss. Do NOT auto-search other repos (that would cross the
+      // tenant data boundary silently); offer the explicit opt-in instead.
+      successResponse.hint = `No exact matches for "${options.query}" in the current project. It may live in another indexed repository — pass scope:"all" to search across every repository (opt-in; this crosses project boundaries). For a concept rather than a literal, use the search tool (semantic).`;
     } else if (dedupedResults.length === 0) {
-      successResponse.hint = `No exact matches for "${options.query}" in any indexed project or branch. If you are looking for a concept rather than a literal string, use the search tool (semantic); otherwise broaden it or drop filters. Retrying the same query verbatim returns the same empty result.`;
+      successResponse.hint = `No exact matches for "${options.query}" in any indexed project. If you are looking for a concept rather than a literal string, use the search tool (semantic); otherwise broaden it or drop filters. Retrying the same query verbatim returns the same empty result.`;
     }
-    // `attachIndexingProgress` is a no-op unless scope==='project', so a widened
-    // ('all') response correctly gets no project-scoped indexing progress.
     await attachIndexingProgress(successResponse, daemonClient, effectiveScope, tenantId);
     return successResponse;
   } catch (error) {
