@@ -251,6 +251,25 @@
     docstring_style: first_string_in_body
   lsp_servers: []
 
+# ── CMake ────────────────────────────────────────────────────────────
+
+- language: cmake
+  aliases: []
+  extensions: [".cmake"]
+  type: programming
+  grammar:
+    sources:
+      - repo: uyha/tree-sitter-cmake
+        quality: community
+    # scanner.c is a C external scanner (no C++); compiled like tree-sitter-bash.
+    has_cpp_scanner: false
+  # No semantic_patterns yet: the grammar alone yields structural chunks (as with
+  # css/html/json), which is enough for tree-sitter coverage. Function/macro
+  # extraction for the graph (node types function_def / macro_def) is a follow-up
+  # to author + validate against grammar_chunking_test. Extension-based detection
+  # covers `.cmake`; `CMakeLists.txt` is filename-based and not resolved here.
+  lsp_servers: []
+
 # ── C++ ──────────────────────────────────────────────────────────────
 
 - language: cpp
