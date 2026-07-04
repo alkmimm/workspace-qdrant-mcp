@@ -88,6 +88,14 @@ pub struct ServerInstance {
     /// the server is genuinely ready, ahead of the fixed warm-up grace. Shared
     /// (Arc) across clones and with the manager's readiness check.
     pub(super) ready_signal: Arc<AtomicBool>,
+    /// True while the server is actively (re)analyzing after a `didOpen` — set
+    /// from Dart's `$/analyzerStatus{isAnalyzing}` notification. The call-graph
+    /// backfill waits for this to clear before asking for call-hierarchy: Dart's
+    /// analyzer answers `outgoingCalls` with an empty result until the freshly
+    /// opened document has been analyzed (a fixed short sleep was the reason the
+    /// Dart backfill resolved 0 edges). Fast servers (TS/pyright) never set it,
+    /// so the wait is a near no-op for them. Shared (Arc) across clones.
+    pub(super) analyzing: Arc<AtomicBool>,
 }
 
 /// Heuristic: does a workDoneProgress title denote initial indexing/loading?
@@ -141,6 +149,7 @@ impl ServerInstance {
             restart_policy: RestartPolicy::default(),
             config,
             ready_signal: Arc::new(AtomicBool::new(false)),
+            analyzing: Arc::new(AtomicBool::new(false)),
         };
 
         Ok(instance)
@@ -210,6 +219,7 @@ impl ServerInstance {
         // unrelated progress), plus jdtls `language/status` Started/ServiceReady.
         {
             let ready_signal = self.ready_signal.clone();
+            let analyzing = self.analyzing.clone();
             let indexing_tokens: Arc<StdMutex<HashSet<String>>> =
                 Arc::new(StdMutex::new(HashSet::new()));
             self.rpc_client
@@ -256,6 +266,17 @@ impl ServerInstance {
                                 || ty.eq_ignore_ascii_case("ServiceReady")
                             {
                                 ready_signal.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        // Dart analysis-server progress: true while (re)analyzing an
+                        // open document, false when idle. The backfill waits for
+                        // this to clear so call-hierarchy is asked only once the
+                        // opened file is analyzed.
+                        "$/analyzerStatus" => {
+                            if let Some(is) =
+                                params.get("isAnalyzing").and_then(|v| v.as_bool())
+                            {
+                                analyzing.store(is, Ordering::Relaxed);
                             }
                         }
                         _ => {}
@@ -414,6 +435,13 @@ impl ServerInstance {
         self.ready_signal.clone()
     }
 
+    /// True while the server is actively (re)analyzing a freshly opened document
+    /// (Dart `$/analyzerStatus`). The call-graph backfill polls this after a
+    /// `didOpen` and defers call-hierarchy until it clears.
+    pub fn is_analyzing(&self) -> bool {
+        self.analyzing.load(Ordering::Relaxed)
+    }
+
     /// Get health metrics (read-write access for manager/restart logic)
     pub fn health_metrics(&self) -> &Arc<RwLock<HealthMetrics>> {
         &self.health_metrics
@@ -464,6 +492,7 @@ impl Clone for ServerInstance {
             restart_policy: self.restart_policy.clone(),
             config: self.config.clone(),
             ready_signal: self.ready_signal.clone(),
+            analyzing: self.analyzing.clone(),
         }
     }
 }

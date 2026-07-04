@@ -157,6 +157,34 @@ impl LanguageServerManager {
             .await;
         Ok(())
     }
+
+    /// Wait until the server for `file` finishes (re)analyzing after a `didOpen`,
+    /// so call-hierarchy is asked only once the document is analyzed.
+    ///
+    /// Dart's analysis server answers `callHierarchy/outgoingCalls` with an empty
+    /// result while a freshly opened document is still being analyzed — a fixed
+    /// short sleep was why the backfill resolved 0 Dart edges. After a brief
+    /// settle (lets the analyzer flip `isAnalyzing` true), this polls until it
+    /// clears or `timeout` elapses. Servers that never emit `$/analyzerStatus`
+    /// (typescript-language-server, pyright) stay idle, so this returns right
+    /// after the settle — negligible cost for the fast path.
+    pub async fn wait_for_analysis_idle(&self, file: &Path) {
+        let (_key, server) = self.find_server_for_file(file).await;
+        let Some(instance) = server else {
+            return;
+        };
+        // Let the analyzer register the didOpen and flip to "analyzing" before we
+        // poll for idle. Fast servers finish (or never signal) within this window.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+        loop {
+            let analyzing = { instance.lock().await.is_analyzing() };
+            if !analyzing || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
 }
 
 /// Best-effort LSP `languageId` for a file (used in `textDocument/didOpen`).

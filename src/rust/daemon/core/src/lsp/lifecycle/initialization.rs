@@ -53,7 +53,13 @@ fn build_initialize_params(working_directory: &std::path::Path) -> serde_json::V
         "rootUri": format!("file://{}", working_directory.display()),
         "capabilities": {
             "textDocument": text_document_capabilities(),
-            "workspace": workspace_capabilities()
+            "workspace": workspace_capabilities(),
+            // Advertise server-initiated progress so analyzers that gate their
+            // "analyzing/idle" notifications on it (Dart) emit them. The
+            // notification handler consumes `$/progress` (readiness) and
+            // `$/analyzerStatus` (per-document analysis-idle for the call-graph
+            // backfill).
+            "window": { "workDoneProgress": true }
         }
     })
 }

@@ -42,6 +42,26 @@ fn relativize(abs_file: &str, project_root: &str) -> Option<String> {
     (!rel.is_empty()).then(|| rel.to_string())
 }
 
+/// Find the (0-indexed line, UTF-16 column) of `symbol` in a small window around
+/// `start`: `start`, then +1, +2, then -1, -2. Recovers multiline signatures
+/// where the stored `start_line` lands on the return type or an annotation and
+/// the identifier is a line or two away. `None` when the symbol is not in the
+/// window (grossly-misaligned start_line — left to the caller's fallback).
+fn locate_symbol(lines: &[String], start: u32, symbol: &str) -> Option<(u32, u32)> {
+    for delta in [0i64, 1, 2, -1, -2] {
+        let idx = start as i64 + delta;
+        if idx < 0 {
+            continue;
+        }
+        if let Some(line) = lines.get(idx as usize) {
+            if line.contains(symbol) {
+                return Some((idx as u32, symbol_column_in_line(line, symbol)));
+            }
+        }
+    }
+    None
+}
+
 /// All callable definitions for a tenant (functions/methods with a known line)
 /// in the given `language_ids` — the set the backfill asks that language's LSP
 /// to resolve outgoing calls for. Scoped by language because the backfill starts
@@ -184,7 +204,15 @@ pub async fn run_backfill_tenant(
                 let _ = lsp.read().await.close_document(Path::new(&prev_abs)).await;
             }
             let _ = lsp.read().await.open_document(Path::new(&abs)).await;
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            // Wait for the server to finish (re)analyzing the just-opened document
+            // before asking for call-hierarchy. Dart answers `outgoingCalls` with
+            // an empty result until analysis settles — a fixed 300ms sleep here was
+            // exactly why the Dart backfill resolved 0 edges. Fast servers stay
+            // idle, so this returns promptly for them.
+            lsp.read()
+                .await
+                .wait_for_analysis_idle(Path::new(&abs))
+                .await;
             cur_lines = tokio::fs::read_to_string(&abs)
                 .await
                 .map(|c| c.lines().map(|l| l.to_string()).collect())
@@ -192,11 +220,13 @@ pub async fn run_backfill_tenant(
             cur_file = Some(caller.file_path.clone());
         }
         // graph_nodes.start_line is 1-indexed; LSP positions are 0-indexed.
-        let lsp_line = caller.start_line.saturating_sub(1);
-        let column = cur_lines
-            .get(lsp_line as usize)
-            .map(|l| symbol_column_in_line(l, &caller.symbol_name))
-            .unwrap_or(0);
+        let start0 = caller.start_line.saturating_sub(1);
+        // Locate the identifier in a small window around start_line. Dart
+        // multiline signatures put the name 1-2 lines below the return type or an
+        // annotation, so a start_line-only lookup misses ~1 in 6 callers (column
+        // → 0 → wrong prepareCallHierarchy position). Fall back to (start_line, 0).
+        let (lsp_line, column) =
+            locate_symbol(&cur_lines, start0, &caller.symbol_name).unwrap_or((start0, 0));
         let resolved = {
             let mgr = lsp.read().await;
             mgr.resolved_outgoing_calls(Path::new(&abs), lsp_line, column)
@@ -344,5 +374,28 @@ mod tests {
 
         // Empty filter resolves nothing (guards the `IN ()` SQL).
         assert!(tenant_callers(&store, t, &[]).await.is_empty());
+    }
+
+    #[test]
+    fn locate_symbol_recovers_multiline_signature() {
+        let lines: Vec<String> = [
+            "  @override",
+            "  Future<List<X>>",
+            "  replaceAdminUserWorkCategories({",
+            "    required this.id,",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        // start_line lands on the return type (index 1); identifier is one below.
+        assert_eq!(
+            locate_symbol(&lines, 1, "replaceAdminUserWorkCategories"),
+            Some((2, 2))
+        );
+        // A normal single-line definition resolves on start_line itself.
+        let simple = vec!["void build() {}".to_string()];
+        assert_eq!(locate_symbol(&simple, 0, "build"), Some((0, 5)));
+        // Grossly-misaligned start_line (symbol nowhere in the window) → None.
+        assert_eq!(locate_symbol(&lines, 1, "notPresent"), None);
     }
 }
