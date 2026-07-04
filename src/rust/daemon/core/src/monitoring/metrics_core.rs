@@ -268,6 +268,10 @@ pub struct DaemonMetrics {
     /// Cumulative graph edges written during ingest. Labels: tenant_id, edge_type
     pub graph_edges_ingested_total: IntCounterVec,
 
+    /// Cumulative fuzzy CALLS superseded by precise LSP edges (R8 backfill).
+    /// Labels: tenant_id, language
+    pub graph_lsp_superseded_total: IntCounterVec,
+
     // MCP adoption/health (sampled from search_events by start_search_adoption_sampler)
     /// MCP read-tool events in the last 24h, by op. Labels: op
     pub mcp_search_events_recent: IntGaugeVec,
@@ -338,6 +342,7 @@ struct CreatedMetrics {
     graph_unresolved_stubs: IntGaugeVec,
     graph_stub_resolved_total: IntCounterVec,
     graph_edges_ingested_total: IntCounterVec,
+    graph_lsp_superseded_total: IntCounterVec,
     mcp_search_events_recent: IntGaugeVec,
     mcp_search_empty_recent: IntGaugeVec,
     mcp_search_unresolved_recent: IntGaugeVec,
@@ -439,6 +444,7 @@ fn create_all_metrics() -> CreatedMetrics {
         graph_unresolved_stubs,
         graph_stub_resolved_total,
         graph_edges_ingested_total,
+        graph_lsp_superseded_total,
     ) = create_graph_metrics();
 
     let (mcp_search_events_recent, mcp_search_empty_recent, mcp_search_unresolved_recent) =
@@ -503,6 +509,7 @@ fn create_all_metrics() -> CreatedMetrics {
         graph_unresolved_stubs,
         graph_stub_resolved_total,
         graph_edges_ingested_total,
+        graph_lsp_superseded_total,
         mcp_search_events_recent,
         mcp_search_empty_recent,
         mcp_search_unresolved_recent,
@@ -572,6 +579,7 @@ fn register_metrics(registry: &Registry, m: &CreatedMetrics) {
             Box::new(m.graph_unresolved_stubs.clone()),
             Box::new(m.graph_stub_resolved_total.clone()),
             Box::new(m.graph_edges_ingested_total.clone()),
+            Box::new(m.graph_lsp_superseded_total.clone()),
             Box::new(m.mcp_search_events_recent.clone()),
             Box::new(m.mcp_search_empty_recent.clone()),
             Box::new(m.mcp_search_unresolved_recent.clone()),
@@ -646,6 +654,7 @@ impl DaemonMetrics {
             graph_unresolved_stubs: m.graph_unresolved_stubs,
             graph_stub_resolved_total: m.graph_stub_resolved_total,
             graph_edges_ingested_total: m.graph_edges_ingested_total,
+            graph_lsp_superseded_total: m.graph_lsp_superseded_total,
             mcp_search_events_recent: m.mcp_search_events_recent,
             mcp_search_empty_recent: m.mcp_search_empty_recent,
             mcp_search_unresolved_recent: m.mcp_search_unresolved_recent,

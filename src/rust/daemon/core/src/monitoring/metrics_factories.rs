@@ -522,6 +522,7 @@ pub(super) fn create_graph_metrics() -> (
     IntGaugeVec,
     IntCounterVec,
     IntCounterVec,
+    IntCounterVec,
 ) {
     let graph_nodes = int_gauge_vec(
         "graph_nodes",
@@ -557,6 +558,12 @@ pub(super) fn create_graph_metrics() -> (
         "Cumulative graph edges written during file ingestion, by tenant and edge type",
         &["tenant_id", "edge_type"],
     );
+    let graph_lsp_superseded_total = int_counter_vec(
+        "graph_lsp_superseded_total",
+        "Cumulative fuzzy CALLS edges superseded by precise LSP-resolved edges, by \
+         tenant and language (the R8 call-graph backfill's authoritative output)",
+        &["tenant_id", "language"],
+    );
     (
         graph_nodes,
         graph_nodes_by_language,
@@ -564,5 +571,6 @@ pub(super) fn create_graph_metrics() -> (
         graph_unresolved_stubs,
         graph_stub_resolved_total,
         graph_edges_ingested_total,
+        graph_lsp_superseded_total,
     )
 }
