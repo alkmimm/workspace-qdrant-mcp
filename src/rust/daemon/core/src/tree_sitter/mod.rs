@@ -47,14 +47,15 @@ struct RegistryData {
     known_languages_sorted: Vec<String>,
     /// Extension (without dot, lowercased) → language ID.
     extension_map: HashMap<String, String>,
-    /// Lowercased aliases whose canonical language has a grammar (e.g.
-    /// `shell`/`sh`/`zsh` → `bash`). Kept separate from `known_languages` so
-    /// [`is_language_supported`] accepts alias-labelled languages: the document
+    /// Lowercased alias → canonical language id, for aliases whose canonical
+    /// language has a grammar (e.g. `shell`/`sh`/`zsh` → `bash`). Kept separate
+    /// from `known_languages` so [`is_language_supported`] accepts alias-labelled
+    /// languages and [`canonical_language`] can resolve them: the document
     /// classifier can emit an alias (`wqm_common::classification` maps `.sh` →
     /// `shell`) while the grammar/extension registry is keyed by the canonical
-    /// id (`bash`). Without this, alias-labelled files failed the semantic
-    /// chunking gate and silently fell back to text.
-    aliases: HashSet<String>,
+    /// id (`bash`). Grammar loading also keys the symbol name off the id
+    /// (`tree_sitter_<id>`), so an alias must be canonicalised before a download.
+    aliases: HashMap<String, String>,
 }
 
 fn registry_data() -> &'static RegistryData {
@@ -68,14 +69,14 @@ fn registry_data() -> &'static RegistryData {
                     known_languages: HashSet::new(),
                     known_languages_sorted: Vec::new(),
                     extension_map: HashMap::new(),
-                    aliases: HashSet::new(),
+                    aliases: HashMap::new(),
                 };
             }
         };
 
         let mut known = HashSet::new();
         let mut ext_map = HashMap::new();
-        let mut aliases = HashSet::new();
+        let mut aliases = HashMap::new();
 
         for def in provider.definitions() {
             let lang_id = def.id();
@@ -86,7 +87,7 @@ fn registry_data() -> &'static RegistryData {
                 // An alias is "supported" only if its canonical language can
                 // actually be chunked (has a grammar) — mirror the guard above.
                 for alias in &def.aliases {
-                    aliases.insert(alias.to_lowercase());
+                    aliases.insert(alias.to_lowercase(), lang_id.clone());
                 }
             }
 
@@ -168,7 +169,24 @@ pub fn known_grammar_languages() -> Vec<&'static str> {
 pub fn is_language_supported(language: &str) -> bool {
     let data = registry_data();
     data.known_languages.contains(language)
-        || data.aliases.contains(&language.to_lowercase())
+        || data.aliases.contains_key(&language.to_lowercase())
+}
+
+/// Resolve a language label to its canonical registry id.
+///
+/// Returns the canonical id for a known alias (`shell`/`sh`/`zsh` → `bash`), the
+/// input itself when it is already a canonical language with a grammar, or `None`
+/// when it is neither. Callers that hit the grammar loader (which derives the
+/// symbol name as `tree_sitter_<id>`) or the on-disk grammar cache MUST
+/// canonicalise first — a raw alias like `shell` would look up a non-existent
+/// `tree_sitter_shell` symbol and fail to load.
+pub fn canonical_language(language: &str) -> Option<String> {
+    let data = registry_data();
+    let normalized = language.to_lowercase();
+    if data.known_languages.contains(&normalized) {
+        return Some(normalized);
+    }
+    data.aliases.get(&normalized).cloned()
 }
 
 /// Check if a language has an available grammar via the GrammarManager.
@@ -312,6 +330,20 @@ mod tests {
         assert!(is_language_supported("zsh"), "alias 'zsh' resolves");
         // Case-insensitive on the alias path.
         assert!(is_language_supported("Shell"));
+    }
+
+    #[test]
+    fn test_canonical_language_resolves_alias_to_id() {
+        // Aliases resolve to the canonical grammar id (needed before a grammar
+        // download, whose symbol name is `tree_sitter_<id>`).
+        assert_eq!(canonical_language("shell").as_deref(), Some("bash"));
+        assert_eq!(canonical_language("sh").as_deref(), Some("bash"));
+        assert_eq!(canonical_language("ZSH").as_deref(), Some("bash"));
+        // A canonical id maps to itself.
+        assert_eq!(canonical_language("bash").as_deref(), Some("bash"));
+        assert_eq!(canonical_language("rust").as_deref(), Some("rust"));
+        // Unknown labels resolve to nothing.
+        assert_eq!(canonical_language("definitely-not-a-language"), None);
     }
 
     #[test]

@@ -248,7 +248,7 @@ pub use crate::storage::{
     SearchParams, SearchResult, StorageClient, StorageConfig, StorageError,
 };
 pub use crate::tree_sitter::{
-    check_grammar_compatibility, create_grammar_manager, detect_language,
+    canonical_language, check_grammar_compatibility, create_grammar_manager, detect_language,
     detect_language_with_overrides, extract_chunks, extract_chunks_with_provider,
     extract_chunks_with_provider_and_tokenizer, get_language, get_static_language,
     is_language_available, is_language_supported, known_grammar_languages, ChunkExtractor,
