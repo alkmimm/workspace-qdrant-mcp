@@ -80,6 +80,50 @@ describe('searchExact — empty-result scope widening', () => {
     expect(response.hint).toBeDefined();
     expect(response.hint).toMatch(/all projects/i);
     expect(response.hint).toMatch(/scope/i);
+    // The response advertises the widened scope, not the caller's 'project', so
+    // the structured scope agrees with the cross-project results.
+    expect(response.scope).toBe('all');
+  });
+
+  it('does NOT widen when the project-scoped exact search already has results', async () => {
+    // In-project (tenant-scoped) call returns a hit; any widen would be a
+    // cross-tenant call (tenant_id undefined), which must NOT happen here.
+    const daemon = {
+      textSearch: vi.fn().mockImplementation((req: { tenant_id?: string }) => {
+        if (req.tenant_id !== undefined) {
+          return Promise.resolve({
+            matches: [
+              {
+                file_path: 'project-a/src/index.ts',
+                line_number: 1,
+                content: 'export class TransformsBuilderComponent {',
+                tenant_id: 'project-a',
+              },
+            ],
+            total_matches: 1,
+            truncated: false,
+          });
+        }
+        return Promise.resolve({ matches: [], total_matches: 0, truncated: false });
+      }),
+    } as unknown as DaemonClient;
+
+    const response = await searchExact(
+      makeQdrant(),
+      daemon,
+      makeStateManager(),
+      makeProjectDetector(undefined),
+      makeOptions({ projectId: 'project-a' })
+    );
+
+    const calls = (daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls;
+    // No cross-project widen fired…
+    expect(calls.some((c) => c[0].tenant_id === undefined)).toBe(false);
+    // …the good in-project result is returned untouched, scope stays 'project',
+    // and no widen hint is attached.
+    expect(response.results).toHaveLength(1);
+    expect(response.scope).toBe('project');
+    expect(response.hint ?? '').not.toMatch(/all projects/i);
   });
 
   it('returns an actionable recovery hint when nothing matches anywhere', async () => {
