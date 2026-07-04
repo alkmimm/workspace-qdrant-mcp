@@ -96,3 +96,29 @@ fn test_non_code_extensions_skip_lsp() {
     let py_lang = Language::from_extension("py");
     assert!(py_lang.has_lsp_support());
 }
+
+#[test]
+fn test_classifier_id_matches_graph_vocabulary() {
+    // classifier_id() must line up with the classifier/graph `language` id so the
+    // graph_lsp_superseded_total metric label overlays graph_nodes_by_language.
+    // Shell is the divergence: LSP languageId "shellscript" vs classifier "bash".
+    assert_eq!(Language::Shell.identifier(), "shellscript");
+    assert_eq!(Language::Shell.classifier_id(), "bash");
+    // `bash` round-trips: it is the id the classifier emits (from_id("bash") == Shell).
+    assert_eq!(Language::from_id("bash"), Language::Shell);
+
+    // Everywhere else classifier_id() equals identifier() (the lowercase id the
+    // graph stores), so those series already align.
+    for lang in [
+        Language::Python,
+        Language::Rust,
+        Language::TypeScript,
+        Language::JavaScript,
+        Language::Go,
+        Language::Php,
+        Language::Cpp,
+    ] {
+        assert_eq!(lang.classifier_id(), lang.identifier());
+    }
+    assert_eq!(Language::Other("kotlin".to_string()).classifier_id(), "kotlin");
+}
