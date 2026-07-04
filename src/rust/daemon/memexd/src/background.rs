@@ -529,7 +529,7 @@ pub fn start_grammar_backfill(pool: SqlitePool) -> JoinHandle<()> {
         use workspace_qdrant_core::strategies::capability_upgrade::trigger_capability_upgrade;
         use workspace_qdrant_core::tracked_files_schema::UpgradeReason;
         use workspace_qdrant_core::tree_sitter::GrammarManager;
-        use workspace_qdrant_core::{get_static_language, is_language_supported};
+        use workspace_qdrant_core::{canonical_language, get_static_language, is_language_supported};
 
         let langs = match sqlx::query(
             "SELECT DISTINCT language FROM tracked_files \
@@ -556,18 +556,26 @@ pub fn start_grammar_backfill(pool: SqlitePool) -> JoinHandle<()> {
 
         let mut downloaded = 0u32;
         for row in &langs {
+            // `lang` is the tracked_files label — which may be an ALIAS (the
+            // classifier tags `.sh` as "shell", not the canonical "bash").
             let lang: String = row.get("language");
             // Static grammars need no download; non-registry labels (unknown,
             // plain text) cannot be fetched at all.
             if get_static_language(&lang).is_some() || !is_language_supported(&lang) {
                 continue;
             }
+            // Grammar cache + loader key off the canonical id (`tree_sitter_<id>`
+            // symbol); fetching by the raw alias "shell" would look up a
+            // non-existent `tree_sitter_shell` and fail. Resolve it here — but
+            // still uplift by the ORIGINAL label below (that is how the files are
+            // tagged in tracked_files).
+            let canonical = canonical_language(&lang).unwrap_or_else(|| lang.clone());
             // Already cached → not a "never-downloaded" case; skip to stay
             // churn-free (avoids re-uplifting on every startup).
-            if manager.cache_paths().grammar_exists(&lang) {
+            if manager.cache_paths().grammar_exists(&canonical) {
                 continue;
             }
-            match manager.get_grammar(&lang).await {
+            match manager.get_grammar(&canonical).await {
                 Ok(_) => {
                     downloaded += 1;
                     info!(
