@@ -1261,6 +1261,11 @@ pub fn start_graph_lsp_backfill(
                             .await;
                         info!(tenant = %tenant, language = ?language, superseded,
                             "LSP backfill: superseded fuzzy CALLS with precise LSP edges");
+                        let lang_label = format!("{language:?}");
+                        METRICS
+                            .graph_lsp_superseded_total
+                            .with_label_values(&[tenant.as_str(), &lang_label])
+                            .inc_by(superseded);
                     }
 
                     // Always stop the enrichment server we started (frees the slot
