@@ -47,6 +47,14 @@ struct RegistryData {
     known_languages_sorted: Vec<String>,
     /// Extension (without dot, lowercased) → language ID.
     extension_map: HashMap<String, String>,
+    /// Lowercased aliases whose canonical language has a grammar (e.g.
+    /// `shell`/`sh`/`zsh` → `bash`). Kept separate from `known_languages` so
+    /// [`is_language_supported`] accepts alias-labelled languages: the document
+    /// classifier can emit an alias (`wqm_common::classification` maps `.sh` →
+    /// `shell`) while the grammar/extension registry is keyed by the canonical
+    /// id (`bash`). Without this, alias-labelled files failed the semantic
+    /// chunking gate and silently fell back to text.
+    aliases: HashSet<String>,
 }
 
 fn registry_data() -> &'static RegistryData {
@@ -60,12 +68,14 @@ fn registry_data() -> &'static RegistryData {
                     known_languages: HashSet::new(),
                     known_languages_sorted: Vec::new(),
                     extension_map: HashMap::new(),
+                    aliases: HashSet::new(),
                 };
             }
         };
 
         let mut known = HashSet::new();
         let mut ext_map = HashMap::new();
+        let mut aliases = HashSet::new();
 
         for def in provider.definitions() {
             let lang_id = def.id();
@@ -73,6 +83,11 @@ fn registry_data() -> &'static RegistryData {
             // Only add to known languages if the language has grammar sources
             if def.has_grammar() {
                 known.insert(lang_id.clone());
+                // An alias is "supported" only if its canonical language can
+                // actually be chunked (has a grammar) — mirror the guard above.
+                for alias in &def.aliases {
+                    aliases.insert(alias.to_lowercase());
+                }
             }
 
             // Build extension → language_id map (first definition wins)
@@ -89,6 +104,7 @@ fn registry_data() -> &'static RegistryData {
             known_languages: known,
             known_languages_sorted: sorted,
             extension_map: ext_map,
+            aliases,
         }
     })
 }
@@ -150,7 +166,9 @@ pub fn known_grammar_languages() -> Vec<&'static str> {
 ///
 /// Checks against the registry of languages with grammar sources.
 pub fn is_language_supported(language: &str) -> bool {
-    registry_data().known_languages.contains(language)
+    let data = registry_data();
+    data.known_languages.contains(language)
+        || data.aliases.contains(&language.to_lowercase())
 }
 
 /// Check if a language has an available grammar via the GrammarManager.
@@ -280,6 +298,20 @@ mod tests {
         assert!(is_language_supported("zig"));
         assert!(is_language_supported("pascal"));
         assert!(!is_language_supported("unknown"));
+    }
+
+    #[test]
+    fn test_is_language_supported_resolves_aliases() {
+        // The document classifier labels `.sh` files "shell" (an alias), while
+        // the grammar/extension registry is keyed by the canonical "bash".
+        // Both the canonical and its aliases must pass the semantic-chunking
+        // gate, else shell scripts silently fall back to text chunking.
+        assert!(is_language_supported("bash"), "canonical bash supported");
+        assert!(is_language_supported("shell"), "alias 'shell' resolves");
+        assert!(is_language_supported("sh"), "alias 'sh' resolves");
+        assert!(is_language_supported("zsh"), "alias 'zsh' resolves");
+        // Case-insensitive on the alias path.
+        assert!(is_language_supported("Shell"));
     }
 
     #[test]
