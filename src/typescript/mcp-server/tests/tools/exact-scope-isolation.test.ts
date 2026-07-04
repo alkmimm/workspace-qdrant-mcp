@@ -1,9 +1,12 @@
 /**
- * Empty-result recovery for exact (FTS5) search: when a project-scoped exact
- * search finds nothing, re-run across ALL projects (the literal usually lives
- * in another repo — measured ~90% of empty exact events were cross-project),
- * and on a genuine total miss return an actionable recovery hint instead of a
- * bare empty result (which agents tend to retry verbatim).
+ * Tenant-isolation contract for exact (FTS5) search.
+ *
+ * A project-scoped exact search (scope:"project", the default) that finds
+ * nothing must NOT silently fall back to OTHER repositories — that would cross
+ * the tenant data-isolation boundary without the caller opting in (a
+ * confidential repo indexed in the same instance leaking into another project's
+ * session). It returns 0 hits plus a hint offering scope:"all". Passing
+ * scope:"all" explicitly still searches across every repository on demand.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -41,28 +44,31 @@ function makeOptions(overrides: Partial<SearchOptions> = {}): SearchOptions {
   return { query: 'TransformsBuilderComponent', scope: 'project', ...overrides };
 }
 
-/** textSearch that is empty for any tenant-scoped call and only returns hits on
- *  the cross-tenant (tenant_id undefined) widen call. Robust to intervening
- *  branch-widen calls, which keep the tenant_id. */
-function makeSeqDaemon(crossProjectMatch: Record<string, unknown> | null): DaemonClient {
+/** textSearch that returns a hit ONLY on a cross-tenant (tenant_id === undefined)
+ *  call — i.e. the literal lives exclusively in another repo. Any tenant-scoped
+ *  call (the current project, and the same-tenant branch-widen) is empty. */
+function makeCrossProjectOnlyDaemon(match: Record<string, unknown> | null): DaemonClient {
   return {
     textSearch: vi.fn().mockImplementation((req: { tenant_id?: string }) => {
-      if (req.tenant_id === undefined && crossProjectMatch) {
-        return Promise.resolve({ matches: [crossProjectMatch], total_matches: 1, truncated: false });
+      if (req.tenant_id === undefined && match) {
+        return Promise.resolve({ matches: [match], total_matches: 1, truncated: false });
       }
       return Promise.resolve({ matches: [], total_matches: 0, truncated: false });
     }),
   } as unknown as DaemonClient;
 }
 
-describe('searchExact — empty-result scope widening', () => {
-  it('widens to ALL projects when the project-scoped exact search is empty', async () => {
-    const daemon = makeSeqDaemon({
-      file_path: 'bws-engineer/frontend/transforms-builder.component.ts',
-      line_number: 55,
-      content: 'export class TransformsBuilderComponent {',
-      tenant_id: 'other-project',
-    });
+const OTHER_REPO_MATCH = {
+  file_path: 'compress-mcp/tests/test_redaction.py',
+  line_number: 55,
+  content: 'JWT_SECRET = "not-a-real-secret"',
+  tenant_id: 'other-project',
+};
+
+describe('searchExact — tenant isolation (no silent cross-project fallback)', () => {
+  it('REGRESSION: a project-scoped miss does NOT return hits from another repo', async () => {
+    // The literal exists only in repo B; cwd is project A, scope defaults to project.
+    const daemon = makeCrossProjectOnlyDaemon(OTHER_REPO_MATCH);
 
     const response = await searchExact(
       makeQdrant(),
@@ -72,22 +78,34 @@ describe('searchExact — empty-result scope widening', () => {
       makeOptions({ projectId: 'project-a' })
     );
 
-    // The cross-project widen ran with NO tenant filter…
     const calls = (daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls.some((c) => c[0].tenant_id === undefined)).toBe(true);
-    // …and surfaced the match that the project-scoped search missed.
-    expect(response.results).toHaveLength(1);
+    // No cross-tenant query was ever issued — the boundary was never crossed.
+    expect(calls.some((c) => c[0].tenant_id === undefined)).toBe(false);
+    // 0 hits, scope stays 'project', and the hint offers the explicit opt-in.
+    expect(response.results).toHaveLength(0);
+    expect(response.scope).toBe('project');
     expect(response.hint).toBeDefined();
-    expect(response.hint).toMatch(/all projects/i);
-    expect(response.hint).toMatch(/scope/i);
-    // The response advertises the widened scope, not the caller's 'project', so
-    // the structured scope agrees with the cross-project results.
+    expect(response.hint).toMatch(/scope:"all"/i);
+  });
+
+  it('passing scope:"all" explicitly still searches across every repository', async () => {
+    const daemon = makeCrossProjectOnlyDaemon(OTHER_REPO_MATCH);
+
+    const response = await searchExact(
+      makeQdrant(),
+      daemon,
+      makeStateManager(),
+      makeProjectDetector(undefined),
+      makeOptions({ scope: 'all', projectId: 'project-a' })
+    );
+
+    // scope:"all" resolves to an unscoped (tenant_id undefined) primary query,
+    // so the cross-repo hit is returned — on demand, because the caller asked.
+    expect(response.results).toHaveLength(1);
     expect(response.scope).toBe('all');
   });
 
-  it('does NOT widen when the project-scoped exact search already has results', async () => {
-    // In-project (tenant-scoped) call returns a hit; any widen would be a
-    // cross-tenant call (tenant_id undefined), which must NOT happen here.
+  it('does NOT widen when the project-scoped search already has results', async () => {
     const daemon = {
       textSearch: vi.fn().mockImplementation((req: { tenant_id?: string }) => {
         if (req.tenant_id !== undefined) {
@@ -117,17 +135,14 @@ describe('searchExact — empty-result scope widening', () => {
     );
 
     const calls = (daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls;
-    // No cross-project widen fired…
     expect(calls.some((c) => c[0].tenant_id === undefined)).toBe(false);
-    // …the good in-project result is returned untouched, scope stays 'project',
-    // and no widen hint is attached.
     expect(response.results).toHaveLength(1);
     expect(response.scope).toBe('project');
-    expect(response.hint ?? '').not.toMatch(/all projects/i);
+    expect(response.hint ?? '').not.toMatch(/all projects|scope:"all"/i);
   });
 
-  it('returns an actionable recovery hint when nothing matches anywhere', async () => {
-    const daemon = makeSeqDaemon(null); // empty for every call, including the widen
+  it('returns an actionable opt-in hint on a total project miss', async () => {
+    const daemon = makeCrossProjectOnlyDaemon(null); // empty everywhere
 
     const response = await searchExact(
       makeQdrant(),
@@ -139,6 +154,7 @@ describe('searchExact — empty-result scope widening', () => {
 
     expect(response.results).toHaveLength(0);
     expect(response.hint).toBeDefined();
-    expect(response.hint).toMatch(/search tool|semantic|broaden/i);
+    // Hint names the explicit opt-in.
+    expect(response.hint).toMatch(/scope:"all"/i);
   });
 });

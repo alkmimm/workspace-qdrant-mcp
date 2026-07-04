@@ -33,7 +33,8 @@ export const grepToolDefinition = {
       scope: {
         type: 'string',
         enum: ['project', 'all'],
-        description: 'Search scope: project (current) or all (default: project)',
+        description:
+          'Search scope. "project" (default) searches ONLY the current repo; on an empty result it does NOT fall back to other repos (it returns a hint suggesting scope:"all"). Pass "all" to search across every indexed repository — this crosses project/tenant boundaries and is opt-in.',
       },
       contextLines: {
         type: 'number',
