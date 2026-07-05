@@ -323,4 +323,67 @@ describe('listTrackedFiles', () => {
     expect(file.extension).toBe('ts');
     expect(file.isTest).toBe(false);
   });
+
+  // ── Glob / pattern floating (regression) ──────────────────────────────────
+  // A relative pattern must "float" (match at any depth), not be anchored to the
+  // repo root. Mirrors the daemon grep `normalize_path_glob` fix; before it a
+  // bare pattern like "V*.sql" against a nested file returned nothing, silently.
+  describe('glob pattern floating', () => {
+    it('matches a bare filename glob at any nested depth', () => {
+      // "helpers.rs" lives at src/utils/helpers.rs — a root-anchored GLOB missed it.
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'helpers.rs' });
+      expect(result.status).toBe('ok');
+      expect(result.data.map((f) => f.relativePath)).toEqual(['src/utils/helpers.rs']);
+    });
+
+    it('matches a wildcard filename glob at any nested depth (V*.sql migrations)', () => {
+      seedFile(db, 'db/migration/V56__cohort.sql', { language: 'sql', extension: 'sql' });
+      seedFile(db, 'db/migration/V57__shift.sql', { language: 'sql', extension: 'sql' });
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'V*.sql' });
+      expect(result.status).toBe('ok');
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual([
+        'db/migration/V56__cohort.sql',
+        'db/migration/V57__shift.sql',
+      ]);
+    });
+
+    it('still matches a relative filename glob at the repo root', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'Cargo.toml' });
+      expect(result.data.map((f) => f.relativePath)).toEqual(['Cargo.toml']);
+    });
+
+    it('floats a nested relative path glob to any depth', () => {
+      seedFile(db, 'backend/db/migration/V1__init.sql', { language: 'sql', extension: 'sql' });
+      const result = listTrackedFiles(db, {
+        watchFolderId: WATCH_ID,
+        glob: 'db/migration/V*.sql',
+      });
+      expect(result.data.map((f) => f.relativePath)).toContain(
+        'backend/db/migration/V1__init.sql'
+      );
+    });
+
+    it('leaves already-floating (leading *) globs matching at any depth', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '*.rs' });
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual([
+        'src/lib.rs',
+        'src/main.rs',
+        'src/utils/helpers.rs',
+        'tests/test_main.rs',
+      ]);
+    });
+
+    it('honors ** in a floating pattern (collapsed to * for SQLite)', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.rs' });
+      expect(result.data.map((f) => f.relativePath)).toContain('src/utils/helpers.rs');
+    });
+
+    it('countTrackedFiles agrees with listTrackedFiles for a floated glob', () => {
+      seedFile(db, 'db/migration/V9__x.sql', { language: 'sql', extension: 'sql' });
+      const list = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'V*.sql' });
+      const count = countTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'V*.sql' });
+      expect(count).toBe(list.data.length);
+      expect(count).toBe(1);
+    });
+  });
 });

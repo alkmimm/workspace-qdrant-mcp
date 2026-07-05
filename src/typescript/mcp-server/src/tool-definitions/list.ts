@@ -41,7 +41,8 @@ export const listToolDefinition = {
       },
       pattern: {
         type: 'string',
-        description: 'Glob pattern on relative path (e.g., "**/*.test.ts")',
+        description:
+          'Glob on the file path, matched at ANY depth — a bare pattern floats, no leading "**/" needed (e.g. "V*.sql" finds migrations in any folder, "helpers.rs", "**/*.test.ts", "src/**/*.ts"). Use `*` for a path segment and `**` for any depth.',
       },
       includeTests: {
         type: 'boolean',
