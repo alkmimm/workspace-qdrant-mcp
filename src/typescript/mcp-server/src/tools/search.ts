@@ -65,6 +65,7 @@ import {
   searchScratchpadLane,
   finalizeResults,
   reconcileNextOffset,
+  unresolvedProjectResponse,
 } from './search-helpers.js';
 
 /** Format an explicit status_reason for the F-014 base-point degradation
@@ -268,6 +269,15 @@ export class SearchTool {
       options.projectId,
       eventId
     );
+    // F-004 (semantic parity): a project-scoped search whose tenant could not be
+    // resolved MUST refuse rather than run unfiltered. buildProjectCondition drops
+    // the tenant filter on an undefined projectId, so proceeding would silently
+    // return cross-tenant results (another repo's code). grep / search_exact /
+    // retrieve / list / graph all already refuse here — the semantic path was the
+    // lone gap. Explicit scope:"all"/"global" is unaffected (it intends no tenant).
+    if (scope === 'project' && !currentProjectId) {
+      return unresolvedProjectResponse(options.query, mode, scope);
+    }
     const concreteEffective = concreteBranchFilter(effectiveBranch);
     let fallbackBranch: string | undefined;
     if (currentProjectId && concreteEffective) {
