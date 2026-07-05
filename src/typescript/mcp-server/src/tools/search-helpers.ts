@@ -47,6 +47,39 @@ import {
 } from './branch-scope.js';
 import { FIELD_BASE_POINT, FIELD_BRANCH, FIELD_TENANT_ID } from '../common/native-bridge.js';
 
+/**
+ * Refusal response for a project-scoped search whose tenant cannot be resolved.
+ *
+ * `buildProjectCondition` drops the `tenant_id` filter when `scope === 'project'`
+ * but the projectId is undefined — so proceeding would run an UNFILTERED query
+ * that silently returns another repo's code (a cross-tenant read). Instead we
+ * refuse, mirroring the same guard the other read tools already have: grep
+ * ("Could not detect the project…"), search_exact (F-004), retrieve (F-011/F-002),
+ * list, and graph. A project-scoped search never falls back to all tenants.
+ */
+export function unresolvedProjectResponse(
+  query: string,
+  mode: SearchMode,
+  scope: SearchScope
+): SearchResponse {
+  return {
+    results: [],
+    total: 0,
+    query,
+    mode,
+    scope,
+    collections_searched: [],
+    status: 'uncertain',
+    status_reason:
+      'Project scope requested but no project could be resolved from this request. A ' +
+      'project-scoped search does NOT fall back to searching every indexed project — that ' +
+      "would cross tenant boundaries silently and surface another repo's code. Pass `cwd` " +
+      '(your absolute working directory, so the project auto-detects) or `projectId` explicitly, ' +
+      'or set `scope: "all"` to search across every repository on purpose.',
+    hint: 'No project resolved — pass `cwd` or `projectId`. A project-scoped search will not silently search other repos.',
+  };
+}
+
 /** Maximum active base_points we still attach as a Qdrant filter. Above
  * this the filter clause would blow past server-side limits; we instead
  * surface a degradation flag so the caller reports it explicitly. */
