@@ -221,11 +221,24 @@ function buildFilterClause(options: Omit<ListTrackedFilesOptions, 'limit'>): Fil
     params.push(branch);
   }
   if (glob) {
-    // SQLite GLOB uses * for multi-char and ? for single-char, same as shell globs.
-    // The caller passes a pattern like "*.rs" or "src/**/*.ts"; translate ** → * for SQLite.
-    const sqliteGlob = glob.replace(/\*\*/g, '*');
-    conditions.push('relative_path GLOB ?');
-    params.push(sqliteGlob);
+    // SQLite GLOB matches the ENTIRE relative_path (anchored at both ends) and its
+    // `*` crosses `/`. `**` is collapsed to `*` since SQLite GLOB has no `**`.
+    //
+    // A *relative* pattern ("V*.sql", "src/main.rs", "db/migration/V*.sql") is thus
+    // anchored at the repo root and silently matches nothing when the file is nested
+    // — the same false-empty trap the daemon's grep path already fixed via
+    // `normalize_path_glob` (see src/rust/.../text_search/escaping.rs). Mirror that
+    // here: float a relative pattern so it matches at the repo root AND at any nested
+    // depth. Patterns that are already floating (leading `*`) or absolute (leading
+    // `/`) are matched verbatim.
+    const collapsed = glob.replace(/\*\*/g, '*');
+    if (collapsed.startsWith('*') || collapsed.startsWith('/')) {
+      conditions.push('relative_path GLOB ?');
+      params.push(collapsed);
+    } else {
+      conditions.push('(relative_path GLOB ? OR relative_path GLOB ?)');
+      params.push(collapsed, `*/${collapsed}`);
+    }
   }
   if (componentBasePaths && componentBasePaths.length > 0) {
     // Build OR clause: each base path matches exact or prefix (with /)
