@@ -4,10 +4,19 @@
  * is needed.
  */
 
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+
 import { describe, it, expect, vi } from 'vitest';
 import { runSearchEval } from '../../src/tools/search-eval.js';
 import type { ProjectDetector } from '../../src/utils/project-detector.js';
 import type { SearchBenchmarkRunner } from '../../src/benchmarks/semantic-search.js';
+
+/** Relative location of the bundled dataset under WQM_REPO_DIR (mirrors the
+ *  constant in the tool). */
+const BUNDLED_DATASET_REL =
+  'src/typescript/mcp-server/scripts/benchmark-data/semantic-search-quality.yaml';
 
 /** Runner that always returns `top` at rank 1 and one filler hit. */
 function makeRunner(topRelPath: string): SearchBenchmarkRunner {
@@ -186,6 +195,61 @@ describe('runSearchEval', () => {
       else process.env['WQM_SEARCH_RERANK'] = savedFlag;
       if (savedWeight === undefined) delete process.env['WQM_SEARCH_RERANK_WEIGHT'];
       else process.env['WQM_SEARCH_RERANK_WEIGHT'] = savedWeight;
+    }
+  });
+
+  it('refuses the bundled dataset when the target tenant is not its home project', async () => {
+    // The bundled dataset's gold paths describe only its own home repo. Running
+    // it against a different tenant checks for files absent there → every query
+    // falsely reports 0% ("poor"). The guard must refuse before parsing.
+    const tmp = mkdtempSync(join(tmpdir(), 'searcheval-'));
+    const dsAbs = join(tmp, BUNDLED_DATASET_REL);
+    mkdirSync(dirname(dsAbs), { recursive: true });
+    writeFileSync(dsAbs, 'name: home-only\nqueries: []\n');
+    const saved = process.env['WQM_REPO_DIR'];
+    process.env['WQM_REPO_DIR'] = tmp;
+    try {
+      // repoDir (WQM_REPO_DIR=tmp) → home tenant; the eval cwd → a DIFFERENT one.
+      const detector = {
+        getProjectInfo: vi.fn(async (p: string) =>
+          p === tmp ? { projectId: 'wqm-home' } : { projectId: 'doc-v2' }
+        ),
+      } as unknown as ProjectDetector;
+      const res = await runSearchEval(makeRunner('a.ts'), detector, {}); // no cases → bundled
+      expect(res.success).toBe(false);
+      expect(res.error).toMatch(/bundled dataset/i);
+      expect(res.error).toContain('wqm-home');
+      expect(res.error).toContain('doc-v2');
+    } finally {
+      if (saved === undefined) delete process.env['WQM_REPO_DIR'];
+      else process.env['WQM_REPO_DIR'] = saved;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('runs the bundled dataset when the target IS its home project', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'searcheval-'));
+    const dsAbs = join(tmp, BUNDLED_DATASET_REL);
+    mkdirSync(dirname(dsAbs), { recursive: true });
+    writeFileSync(
+      dsAbs,
+      'name: home\nqueries:\n  - id: q1\n    query: hello\n    expectedFiles:\n      - a.ts\n'
+    );
+    const saved = process.env['WQM_REPO_DIR'];
+    process.env['WQM_REPO_DIR'] = tmp;
+    try {
+      // Same tenant for both the eval cwd and the dataset home → guard passes.
+      const detector = {
+        getProjectInfo: vi.fn(async () => ({ projectId: 'same-tenant' })),
+      } as unknown as ProjectDetector;
+      const res = await runSearchEval(makeRunner('a.ts'), detector, {});
+      expect(res.success).toBe(true);
+      expect(res.datasetSource).toBe(dsAbs);
+      expect(res.projectId).toBe('same-tenant');
+    } finally {
+      if (saved === undefined) delete process.env['WQM_REPO_DIR'];
+      else process.env['WQM_REPO_DIR'] = saved;
+      rmSync(tmp, { recursive: true, force: true });
     }
   });
 });

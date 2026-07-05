@@ -10,14 +10,14 @@ export const searchEvalToolDefinition = {
     openWorldHint: false,
   },
   description:
-    "Benchmark semantic-search quality. Runs known-item queries (each with the file(s) that SHOULD rank) through the live search pipeline and returns hit@1/3/10, recall@10, MRR, and duplicate-rate per mode (semantic/hybrid/exact) plus a quality verdict. Use it to measure the effect of a search-ranking change — the measure→edit→measure loop. Pass `cases` for an ad-hoc eval set, or omit to use the project's bundled dataset when available. Runs in-process against the real index (no extra setup).",
+    "Benchmark semantic-search quality. Runs known-item queries (each with the file(s) that SHOULD rank) through the live search pipeline and returns hit@1/3/10, recall@10, MRR, and duplicate-rate per mode (semantic/hybrid/exact) plus a quality verdict. Use it to measure the effect of a search-ranking change — the measure→edit→measure loop. Pass `cases` for an ad-hoc eval set. Omitting `cases` falls back to the bundled dataset, which only describes the server's own repo — evaluating any OTHER project without `cases` is refused (its gold files don't exist in your project, which would falsely report 0%). Runs in-process against the real index (no extra setup).",
   inputSchema: {
     type: 'object' as const,
     properties: {
       cases: {
         type: 'array',
         description:
-          'Ad-hoc evaluation set. Each case is a natural-language query plus the repo-relative file paths expected to rank for it. Omit to use the bundled dataset.',
+          "Ad-hoc evaluation set. Each case is a natural-language query plus the repo-relative file paths expected to rank for it. Omit to use the bundled dataset — but that dataset only describes the server's own repo, so evaluating another project REQUIRES `cases`.",
         items: {
           type: 'object',
           properties: {
