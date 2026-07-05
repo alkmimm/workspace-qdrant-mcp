@@ -167,13 +167,39 @@ export async function runSearchEval(
   } else {
     const repoDir = process.env['WQM_REPO_DIR'];
     const dsPath = repoDir ? join(repoDir, BUNDLED_DATASET_REL) : undefined;
-    if (!dsPath || !existsSync(dsPath)) {
+    if (!repoDir || !dsPath || !existsSync(dsPath)) {
       return {
         success: false,
         error:
           'No `cases` provided and the bundled dataset is not reachable ' +
           '(WQM_REPO_DIR unset or file missing). Pass `cases: [{ query, expectedFiles }]`.',
       };
+    }
+    // The bundled dataset's queries+gold describe its OWN home project (the
+    // server repo at WQM_REPO_DIR). Evaluating it against a different tenant
+    // checks for files that do not exist there, so every query misses and the
+    // harness falsely reports 0% ("poor") — a silent cross-project mismatch.
+    // Refuse with an actionable hint instead (mirrors the scope-widen tenant
+    // guards in search/grep, #214/#218). `scope:"all"` has no concrete tenant
+    // and DOES reach the home project, so it is left to run.
+    if (tenant.tenantId) {
+      const homeInfo = await projectDetector.getProjectInfo(repoDir, false, {
+        fallbackToSoleProject: false,
+      });
+      const homeTenant = homeInfo?.projectId;
+      if (homeTenant && homeTenant !== tenant.tenantId) {
+        return {
+          success: false,
+          error:
+            `The bundled dataset (${BUNDLED_DATASET_REL}) describes its home ` +
+            `project (tenant ${homeTenant}), but this eval targets tenant ` +
+            `${tenant.tenantId}. Its expected files do not exist in the target ` +
+            `project, so every query would falsely report 0% ("poor"). Pass ` +
+            '`cases: [{ query, expectedFiles }]` describing THIS project, run ' +
+            "search_eval from the dataset's own project (via `cwd`/`projectId`), " +
+            'or set `scope: "all"`.',
+        };
+      }
     }
     dataset = loadSemanticSearchBenchmarkDataset(dsPath);
     datasetSource = dsPath;
