@@ -23,6 +23,7 @@ import {
   resolveFallbackBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
+import { whitespaceSensitivityHint } from './exact-hints.js';
 
 /**
  * Conservative proxy for the size of the files that contain a grep match.
@@ -450,6 +451,12 @@ export class GrepTool {
       // cross-project (scope:"all" → no tenantId), it's a genuine total miss.
       if (matches.length === 0 && message === undefined) {
         message = tenantId ? grepScopeOptInHint(pattern) : grepEmptyRecoveryHint(pattern);
+        // A literal multi-token miss is often just a spacing / type-annotation
+        // mismatch, not a true absence — nudge toward a whitespace-tolerant regex.
+        if (!regex) {
+          const ws = whitespaceSensitivityHint(pattern, true);
+          if (ws) message += ` ${ws}`;
+        }
       }
       const economy = computeGrepEconomy(matches);
       const latencyMs = Date.now() - startTime;

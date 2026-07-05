@@ -18,6 +18,7 @@ import {
   resolveFallbackBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
+import { whitespaceSensitivityHint } from './exact-hints.js';
 
 /**
  * Resolution outcome for exact-search tenant scoping.
@@ -419,6 +420,12 @@ async function executeAndLogSearch(
       successResponse.hint = `No exact matches for "${options.query}" in the current project. It may live in another indexed repository — pass scope:"all" to search across every repository (opt-in; this crosses project boundaries). For a concept rather than a literal, use the search tool (semantic).`;
     } else if (dedupedResults.length === 0) {
       successResponse.hint = `No exact matches for "${options.query}" in any indexed project. If you are looking for a concept rather than a literal string, use the search tool (semantic); otherwise broaden it or drop filters. Retrying the same query verbatim returns the same empty result.`;
+    }
+    if (dedupedResults.length === 0) {
+      // A literal multi-token miss is often a spacing / type-annotation mismatch,
+      // not a true absence. exact mode has no regex — point at grep for that.
+      const ws = whitespaceSensitivityHint(options.query, false);
+      if (ws) successResponse.hint = successResponse.hint ? `${successResponse.hint} ${ws}` : ws;
     }
     await attachIndexingProgress(successResponse, daemonClient, effectiveScope, tenantId);
     return successResponse;
