@@ -11,7 +11,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 /// Current schema version for graph.db.
-pub const GRAPH_SCHEMA_VERSION: i32 = 2;
+pub const GRAPH_SCHEMA_VERSION: i32 = 4;
 
 /// Default graph database filename.
 pub const GRAPH_DB_FILENAME: &str = "graph.db";
@@ -165,6 +165,8 @@ impl GraphDbManager {
         match version {
             1 => self.migrate_v1().await,
             2 => self.migrate_v2().await,
+            3 => self.migrate_v3().await,
+            4 => self.migrate_v4().await,
             _ => Err(GraphDbError::Migration(format!(
                 "Unknown graph migration version: {}",
                 version
@@ -261,6 +263,43 @@ impl GraphDbManager {
         .await?;
         Ok(())
     }
+
+    /// v3: partial index once meant to isolate file-less "stub" nodes for the
+    /// periodic stub-edge resolver. SUPERSEDED by v4, which drops it: the
+    /// daemon's bundled SQLite could not prove the query's
+    /// `file_path IS NULL OR file_path = ''` predicate implied this partial
+    /// index's WHERE, so forcing it via `INDEXED BY` failed the whole query
+    /// with "no query solution". The resolver now uses the existing plain
+    /// index `idx_nodes_file(tenant_id, file_path)` via `file_path = ''`
+    /// (`file_path` is NOT NULL, so the `IS NULL` branch was always dead) —
+    /// see `resolve_stub_edges` in sqlite_store.rs. Kept as a historical step
+    /// so already-migrated databases stay on a linear version chain.
+    async fn migrate_v3(&self) -> GraphDbResult<()> {
+        info!("Graph migration v3: adding partial index idx_nodes_fileless");
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_nodes_fileless \
+             ON graph_nodes(tenant_id, node_id) WHERE file_path IS NULL OR file_path = ''",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// v4: drop the redundant v3 partial index `idx_nodes_fileless`. The
+    /// stub-edge resolver drives its file-less-node scan from the existing
+    /// plain composite index `idx_nodes_file(tenant_id, file_path)` (via
+    /// `file_path = ''`), which the planner picks on its own with no stats and
+    /// no `INDEXED BY` hint — so the partial index is dead weight. Dropping it
+    /// also removes the "no query solution" trap: a future `INDEXED BY
+    /// idx_nodes_fileless` would fail on the daemon's SQLite (weaker
+    /// partial-index prover). `IF EXISTS` keeps the migration idempotent.
+    async fn migrate_v4(&self) -> GraphDbResult<()> {
+        info!("Graph migration v4: dropping redundant partial index idx_nodes_fileless");
+        sqlx::query("DROP INDEX IF EXISTS idx_nodes_fileless")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 impl Clone for GraphDbManager {
@@ -277,11 +316,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn migrations_apply_v2_covering_index_and_are_idempotent() {
+    async fn migrations_apply_indexes_and_are_idempotent() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db = tmp.path().join("graph.db");
 
-        // `new` opens the DB and runs all pending migrations (v1 → v2).
+        // `new` opens the DB and runs all pending migrations (v1 → v4).
         let mgr = GraphDbManager::new(&db).await.expect("open graph db");
 
         // Schema lands at the latest version.
@@ -290,17 +329,38 @@ mod tests {
             .await
             .expect("read schema version");
         assert_eq!(version, GRAPH_SCHEMA_VERSION);
-        assert_eq!(version, 2, "v2 must be applied");
+        assert_eq!(version, 4, "v4 must be applied");
 
         // The v2 covering index for the metrics aggregate exists.
-        let idx: Option<String> = sqlx::query_scalar(
+        let idx_v2: Option<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master \
              WHERE type = 'index' AND name = 'idx_edges_tenant_type'",
         )
         .fetch_optional(&mgr.pool)
         .await
         .expect("query sqlite_master");
-        assert_eq!(idx.as_deref(), Some("idx_edges_tenant_type"));
+        assert_eq!(idx_v2.as_deref(), Some("idx_edges_tenant_type"));
+
+        // v4 drops the redundant v3 partial index — it must NOT exist at head.
+        let idx_fileless: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_nodes_fileless'",
+        )
+        .fetch_optional(&mgr.pool)
+        .await
+        .expect("query sqlite_master");
+        assert_eq!(idx_fileless, None, "idx_nodes_fileless must be dropped by v4");
+
+        // The plain index the stub-edge resolver actually drives from (created
+        // in v1) must exist.
+        let idx_file: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_nodes_file'",
+        )
+        .fetch_optional(&mgr.pool)
+        .await
+        .expect("query sqlite_master");
+        assert_eq!(idx_file.as_deref(), Some("idx_nodes_file"));
 
         // Re-running migrations on an up-to-date DB is a no-op (no error, no
         // duplicate-index failure thanks to IF NOT EXISTS / early return).
