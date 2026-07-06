@@ -96,8 +96,14 @@ pub fn extract_edges(
 ) -> ExtractionResult {
     let mut result = ExtractionResult::default();
 
-    // Create a File node for import edges
-    let file_node = GraphNode::new(tenant_id, file_path, file_path, NodeType::File);
+    // Create a File node for import edges. Stamp its language from the first
+    // chunk that carries one so file-level nodes don't inflate the "unknown"
+    // language bucket in per-language graph metrics.
+    let mut file_node = GraphNode::new(tenant_id, file_path, file_path, NodeType::File);
+    file_node.language = chunks
+        .iter()
+        .map(|c| c.language.clone())
+        .find(|l| !l.is_empty());
     result.nodes.push(file_node);
 
     for chunk in chunks {
@@ -144,7 +150,14 @@ pub fn extract_edges_from_text_chunks(
 ) -> ExtractionResult {
     let mut result = ExtractionResult::default();
 
-    let file_node = GraphNode::new(tenant_id, file_path, file_path, NodeType::File);
+    // Stamp the File node's language from the first chunk that carries one so
+    // file-level nodes don't inflate the "unknown" language bucket in
+    // per-language graph metrics (see `extract_edges` for the same fix on the
+    // `SemanticChunk` entry point).
+    let mut file_node = GraphNode::new(tenant_id, file_path, file_path, NodeType::File);
+    file_node.language = chunks
+        .iter()
+        .find_map(|c| c.metadata.get("language").filter(|l| !l.is_empty()).cloned());
     result.nodes.push(file_node);
 
     for chunk in chunks {

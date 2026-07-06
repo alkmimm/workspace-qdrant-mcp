@@ -420,6 +420,91 @@ fn test_is_valid_symbol_name_rejects_generic_fragments() {
     assert!(!is_valid_symbol_name(""));
 }
 
+// -- File node language stamp (per-language graph metrics) ---------------
+
+#[test]
+fn test_extract_edges_file_node_gets_language_from_semantic_chunk() {
+    let chunk = SemanticChunk::new(
+        ChunkType::Method,
+        "build",
+        "Widget build(BuildContext context) {}",
+        10,
+        15,
+        "dart",
+        "lib/widget.dart",
+    );
+
+    let result = extract_edges(&[chunk], "t1", "lib/widget.dart");
+
+    let file_node = result
+        .nodes
+        .iter()
+        .find(|n| n.symbol_type == NodeType::File)
+        .expect("a File node must be created");
+    assert_eq!(
+        file_node.language.as_deref(),
+        Some("dart"),
+        "File node must be stamped with the language of its chunks, not left empty \
+         (an empty language folds every file node into the 'unknown' bucket in \
+         per-language graph metrics)"
+    );
+}
+
+#[test]
+fn test_extract_edges_from_text_chunks_file_node_gets_language() {
+    use crate::TextChunk;
+    use std::collections::HashMap;
+
+    let mut meta = HashMap::new();
+    meta.insert("chunk_type".to_string(), "method".to_string());
+    meta.insert("symbol_name".to_string(), "build".to_string());
+    meta.insert("language".to_string(), "dart".to_string());
+
+    let chunk = TextChunk {
+        content: "Widget build(BuildContext context) {}".to_string(),
+        chunk_index: 0,
+        start_char: 0,
+        end_char: 0,
+        metadata: meta,
+    };
+
+    let result = extract_edges_from_text_chunks(&[chunk], "t1", "lib/widget.dart");
+
+    let file_node = result
+        .nodes
+        .iter()
+        .find(|n| n.symbol_type == NodeType::File)
+        .expect("a File node must be created");
+    assert_eq!(file_node.language.as_deref(), Some("dart"));
+}
+
+#[test]
+fn test_extract_edges_file_node_language_none_when_no_chunk_language() {
+    // A file with only a preamble/text chunk (no `language` in metadata) leaves
+    // the File node's language as None -- no worse than before this fix, just
+    // no longer silently mislabeling nodes that DO carry a known language.
+    use crate::TextChunk;
+    use std::collections::HashMap;
+
+    let meta = HashMap::new();
+    let chunk = TextChunk {
+        content: "some text".to_string(),
+        chunk_index: 0,
+        start_char: 0,
+        end_char: 0,
+        metadata: meta,
+    };
+
+    let result = extract_edges_from_text_chunks(&[chunk], "t1", "README.md");
+
+    let file_node = result
+        .nodes
+        .iter()
+        .find(|n| n.symbol_type == NodeType::File)
+        .expect("a File node must be created");
+    assert_eq!(file_node.language, None);
+}
+
 #[test]
 fn test_extract_edges_imports_from_preamble() {
     let chunk = SemanticChunk::new(
