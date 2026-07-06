@@ -96,6 +96,11 @@ export const searchToolDefinition = {
         type: 'string',
         description: 'File path glob filter (e.g., "**/*.rs", "src/**/*.ts")',
       },
+      pathExclude: {
+        type: 'string',
+        description:
+          'File path glob to EXCLUDE from results (hard filter, opposite of pathGlob). Floats: "old_project/**" drops that directory at the repo root AND at any nested depth. Use it to silence a legacy/vendored tree that pollutes results. To de-rank a path everywhere without passing it each call, the deployment can set WQM_SEARCH_DERANK instead.',
+      },
       component: {
         type: 'string',
         description:

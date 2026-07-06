@@ -45,6 +45,7 @@ search({
     // Structural filters
     component?: string,               // Filter by project component (e.g., "daemon", "daemon.core"). Supports prefix matching.
     pathGlob?: string,                // File path glob filter (e.g., "**/*.rs", "src/**/*.ts")
+    pathExclude?: string,             // Glob to EXCLUDE (hard filter, opposite of pathGlob); floats "old_project/**" at any depth
     // Payload shaping (per-hit budget control)
     maxBytesPerHit?: number,          // Per-hit text cap in chars (default: 1500). Set to 0 to disable.
     summary?: boolean,                // Drop chunk bodies, return only metadata (default: false)
@@ -258,6 +259,7 @@ grep({
     regex?: boolean,                    // Treat pattern as regex (default: false)
     caseSensitive?: boolean,            // Case-sensitive matching (default: true)
     pathGlob?: string,                  // File path glob filter (e.g., "**/*.rs", "src/**/*.ts")
+    pathExclude?: string,               // Glob to EXCLUDE matches (hard filter, opposite of pathGlob); floats at any depth
     scope?: "project" | "all",          // Search scope (default: "project")
     contextLines?: number,              // Lines of context before/after each match (default: 0)
     maxResults?: number,                // Maximum results to return (default: 1000)
@@ -281,6 +283,7 @@ list({
     language?: string,                  // Filter by programming language (e.g., "rust", "typescript")
     extension?: string,                 // Filter by file extension (e.g., "rs", "ts")
     pattern?: string,                   // Glob pattern on relative path (e.g., "**/*.test.ts")
+    pathExclude?: string,               // Glob to EXCLUDE from the listing (hard filter, opposite of pattern); floats at any depth
     includeTests?: boolean,             // Include test files (default: true)
     limit?: number,                     // Max entries returned (default: 200, max: 500)
     projectId?: string,                 // Specific project ID (default: current project)

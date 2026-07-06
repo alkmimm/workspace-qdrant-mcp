@@ -11,6 +11,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { matchesPathExclude } from '../utils/path-glob.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import type { TextSearchMatch } from '../clients/grpc-types.js';
@@ -88,6 +89,7 @@ export interface GrepOptions {
   regex?: boolean;
   caseSensitive?: boolean;
   pathGlob?: string;
+  pathExclude?: string;
   scope?: 'project' | 'all';
   contextLines?: number;
   maxResults?: number;
@@ -190,6 +192,21 @@ export function dedupGrepMatches(matches: GrepMatch[]): GrepMatch[] {
   return out;
 }
 
+/**
+ * Drop grep matches whose file path matches the `pathExclude` glob — the hard
+ * per-call exclude, applied in TS on the mapped matches (the daemon FTS query
+ * itself only knows the `pathGlob` include). Floats like the include filter, so
+ * `old_project/**` silences that tree at the repo root and any nested depth.
+ * No-op when `pathExclude` is unset.
+ */
+export function filterGrepMatchesByExclude(
+  matches: GrepMatch[],
+  pathExclude: string | undefined
+): GrepMatch[] {
+  if (!pathExclude) return matches;
+  return matches.filter((m) => !matchesPathExclude(m.file, pathExclude));
+}
+
 /** Map daemon TextSearchMatch array to GrepMatch array. */
 function mapGrepMatches(matches: TextSearchMatch[]): GrepMatch[] {
   return matches.map((m: TextSearchMatch) => {
@@ -270,6 +287,7 @@ export class GrepTool {
       regex = false,
       caseSensitive = true,
       pathGlob,
+      pathExclude,
       scope = 'project',
       contextLines = 0,
       maxResults = 1000,
@@ -335,6 +353,7 @@ export class GrepTool {
       tenantId,
       effectiveBranch,
       pathGlob,
+      pathExclude,
       startTime,
       eventId,
       fallbackBranch
@@ -375,6 +394,7 @@ export class GrepTool {
     tenantId: string | undefined,
     branch: string | undefined,
     pathGlob: string | undefined,
+    pathExclude: string | undefined,
     startTime: number,
     eventId: string,
     fallbackBranch?: string
@@ -407,7 +427,10 @@ export class GrepTool {
           )
         );
       }
-      const rawMatches = responses.flatMap((response) => mapGrepMatches(response.matches));
+      const rawMatches = filterGrepMatchesByExclude(
+        responses.flatMap((response) => mapGrepMatches(response.matches)),
+        pathExclude
+      );
       const dedupedMatches = dedupGrepMatches(rawMatches);
       let matches = dedupedMatches.slice(0, maxResults);
       let duplicatesDropped = rawMatches.length - dedupedMatches.length;
@@ -432,7 +455,8 @@ export class GrepTool {
           maxResults,
           tenantId,
           branch,
-          pathGlob
+          pathGlob,
+          pathExclude
         );
         if (widened) {
           matches = widened.matches;
@@ -519,7 +543,8 @@ export class GrepTool {
     maxResults: number,
     tenantId: string | undefined,
     branch: string | undefined,
-    pathGlob: string | undefined
+    pathGlob: string | undefined,
+    pathExclude: string | undefined
   ): Promise<
     | {
         matches: GrepMatch[];
@@ -536,7 +561,7 @@ export class GrepTool {
       const resp = await this.daemonClient.textSearch(
         buildGrepRequest(pattern, regex, caseSensitive, contextLines, maxResults, tenantId, '*', pathGlob)
       );
-      const rawMatches = mapGrepMatches(resp.matches);
+      const rawMatches = filterGrepMatchesByExclude(mapGrepMatches(resp.matches), pathExclude);
       const dedupedMatches = dedupGrepMatches(rawMatches);
       const matches = dedupedMatches.slice(0, maxResults);
       if (matches.length === 0) return undefined;

@@ -10,6 +10,7 @@ import type { SearchOptions, SearchResult, SearchResponse, FilterParams, SearchS
 import { PROJECTS_COLLECTION } from './search-types.js';
 import { attachIndexingProgress } from './search-helpers.js';
 import { buildFilter } from './search-filters.js';
+import { filterResultsByPathExclude } from './search-path-filters.js';
 import { FIELD_CONTENT, FIELD_TITLE } from '../common/native-bridge.js';
 import {
   applyEffectiveBranch,
@@ -231,13 +232,16 @@ async function exactSearchInCollection(
       status_reason: `Exact search failed: ${error instanceof Error ? error.message : 'unknown error'}`,
     };
   }
+  // Hard per-call exclude (`pathExclude`) — parity with the projects path. Rare
+  // for scratchpad/libraries (they carry no file path), but honour it uniformly.
+  const finalResults = filterResultsByPathExclude(results, options.pathExclude);
   stateManager.updateSearchEvent(eventId, {
-    resultCount: results.length,
+    resultCount: finalResults.length,
     latencyMs: Date.now() - startTime,
   });
   return {
-    results,
-    total: results.length,
+    results: finalResults,
+    total: finalResults.length,
     query: options.query,
     mode: 'keyword',
     scope,
@@ -388,6 +392,12 @@ async function executeAndLogSearch(
     // in (a confidential repo indexed in the same instance would leak into an
     // unrelated project's session). On an empty project result we surface a hint
     // offering scope:"all" (below) instead of fetching cross-project data here.
+    //
+    // Hard per-call exclude (`pathExclude`), applied AFTER any branch-widen so it
+    // covers widened hits too and BEFORE the offset slice so pagination stays honest.
+    if (options.pathExclude) {
+      dedupedResults = filterResultsByPathExclude(dedupedResults, options.pathExclude);
+    }
     const limit = options.limit ?? 100;
     // Pagination parity with the vector path (P1.5 C): honor `offset` by slicing
     // the deduped result list; set next_offset below when more remain.

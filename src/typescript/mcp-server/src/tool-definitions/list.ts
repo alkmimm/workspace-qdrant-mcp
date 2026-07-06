@@ -44,6 +44,11 @@ export const listToolDefinition = {
         description:
           'Glob on the file path, matched at ANY depth — a bare pattern floats, no leading "**/" needed (e.g. "V*.sql" finds migrations in any folder, "helpers.rs", "**/*.test.ts", "src/**/*.ts"). Use `*` for a path segment and `**` for any depth.',
       },
+      pathExclude: {
+        type: 'string',
+        description:
+          'Glob on the file path to EXCLUDE from the listing (hard filter, opposite of `pattern`). Floats the same way: "old_project/**" hides that directory at the repo root AND any nested depth. Use it to drop a legacy/vendored tree from the structure view.',
+      },
       includeTests: {
         type: 'boolean',
         description: 'Include test files (default: true)',

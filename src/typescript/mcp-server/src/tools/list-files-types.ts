@@ -21,6 +21,9 @@ export interface ListOptions {
   language?: string;
   extension?: string;
   pattern?: string;
+  /** Glob on the file path to EXCLUDE (hard filter, opposite of `pattern`).
+   *  Floats: "old_project/**" hides that dir at the repo root and any depth. */
+  pathExclude?: string;
   includeTests?: boolean;
   limit?: number;
   projectId?: string;

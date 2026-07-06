@@ -28,8 +28,10 @@ import {
   SCRATCHPAD_COLLECTION,
   tuningFromEnv,
   rerankEnabledByDefault,
+  resolveDerankConfig,
 } from './search-types.js';
 import { buildFilter } from './search-filters.js';
+import { filterResultsByPathExclude, applyPathDerank } from './search-path-filters.js';
 import {
   searchCollection,
   applyRRFFusion,
@@ -1220,7 +1222,10 @@ export async function finalizeResults(
   stateManager: SqliteStateManager,
   params: FinalizeResultsParams
 ): Promise<SearchResponse> {
-  const scopedResults = filterResultsByPathGlob(params.allResults, params.options.pathGlob);
+  const includeScoped = filterResultsByPathGlob(params.allResults, params.options.pathGlob);
+  // Hard per-call exclude (`pathExclude`) — drop anything under the excluded path
+  // BEFORE fusion/pagination so page sizes and next_offset stay honest.
+  const scopedResults = filterResultsByPathExclude(includeScoped, params.options.pathExclude);
   const fusedResults = applyRRFFusion(scopedResults, params.mode);
   // Snapshot the pre-boost score per result (raw cosine for semantic, RRF for
   // hybrid) so it can be RESTORED for display after ranking. The path-relevance
@@ -1236,6 +1241,11 @@ export async function finalizeResults(
   // — surfaces the precisely-named file over content-term magnets, and shapes
   // which candidates enter the rerank pool below.
   applyPathRelevanceBoost(fusedResults, params.query);
+  // Soft, deployment-default de-rank (WQM_SEARCH_DERANK): multiply the ranking
+  // score of legacy paths (e.g. `old_project/`) so they sink below live code but
+  // stay in the set. Ordering-only — the display score is restored below, same as
+  // the path boost. A per-call `pathExclude` (hard) removes; this only demotes.
+  applyPathDerank(fusedResults, resolveDerankConfig());
   fusedResults.sort((a, b) => b.score - a.score);
   // Collapse same-file chunks BEFORE reranking/slicing so the pool holds
   // distinct files, not repeated chunks of one file.

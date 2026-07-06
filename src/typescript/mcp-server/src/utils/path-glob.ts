@@ -35,3 +35,16 @@ export function globToRegExp(glob: string): RegExp {
 export function matchesGlob(value: string, glob: string): boolean {
   return globToRegExp(glob).test(value.replace(/\\/g, '/'));
 }
+
+/**
+ * Match a path against an EXCLUDE glob, floating so it drops a dir at the repo
+ * root AND at any nested depth — the forgiving behaviour a caller expects from
+ * "exclude old_project/". `matchesGlob` anchors both ends, so a bare
+ * `old_project/**` would only hit the root copy; also testing `** /<glob>`
+ * lets a nested `pkg/old_project/x` match too. Absolute paths (the metadata
+ * `file_path`) match via the same floated form. Patterns already floating
+ * (`**\/…`) stay correct — the extra prefix is a no-op there.
+ */
+export function matchesPathExclude(value: string, glob: string): boolean {
+  return matchesGlob(value, glob) || matchesGlob(value, `**/${glob}`);
+}

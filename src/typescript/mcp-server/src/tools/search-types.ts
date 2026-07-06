@@ -78,6 +78,10 @@ export interface SearchOptions {
   expandContext?: boolean;
   /** File path glob filter (e.g., "**\/*.rs") — applies in both exact and semantic modes */
   pathGlob?: string;
+  /** File path glob to EXCLUDE (hard filter) — drops any hit whose path matches,
+   *  in both exact and semantic modes. Floats: `old_project/**` excludes the dir
+   *  at the repo root AND at any nested depth. Complements `pathGlob` (include). */
+  pathExclude?: string;
   /** Filter by project component (e.g., "daemon", "daemon.core"). Supports prefix matching. */
   component?: string;
   /** Internal: base branch to include for files unchanged on a feature branch. */
@@ -130,6 +134,49 @@ export interface SearchOptions {
  *  resolve the deployment default identically. */
 export function rerankEnabledByDefault(envValue: string | undefined): boolean {
   return envValue === undefined ? true : envValue !== '0';
+}
+
+/** Default score multiplier for a de-ranked (legacy) path. 0.2 sinks a matched
+ *  hit well below live code (cosine hits sit ~0.4–0.7 → ~0.08–0.14 after) while
+ *  keeping it in the result set, so a legacy dir never *hides* a needed file. */
+export const DEFAULT_DERANK_PENALTY = 0.2;
+
+/** Resolved soft de-rank configuration (see {@link resolveDerankConfig}). */
+export interface DerankConfig {
+  /** Path substrings; a hit whose relative (else absolute) path CONTAINS any one
+   *  is de-ranked. Same match semantics as the daemon's
+   *  `WQM_GRAPH_CENTRALITY_EXCLUDE` so the two knobs can share a value. */
+  substrings: string[];
+  /** Ranking-score multiplier in [0,1) applied to a matched hit. >=1 or empty
+   *  `substrings` ⇒ the de-rank is a no-op. */
+  penalty: number;
+}
+
+/** Resolve the deployment de-rank default from the environment. `WQM_SEARCH_DERANK`
+ *  is a comma-separated list of path SUBSTRINGS (e.g. `old_project/,/generated/`) —
+ *  intentionally the SAME format as the graph `WQM_GRAPH_CENTRALITY_EXCLUDE` knob so
+ *  one value covers both. `WQM_SEARCH_DERANK_PENALTY` overrides the score multiplier
+ *  ([0,1); default {@link DEFAULT_DERANK_PENALTY}). Unlike a hard `pathExclude`, this
+ *  only reorders — matched hits sink but stay findable. Semantic/hybrid search only
+ *  (exact/grep are literal, not ranked). Read per-call; change ⇒ recreate the mcp
+ *  container (docker compose up -d --force-recreate mcp), no reembed. */
+export function resolveDerankConfig(env: NodeJS.ProcessEnv = process.env): DerankConfig {
+  const raw = env['WQM_SEARCH_DERANK'];
+  const substrings = raw
+    ? raw
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    : [];
+  let penalty = DEFAULT_DERANK_PENALTY;
+  const penaltyRaw = env['WQM_SEARCH_DERANK_PENALTY'];
+  if (penaltyRaw !== undefined && penaltyRaw.trim() !== '') {
+    const parsed = Number(penaltyRaw);
+    // Only accept a genuine down-weight in [0,1). >=1 (or garbage) keeps the
+    // default rather than silently disabling or inverting the de-rank.
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed < 1) penalty = parsed;
+  }
+  return { substrings, penalty };
 }
 
 export interface ParentContext {
