@@ -268,7 +268,7 @@ pub async fn initialize_all(
 // -- private helpers --
 
 /// Derive the state.db path (best-effort: re-read from environment).
-fn get_state_db_path(_pool: &SqlitePool) -> PathBuf {
+pub(crate) fn get_state_db_path(_pool: &SqlitePool) -> PathBuf {
     if let Ok(override_path) = std::env::var("WQM_DATABASE_PATH") {
         return PathBuf::from(override_path);
     }

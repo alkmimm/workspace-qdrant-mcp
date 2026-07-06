@@ -200,21 +200,31 @@ pub fn start_metrics_collection(pool: SqlitePool) -> JoinHandle<()> {
 /// Periodically checkpoint the WAL to keep it bounded (#5 of the SQLite
 /// write-contention work).
 ///
-/// SQLite's automatic `wal_autocheckpoint` runs a PASSIVE checkpoint inline, but
-/// PASSIVE can be starved by long-lived readers (the queue-depth / inventory
-/// exporters, git/pause monitors), letting the WAL grow unbounded under
-/// sustained write load — observed at ~730 MB during a reembed. A large WAL both
-/// wastes disk and keeps read snapshots stale, which feeds SQLITE_BUSY_SNAPSHOT.
-/// This loop runs a PASSIVE checkpoint every tick and forces a TRUNCATE once the
-/// WAL crosses a frame threshold, so it stays bounded without churning readers
-/// on every tick.
-pub fn start_wal_checkpoint_loop(pool: SqlitePool) -> JoinHandle<()> {
+/// SQLite's automatic `wal_autocheckpoint` and a PASSIVE checkpoint reclaim WAL
+/// *frames* (write them back to the main db and reset the log for reuse), but
+/// they do NOT shrink the WAL *file*: after a write spike (e.g. a reembed) the
+/// `-wal` stays at its high-water mark indefinitely. The previous gate keyed on
+/// the checkpoint's `log_size` — the *live frame count*, which PASSIVE keeps
+/// small — so `log_size > threshold` was essentially never true and TRUNCATE
+/// never fired. Observed: a 730 MB `-wal` holding only ~450 live frames, stuck
+/// for the life of the process (wasting disk and keeping read snapshots stale,
+/// which feeds SQLITE_BUSY_SNAPSHOT).
+///
+/// Fix: gate TRUNCATE on the WAL file's on-disk **byte size** instead, so a
+/// bloated physical file is reclaimed even when the live frame count is low.
+/// TRUNCATE (which waits for readers) still fires rarely — only above the byte
+/// threshold — so it does not churn readers on every tick.
+pub fn start_wal_checkpoint_loop(
+    pool: SqlitePool,
+    wal_path: std::path::PathBuf,
+    label: &'static str,
+) -> JoinHandle<()> {
     use workspace_qdrant_core::queue_config::{checkpoint_wal, CheckpointMode};
 
-    // A WAL frame is one DB page (~4 KiB). Truncate once the log exceeds ~20k
-    // frames (~80 MiB) so it stays bounded while TRUNCATE (which waits for
-    // readers) fires rarely rather than on every tick.
-    const TRUNCATE_THRESHOLD_FRAMES: i32 = 20_000;
+    // Reclaim the physical WAL file once it grows past this size on disk. Large
+    // enough that TRUNCATE fires rarely, small enough to keep disk + read
+    // snapshots tight (a WAL page is ~4 KiB, so this is ~16k frames).
+    const TRUNCATE_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
 
     let handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
@@ -222,29 +232,41 @@ pub fn start_wal_checkpoint_loop(pool: SqlitePool) -> JoinHandle<()> {
             interval.tick().await;
             match checkpoint_wal(&pool, CheckpointMode::Passive).await {
                 Ok(result) => {
-                    if result.log_size > TRUNCATE_THRESHOLD_FRAMES {
+                    let wal_bytes = tokio::fs::metadata(&wal_path)
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    if wal_bytes > TRUNCATE_THRESHOLD_BYTES {
                         debug!(
-                            "WAL large ({} frames; {} checkpointed passively), forcing TRUNCATE",
-                            result.log_size, result.checkpointed
+                            "{label} WAL file large ({:.0} MiB on disk; {} live frames checkpointed passively), forcing TRUNCATE",
+                            wal_bytes as f64 / (1024.0 * 1024.0),
+                            result.checkpointed
                         );
                         match checkpoint_wal(&pool, CheckpointMode::Truncate).await {
                             Ok(t) => debug!(
-                                "WAL TRUNCATE: busy={}, log_size={}, checkpointed={}",
+                                "{label} WAL TRUNCATE: busy={}, log_size={}, checkpointed={}",
                                 t.busy, t.log_size, t.checkpointed
                             ),
-                            Err(e) => warn!("WAL TRUNCATE checkpoint failed: {}", e),
+                            Err(e) => warn!("{label} WAL TRUNCATE checkpoint failed: {}", e),
                         }
                     }
                 }
-                Err(e) => warn!("WAL passive checkpoint failed: {}", e),
+                Err(e) => warn!("{label} WAL passive checkpoint failed: {}", e),
             }
         }
     });
     info!(
-        "WAL checkpoint loop started (30s PASSIVE, TRUNCATE above {} frames)",
-        TRUNCATE_THRESHOLD_FRAMES
+        "WAL checkpoint loop started for {label} (30s PASSIVE, TRUNCATE above {} MiB on disk)",
+        TRUNCATE_THRESHOLD_BYTES / (1024 * 1024)
     );
     handle
+}
+
+/// The `-wal` sidecar path for a SQLite database file (`<db>` -> `<db>-wal`).
+pub(crate) fn wal_sidecar(db_path: &std::path::Path) -> std::path::PathBuf {
+    let mut p = db_path.as_os_str().to_os_string();
+    p.push("-wal");
+    std::path::PathBuf::from(p)
 }
 
 /// Periodically refresh unified queue depth gauges (issue-64 Task 4).
@@ -1437,7 +1459,18 @@ pub fn spawn_all(
     let _remote = start_remote_url_monitor(pool.clone());
     let _git_state = start_git_state_monitor(pool.clone());
     let _queue_depth = start_queue_depth_exporter(pool.clone());
-    let _wal_checkpoint = start_wal_checkpoint_loop(pool.clone());
+    // Keep the physical WAL files bounded for every daemon-owned SQLite db that
+    // takes sustained write load. (graph.db has its own pool behind
+    // SharedGraphStore and no loop yet — tracked as a follow-up.)
+    let state_db_path = crate::database::get_state_db_path(pool);
+    let search_db_path = workspace_qdrant_core::search_db::search_db_path_from_state(&state_db_path);
+    let _wal_checkpoint =
+        start_wal_checkpoint_loop(pool.clone(), wal_sidecar(&state_db_path), "memexd.db");
+    let _search_wal_checkpoint = start_wal_checkpoint_loop(
+        search_db.pool().clone(),
+        wal_sidecar(&search_db_path),
+        "search.db",
+    );
     let _project_inventory = start_indexed_project_inventory_exporter(pool.clone());
     let _search_adoption = start_search_adoption_sampler(pool.clone());
     let _chunking_coverage = start_chunking_coverage_exporter(pool.clone());
