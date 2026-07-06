@@ -308,6 +308,34 @@ mod tests {
         }
     }
 
+    /// No language may list the same AST node kind in both `function.node_types`
+    /// and `function.async_node_types`. The chunker flags a node async purely by
+    /// `node.kind()` membership in `async_node_types` (it does not inspect for an
+    /// `async` child token), so an overlap marks EVERY function of that kind
+    /// async. This is a regression guard for the Rust `function_item` overlap that
+    /// mislabeled all sync `fn`s as `async_function`: modifier-async grammars must
+    /// leave `async_node_types` empty; only a grammar with a genuinely distinct
+    /// async node kind (e.g. Python's `async_function_definition`) may populate it.
+    #[test]
+    fn test_async_node_types_disjoint_from_function_node_types() {
+        let provider = RegistryProvider::new().unwrap();
+        for def in &provider.definitions {
+            let Some(patterns) = def.semantic_patterns.as_ref() else {
+                continue;
+            };
+            for async_kind in &patterns.function.async_node_types {
+                assert!(
+                    !patterns.function.node_types.contains(async_kind),
+                    "{}: node kind `{async_kind}` is in both function.node_types and \
+                     function.async_node_types — this marks every `{async_kind}` async. \
+                     Leave async_node_types empty unless the grammar has a distinct \
+                     async node kind.",
+                    def.id(),
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_protobuf_grammar_symbol_and_patterns() {
         let provider = RegistryProvider::new().unwrap();

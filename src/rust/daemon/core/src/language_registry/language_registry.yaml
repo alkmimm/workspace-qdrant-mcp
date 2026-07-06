@@ -1438,7 +1438,13 @@
       node_types: [use_declaration, extern_crate_declaration, attribute_item, inner_attribute_item]
     function:
       node_types: [function_item]
-      async_node_types: [function_item]
+      # Rust has no distinct async node kind: `async fn` and `fn` are both
+      # `function_item` (async is a child modifier token). The extractor flags
+      # async purely by node.kind() membership here, so listing `function_item`
+      # marked EVERY function async. Empty, matching every other modifier-async
+      # grammar in this registry (JS/TS/Go/Kotlin/C#…); only Python, which has a
+      # real `async_function_definition` node, populates async_node_types.
+      async_node_types: []
     class:
       node_types: []
     method:
