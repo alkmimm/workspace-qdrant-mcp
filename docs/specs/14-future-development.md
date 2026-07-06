@@ -282,6 +282,16 @@ Search should support three scopes, selectable per query:
 
 **Graph RAG across projects:** Cross-project graph edges (e.g., shared dependency usage patterns, similar function signatures) enable structural code reuse discovery that vector search alone misses. GitHub research shows ~5% of code across repositories is cross-project clones, concentrated within similar domains.
 
+### Rule/Enforcement-Aware Reranking (precision for "where is X validated")
+
+**Observation (2026-07-05, usage feedback):** Semantic `search` embeds chunks at method/class granularity, so it locates the right *file/method* for a business rule but does not pin the exact *enforcement line* — and rule queries rarely match lexically (a query like "max admins per sector" vs. code `if (admins.size() >= MAX) throw …`). Users fall back to reading whole files. Semantic retrieval returns *topics*, not *guards*.
+
+**Idea:** When a query reads like "where/how is X validated / enforced / limited", bias retrieval toward enforcement sites instead of concept matches:
+- A lightweight reranker that boosts chunks carrying enforcement signals near the semantic hit — `throw new …Exception`, Bean Validation annotations (`@Size/@Max/@NotNull/@Pattern`), guard shapes (`if (… .size() >= …)`, `require(`, `Preconditions`), and UI error-message / i18n keys.
+- Or an intent-detected auto-pivot: additionally run a structured `grep` (error-message / annotation / throw patterns) and/or a `graph` lookup (nodes are line-anchored via `start_line`/`end_line`), merging the line-precise hits into the ranked results.
+
+**Why it fits:** `grep` (line-anchored FTS5) and the code graph (line-anchored nodes) already provide the precision the embedding index lacks — this is a retrieval-routing/reranking layer over existing capabilities, not new storage. It composes with the cross-encoder reranker already in the search path and the relevance-ranking design in [Cross-Project Search](#cross-project-search). Until built, the workaround is the manual recipe (semantic-locate → targeted `grep` on error/annotation/throw → read only the method), captured as the DOC-V2 `debug-rule-line` behavioral rule.
+
 ### Project vs. Library Boundary
 
 **Observation:** Not all files in a project folder are "project code." Research papers, development notes, experiment results, and reference PDFs are background knowledge that supports the project but clutters code search results.

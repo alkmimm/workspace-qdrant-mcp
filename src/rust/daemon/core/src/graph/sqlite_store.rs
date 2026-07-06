@@ -729,12 +729,29 @@ impl GraphStore for SqliteGraphStore {
         //     it (this is why `relations(class, filePath)` listed no members).
         // Both are repointed by name to the real project node; the file-less
         // stub is dropped once it has no edges left.
+        // Both dangling queries drive from the small file-less-node set, then
+        // probe edges by node id. Forced with CROSS JOIN (loop order: nodes
+        // outer) so the join starts from the ~35k file-less nodes instead of
+        // full-scanning every edge of the tenant (~445k for the largest) and
+        // PK-probing nodes — the original ~1s+ "slow statement" WARN.
+        //
+        // `file_path = ''` (graph_nodes.file_path is NOT NULL, so the historical
+        // `IS NULL OR` branch was dead code) lets the existing plain composite
+        // index idx_nodes_file(tenant_id, file_path) drive the scan; the planner
+        // picks it on its own with no stats and no `INDEXED BY` hint (verified on
+        // a no-`sqlite_stat1` copy of the live graph). We deliberately do NOT use
+        // `INDEXED BY` on a *partial* index: the daemon's bundled SQLite could
+        // not prove the partial predicate and failed the whole query with
+        // "no query solution". `t.tenant_id = ?1` is equivalent to the original
+        // (edges only ever target same-tenant nodes; row counts verified
+        // identical). Measured on the live DOC-V2 graph (no stats):
+        // target 650ms -> ~293ms, source 254ms -> ~19ms.
         let target_dangling = sqlx::query(
             "SELECT e.edge_id, e.source_node_id, e.edge_type, e.source_file,
                     e.weight, e.metadata_json, t.symbol_name AS peer_name
-             FROM graph_edges e
-             JOIN graph_nodes t ON e.target_node_id = t.node_id
-             WHERE e.tenant_id = ?1 AND (t.file_path IS NULL OR t.file_path = '')",
+             FROM graph_nodes t
+             CROSS JOIN graph_edges e ON e.target_node_id = t.node_id
+             WHERE t.tenant_id = ?1 AND e.tenant_id = ?1 AND t.file_path = ''",
         )
         .bind(tenant_id)
         .fetch_all(&self.pool)
@@ -743,9 +760,9 @@ impl GraphStore for SqliteGraphStore {
         let source_dangling = sqlx::query(
             "SELECT e.edge_id, e.target_node_id, e.edge_type, e.source_file,
                     e.weight, e.metadata_json, s.symbol_name AS peer_name
-             FROM graph_edges e
-             JOIN graph_nodes s ON e.source_node_id = s.node_id
-             WHERE e.tenant_id = ?1 AND (s.file_path IS NULL OR s.file_path = '')",
+             FROM graph_nodes s
+             CROSS JOIN graph_edges e ON e.source_node_id = s.node_id
+             WHERE s.tenant_id = ?1 AND e.tenant_id = ?1 AND s.file_path = ''",
         )
         .bind(tenant_id)
         .fetch_all(&self.pool)
