@@ -200,23 +200,49 @@ export class WorkspaceQdrantMcpServer {
   private async createHttpSessionServer(): Promise<Server> {
     const sessionState = this.createSessionState();
     const components = buildServerComponents(this.config);
-    const { stateManager, daemonClient, projectDetector, healthMonitor } = components;
-    const initResult = stateManager.initialize();
+    const initResult = components.stateManager.initialize();
     if (initResult.status === 'degraded') {
       logInfo('State manager degraded', { reason: initResult.reason });
     }
-    await initializeSession(sessionState, daemonClient, projectDetector, () =>
-      startHeartbeat(sessionState, () => sendHeartbeat(sessionState, daemonClient))
-    );
 
-    healthMonitor.start();
-    logDebug('Health monitoring started');
-    await seedDefaultRule(components.rulesTool);
+    // Connect the MCP Server and return it IMMEDIATELY so the `initialize`
+    // handshake completes in milliseconds. Everything the session bootstrap does
+    // — project detection, daemon connect, and especially `register_project`,
+    // which eagerly spawns per-language LSP servers and routinely takes 20-30s
+    // cold (see `buildServerComponents` docs) — plus the heartbeat, health
+    // monitor and default-rule seed, must NOT gate the handshake. Awaiting it
+    // here is what let a slow `register_project` blow past the client's startup
+    // timeout and fail the whole session (Codex: "timed out handshaking with MCP
+    // server after ~20s"). Read tools re-detect the project per call and tolerate
+    // a not-yet-registered daemon, so the bootstrap is safe to run detached.
     recordSessionStart();
-
     const server = this.createMcpServer();
     this.setupHandlers(server, components, sessionState);
+    void this.bootstrapHttpSession(components, sessionState);
     return server;
+  }
+
+  /**
+   * Best-effort session bootstrap, run AFTER the transport handshake has already
+   * completed so it never blocks it. Errors are logged, never thrown: a failed
+   * bootstrap must not tear down an otherwise usable session (the tools degrade
+   * gracefully when the daemon is unavailable).
+   */
+  private async bootstrapHttpSession(
+    components: ServerComponents,
+    sessionState: SessionState
+  ): Promise<void> {
+    const { daemonClient, projectDetector, healthMonitor } = components;
+    try {
+      await initializeSession(sessionState, daemonClient, projectDetector, () =>
+        startHeartbeat(sessionState, () => sendHeartbeat(sessionState, daemonClient))
+      );
+      healthMonitor.start();
+      logDebug('Health monitoring started');
+      await seedDefaultRule(components.rulesTool);
+    } catch (error) {
+      logError('HTTP session bootstrap failed', error);
+    }
   }
 
   async start(): Promise<void> {
