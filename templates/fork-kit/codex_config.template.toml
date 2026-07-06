@@ -18,10 +18,12 @@ enabled_tools = ["search", "retrieve", "grep", "list", "store", "scratchpad", "r
 url = "http://localhost:6335/mcp"
 bearer_token_env_var = "MCP_HTTP_TOKEN"
 
-[mcp_servers.workspace-qdrant.http_headers]
-Authorization = "Bearer 0123456789abcdef0123456789abcdef"
-
-
-[mcp_servers.workspace-qdrant.env]
-QDRANT_URL = "http://localhost:6333"
-WQM_DAEMON_ENDPOINT = "http://localhost:50051"
+# Bearer token: Codex resolves `bearer_token_env_var` ONLY from the process
+# environment. For a streamable-HTTP server it does NOT accept a
+# [mcp_servers.workspace-qdrant.env] table (Codex errors "env is not supported
+# for streamable_http") and it strips any [.http_headers] block on
+# re-serialization — so neither can carry the token here. Export MCP_HTTP_TOKEN
+# in the environment Codex inherits before launching it, matching the value in
+# docker/.env (what the running MCP server validates the Authorization header
+# against). On Windows: `setx MCP_HTTP_TOKEN <token>` then restart Codex, or use
+# scripts/windows/start-codex.ps1 which loads it from docker/.env.
