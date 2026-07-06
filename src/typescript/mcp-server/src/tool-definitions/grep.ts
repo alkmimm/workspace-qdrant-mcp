@@ -47,7 +47,8 @@ export const grepToolDefinition = {
       },
       maxResults: {
         type: 'number',
-        description: 'Maximum results to return (default: 1000)',
+        description:
+          'Maximum matches to return (default: 100). Raise it for an exhaustive sweep — when the cap is hit the response sets truncated:true and reports total_matches, so you can narrow with pathGlob or request more.',
       },
       branch: {
         type: 'string',
