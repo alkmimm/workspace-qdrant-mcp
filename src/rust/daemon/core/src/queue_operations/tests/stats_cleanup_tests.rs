@@ -542,3 +542,104 @@ async fn test_delete_unified_item_tracked_files_scoped_by_tenant() {
         "tenant-beta's tracked_files row must NOT be removed — it belongs to a different tenant"
     );
 }
+
+/// Regression (#224): a Delete op that "completes" for a file STILL ON DISK must
+/// NOT remove its tracked_files row (the F-036 orphan guard). The delete handler
+/// preserves on-disk files ("Skipping stale delete for existing file on disk" and
+/// the #181 branch-prune preserve-guard) WITHOUT touching Qdrant/FTS; stripping
+/// the tracking row here would strand those search-store entries — the exact
+/// tracked_files-vs-Qdrant/FTS drift (present-but-untracked files) F-036 caused.
+#[tokio::test]
+async fn test_delete_unified_item_preserves_row_when_file_on_disk() {
+    let temp_dir = tempdir().unwrap();
+    let db_path = temp_dir.path().join("test_on_disk_preserve.db");
+
+    // A real watch-folder root holding a real file on disk.
+    let watch_root = temp_dir.path().join("repo");
+    let rel_path = "src/lib.rs";
+    std::fs::create_dir_all(watch_root.join("src")).unwrap();
+    std::fs::write(watch_root.join(rel_path), "pub fn f() {}\n").unwrap();
+    let watch_root_str = watch_root.to_string_lossy().to_string();
+
+    let config = QueueConnectionConfig::with_database_path(&db_path);
+    let pool = config.create_pool().await.unwrap();
+
+    apply_sql_script(&pool, include_str!("../../schema/watch_folders_schema.sql"))
+        .await
+        .unwrap();
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let manager = QueueManager::new(pool.clone());
+    manager.init_unified_queue().await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, created_at, updated_at) \
+         VALUES ('wf-1', ?1, 'projects', 'tenant-a', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+    )
+    .bind(&watch_root_str)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO tracked_files \
+         (watch_folder_id, relative_path, branches, needs_reconcile, file_mtime, file_hash, \
+          collection, created_at, updated_at) \
+         VALUES ('wf-1', ?1, '[\"main\"]', 0, '2025-01-01T00:00:00Z', 'hash1', \
+                 'projects', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+    )
+    .bind(rel_path)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Complete a Delete op for the (on-disk) file.
+    let insert_delete = |qid: &str, idem: &str| {
+        sqlx::query(
+            "INSERT INTO unified_queue \
+             (queue_id, idempotency_key, item_type, op, tenant_id, collection, \
+              status, branch, payload_json, metadata, file_path, created_at, updated_at) \
+             VALUES (?1, ?2, 'file', 'delete', 'tenant-a', 'projects', \
+                     'in_progress', 'main', '{}', '{}', ?3, \
+                     '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .bind(qid.to_string())
+        .bind(idem.to_string())
+        .bind(rel_path)
+    };
+
+    insert_delete("qid-ondisk", "idem-ondisk")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(manager.delete_unified_item("qid-ondisk").await.unwrap());
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracked_files")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "F-036 must PRESERVE the tracked_files row for a file still on disk (#224 orphan guard)"
+    );
+
+    // Sanity: once the file is gone from disk, F-036 removes the row as before.
+    std::fs::remove_file(watch_root.join(rel_path)).unwrap();
+    insert_delete("qid-gone", "idem-gone")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(manager.delete_unified_item("qid-gone").await.unwrap());
+
+    let count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracked_files")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count_after, 0,
+        "F-036 must still remove the tracked_files row once the file is gone from disk"
+    );
+}
