@@ -263,7 +263,7 @@ pub fn start_wal_checkpoint_loop(
 }
 
 /// The `-wal` sidecar path for a SQLite database file (`<db>` -> `<db>-wal`).
-fn wal_sidecar(db_path: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn wal_sidecar(db_path: &std::path::Path) -> std::path::PathBuf {
     let mut p = db_path.as_os_str().to_os_string();
     p.push("-wal");
     std::path::PathBuf::from(p)

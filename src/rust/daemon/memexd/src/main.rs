@@ -164,6 +164,23 @@ async fn run_daemon(
         )),
         _ => None,
     };
+    // Bound graph.db's WAL too. Unlike memexd.db / search.db (looped in
+    // spawn_all), graph.db has its own pool behind SharedGraphStore, so its
+    // checkpoint loop is spawned here where the graph store handle is available.
+    let _graph_wal_checkpoint = if let Some(gs) = db_handles.graph_store.as_ref() {
+        let graph_pool = gs.read().await.pool().clone();
+        let graph_db_path = crate::database::get_state_db_path(&db_handles.queue_pool)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(workspace_qdrant_core::graph::GRAPH_DB_FILENAME);
+        Some(background::start_wal_checkpoint_loop(
+            graph_pool,
+            background::wal_sidecar(&graph_db_path),
+            "graph.db",
+        ))
+    } else {
+        None
+    };
     let watch_refresh_signal = Arc::new(Notify::new());
 
     // Phase 5: IPC + Queue processor
