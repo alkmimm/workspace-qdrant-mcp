@@ -1546,7 +1546,13 @@
     sources:
       - repo: derekstride/tree-sitter-sql
         quality: community
-    has_cpp_scanner: true
+    # DerekStride/tree-sitter-sql publishes the generated src/parser.c only on
+    # the gh-pages branch (main has grammar.js but no parser.c → extraction
+    # fails). Fetch the archive from gh-pages, which carries a C scanner.c
+    # (not scanner.cc), so has_cpp_scanner must be false. Mirrors Perl's
+    # archive_branch usage.
+    has_cpp_scanner: false
+    archive_branch: gh-pages
   lsp_servers: []
 
 # ── Swift ────────────────────────────────────────────────────────────
