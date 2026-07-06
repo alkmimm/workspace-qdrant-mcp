@@ -40,6 +40,8 @@ export interface ListTrackedFilesOptions {
   limit?: number;
   /** Glob pattern (e.g. "*.rs") — translated to SQLite GLOB */
   glob?: string;
+  /** Glob to EXCLUDE (e.g. "old_project/**") — floated NOT GLOB, opposite of `glob`. */
+  excludeGlob?: string;
   /** Component base-path prefixes (OR logic) — each entry is a basePath like "src/rust/daemon" */
   componentBasePaths?: string[];
   /** Keyset pagination cursor: return rows with relative_path > cursor */
@@ -166,12 +168,43 @@ const FILE_TYPE_EXTENSIONS: Record<string, string[]> = {
   ],
 };
 
+/**
+ * Append a floated `NOT GLOB` exclusion for `excludeGlob` on `column`, mirroring
+ * the include-glob float below: it drops the pattern at the repo root AND at any
+ * nested depth (negation of `(GLOB ? OR GLOB * /?)`). SQLite GLOB has no `**` —
+ * collapse it to `*`, which already crosses `/`.
+ */
+function pushExcludeGlobClause(
+  conditions: string[],
+  params: (string | number)[],
+  column: string,
+  excludeGlob: string
+): void {
+  const collapsed = excludeGlob.replace(/\*\*/g, '*');
+  if (collapsed.startsWith('*') || collapsed.startsWith('/')) {
+    conditions.push(`${column} NOT GLOB ?`);
+    params.push(collapsed);
+  } else {
+    conditions.push(`(${column} NOT GLOB ? AND ${column} NOT GLOB ?)`);
+    params.push(collapsed, `*/${collapsed}`);
+  }
+}
+
 /** Build WHERE conditions and params from filter options. */
 function buildFilterClause(options: Omit<ListTrackedFilesOptions, 'limit'>): FilterClause {
   const conditions: string[] = ['watch_folder_id = ?'];
   const params: (string | number)[] = [options.watchFolderId];
-  const { path, fileType, language, extension, branch, glob, componentBasePaths, afterPath } =
-    options;
+  const {
+    path,
+    fileType,
+    language,
+    extension,
+    branch,
+    glob,
+    excludeGlob,
+    componentBasePaths,
+    afterPath,
+  } = options;
   const fallbackBranch =
     options.fallbackBranch && options.fallbackBranch !== branch
       ? options.fallbackBranch
@@ -239,6 +272,9 @@ function buildFilterClause(options: Omit<ListTrackedFilesOptions, 'limit'>): Fil
       conditions.push('(relative_path GLOB ? OR relative_path GLOB ?)');
       params.push(collapsed, `*/${collapsed}`);
     }
+  }
+  if (excludeGlob) {
+    pushExcludeGlobClause(conditions, params, 'relative_path', excludeGlob);
   }
   if (componentBasePaths && componentBasePaths.length > 0) {
     // Build OR clause: each base path matches exact or prefix (with /)
@@ -532,6 +568,9 @@ function buildSearchMetadataFilterClause(
   if (options.glob) {
     conditions.push('m.relative_path GLOB ?');
     params.push(options.glob.replace(/\*\*/g, '*'));
+  }
+  if (options.excludeGlob) {
+    pushExcludeGlobClause(conditions, params, 'm.relative_path', options.excludeGlob);
   }
   if (options.componentBasePaths && options.componentBasePaths.length > 0) {
     const clauses = options.componentBasePaths.map(

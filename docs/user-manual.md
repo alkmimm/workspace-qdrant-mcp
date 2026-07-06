@@ -273,6 +273,7 @@ When using workspace-qdrant through an AI assistant (Claude Desktop, Claude Code
 search(query="authentication", scope="project")
 search(query="JWT implementation", collection="libraries")
 search(query="error handling", tags=["security"])
+search(query="invoice total", pathExclude="old_project/**")  # drop a legacy tree
 ```
 
 **grep** — exact substring or regex search (faster for known strings):
@@ -280,6 +281,7 @@ search(query="error handling", tags=["security"])
 grep(pattern="handleRequest")
 grep(pattern="fn process_.*event", regex=true)
 grep(pattern="TODO", pathGlob="**/*.rs")
+grep(pattern="TODO", pathExclude="vendor/**")   # exclude a path (opposite of pathGlob)
 ```
 
 **list** — browse project file structure:
@@ -287,7 +289,20 @@ grep(pattern="TODO", pathGlob="**/*.rs")
 list(format="summary")              # Overview of project layout
 list(path="src/", format="tree")    # Tree view of src/ directory
 list(extension="rs", depth=5)       # All Rust files
+list(pathExclude="old_project/**")  # hide a legacy tree from the listing
 ```
+
+**graph** — navigate the code-relationship graph (callers, change-impact, hotspots):
+```
+graph(action="impact", symbol="process_queue_item")   # what breaks if I change it
+graph(action="usages", symbol="validate_token")       # direct references
+graph(action="hotspots")                               # most central symbols
+```
+
+> `pathExclude` (a glob, the opposite of `pathGlob`/`pattern`) hard-drops matching
+> paths and floats at any depth. To demote a legacy path across ALL semantic
+> searches without passing it each call, set `WQM_SEARCH_DERANK` in `docker/.env`
+> (see `docker/.env.example`) — a soft ranking penalty, so it sinks but stays findable.
 
 ### When to use which tool
 
@@ -297,6 +312,7 @@ list(extension="rs", depth=5)       # All Rust files
 | Find exact string | `grep` | "handleRequest" |
 | Find by regex pattern | `grep` | "fn.*Error" |
 | Browse file structure | `list` | See what files exist |
+| Callers / change-impact of a symbol | `graph` | "what breaks if I change X" |
 | Get specific document | `retrieve` | Known document ID |
 | Find library docs | `search` with `collection="libraries"` | "React hooks" |
 

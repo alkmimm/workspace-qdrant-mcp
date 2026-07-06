@@ -380,6 +380,14 @@ services:
       # order; empty = code default (0.05, the balanced BGE-M3 optimum after implementation-intent tuning;
       # e5-large deployments can override to 0.25). Per-call rerankWeight wins.
       WQM_SEARCH_RERANK_WEIGHT: ${WQM_SEARCH_RERANK_WEIGHT:-}
+      # Soft de-rank of legacy paths in SEMANTIC/HYBRID search ranking. Comma-
+      # separated path SUBSTRINGS (same format as WQM_GRAPH_CENTRALITY_EXCLUDE, so
+      # one value can feed both); a hit whose path contains any is multiplied by
+      # WQM_SEARCH_DERANK_PENALTY (0–1, default 0.2) so it sinks below live code
+      # but stays findable. Empty = off. Unlike a per-call `pathExclude` (hard
+      # drop), this only reorders. Read per-call; change ⇒ --force-recreate mcp.
+      WQM_SEARCH_DERANK: ${WQM_SEARCH_DERANK:-}
+      WQM_SEARCH_DERANK_PENALTY: ${WQM_SEARCH_DERANK_PENALTY:-}
       # Trust the bind-mounted repo: git's "dubious ownership" check
       # otherwise rejects every command because the bind mount preserves
       # host uids that don't match the container's `node` user.

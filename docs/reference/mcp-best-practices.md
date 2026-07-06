@@ -104,6 +104,18 @@ claude mcp list
 | `WQM_DATABASE_PATH` | No | `~/.local/share/workspace-qdrant/state.db` | Override SQLite state path |
 | `WQM_LOG_LEVEL` | No | `INFO` | Log level: DEBUG, INFO, WARN, ERROR |
 
+**Search-quality tuning** (set in `docker/.env` for the container deployment; read by the MCP server, so a change needs `docker compose up -d --force-recreate mcp`, not a reembed):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WQM_SEARCH_RERANK` | `1` (on) | Cross-encoder rerank default; `0` disables it deployment-wide |
+| `WQM_SEARCH_RERANK_WEIGHT` | `0.10` | Blend weight 0–1 for the rerank score (1 = pure cross-encoder order) |
+| `WQM_SEARCH_DERANK` | (none) | Comma-separated path SUBSTRINGS to DEMOTE in semantic ranking (same format as `WQM_GRAPH_CENTRALITY_EXCLUDE`), e.g. `old_project/,/generated/`. Sinks matches without hiding them |
+| `WQM_SEARCH_DERANK_PENALTY` | `0.2` | Ranking-score multiplier (0–1) applied to a de-ranked path |
+| `WQM_GRAPH_CENTRALITY_EXCLUDE` | (none) | Path substrings excluded from graph centrality (PageRank/betweenness/community) only — does not affect `search`/`grep` |
+
+> The full set of daemon/search knobs (embedding provider, RRF weights, path boost, rerank backend URL) is documented in `docker/.env.example`.
+
 > **Reference deployment (this fork).** The recommended setup is **container-first
 > over HTTP** (`make redeploy` / `docker compose`), with the daemon using the
 > code-specialized **CodeRankEmbed** (768-dim) via an OpenAI-compatible backend —
@@ -142,6 +154,10 @@ At the start of every session:
   function names, import paths, specific constants, error messages
 - `list` — browse project structure. Use to orient yourself before diving in,
   or to find files by type/language
+- `graph` — navigate the code-relationship graph (callers/callees, change-impact,
+  importance ranking, module clusters). Use for structural questions —
+  "what calls X", "what breaks if I change Y" — and BEFORE refactoring or renaming
+  a widely-used symbol, instead of guessing from `search`/`grep`
 - `retrieve` — direct access to a known Qdrant point id or metadata filter.
   Use the `id` field from `search`/`list` results; if you only have
   `metadata.document_id`, use `filter: { document_id: "..." }`. If the hit
@@ -273,6 +289,23 @@ search({
 })
 ```
 
+**Use `pathExclude` to silence a noisy tree.** The hard opposite of `pathGlob`: it
+drops any hit whose path matches, in `search`, `grep`, and `list`. It floats, so
+`"old_project/**"` removes that directory at the repo root AND any nested depth.
+Reach for it when a legacy, vendored, or generated tree keeps polluting results.
+
+```typescript
+search({
+  query: "invoice total calculation",
+  pathExclude: "old_project/**"
+})
+```
+
+To DEMOTE such a path everywhere without passing it on each call, the deployment
+sets `WQM_SEARCH_DERANK` (see the environment table above) — a soft ranking
+penalty rather than a hard drop, so the path sinks below live code but stays
+findable. `pathExclude` removes; `WQM_SEARCH_DERANK` demotes.
+
 ### Filter Reference
 
 #### `scope` parameter
@@ -327,6 +360,40 @@ The default limit is 10 results. Adjust based on task:
 - **Exhaustive review** (audit, refactoring): `limit=20` to `limit=50`
 
 Higher limits increase latency. Prefer filtering (scope, fileType, component) over high limits to keep results focused.
+
+### Advanced search controls
+
+Beyond scope/filters/limit, `search` exposes a few controls worth knowing:
+
+**Reranking (`rerank`, `rerankWeight`).** A cross-encoder can re-order the top
+candidates. It is ON by a soft default (a weak `WQM_SEARCH_RERANK_WEIGHT=0.10`
+blend that lifts top-1/MRR without hurting recall); pass `rerank: false` on a call
+to skip it (lower latency) or `rerankWeight` to tune the blend (0 = off, 1 = pure
+cross-encoder order — measured to HURT code search, use only for experiments). The
+deployment default comes from `WQM_SEARCH_RERANK` / `WQM_SEARCH_RERANK_WEIGHT`.
+
+**Pagination (`offset` → `next_offset`).** `search` returns a page `[offset,
+offset+limit)`; when more ranked results remain it sets `next_offset` — pass it
+back as `offset` for the next page (pages never overlap). `list` paginates with an
+opaque `cursor` (echo the response's `next_token`); exact `grep`/`search` honor
+`offset` the same way. Prefer a second page over a huge `limit`.
+
+**Payload / token budget (`summary`, `responseFormat`, `maxBytesPerHit`,
+`maxResponseBytes`).** For pure discovery, `summary: true` drops chunk bodies and
+returns only metadata (id, score, path/symbol) — cheapest; follow up with
+`retrieve` for the bodies you actually want. Otherwise each hit body is capped at
+`maxBytesPerHit` (default 1500 chars, truncation points at `retrieve`), and the
+whole response at `maxResponseBytes` (~24k chars); trailing hits beyond the budget
+are dropped and reported in `budget_truncated`. `responseFormat: "detailed"`
+returns full bodies (disables the per-hit cap) — use it sparingly.
+
+**Empty results auto-widen (branch), never cross-tenant.** A project + branch
+scoped `search`/`grep`/exact that finds nothing is re-run across ALL branches
+automatically (a file unchanged on your branch stays indexed under the branch it
+was last modified on) — the response `message`/`hint` says when this happened; pass
+`branch: "*"` to make it explicit. A project-scoped miss does **not** silently
+search other repositories — crossing the tenant boundary is opt-in via
+`scope: "all"` (the tool returns a hint offering it). Do not widen silently.
 
 ---
 

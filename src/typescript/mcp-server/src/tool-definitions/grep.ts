@@ -30,6 +30,11 @@ export const grepToolDefinition = {
         type: 'string',
         description: 'File path glob filter (e.g., "**/*.rs", "src/**/*.ts")',
       },
+      pathExclude: {
+        type: 'string',
+        description:
+          'File path glob to EXCLUDE from matches (hard filter, opposite of pathGlob). Floats: "old_project/**" drops that directory at the repo root AND at any nested depth. Use it to silence matches from a legacy/vendored tree.',
+      },
       scope: {
         type: 'string',
         enum: ['project', 'all'],

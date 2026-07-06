@@ -79,6 +79,9 @@ function extractFilterOptions(
   const pathGlob = args?.['pathGlob'] as string | undefined;
   if (pathGlob) options.pathGlob = pathGlob;
 
+  const pathExclude = args?.['pathExclude'] as string | undefined;
+  if (pathExclude) options.pathExclude = pathExclude;
+
   const component = args?.['component'] as string | undefined;
   if (component) options.component = component;
 }

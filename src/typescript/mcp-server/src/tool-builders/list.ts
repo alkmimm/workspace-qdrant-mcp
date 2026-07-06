@@ -31,6 +31,9 @@ export function buildListOptions(args: Record<string, unknown> | undefined): Lis
   const pattern = args?.['pattern'] as string | undefined;
   if (pattern) options.pattern = pattern;
 
+  const pathExclude = args?.['pathExclude'] as string | undefined;
+  if (pathExclude) options.pathExclude = pathExclude;
+
   const includeTests = args?.['includeTests'] as boolean | undefined;
   if (includeTests !== undefined) options.includeTests = includeTests;
 

@@ -338,6 +338,7 @@ export class ListFilesTool {
     if (options.extension) baseOpts.extension = options.extension;
     if (options.includeTests !== undefined) baseOpts.includeTests = options.includeTests;
     if (options.pattern) baseOpts.glob = options.pattern;
+    if (options.pathExclude) baseOpts.excludeGlob = options.pathExclude;
     const branch = concreteBranchFilter(options.branch);
     if (branch) baseOpts.branch = branch;
     if (branch && options.fallbackBranch) baseOpts.fallbackBranch = options.fallbackBranch;

@@ -7,6 +7,7 @@ export type GrepOptions = {
   regex?: boolean;
   caseSensitive?: boolean;
   pathGlob?: string;
+  pathExclude?: string;
   scope?: 'project' | 'all';
   contextLines?: number;
   maxResults?: number;
@@ -31,6 +32,9 @@ export function buildGrepOptions(args: Record<string, unknown> | undefined): Gre
 
   const pathGlob = args?.['pathGlob'] as string | undefined;
   if (pathGlob) options.pathGlob = pathGlob;
+
+  const pathExclude = args?.['pathExclude'] as string | undefined;
+  if (pathExclude) options.pathExclude = pathExclude;
 
   const scope = args?.['scope'] as string | undefined;
   if (scope === 'project' || scope === 'all') options.scope = scope;

@@ -232,12 +232,14 @@ Workflow `agent()`), prepend this preamble to its prompt verbatim:
 
 > This project's codebase is indexed and exposed via the `workspace-qdrant` MCP.
 > Before any codebase discovery, load the tools: `ToolSearch` with query
-> `select:mcp__workspace-qdrant__search,mcp__workspace-qdrant__grep,mcp__workspace-qdrant__list,mcp__workspace-qdrant__retrieve`.
+> `select:mcp__workspace-qdrant__search,mcp__workspace-qdrant__grep,mcp__workspace-qdrant__list,mcp__workspace-qdrant__retrieve,mcp__workspace-qdrant__graph`.
 > Then prefer `search` (semantic/concept queries — write them in ENGLISH; add
-> `fileType:"code"` or a `pathGlob` to bias toward implementation), `grep`
-> (exact/regex substring), and `list` (layout, start `format:"summary"`) over native
-> Grep/Glob for discovery. Use native Read only to pull exact bytes once the MCP
-> located the file.
+> `fileType:"code"` or a `pathGlob` to bias toward implementation, or `pathExclude`
+> like `"old_project/**"` to drop a noisy legacy/vendored tree), `grep`
+> (exact/regex substring; also takes `pathExclude`), and `list` (layout, start
+> `format:"summary"`) over native Grep/Glob for discovery. For structural questions
+> ("what calls X", change-impact before a refactor) use the `graph` tool instead of
+> guessing. Use native Read only to pull exact bytes once the MCP located the file.
 
 ## Critical Development Rules
 

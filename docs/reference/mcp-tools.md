@@ -12,6 +12,7 @@ The workspace-qdrant MCP server exposes eight tools to AI assistants. All tools 
 | [`store`](#store) | Store content, register projects, save notes |
 | [`grep`](#grep) | Exact substring or regex search using FTS5 |
 | [`list`](#list) | List project files and folder structure |
+| [`graph`](#graph) | Navigate the code-relationship graph (callers, impact, hotspots) |
 | [`embedding`](#embedding) | Generate vector embeddings for text |
 | [`workspace_index`](#workspace_index) | Manage indexed-project registry + branch sync (host hooks) |
 
@@ -38,6 +39,7 @@ Search for documents using hybrid semantic and keyword search. Use this tool fir
 | `tag` | string | No | — | Filter results by concept tag (exact match) |
 | `tags` | string[] | No | — | Filter results by multiple concept tags (OR logic) |
 | `pathGlob` | string | No | — | File path glob filter, e.g. `"**/*.rs"` or `"src/**/*.ts"` |
+| `pathExclude` | string | No | — | File path glob to EXCLUDE (hard filter, opposite of `pathGlob`). Floats: `"old_project/**"` drops that dir at the repo root and any nested depth. Use it to silence a legacy/vendored tree. See also `WQM_SEARCH_DERANK` below to demote paths globally without passing it each call. |
 | `component` | string | No | — | Filter by project component, e.g. `"daemon"` or `"daemon.core"`. Supports prefix matching. |
 | `exact` | boolean | No | `false` | Use exact substring search instead of semantic search |
 | `contextLines` | number | No | `0` | Lines of context to include before/after matches when `exact` is `true` |
@@ -74,6 +76,25 @@ Search only Rust files using a path glob:
   "limit": 15
 }
 ```
+
+Silence a legacy tree that pollutes the ranking (hard exclude):
+
+```json
+{
+  "query": "invoice total calculation",
+  "scope": "project",
+  "pathExclude": "old_project/**"
+}
+```
+
+> **De-rank vs exclude.** `pathExclude` removes matching hits outright, per call.
+> To *demote* a path everywhere WITHOUT passing it each call, the deployment sets
+> `WQM_SEARCH_DERANK` (comma-separated path substrings — same format as
+> `WQM_GRAPH_CENTRALITY_EXCLUDE`, so one value feeds both). A matched hit's ranking
+> score is multiplied by `WQM_SEARCH_DERANK_PENALTY` (0–1, default `0.2`) so it sinks
+> below live code but stays findable. Semantic/hybrid `search` only — `grep` and
+> exact search are literal, not ranked. Read per-call; change ⇒ recreate the mcp
+> container (`docker compose up -d --force-recreate mcp`), no reembed.
 
 Search library documentation for a specific concept:
 
@@ -389,6 +410,7 @@ Search code with exact substring or regex pattern matching. Uses an FTS5 trigram
 | `regex` | boolean | No | `false` | Treat `pattern` as a regular expression |
 | `caseSensitive` | boolean | No | `true` | Case-sensitive matching |
 | `pathGlob` | string | No | — | File path glob filter, e.g. `"**/*.rs"` or `"src/**/*.ts"` |
+| `pathExclude` | string | No | — | File path glob to EXCLUDE from matches (hard filter, opposite of `pathGlob`). Floats: `"old_project/**"` drops that dir at the repo root and any nested depth. |
 | `scope` | string | No | `project` | Search scope: `project` (current project) or `all` (all projects) |
 | `contextLines` | number | No | `0` | Lines of context to include before and after each match |
 | `maxResults` | number | No | `1000` | Maximum number of results to return |
@@ -465,6 +487,7 @@ List project files and folder structure. Only shows indexed files; gitignored pa
 | `language` | string | No | — | Filter by programming language, e.g. `"rust"` or `"typescript"` |
 | `extension` | string | No | — | Filter by file extension, e.g. `"rs"` or `"ts"` |
 | `pattern` | string | No | — | Glob pattern applied to relative paths, e.g. `"**/*.test.ts"` |
+| `pathExclude` | string | No | — | Glob to EXCLUDE from the listing (hard filter, opposite of `pattern`). Floats: `"old_project/**"` hides that dir at the repo root and any nested depth. |
 | `includeTests` | boolean | No | `true` | Include test files in results |
 | `limit` | number | No | `200` | Maximum number of entries returned (maximum: `500`) |
 | `projectId` | string | No | current project | Specific project ID |
@@ -533,6 +556,65 @@ List only configuration files:
 - `tree` format: returns a formatted directory tree string.
 - `summary` format: returns counts of files per directory and language breakdown.
 - `flat` format: returns an array of relative file path strings.
+
+---
+
+## graph
+
+Navigate the **code-relationship graph** the daemon builds from symbol relations (calls, contains, uses-type, imports, inheritance) extracted during indexing. Use it for structural questions that `search`/`grep` can only guess at — "what calls this?", "what breaks if I change X?", "what are the most central functions?" — especially **before** refactoring or renaming a widely-used symbol.
+
+### Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `action` | string | Yes | `stats` | One of `stats`, `relations`, `impact`, `usages`, `hotspots`, `bridges`, `modules` (see below) |
+| `symbol` | string | For `impact`/`relations` | — | Symbol name |
+| `filePath` | string | For `relations` | — | Relative path of the symbol's definition (optional narrowing for `impact`) |
+| `symbolType` | string | No | `function` | Symbol kind for `relations` node lookup (`function`, `async_function`, `method`, `struct`, `class`, `enum`, `interface`, `trait`, `type_alias`, `constant`, `module`, `macro`, `impl`). Falls back to name resolution if it doesn't match. |
+| `maxHops` | number | No | `1` | Traversal depth for `relations` (1–5) |
+| `topK` | number | No | `20` / `50` | Max results (top symbols for hotspots/bridges/modules = 20; max nodes for impact/usages/relations = 50; `0` = all, true total still reported) |
+| `minConfidence` | number | No | — | For `relations`/`impact`/`usages`: drop nodes whose best-path `confidence` is below this (0–1). Use ~`0.5` to suppress ambiguous same-name (homonym) fan-out. |
+| `minSize` | number | No | `2` | Minimum community size for `modules` |
+| `memberLimit` | number | No | `10` | Members listed per community for `modules` (`0` = all; each community reports its true `member_count`) |
+| `maxSamples` | number | No | — | For `bridges`: sample N source nodes for betweenness on large graphs (`0`/omit = exact) |
+| `edgeTypes` | string[] | No | — | Filter by edge type, e.g. `["CALLS","IMPORTS","CONTAINS","USES_TYPE","EXTENDS","IMPLEMENTS"]` |
+| `projectId` / `cwd` | string | No | — | Project scoping — same semantics as `search`/`grep`/`list` |
+
+### Actions
+
+| Action | Returns |
+|--------|---------|
+| `stats` | Node/edge counts (project-wide) |
+| `relations` | A symbol's dependencies (calls/uses-type/imports/inheritance). Excludes `CONTAINS` membership by default — pass `edgeTypes:["CONTAINS"]` to list a class's members instead of its dependencies |
+| `impact` | Transitive change blast-radius: direct + indirect dependents |
+| `usages` | DIRECT references only (1-hop "find references") |
+| `hotspots` | Most central symbols (PageRank) |
+| `bridges` | Bottleneck symbols on many shortest paths (betweenness) |
+| `modules` | Code clusters (community detection) |
+
+> **Confidence.** Each `relations`/`impact`/`usages` node carries a best-path `confidence`: ~`1.0` precise, `0.7` a tenant-unique name, ~`1/N` (e.g. `0.17`) an ambiguous same-name fan-out. Pass `minConfidence` to filter homonym noise at the daemon (before `topK` and the reported total).
+
+### Examples
+
+Change blast-radius before editing a function:
+
+```json
+{ "action": "impact", "symbol": "process_queue_item" }
+```
+
+A symbol's direct dependencies (precise view, homonyms suppressed):
+
+```json
+{ "action": "relations", "symbol": "SearchService", "filePath": "src/typescript/mcp-server/src/tools/search.ts", "symbolType": "class", "minConfidence": 0.5 }
+```
+
+Project-wide importance ranking:
+
+```json
+{ "action": "hotspots", "topK": 20 }
+```
+
+> **`graph` vs `search(includeGraphContext:true)`.** The `graph` tool is the dedicated, richer entry point (impact/hotspots/bridges/modules). `includeGraphContext` on `search` is a lightweight 1-hop callers/callees annotation on semantic hits — handy inline, but for blast-radius or centrality use `graph`.
 
 ---
 
