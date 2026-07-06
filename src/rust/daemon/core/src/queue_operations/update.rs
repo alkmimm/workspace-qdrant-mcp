@@ -218,12 +218,26 @@ impl QueueManager {
                 let is_file = item_type.as_deref() == Some("file");
                 let is_delete = op.as_deref() == Some("delete");
 
-                // F-036: remove the tracked_files row once a Delete op completes.
-                // The handler has already cleaned up Qdrant/FTS/graph state; keep
-                // the row any longer would cause the next reconciliation pass to
-                // re-enqueue another Delete for the same file.
+                // F-036: remove the tracked_files row once a Delete op completes,
+                // so the next reconciliation pass does not re-enqueue another Delete.
+                //
+                // #224 orphan guard: do this ONLY when the file is genuinely gone
+                // from disk. If it is still present, the Delete was a stale/phantom
+                // no-op that the handler deliberately PRESERVED ("Skipping stale
+                // delete for existing file on disk" and the #181 branch-prune
+                // preserve-guard) WITHOUT touching Qdrant/FTS. Removing its tracking
+                // row here would strand those search-store entries — exactly how the
+                // tracked_files-vs-Qdrant/FTS drift (present-but-untracked files)
+                // arose. When the file really is gone the handler already removed
+                // its branch tag, so this stays a correct belt-and-suspenders.
                 if is_file && is_delete {
-                    if let Err(e) = self.remove_tracked_file_row(rel_path, tid, coll).await {
+                    if self.delete_target_on_disk(rel_path, tid, coll).await {
+                        debug!(
+                            "F-036: preserving tracked_files row for {} — file still on \
+                             disk (Delete was a no-op the handler preserved)",
+                            rel_path
+                        );
+                    } else if let Err(e) = self.remove_tracked_file_row(rel_path, tid, coll).await {
                         warn!(
                             "Failed to remove tracked_files row after Delete {} completed: {}",
                             queue_id, e
@@ -290,6 +304,42 @@ impl QueueManager {
             );
         }
         Ok(())
+    }
+
+    /// Best-effort: is the working-tree file for `relative_file_path` still on
+    /// disk? Resolves the owning watch-folder root (scoped by tenant + collection
+    /// via the tracked row) and stats `<root>/<relative_path>`.
+    ///
+    /// Used by the F-036 orphan guard (#224): a Delete op that "completes" for a
+    /// file still on disk was a stale/phantom no-op the handler PRESERVED, so its
+    /// tracking row must NOT be removed. Returns `false` when the root can't be
+    /// resolved (row already gone / real delete) so F-036 falls back to removal.
+    async fn delete_target_on_disk(
+        &self,
+        relative_file_path: &str,
+        tenant_id: &str,
+        collection: &str,
+    ) -> bool {
+        let root: Option<String> = sqlx::query_scalar(
+            "SELECT wf.path \
+             FROM watch_folders wf \
+             JOIN tracked_files tf ON tf.watch_folder_id = wf.watch_id \
+             WHERE tf.relative_path = ?1 \
+               AND wf.tenant_id = ?2 \
+               AND wf.collection = ?3 \
+             LIMIT 1",
+        )
+        .bind(relative_file_path)
+        .bind(tenant_id)
+        .bind(collection)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        match root {
+            Some(root) => std::path::Path::new(&root).join(relative_file_path).exists(),
+            None => false,
+        }
     }
 
     /// Clear `needs_reconcile` on the `tracked_files` row whose relative path
