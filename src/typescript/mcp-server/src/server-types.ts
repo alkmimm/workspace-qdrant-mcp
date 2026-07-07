@@ -3,7 +3,7 @@
  */
 
 import type { ServerConfig } from './types/index.js';
-import { BUILD_NUMBER } from './build-info.js';
+import { BUILD_NUMBER, BUILD_SHA } from './build-info.js';
 import mcpPublicConfig from './constants/mcp-public-config.json' with { type: 'json' };
 
 // Session heartbeat interval (milliseconds). Kept well below the daemon's
@@ -15,9 +15,14 @@ import mcpPublicConfig from './constants/mcp-public-config.json' with { type: 'j
 // start_session_monitor in the daemon).
 export const HEARTBEAT_INTERVAL_MS = 30 * 1000;
 
-// Server name and version for MCP protocol
+// Server name and version for MCP protocol. Includes the short commit SHA when
+// known (build-arg/git) so a running server reports which build it is; falls
+// back to just the legacy build number when the SHA is unavailable ('unknown').
 export const SERVER_NAME = 'workspace-qdrant-mcp';
-export const SERVER_VERSION = `0.1.0-beta1 (${BUILD_NUMBER})`;
+export const SERVER_VERSION =
+  BUILD_SHA && BUILD_SHA !== 'unknown'
+    ? `0.1.0-beta1 (${BUILD_NUMBER} ${BUILD_SHA})`
+    : `0.1.0-beta1 (${BUILD_NUMBER})`;
 
 export interface SessionState {
   sessionId: string;

@@ -67,10 +67,15 @@ done
 
 if [[ -n "$MARKER" ]]; then
   echo ""
-  echo "=== 3. deployed memexd binary contains: '$MARKER' ==="
-  # Hardcode /tmp (NOT $TMPDIR, which a login profile may point at a 9p/Windows
-  # mount where the copied binary is unreadable) and a fixed pre-removed path
-  # (NOT mktemp — `docker cp` onto an existing file does not reliably overwrite).
+  echo "=== 3. deployed artifacts contain: '$MARKER' (memexd binary + mcp bundle) ==="
+  # A fix can land in EITHER product: a Rust fix in the memexd binary, or a
+  # TypeScript fix in the mcp `dist` bundle. Check both, pass if the marker is in
+  # either, and report where — so `MARKER=` verifies a TS fix (e.g. a new message
+  # string / function name) just as robustly as a Rust one. Use `docker cp` (not
+  # `docker exec`, which a deny rule may block) into a fixed pre-removed /tmp path.
+  found_in=""
+
+  # ── memexd binary ──
   bin="/tmp/wqm-memexd-verify.bin"
   rm -f "$bin"
   if docker cp wqm-memexd:/usr/local/bin/memexd "$bin" 2>/dev/null; then
@@ -78,15 +83,31 @@ if [[ -n "$MARKER" ]]; then
     # match and SIGPIPEs `strings` (exit 141), which pipefail then reports as a
     # pipeline failure — a false [MISS] even when the marker is present.
     hits=$(strings -n 6 "$bin" | grep -cF "$MARKER" || true)
-    if [[ "${hits:-0}" -gt 0 ]]; then
-      say "[OK]" "marker present in the running binary"
-    else
-      say "[MISS]" "marker ABSENT — the running binary predates this change"; warn=$((warn + 1))
-    fi
+    [[ "${hits:-0}" -gt 0 ]] && found_in="memexd binary"
   else
-    say "[?]" "docker cp failed — cannot inspect the binary"
+    say "[?]" "docker cp of memexd failed — cannot inspect the binary"
   fi
   rm -f "$bin"
+
+  # ── mcp dist bundle (compiled TypeScript) ──
+  dist="/tmp/wqm-mcp-verify-dist"
+  rm -rf "$dist"
+  if docker cp wqm-mcp:/app/src/typescript/mcp-server/dist "$dist" 2>/dev/null; then
+    # -l stops at the first matching FILE (not line), so no SIGPIPE-into-strings
+    # concern here; restrict to .js so source maps / .d.ts don't give false hits.
+    if grep -rlF --include='*.js' "$MARKER" "$dist" >/dev/null 2>&1; then
+      found_in="${found_in:+$found_in + }mcp bundle"
+    fi
+  else
+    say "[?]" "docker cp of mcp dist failed — cannot inspect the bundle"
+  fi
+  rm -rf "$dist"
+
+  if [[ -n "$found_in" ]]; then
+    say "[OK]" "marker present in: $found_in"
+  else
+    say "[MISS]" "marker ABSENT from both memexd binary and mcp bundle — the running artifacts predate this change"; warn=$((warn + 1))
+  fi
 fi
 
 echo ""

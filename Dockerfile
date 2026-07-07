@@ -56,6 +56,15 @@ COPY --from=addon-builder /out/src/rust/common-node/wqm-common-node.linux-x64-gn
 COPY src/typescript/mcp-server/package*.json src/typescript/mcp-server/
 RUN cd src/typescript/mcp-server && npm ci
 
+# Build provenance passed from the host (Makefile / compose). The build context
+# omits .git, so generate-build-info.ts cannot call `git` here — without these
+# the compiled build-info is a meaningless constant. Falls back to git/now when
+# unset (e.g. a bare `docker build`). See scripts/generate-build-info.ts.
+ARG WQM_BUILD_SHA=unknown
+ARG WQM_BUILD_TIME=
+ENV WQM_BUILD_SHA=$WQM_BUILD_SHA
+ENV WQM_BUILD_TIME=$WQM_BUILD_TIME
+
 # Copy source and build TypeScript.
 COPY src/typescript/mcp-server/ src/typescript/mcp-server/
 RUN cd src/typescript/mcp-server && npm run build

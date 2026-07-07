@@ -279,6 +279,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Build provenance for build-info (the context has no .git). The Makefile
+      # exports these; a bare `docker compose build` falls back to unknown/now.
+      args:
+        WQM_BUILD_SHA: "${WQM_BUILD_SHA:-unknown}"
+        WQM_BUILD_TIME: "${WQM_BUILD_TIME:-}"
     container_name: wqm-mcp
     <<: *restart
     logging: *default-logging

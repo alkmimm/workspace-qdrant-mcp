@@ -40,6 +40,15 @@ MARKER ?=
 COMPOSE := docker compose --env-file "$(COMPOSE_ENV_FILE)" -f "$(COMPOSE_FILE)"
 COMPOSE_BUILDER ?= default
 
+# Build provenance for the mcp image build-info (the Docker context omits .git,
+# so `git` cannot run inside the image). Exported so every `$(COMPOSE) build`
+# recipe passes them through docker-compose.yml's `build.args`. Best-effort SHA;
+# build time is always set.
+WQM_BUILD_SHA ?= $(shell git -C "$(REPO)" rev-parse --short HEAD 2>/dev/null || echo unknown)
+WQM_BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+export WQM_BUILD_SHA
+export WQM_BUILD_TIME
+
 MCP_HEALTH_URL ?= http://localhost:$(MCP_HTTP_PORT)/admin/api/health
 MCP_INIT_URL ?= http://localhost:$(MCP_HTTP_PORT)/admin/init
 MEMEXD_DB_VOLUME ?= workspace-qdrant-mcp_memexd_db
