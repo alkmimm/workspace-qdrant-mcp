@@ -48,3 +48,17 @@ export function matchesGlob(value: string, glob: string): boolean {
 export function matchesPathExclude(value: string, glob: string): boolean {
   return matchesGlob(value, glob) || matchesGlob(value, `**/${glob}`);
 }
+
+/**
+ * Match a path against an INCLUDE glob (`pathGlob`), floating exactly like
+ * {@link matchesPathExclude} so a relative pattern like `management/test/**`
+ * matches at the repo root AND at any nested depth. This gives the semantic
+ * search's `pathGlob` post-filter the SAME floating semantics as `pathExclude`
+ * and as the daemon-side FTS glob used by grep / exact search (which anchors
+ * relative patterns with a `**\/` prefix) — instead of the previous both-ends
+ * anchored `matchesGlob`, under which `management/test/**` only matched when the
+ * path STARTED with `management/test/`.
+ */
+export function matchesPathInclude(value: string, glob: string): boolean {
+  return matchesGlob(value, glob) || matchesGlob(value, `**/${glob}`);
+}
