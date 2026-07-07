@@ -92,6 +92,13 @@ pub(crate) fn compile_glob_matcher(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| SearchDbError::InvalidPattern(format!("Invalid glob pattern: {}", e)))?;
 
+    // `require_literal_separator: false` is deliberate and load-bearing: it lets a
+    // leading `**/` (added by `normalize_path_glob`) absorb the absolute-path
+    // prefix (`/home/u/repo/...`) so a project-relative glob still matches the
+    // absolute `file_path` stored in the index. A side effect is that a lone `*`
+    // also crosses `/` — so `src/*.rs` matches `src/deep/nested/x.rs`, not just
+    // `src/x.rs`. This is intentionally lenient (over-match, never under-match);
+    // callers that need a single directory level should use an explicit path.
     let opts = glob::MatchOptions {
         case_sensitive: true,
         require_literal_separator: false,
@@ -315,6 +322,22 @@ mod tests {
         assert!(matcher("src/main.rs"));
         assert!(matcher("Cargo.toml"));
         assert!(!matcher("src/main.ts"));
+    }
+
+    #[test]
+    fn test_compile_glob_matcher_single_star_crosses_separators() {
+        // Documented lenient behavior: with require_literal_separator=false a lone
+        // `*` also crosses `/`, so `src/*.rs` matches deeply nested paths too. This
+        // pins the over-match so it isn't silently changed (it is load-bearing for
+        // the `**/`-anchored absolute-path matching in normalize_path_glob).
+        let matcher = compile_glob_matcher("src/*.rs").unwrap();
+        assert!(matcher("src/main.rs"), "direct child matches");
+        assert!(
+            matcher("src/deep/nested/x.rs"),
+            "single `*` crosses `/` (intentional over-match)"
+        );
+        assert!(!matcher("tests/x.rs"), "different top-level dir does not match");
+        assert!(!matcher("src/main.ts"), "extension still constrains");
     }
 
     #[test]
