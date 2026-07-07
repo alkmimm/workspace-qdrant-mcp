@@ -47,9 +47,16 @@ function createTools(
   daemonClient: DaemonClient,
   stateManager: SqliteStateManager,
   projectDetector: ProjectDetector,
-  config: ServerConfig
+  config: ServerConfig,
+  searchDbReader: SearchDbReader
 ) {
-  const searchTool = new SearchTool(qdrantConfig, daemonClient, stateManager, projectDetector);
+  const searchTool = new SearchTool(
+    qdrantConfig,
+    daemonClient,
+    stateManager,
+    projectDetector,
+    searchDbReader
+  );
   const retrieveTool = new RetrieveTool(qdrantConfig, projectDetector, daemonClient);
   const rulesConfig: { qdrantUrl: string; qdrantApiKey?: string; duplicationThreshold?: number } = {
     ...qdrantConfig,
@@ -58,7 +65,7 @@ function createTools(
     rulesConfig.duplicationThreshold = config.rules.duplicationThreshold;
   }
   const rulesTool = new RulesTool(rulesConfig, daemonClient, stateManager, projectDetector);
-  const grepTool = new GrepTool(daemonClient, projectDetector, stateManager);
+  const grepTool = new GrepTool(daemonClient, projectDetector, stateManager, searchDbReader);
   const storeTool = new StoreTool({}, stateManager);
   const scratchpadTool = new ScratchpadTool(qdrantConfig, stateManager, projectDetector);
   const listTool = new ListFilesTool(stateManager, projectDetector);
@@ -93,7 +100,14 @@ export function buildServerComponents(config: ServerConfig): ServerComponents {
   const projectDetector = new ProjectDetector({ stateManager });
   const qdrantConfig = buildQdrantConfig(config);
   const healthMonitor = new HealthMonitor(qdrantConfig, daemonClient);
-  const tools = createTools(qdrantConfig, daemonClient, stateManager, projectDetector, config);
+  const tools = createTools(
+    qdrantConfig,
+    daemonClient,
+    stateManager,
+    projectDetector,
+    config,
+    searchDbReader
+  );
 
   return {
     daemonClient,

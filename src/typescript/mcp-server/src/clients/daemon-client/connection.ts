@@ -78,6 +78,53 @@ export interface ProtoGrpcType {
   };
 }
 
+/** Matches a percent-encoding escape (`%` + two hex digits). */
+const PERCENT_ESCAPE = /%[0-9A-Fa-f]{2}/;
+
+/**
+ * Decode a gRPC status message that arrived percent-encoded.
+ *
+ * The gRPC HTTP/2 spec transmits the status message (the `grpc-message`
+ * trailer) percent-encoded, and `@grpc/grpc-js` surfaces it WITHOUT decoding —
+ * so a daemon error like an invalid regex reaches the caller with `?`→`%3F`,
+ * newlines→`%0A`, etc., obscuring the very pattern the user needs to read. This
+ * decodes the error's `message` (and `details`, if present) in place at the one
+ * choke point every unary call funnels through, so every tool that renders
+ * `error.message` shows real text. It:
+ *   - preserves the error's prototype, `code`, and `metadata` (only the display
+ *     text changes) so retry classification and `instanceof` checks still work;
+ *   - only acts on strings that actually contain a `%xx` escape, so it is a
+ *     no-op on already-plain messages;
+ *   - never throws — malformed encoding falls back to the original string.
+ *
+ * ASSUMPTION (load-bearing): the pinned `@grpc/grpc-js` does NOT decode the
+ * trailer, so exactly ONE decode reverses the transport encoding. A literal `%`
+ * in the daemon's message (e.g. a user pattern `data/%2F`) is transmitted as
+ * `%25`, so one decode restores it correctly — no corruption. If grpc-js is ever
+ * upgraded to a version that decodes `grpc-message` itself, this would become a
+ * DOUBLE decode and mangle any literal `%xx` in the surfaced pattern; revisit
+ * (drop this decode, or gate it on transport behavior) at that point. The
+ * `%3F`-round-trip test in tests/clients/grpc-error-decode.test.ts pins the
+ * current contract.
+ */
+export function decodePercentEncodedGrpcMessage<T>(error: T): T {
+  if (!(error instanceof Error)) return error;
+  const safeDecode = (value: string): string => {
+    if (!PERCENT_ESCAPE.test(value)) return value;
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
+  error.message = safeDecode(error.message);
+  const withDetails = error as { details?: unknown };
+  if (typeof withDetails.details === 'string') {
+    withDetails.details = safeDecode(withDetails.details);
+  }
+  return error;
+}
+
 /**
  * Generic gRPC unary call wrapper — turns callback-style into Promise.
  * The `method` must be a function(request, callback) on the service client.
@@ -101,7 +148,7 @@ export function grpcUnary<TReq, TRes>(
       client,
       request,
       (error, response) => {
-        if (error) reject(error);
+        if (error) reject(decodePercentEncodedGrpcMessage(error));
         else resolve(response);
       }
     );

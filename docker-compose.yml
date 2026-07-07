@@ -279,6 +279,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Build provenance for build-info (the context has no .git). The Makefile
+      # exports WQM_BUILD_SHA; a bare `docker compose build` falls back to
+      # unknown. Only the SHA is passed — a timestamp build-arg would bust the
+      # build cache every run (see Dockerfile).
+      args:
+        WQM_BUILD_SHA: "${WQM_BUILD_SHA:-unknown}"
     container_name: wqm-mcp
     <<: *restart
     logging: *default-logging

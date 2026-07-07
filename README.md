@@ -1,20 +1,24 @@
 # workspace-qdrant-mcp
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/ChrisGVE/workspace-qdrant-mcp)](https://github.com/ChrisGVE/workspace-qdrant-mcp/releases)
-[![Glama](https://glama.ai/mcp/servers/ChrisGVE/workspace-qdrant-mcp/badges/score.svg)](https://glama.ai/mcp/servers/ChrisGVE/workspace-qdrant-mcp)
-[![Homebrew](https://img.shields.io/badge/Homebrew-tap-orange.svg)](https://github.com/ChrisGVE/homebrew-tap)
+[![Fork of ChrisGVE/workspace-qdrant-mcp](https://img.shields.io/badge/fork%20of-ChrisGVE%2Fworkspace--qdrant--mcp-lightgrey.svg)](https://github.com/ChrisGVE/workspace-qdrant-mcp)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org/)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Qdrant](https://img.shields.io/badge/Qdrant-1.7%2B-red.svg)](https://qdrant.tech)
+[![Docker](https://img.shields.io/badge/Docker-container--first-2496ED.svg)](https://www.docker.com/)
 
 Project-scoped vector database for AI assistants, providing hybrid semantic + keyword search with automatic project detection.
+
+This is [alkmimm](https://github.com/alkmimm)'s personal development fork of
+[ChrisGVE/workspace-qdrant-mcp](https://github.com/ChrisGVE/workspace-qdrant-mcp), rewritten with a
+TypeScript MCP server and a Rust daemon/CLI. It's a work in progress with no stability or backward-compatibility
+guarantees — see [CLAUDE.md](CLAUDE.md) for the architecture this fork actually runs today.
 
 ## Features
 
 - **Hybrid Search** - Combines semantic similarity with keyword matching using Reciprocal Rank Fusion
 - **Project Detection** - Automatic Git repository awareness and project-scoped collections
-- **7 MCP Tools** - search, retrieve, rules, store, grep, list, embedding
+- **11 MCP Tools** - search, retrieve, rules, store, scratchpad, grep, list, graph, embedding, search_eval, workspace_index
 - **Code Intelligence** - Tree-sitter semantic chunking + LSP integration for active projects
 - **Code Graph** - Relationship graph with algorithms (PageRank, community detection, betweenness centrality)
 - **High-Performance CLI** - Rust-based `wqm` command-line tool
@@ -22,75 +26,72 @@ Project-scoped vector database for AI assistants, providing hybrid semantic + ke
 
 ## Quick Start
 
+This fork is **container-first**: every build (Rust daemon + static ONNX, TypeScript MCP server) runs
+inside Docker. No local Rust toolchain, ONNX Runtime, or host `npm` build is required for normal use.
+
 ### Prerequisites
 
-- **Qdrant** - `docker run -d -p 6333:6333 -v qdrant_storage:/qdrant/storage qdrant/qdrant`
-- **C compiler** - Required for compiling Tree-sitter grammars on first use. Tree-sitter grammars are distributed as C source and compiled locally.
-  - **macOS**: `xcode-select --install` (Xcode Command Line Tools)
-  - **Linux**: `apt install build-essential` (Debian/Ubuntu) or `dnf groupinstall "Development Tools"` (Fedora)
-  - **Windows**: Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with C++ workload
+- **Docker** and **Docker Compose**
+- On WSL, run from a native ext4 path (e.g. `/home/<you>/repos/...`), not a `/mnt/c/...` or UNC path — see
+  [CLAUDE.md](CLAUDE.md) for why cross-filesystem I/O is much slower there.
 
 ### Install
 
-**Option 1: Homebrew (Recommended — macOS & Linux)**
-
 ```bash
-brew install ChrisGVE/tap/workspace-qdrant
-brew services start workspace-qdrant
-```
-
-**Option 2: Pre-built Binaries**
-
-```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/ChrisGVE/workspace-qdrant-mcp/main/scripts/download-install.sh | bash
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/ChrisGVE/workspace-qdrant-mcp/main/scripts/download-install.ps1 | iex
-```
-
-Installs `wqm` and `memexd` to `~/.local/bin` (Linux/macOS) or `%LOCALAPPDATA%\wqm\bin` (Windows).
-
-**Option 3: Build from Source**
-
-```bash
-git clone https://github.com/ChrisGVE/workspace-qdrant-mcp.git
+git clone https://github.com/alkmimm/workspace-qdrant-mcp.git
 cd workspace-qdrant-mcp
-./install.sh
+cp docker/.env.example docker/.env
+# Edit docker/.env: set WQM_DEV_ROOT (the folder of repos the daemon should watch)
+# and MCP_HTTP_TOKEN (generate with `openssl rand -hex 32`)
+
+make first-time            # Linux / WSL
+# or
+make -f Makefile.win first-time   # Windows / PowerShell
 ```
 
-See [Installation Reference](docs/reference/installation.md) for detailed instructions and platform-specific notes. For Windows, see the [Windows Installation Guide](docs/reference/windows-installation.md).
+This builds the `mcp` and `memexd` images, starts the stack, and installs Git hooks. See
+`make help` for the full target list, and [Installation Reference](docs/reference/installation.md) /
+[Windows Installation Guide](docs/reference/windows-installation.md) for platform-specific notes.
 
 ### Configure MCP
 
-**Claude Desktop** (`claude_desktop_config.json`):
+The MCP server is served over streamable HTTP at `http://localhost:6335/mcp`, authenticated with the
+`MCP_HTTP_TOKEN` bearer token set in `docker/.env`.
+
+**Claude Code** (native HTTP transport):
+
+```bash
+claude mcp add --transport http workspace-qdrant http://localhost:6335/mcp \
+  --header "Authorization: Bearer <your-MCP_HTTP_TOKEN>"
+```
+
+**Claude Desktop / Codex** (HTTP-only clients that need a local stdio↔HTTP proxy — see `templates/fork-kit/`
+for full examples):
 
 ```json
 {
   "mcpServers": {
-    "workspace-qdrant-mcp": {
-      "command": "node",
-      "args": ["/path/to/workspace-qdrant-mcp/src/typescript/mcp-server/dist/index.js"],
-      "env": {
-        "QDRANT_URL": "http://localhost:6333"
-      }
+    "workspace-qdrant": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "http://localhost:6335/mcp",
+        "--header",
+        "Authorization: Bearer <your-MCP_HTTP_TOKEN>"
+      ]
     }
   }
 }
 ```
 
-**Claude Code**:
-
-```bash
-claude mcp add workspace-qdrant-mcp -- node /path/to/workspace-qdrant-mcp/src/typescript/mcp-server/dist/index.js
-```
-
 ### Verify
 
 ```bash
-wqm --version
-wqm status health
+make stack-status                       # compose ps + ping admin/qdrant/daemon
+docker exec wqm-memexd wqm status health   # wqm CLI runs inside the daemon container
 ```
+
+Open `http://localhost:6335/admin/` for the admin UI.
 
 ### CLAUDE.md Integration
 
@@ -139,7 +140,7 @@ The `rules` tool manages persistent rules that are injected into context across 
 
 ### Issue Reporting
 
-workspace-qdrant is under active development. If you encounter errors, unexpected behavior, or limitations with any workspace-qdrant tool, report them as GitHub issues at https://github.com/ChrisGVE/workspace-qdrant-mcp/issues using the `gh` CLI.
+workspace-qdrant is under active development. If you encounter errors, unexpected behavior, or limitations with any workspace-qdrant tool, report them as GitHub issues at https://github.com/alkmimm/workspace-qdrant-mcp/issues using the `gh` CLI.
 ````
 
 ## MCP Tools
@@ -150,8 +151,13 @@ workspace-qdrant is under active development. If you encounter errors, unexpecte
 | `retrieve` | Direct document lookup by ID or metadata filter |
 | `rules` | Manage persistent behavioral rules |
 | `store` | Store content, register projects, save notes |
+| `scratchpad` | List, update, or delete scratchpad entries (analysis, design rationale) |
 | `grep` | Exact substring or regex search using FTS5 |
 | `list` | List project files and folder structure |
+| `graph` | Navigate the code-relationship graph (callers, impact, centrality) |
+| `embedding` | Generate vector embeddings for text |
+| `search_eval` | Evaluate search quality (hit@k, recall) against a case set |
+| `workspace_index` | Manage the indexed-project registry and branch sync |
 
 See [MCP Tools Reference](docs/reference/mcp-tools.md) for parameters and examples.
 
@@ -165,6 +171,10 @@ See [MCP Tools Reference](docs/reference/mcp-tools.md) for parameters and exampl
 | `scratchpad` | Temporary working storage | Per-session |
 
 ## CLI Reference
+
+Run these via `docker exec wqm-memexd wqm ...` (the container owns the authoritative SQLite state), or
+directly if you've built `wqm` natively — see [scripts/windows/wqm-docker.cmd](scripts/windows/wqm-docker.cmd)
+for a wrapper that makes a host-installed `wqm` transparently route through the container.
 
 ```bash
 # Service management
@@ -389,4 +399,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-*Inspired by [claude-qdrant-mcp](https://github.com/marlian/claude-qdrant-mcp)*
+*Forked from [ChrisGVE/workspace-qdrant-mcp](https://github.com/ChrisGVE/workspace-qdrant-mcp), itself inspired by [claude-qdrant-mcp](https://github.com/marlian/claude-qdrant-mcp)*

@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { matchesPathExclude } from '../../src/utils/path-glob.js';
+import { matchesPathExclude, matchesPathInclude } from '../../src/utils/path-glob.js';
 import {
   filterResultsByPathExclude,
   applyPathDerank,
@@ -19,7 +19,11 @@ import {
 import { resolveDerankConfig, DEFAULT_DERANK_PENALTY } from '../../src/tools/search-types.js';
 import type { SearchResult } from '../../src/tools/search-types.js';
 
-function result(relativePath: string | undefined, score = 0.5, id = relativePath ?? 'x'): SearchResult {
+function result(
+  relativePath: string | undefined,
+  score = 0.5,
+  id = relativePath ?? 'x'
+): SearchResult {
   const metadata: Record<string, unknown> = {};
   if (relativePath !== undefined) metadata['relative_path'] = relativePath;
   return { id, score, collection: 'projects', content: '', metadata };
@@ -39,6 +43,37 @@ describe('matchesPathExclude', () => {
 
   it('normalizes backslashes so Windows-style paths still match', () => {
     expect(matchesPathExclude('old_project\\legacy.php', 'old_project/**')).toBe(true);
+  });
+});
+
+describe('matchesPathInclude (semantic pathGlob — floats, parity with exclude)', () => {
+  it('floats a relative multi-segment glob at any depth (the fix)', () => {
+    // Previously the semantic post-filter anchored both ends (matchesGlob), so a
+    // relative pattern only matched when the path STARTED with it. It must now
+    // float like exclude / grep's daemon-side glob.
+    expect(matchesPathInclude('lib/management/test/a/b.dart', 'management/test/**')).toBe(true);
+    expect(matchesPathInclude('management/test/x.dart', 'management/test/**')).toBe(true);
+    expect(
+      matchesPathInclude(
+        '/home/u/repo/svc/grpc/AdvertisingGrpcService.java',
+        '**/AdvertisingGrpcService.java'
+      )
+    ).toBe(true);
+  });
+
+  it('still constrains: non-matching extension / dir does not match', () => {
+    expect(matchesPathInclude('lib/management/test/a.kt', 'management/test/**/*.dart')).toBe(false);
+    expect(matchesPathInclude('lib/other/x.dart', 'management/test/**')).toBe(false);
+  });
+
+  it('matches the same paths as matchesPathExclude (shared floating semantics)', () => {
+    for (const [p, g] of [
+      ['old_project/a.php', 'old_project/**'],
+      ['pkg/old_project/a.php', 'old_project/**'],
+      ['src/main.rs', 'old_project/**'],
+    ] as const) {
+      expect(matchesPathInclude(p, g)).toBe(matchesPathExclude(p, g));
+    }
   });
 });
 
@@ -78,7 +113,9 @@ describe('filterResultsByPathExclude', () => {
 
 describe('resolveDerankConfig', () => {
   it('parses comma-separated substrings, trims, and drops empties', () => {
-    const cfg = resolveDerankConfig({ WQM_SEARCH_DERANK: 'old_project/, /generated/ ,, docs/archive/' });
+    const cfg = resolveDerankConfig({
+      WQM_SEARCH_DERANK: 'old_project/, /generated/ ,, docs/archive/',
+    });
     expect(cfg.substrings).toEqual(['old_project/', '/generated/', 'docs/archive/']);
   });
 
@@ -94,10 +131,18 @@ describe('resolveDerankConfig', () => {
   });
 
   it('rejects penalty >= 1, negative, or garbage (keeps the default)', () => {
-    expect(resolveDerankConfig({ WQM_SEARCH_DERANK_PENALTY: '1' }).penalty).toBe(DEFAULT_DERANK_PENALTY);
-    expect(resolveDerankConfig({ WQM_SEARCH_DERANK_PENALTY: '1.5' }).penalty).toBe(DEFAULT_DERANK_PENALTY);
-    expect(resolveDerankConfig({ WQM_SEARCH_DERANK_PENALTY: '-0.2' }).penalty).toBe(DEFAULT_DERANK_PENALTY);
-    expect(resolveDerankConfig({ WQM_SEARCH_DERANK_PENALTY: 'abc' }).penalty).toBe(DEFAULT_DERANK_PENALTY);
+    expect(resolveDerankConfig({ WQM_SEARCH_DERANK_PENALTY: '1' }).penalty).toBe(
+      DEFAULT_DERANK_PENALTY
+    );
+    expect(resolveDerankConfig({ WQM_SEARCH_DERANK_PENALTY: '1.5' }).penalty).toBe(
+      DEFAULT_DERANK_PENALTY
+    );
+    expect(resolveDerankConfig({ WQM_SEARCH_DERANK_PENALTY: '-0.2' }).penalty).toBe(
+      DEFAULT_DERANK_PENALTY
+    );
+    expect(resolveDerankConfig({ WQM_SEARCH_DERANK_PENALTY: 'abc' }).penalty).toBe(
+      DEFAULT_DERANK_PENALTY
+    );
   });
 });
 

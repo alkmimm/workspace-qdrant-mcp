@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-The workspace-qdrant MCP server exposes eight tools to AI assistants. All tools communicate with the `memexd` daemon over gRPC.
+The workspace-qdrant MCP server exposes eleven tools to AI assistants. All tools communicate with the `memexd` daemon over gRPC.
 
 ## Tool Index
 
@@ -10,11 +10,13 @@ The workspace-qdrant MCP server exposes eight tools to AI assistants. All tools 
 | [`retrieve`](#retrieve) | Direct document lookup by ID or metadata filter |
 | [`rules`](#rules) | Manage persistent behavioral rules |
 | [`store`](#store) | Store content, register projects, save notes |
+| [`scratchpad`](#scratchpad) | List, update, or delete scratchpad notes |
 | [`grep`](#grep) | Exact substring or regex search using FTS5 |
 | [`list`](#list) | List project files and folder structure |
-| [`graph`](#graph) | Navigate the code-relationship graph (callers, impact, hotspots) |
 | [`embedding`](#embedding) | Generate vector embeddings for text |
+| [`graph`](#graph) | Navigate the code-relationship graph (callers, impact, hotspots) |
 | [`workspace_index`](#workspace_index) | Manage indexed-project registry + branch sync (host hooks) |
+| [`search_eval`](#search_eval) | Benchmark search quality (hit@k, recall, MRR) against a case set |
 
 ---
 
@@ -398,6 +400,45 @@ Returns a confirmation message with the stored document ID or registration statu
 
 ---
 
+## scratchpad
+
+Manage existing scratchpad notes: list, update, or delete. To *create* a note, use `store` with
+`type: "scratchpad"` — this tool never creates. Notes are project-scoped: pass `projectId` (the
+`tenant_id` seen in a `search`/`list` result) or `cwd` to auto-detect the project.
+
+`update`/`delete` identify a note by its **current** content (content-addressed) — it must match
+verbatim, taken from a `scratchpad` `list` call (full content), not a `search` hit (which may be
+truncated). If nothing matches exactly, the call fails with a clear error instead of silently no-oping.
+
+### Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `action` | string | Yes | — | `list`, `update`, or `delete` |
+| `content` | string | Conditional | — | Current, verbatim text of the note to target. Required for `update`/`delete`. |
+| `newContent` | string | Conditional | — | Replacement text. Required for `update`. |
+| `title` | string | No | — | New title (for `update`) |
+| `tags` | string[] | No | — | New tags (for `update`) |
+| `projectId` | string | No | — | Tenant the note belongs to (takes precedence over `cwd`); use `"global"` for project-less notes |
+| `cwd` | string | No | — | Working directory used to auto-detect the project when `projectId` is omitted |
+| `limit` | number | No | `50` | Maximum entries to return (for `list`) |
+
+### Examples
+
+```json
+{ "action": "list" }
+```
+
+```json
+{ "action": "delete", "content": "<verbatim note text>" }
+```
+
+```json
+{ "action": "update", "content": "<old text>", "newContent": "<new text>" }
+```
+
+---
+
 ## grep
 
 Search code with exact substring or regex pattern matching. Uses an FTS5 trigram index for fast line-level search across all indexed files. Unlike `search`, `grep` does not use embeddings and always returns exact matches.
@@ -559,6 +600,30 @@ List only configuration files:
 
 ---
 
+## embedding
+
+Report the active embedding provider used by the daemon: provider id, model, configured output
+dimensionality, base URL (for remote providers), and the live probe status. Useful for `/health`-style
+introspection from the MCP client, and for verifying that a provider migration (`wqm admin reembed`)
+succeeded.
+
+### Parameters
+
+None — the tool takes no arguments.
+
+### Examples
+
+```json
+{}
+```
+
+### Response Format
+
+Returns an object describing the active provider (id, model, output dimensionality, base URL if
+remote) and its current probe status.
+
+---
+
 ## graph
 
 Navigate the **code-relationship graph** the daemon builds from symbol relations (calls, contains, uses-type, imports, inheritance) extracted during indexing. Use it for structural questions that `search`/`grep` can only guess at — "what calls this?", "what breaks if I change X?", "what are the most central functions?" — especially **before** refactoring or renaming a widely-used symbol.
@@ -705,6 +770,57 @@ For the host-side hook script that drives this action, see
 [scripts/git-hooks/README.md](../../scripts/git-hooks/README.md). For
 the browser dashboard that exercises every other `workspace_index`
 action interactively, see [Admin UI](../ADMIN_UI.md).
+
+---
+
+## search_eval
+
+Benchmark semantic-search quality. Runs known-item queries (each with the file(s) that *should* rank)
+through the live search pipeline and returns hit@1/3/10, recall@10, MRR, and duplicate-rate per mode
+(`semantic`/`hybrid`/`exact`), plus a quality verdict. Use it for the measure → edit → measure loop when
+tuning a ranking change. Runs in-process against the real index — no extra setup.
+
+Omitting `cases` falls back to the bundled dataset, which only describes this server's own repo —
+evaluating any *other* project without `cases` is refused, since the bundled gold files wouldn't exist
+in that project (which would falsely report 0%).
+
+### Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `cases` | array | No | bundled dataset | Ad-hoc eval set: each case is `{ id?, query, expectedFiles }`, where `expectedFiles` are repo-relative paths expected to rank. Required when evaluating a project other than this repo. |
+| `limit` | number | No | `10` | Results fetched per query |
+| `topK` | number | No | `10` | Evaluation cutoff K for hit@k / recall |
+| `projectId` | string | No | auto-detect from `cwd` | Tenant to evaluate against |
+| `cwd` | string | No | — | Working directory for project auto-detection; ignored if `projectId` is set |
+| `scope` | string | No | `project` | `project`, `global`, or `all` |
+| `includeTopPaths` | boolean | No | `false` | Include returned file paths per query (semantic mode), for debugging misses |
+| `rerank` | boolean | No | deployment default (`WQM_SEARCH_RERANK`) | Force the cross-encoder rerank on/off for every query, for A/B sweeps without redeploying |
+| `rerankWeight` | number | No | `WQM_SEARCH_RERANK_WEIGHT` (0.10 measured default) | Blend weight 0–1: final order is `(1-w)·norm(rrf_boosted) + w·norm(rerank)` |
+| `summary` | boolean | No | `false` | `true` = metadata-only hits (no chunk bodies); ranking metrics are unchanged, only response size differs |
+
+### Examples
+
+Evaluate this repo with the bundled dataset:
+
+```json
+{}
+```
+
+Evaluate another project with an ad-hoc case set:
+
+```json
+{
+  "cases": [
+    { "query": "hybrid search fusion", "expectedFiles": ["src/search/fusion.ts"] }
+  ],
+  "cwd": "/home/me/projects/other-repo"
+}
+```
+
+### Response Format
+
+Returns per-mode metrics (hit@1/3/10, recall@10, MRR, duplicate-rate) and an overall quality verdict.
 
 ---
 

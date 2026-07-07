@@ -19,7 +19,7 @@ a local ONNX Runtime, or a host `npm`/Python build to run or develop the stack.
 ### Clone and Setup
 
 ```bash
-git clone https://github.com/ChrisGVE/workspace-qdrant-mcp.git
+git clone https://github.com/alkmimm/workspace-qdrant-mcp.git
 cd workspace-qdrant-mcp
 
 # Configure the environment (Qdrant key, MCP token, and the daemon watch root).

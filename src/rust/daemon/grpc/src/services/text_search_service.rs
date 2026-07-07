@@ -14,11 +14,13 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 use workspace_qdrant_core::text_search::{
     attach_context_lines, search_exact, search_regex, SearchOptions, SearchResults,
 };
 use workspace_qdrant_core::SearchDbManager;
+
+use super::text_search_errors::map_search_error;
 
 use crate::proto::{
     text_search_service_server::TextSearchService, TextSearchCountResponse, TextSearchMatch,
@@ -201,10 +203,7 @@ impl TextSearchServiceImpl {
         } else {
             search_exact(&self.search_db, &req.pattern, &options).await
         }
-        .map_err(|e| {
-            error!("TextSearch failed: {:?}", e);
-            Status::internal(format!("Search failed: {e}"))
-        })?;
+        .map_err(map_search_error)?;
 
         self.cache_put(key, results.clone()).await;
         Ok(results)

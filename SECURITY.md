@@ -9,7 +9,9 @@ We provide security updates for the following versions of workspace-qdrant-mcp:
 | 0.1.x   | ✅ Yes             | TBA            |
 | < 0.1   | ❌ No              | Ended          |
 
-**Python Compatibility:** Python 3.9+ is required for security updates.
+**Node.js Compatibility:** Node.js 18+ is required for the TypeScript MCP server.
+
+**Rust Compatibility:** Rust 1.75+ is required for the daemon and CLI.
 
 **Qdrant Compatibility:** Qdrant 1.7+ is required for full security feature support.
 
@@ -19,7 +21,7 @@ We take security vulnerabilities seriously. Please follow our responsible disclo
 
 ### 🚨 **For Sensitive/Critical Issues**
 
-**Email:** [christian.berclaz@mac.com](mailto:christian.berclaz@mac.com)
+**Email:** [alberto.souza@althoztecnologia.com.br](mailto:alberto.souza@althoztecnologia.com.br)
 
 - Use this for vulnerabilities that could be exploited maliciously
 - Include "SECURITY" in the subject line
@@ -38,7 +40,7 @@ This allows for private collaboration with our team before public disclosure.
 
 ### 🔍 **For Non-Sensitive Security Improvements**
 
-Use our [Security Issue Template](https://github.com/ChrisGVE/workspace-qdrant-mcp/issues/new?template=security.yml) for:
+Use our [Security Issue Template](https://github.com/alkmimm/workspace-qdrant-mcp/issues/new?template=security.yml) for:
 - Security configuration improvements
 - Documentation security updates
 - General security hardening suggestions
@@ -186,4 +188,4 @@ This security policy complements but does not replace our [License](LICENSE). Fo
 **Last Updated:** September 1, 2025
 **Next Review:** December 1, 2025
 
-For questions about this security policy, please email [christian.berclaz@mac.com](mailto:christian.berclaz@mac.com) or open a [general discussion](https://github.com/ChrisGVE/workspace-qdrant-mcp/discussions).
+For questions about this security policy, please email [alberto.souza@althoztecnologia.com.br](mailto:alberto.souza@althoztecnologia.com.br) or open a [general discussion](https://github.com/alkmimm/workspace-qdrant-mcp/discussions).

@@ -13,6 +13,7 @@ mod rules_payload_backfill;
 mod rules_rebuild;
 mod scratchpad_rebuild;
 pub mod system_service;
+mod text_search_errors;
 pub mod text_search_service;
 
 // Re-embed pipeline (used by AdminWriteService.TriggerReembed)

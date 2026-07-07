@@ -16,6 +16,7 @@ import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import type { TextSearchMatch } from '../clients/grpc-types.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
+import type { SearchDbReader } from '../clients/search-db-reader.js';
 import { finishToolEvent, logSearchEvent } from '../clients/search-event-queries.js';
 import { SERVER_VERSION as MCP_SERVER_VERSION } from '../server-types.js';
 import {
@@ -24,6 +25,7 @@ import {
   resolveFallbackBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
+import { diagnoseEmptyResult, EMPTY_DIAGNOSIS_PROBE_LIMIT } from './empty-diagnosis.js';
 import { whitespaceSensitivityHint } from './exact-hints.js';
 
 /**
@@ -267,15 +269,18 @@ export class GrepTool {
   private readonly daemonClient: DaemonClient;
   private readonly projectDetector: ProjectDetector;
   private readonly stateManager: SqliteStateManager | undefined;
+  private readonly searchDbReader: SearchDbReader | undefined;
 
   constructor(
     daemonClient: DaemonClient,
     projectDetector: ProjectDetector,
-    stateManager?: SqliteStateManager
+    stateManager?: SqliteStateManager,
+    searchDbReader?: SearchDbReader
   ) {
     this.daemonClient = daemonClient;
     this.projectDetector = projectDetector;
     this.stateManager = stateManager;
+    this.searchDbReader = searchDbReader;
   }
 
   /**
@@ -474,12 +479,33 @@ export class GrepTool {
       // instead of fetching cross-project data. When the search was already
       // cross-project (scope:"all" → no tenantId), it's a genuine total miss.
       if (matches.length === 0 && message === undefined) {
-        message = tenantId ? grepScopeOptInHint(pattern) : grepEmptyRecoveryHint(pattern);
-        // A literal multi-token miss is often just a spacing / type-annotation
-        // mismatch, not a true absence — nudge toward a whitespace-tolerant regex.
-        if (!regex) {
-          const ws = whitespaceSensitivityHint(pattern, true);
-          if (ws) message += ` ${ws}`;
+        // Before the generic hints, try to explain the emptiness SPECIFICALLY:
+        // a path filter that dropped everything, or a branch with no index.
+        // A bare "No matches" otherwise conflates "pattern absent" with "the
+        // filter/branch hid it" — the silent-zero trap. Only for project scope
+        // (tenantId set); best-effort, never throws.
+        const diagnosis = tenantId
+          ? await this.diagnoseEmptyGrep(
+              pattern,
+              regex,
+              caseSensitive,
+              contextLines,
+              tenantId,
+              branch,
+              pathGlob,
+              pathExclude
+            )
+          : undefined;
+        if (diagnosis) {
+          message = diagnosis;
+        } else {
+          message = tenantId ? grepScopeOptInHint(pattern) : grepEmptyRecoveryHint(pattern);
+          // A literal multi-token miss is often just a spacing / type-annotation
+          // mismatch, not a true absence — nudge toward a whitespace-tolerant regex.
+          if (!regex) {
+            const ws = whitespaceSensitivityHint(pattern, true);
+            if (ws) message += ` ${ws}`;
+          }
         }
       }
       const economy = computeGrepEconomy(matches);
@@ -559,7 +585,16 @@ export class GrepTool {
     if (!tenantId || !concreteBranch) return undefined;
     try {
       const resp = await this.daemonClient.textSearch(
-        buildGrepRequest(pattern, regex, caseSensitive, contextLines, maxResults, tenantId, '*', pathGlob)
+        buildGrepRequest(
+          pattern,
+          regex,
+          caseSensitive,
+          contextLines,
+          maxResults,
+          tenantId,
+          '*',
+          pathGlob
+        )
       );
       const rawMatches = filterGrepMatchesByExclude(mapGrepMatches(resp.matches), pathExclude);
       const dedupedMatches = dedupGrepMatches(rawMatches);
@@ -575,6 +610,47 @@ export class GrepTool {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Explain a still-empty project-scoped result before falling back to the
+   * generic hints, via the shared {@link diagnoseEmptyResult} probes (path
+   * filter excluded everything → branch has no indexed content). The
+   * `countWithoutPathFilter` closure re-runs the same branch scope with NO path
+   * filter (no `pathGlob` sent, no `pathExclude` post-filter).
+   */
+  private async diagnoseEmptyGrep(
+    pattern: string,
+    regex: boolean,
+    caseSensitive: boolean,
+    contextLines: number,
+    tenantId: string,
+    branch: string | undefined,
+    pathGlob: string | undefined,
+    pathExclude: string | undefined
+  ): Promise<string | undefined> {
+    return diagnoseEmptyResult({
+      tenantId,
+      branch,
+      pathGlob,
+      pathExclude,
+      searchDbReader: this.searchDbReader,
+      countWithoutPathFilter: async () => {
+        const resp = await this.daemonClient.textSearch(
+          buildGrepRequest(
+            pattern,
+            regex,
+            caseSensitive,
+            contextLines,
+            EMPTY_DIAGNOSIS_PROBE_LIMIT,
+            tenantId,
+            branch,
+            undefined // drop pathGlob; no pathExclude post-filter either
+          )
+        );
+        return dedupGrepMatches(mapGrepMatches(resp.matches)).length;
+      },
+    });
   }
 
   /**

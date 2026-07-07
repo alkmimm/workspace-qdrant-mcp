@@ -41,7 +41,7 @@ import {
 } from './search-qdrant.js';
 import { expandGraphContext } from './search-graph-context.js';
 import { logDebug } from '../utils/logger.js';
-import { matchesGlob } from '../utils/path-glob.js';
+import { matchesPathInclude } from '../utils/path-glob.js';
 import {
   concreteBranchFilter,
   resolveEffectiveBranch,
@@ -1179,8 +1179,8 @@ function filterResultsByPathGlob(
     const filePath =
       typeof result.metadata['file_path'] === 'string' ? result.metadata['file_path'] : undefined;
     return (
-      (relativePath !== undefined && matchesGlob(relativePath, pathGlob)) ||
-      (filePath !== undefined && matchesGlob(filePath, pathGlob))
+      (relativePath !== undefined && matchesPathInclude(relativePath, pathGlob)) ||
+      (filePath !== undefined && matchesPathInclude(filePath, pathGlob))
     );
   });
 }
@@ -1303,11 +1303,7 @@ export async function finalizeResults(
     rerankEnabled && rerankWeight > 0
       ? await rerankResults(daemonClient, params.query, deduped, windowEnd, rerankWeight)
       : deduped;
-  const { page: finalResults, hasMore: hasMoreCode } = paginateRanked(
-    ranked,
-    offset,
-    params.limit
-  );
+  const { page: finalResults, hasMore: hasMoreCode } = paginateRanked(ranked, offset, params.limit);
 
   // Restore the display score: the ordering above used the path-boosted (and,
   // when enabled, reranked) score, but the number we RETURN is the pre-boost

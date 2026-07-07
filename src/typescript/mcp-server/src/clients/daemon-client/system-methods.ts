@@ -30,7 +30,11 @@ import type {
   ListFailedItemsResponse,
 } from '../grpc-types.js';
 
-import { DaemonClientBase, grpcUnaryWithTimeout } from './connection.js';
+import {
+  DaemonClientBase,
+  decodePercentEncodedGrpcMessage,
+  grpcUnaryWithTimeout,
+} from './connection.js';
 
 /** Coerce a proto `int64` (decoded as a string by the gRPC client) to a number. */
 function int64ToNumber(value: unknown, fallback = 0): number {
@@ -55,9 +59,7 @@ function optionalInt64ToNumber(value: unknown): number | undefined {
  * untouched. Without this the ETA never renders (its `typeof === 'number'`
  * guard rejects the string) and count arithmetic concatenates.
  */
-function normalizeProjectStatusCounts(
-  resp: GetProjectStatusResponse
-): GetProjectStatusResponse {
+function normalizeProjectStatusCounts(resp: GetProjectStatusResponse): GetProjectStatusResponse {
   // Drop eta_seconds from the spread so we never assign it `undefined`
   // explicitly — `exactOptionalPropertyTypes` forbids that for an optional
   // field; absence must omit the key entirely.
@@ -90,7 +92,10 @@ export class DaemonClientSystem extends DaemonClientBase {
           const deadline = new Date(Date.now() + this.timeoutMs);
           (this.systemClient as unknown as grpc.Client).waitForReady(deadline, (err) => {
             if (err) {
-              reject(err);
+              // Consistency with the grpcUnary path: decode any percent-encoded
+              // gRPC message. `waitForReady` yields connectivity errors (no
+              // grpc-message trailer), so this is a defensive no-op in practice.
+              reject(decodePercentEncodedGrpcMessage(err));
               return;
             }
             grpcUnaryWithTimeout<{}, HealthCheckResponse>(
@@ -274,9 +279,7 @@ export class DaemonClientSystem extends DaemonClientBase {
    * RPC. Read-only; backs the admin UI's failed-items drill-down. Retry is a
    * separate QueueWriteService mutation (`retryAll` / `retryItem`).
    */
-  async listFailedItems(
-    request: ListFailedItemsRequest = {}
-  ): Promise<ListFailedItemsResponse> {
+  async listFailedItems(request: ListFailedItemsRequest = {}): Promise<ListFailedItemsResponse> {
     return this.callWithRetry(() =>
       grpcUnaryWithTimeout(
         this.projectClient,

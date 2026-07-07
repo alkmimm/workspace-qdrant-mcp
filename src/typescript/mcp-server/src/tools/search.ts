@@ -14,6 +14,7 @@ import type { QdrantClient } from '@qdrant/js-client-rest';
 import { getQdrantClient } from '../clients/qdrant-client-factory.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
+import type { SearchDbReader } from '../clients/search-db-reader.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import { SERVER_VERSION as MCP_SERVER_VERSION } from '../server-types.js';
 
@@ -93,12 +94,14 @@ export class SearchTool {
   private readonly enableTagExpansion: boolean;
   private readonly expansionWeight: number;
   private readonly maxExpandedKeywords: number;
+  private readonly searchDbReader: SearchDbReader | undefined;
 
   constructor(
     config: SearchToolConfig,
     daemonClient: DaemonClient,
     stateManager: SqliteStateManager,
-    projectDetector: ProjectDetector
+    projectDetector: ProjectDetector,
+    searchDbReader?: SearchDbReader
   ) {
     this.qdrantClient = getQdrantClient({
       url: config.qdrantUrl,
@@ -111,6 +114,7 @@ export class SearchTool {
     this.enableTagExpansion = config.enableTagExpansion ?? true;
     this.expansionWeight = config.expansionWeight ?? DEFAULT_EXPANSION_WEIGHT;
     this.maxExpandedKeywords = config.maxExpandedKeywords ?? DEFAULT_MAX_EXPANDED_KEYWORDS;
+    this.searchDbReader = searchDbReader;
   }
 
   get stateManager(): SqliteStateManager {
@@ -243,7 +247,8 @@ export class SearchTool {
         this._stateManager,
         this.projectDetector,
         options,
-        eventId
+        eventId,
+        this.searchDbReader
       );
     }
     const mode = options.mode ?? 'semantic';
@@ -312,22 +317,48 @@ export class SearchTool {
       }
       return embeddings.fallback;
     }
-    return this.runSearchAndFinalize(
-      effectiveOptions,
-      mode,
-      limit,
-      scope,
-      collectionsToSearch,
-      eventId,
-      searchStartMs,
-      currentProjectId,
-      basePoints,
-      fallbackBranch,
-      basePointsDegraded,
-      basePointsActiveCount,
-      embeddings.denseEmbedding,
-      embeddings.sparseVector
-    );
+    const runFinalize = (opts: SearchOptions, fb: string | undefined): Promise<SearchResponse> =>
+      this.runSearchAndFinalize(
+        opts,
+        mode,
+        limit,
+        scope,
+        collectionsToSearch,
+        eventId,
+        searchStartMs,
+        currentProjectId,
+        basePoints,
+        fb,
+        basePointsDegraded,
+        basePointsActiveCount,
+        embeddings.denseEmbedding,
+        embeddings.sparseVector
+      );
+
+    const primary = await runFinalize(effectiveOptions, fallbackBranch);
+
+    // Auto-widen on empty (parity with grep / search_exact): a branch-scoped
+    // semantic search that finds nothing may be missing content the daemon
+    // tagged under another branch (a file unchanged on the current branch stays
+    // indexed under the branch it was last modified on). Re-run across ALL
+    // branches, REUSING the embeddings (no re-embed — same dense/sparse vectors).
+    // Fires ONLY for a concrete project-scoped branch and ONLY when zero CODE
+    // results were found, so good branch-scoped results are never diluted. Gate
+    // on CODE hits (not `results.length`): the project-memory scratchpad lane
+    // appends notes into `results`, and a matching note must NOT mask missing
+    // cross-branch code (that would defeat the parity). Never crosses the tenant
+    // boundary — currentProjectId still filters the tenant, only branch widens.
+    const codeHits = (r: SearchResponse): number =>
+      r.results.filter((x) => x.collection !== SCRATCHPAD_COLLECTION).length;
+    if (codeHits(primary) === 0 && scope === 'project' && concreteEffective && currentProjectId) {
+      const widened = await runFinalize(applyEffectiveBranch(options, '*'), undefined);
+      if (codeHits(widened) > 0) {
+        const note = `No semantic matches on branch "${concreteEffective}" — widened to all branches; results may be from another indexed branch.`;
+        widened.hint = widened.hint ? `${widened.hint} ${note}` : note;
+        return widened;
+      }
+    }
+    return primary;
   }
 
   private async runSearchCollections(

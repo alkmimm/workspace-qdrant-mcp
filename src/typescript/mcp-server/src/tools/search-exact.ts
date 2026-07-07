@@ -5,8 +5,15 @@
 import type { QdrantClient } from '@qdrant/js-client-rest';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
+import type { SearchDbReader } from '../clients/search-db-reader.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
-import type { SearchOptions, SearchResult, SearchResponse, FilterParams, SearchScope } from './search-types.js';
+import type {
+  SearchOptions,
+  SearchResult,
+  SearchResponse,
+  FilterParams,
+  SearchScope,
+} from './search-types.js';
 import { PROJECTS_COLLECTION } from './search-types.js';
 import { attachIndexingProgress } from './search-helpers.js';
 import { buildFilter } from './search-filters.js';
@@ -19,6 +26,7 @@ import {
   resolveFallbackBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
+import { diagnoseEmptyResult, EMPTY_DIAGNOSIS_PROBE_LIMIT } from './empty-diagnosis.js';
 import { whitespaceSensitivityHint } from './exact-hints.js';
 
 /**
@@ -259,7 +267,8 @@ export async function searchExact(
   stateManager: SqliteStateManager,
   projectDetector: ProjectDetector,
   options: SearchOptions,
-  eventId: string
+  eventId: string,
+  searchDbReader?: SearchDbReader
 ): Promise<SearchResponse> {
   const startTime = Date.now();
   const resolution = await resolveExactSearchTenant(options, projectDetector, stateManager);
@@ -334,7 +343,8 @@ export async function searchExact(
     tenantId,
     eventId,
     startTime,
-    fallbackBranch
+    fallbackBranch,
+    searchDbReader
   );
 }
 
@@ -345,14 +355,17 @@ async function executeAndLogSearch(
   tenantId: string | undefined,
   eventId: string,
   startTime: number,
-  fallbackBranch?: string
+  fallbackBranch?: string,
+  searchDbReader?: SearchDbReader
 ): Promise<SearchResponse> {
   try {
     const request = buildExactSearchRequest(options, tenantId);
     const requestedBranch = concreteBranchFilter(options.branch);
     const primaryResponse = await daemonClient.textSearch(request);
     const responses = [primaryResponse];
-    const resultGroups: SearchResult[][] = [mapExactResults(primaryResponse.matches, requestedBranch)];
+    const resultGroups: SearchResult[][] = [
+      mapExactResults(primaryResponse.matches, requestedBranch),
+    ];
     if (fallbackBranch) {
       const fallbackResponse = await daemonClient.textSearch(
         buildExactSearchRequest({ ...options, branch: fallbackBranch }, tenantId)
@@ -421,9 +434,51 @@ async function executeAndLogSearch(
       scope: effectiveScope,
       collections_searched: [PROJECTS_COLLECTION],
     };
-    if (dedupedResults.length > offset + limit) successResponse.next_offset = offset + results.length;
+    if (dedupedResults.length > offset + limit)
+      successResponse.next_offset = offset + results.length;
+    // A specific diagnosis (path filter excluded everything / branch has no
+    // indexed content) is more useful than the generic scope-opt-in hint — same
+    // shared probes grep uses (CLAUDE.md shared-behavior rule). Only on a
+    // project-scoped, still-empty result.
+    const diagnosis =
+      dedupedResults.length === 0 && tenantId
+        ? await diagnoseEmptyResult({
+            tenantId,
+            branch: options.branch,
+            pathGlob: options.pathGlob,
+            pathExclude: options.pathExclude,
+            searchDbReader,
+            countWithoutPathFilter: async () => {
+              // Drop the pathGlob (delete, not `= undefined`, for
+              // exactOptionalPropertyTypes) and cap the probe.
+              const probeOptions: SearchOptions = {
+                ...options,
+                limit: EMPTY_DIAGNOSIS_PROBE_LIMIT,
+              };
+              delete probeOptions.pathGlob;
+              const probe = await daemonClient.textSearch(
+                buildExactSearchRequest(probeOptions, tenantId)
+              );
+              // No pathExclude post-filter either — probe the unfiltered scope.
+              return dedupeExactResults(mapExactResults(probe.matches, undefined)).length;
+            },
+          })
+        : undefined;
+    // Branch-widen owns its hint for BOTH sub-cases, so a misleading "results
+    // may be from another branch" never appears on an empty set: when the widened
+    // hits were all removed by `pathExclude`, say THAT instead. Only when the
+    // widen did NOT fire do we fall through to the shared diagnosis — whose
+    // probes are scoped to the requested branch and would be inaccurate here
+    // (the pattern WAS found cross-branch; it was just filtered out).
     if (branchWidened && requestedBranch) {
-      successResponse.hint = `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`;
+      successResponse.hint =
+        dedupedResults.length > 0
+          ? `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`
+          : `Matches exist on other branches but were all removed by pathExclude${
+              options.pathExclude ? ` "${options.pathExclude}"` : ''
+            } — drop or adjust it to see them.`;
+    } else if (diagnosis) {
+      successResponse.hint = diagnosis;
     } else if (dedupedResults.length === 0 && tenantId) {
       // Project-scoped miss. Do NOT auto-search other repos (that would cross the
       // tenant data boundary silently); offer the explicit opt-in instead.
