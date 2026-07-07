@@ -57,13 +57,18 @@ COPY src/typescript/mcp-server/package*.json src/typescript/mcp-server/
 RUN cd src/typescript/mcp-server && npm ci
 
 # Build provenance passed from the host (Makefile / compose). The build context
-# omits .git, so generate-build-info.ts cannot call `git` here — without these
-# the compiled build-info is a meaningless constant. Falls back to git/now when
+# omits .git, so generate-build-info.ts cannot call `git` here — without this the
+# compiled build-info is a meaningless constant. Falls back to git/unknown when
 # unset (e.g. a bare `docker build`). See scripts/generate-build-info.ts.
+#
+# ONLY the commit SHA is injected as a build-arg — it is STABLE per commit, so
+# this ENV layer (and the source COPY + `npm run build` below it) stays cached
+# across successive builds of the same commit. The build TIMESTAMP is deliberately
+# NOT a build-arg: it changes every second and would bust this layer on every
+# build, forcing a full TypeScript recompile. generate-build-info.ts instead
+# stamps `new Date()` when it runs, so BUILD_TIME reflects the last real build.
 ARG WQM_BUILD_SHA=unknown
-ARG WQM_BUILD_TIME=
 ENV WQM_BUILD_SHA=$WQM_BUILD_SHA
-ENV WQM_BUILD_TIME=$WQM_BUILD_TIME
 
 # Copy source and build TypeScript.
 COPY src/typescript/mcp-server/ src/typescript/mcp-server/

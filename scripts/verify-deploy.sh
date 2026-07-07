@@ -74,11 +74,13 @@ if [[ -n "$MARKER" ]]; then
   # string / function name) just as robustly as a Rust one. Use `docker cp` (not
   # `docker exec`, which a deny rule may block) into a fixed pre-removed /tmp path.
   found_in=""
+  inspected=0  # count of artifacts we actually managed to read
 
   # ── memexd binary ──
   bin="/tmp/wqm-memexd-verify.bin"
   rm -f "$bin"
   if docker cp wqm-memexd:/usr/local/bin/memexd "$bin" 2>/dev/null; then
+    inspected=$((inspected + 1))
     # Count, do NOT `grep -q`: under `set -o pipefail`, grep -q exits at the first
     # match and SIGPIPEs `strings` (exit 141), which pipefail then reports as a
     # pipeline failure — a false [MISS] even when the marker is present.
@@ -93,6 +95,7 @@ if [[ -n "$MARKER" ]]; then
   dist="/tmp/wqm-mcp-verify-dist"
   rm -rf "$dist"
   if docker cp wqm-mcp:/app/src/typescript/mcp-server/dist "$dist" 2>/dev/null; then
+    inspected=$((inspected + 1))
     # -l stops at the first matching FILE (not line), so no SIGPIPE-into-strings
     # concern here; restrict to .js so source maps / .d.ts don't give false hits.
     if grep -rlF --include='*.js' "$MARKER" "$dist" >/dev/null 2>&1; then
@@ -103,10 +106,15 @@ if [[ -n "$MARKER" ]]; then
   fi
   rm -rf "$dist"
 
+  # Distinguish "inspected and absent" (a real [MISS] that fails) from "could not
+  # inspect either artifact" (a soft [?] that does NOT fail) — a false failure is
+  # worse than an honest "couldn't check".
   if [[ -n "$found_in" ]]; then
     say "[OK]" "marker present in: $found_in"
+  elif [[ "$inspected" -eq 0 ]]; then
+    say "[?]" "could not inspect either artifact (docker cp failed) — marker status unknown"
   else
-    say "[MISS]" "marker ABSENT from both memexd binary and mcp bundle — the running artifacts predate this change"; warn=$((warn + 1))
+    say "[MISS]" "marker ABSENT from the inspected artifact(s) — the running code predates this change"; warn=$((warn + 1))
   fi
 fi
 
