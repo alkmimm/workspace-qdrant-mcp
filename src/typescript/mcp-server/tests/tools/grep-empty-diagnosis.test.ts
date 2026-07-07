@@ -127,7 +127,7 @@ describe('GrepTool — empty-result diagnosis', () => {
     });
 
     expect(res.matches).toHaveLength(0);
-    expect(res.message).toMatch(/no indexed content yet/i);
+    expect(res.message).toMatch(/0 files indexed under its own name/i);
     expect(res.message).toMatch(/main, develop/);
   });
 
@@ -150,7 +150,7 @@ describe('GrepTool — empty-result diagnosis', () => {
     });
 
     expect(res.matches).toHaveLength(0);
-    expect(res.message).not.toMatch(/no indexed content/i);
+    expect(res.message).not.toMatch(/0 files indexed under its own name/i);
     // Falls back to the generic scope-opt-in hint.
     expect(res.message).toMatch(/scope:"all"/i);
   });

@@ -464,8 +464,19 @@ async function executeAndLogSearch(
             },
           })
         : undefined;
+    // Branch-widen owns its hint for BOTH sub-cases, so a misleading "results
+    // may be from another branch" never appears on an empty set: when the widened
+    // hits were all removed by `pathExclude`, say THAT instead. Only when the
+    // widen did NOT fire do we fall through to the shared diagnosis — whose
+    // probes are scoped to the requested branch and would be inaccurate here
+    // (the pattern WAS found cross-branch; it was just filtered out).
     if (branchWidened && requestedBranch) {
-      successResponse.hint = `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`;
+      successResponse.hint =
+        dedupedResults.length > 0
+          ? `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`
+          : `Matches exist on other branches but were all removed by pathExclude${
+              options.pathExclude ? ` "${options.pathExclude}"` : ''
+            } — drop or adjust it to see them.`;
     } else if (diagnosis) {
       successResponse.hint = diagnosis;
     } else if (dedupedResults.length === 0 && tenantId) {

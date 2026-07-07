@@ -342,17 +342,17 @@ export class SearchTool {
     // tagged under another branch (a file unchanged on the current branch stays
     // indexed under the branch it was last modified on). Re-run across ALL
     // branches, REUSING the embeddings (no re-embed — same dense/sparse vectors).
-    // Fires ONLY for a concrete project-scoped branch and ONLY when the scoped
-    // result is empty, so good branch-scoped results are never diluted. Never
-    // crosses the tenant boundary — currentProjectId still filters the tenant.
-    if (
-      primary.results.length === 0 &&
-      scope === 'project' &&
-      concreteEffective &&
-      currentProjectId
-    ) {
+    // Fires ONLY for a concrete project-scoped branch and ONLY when zero CODE
+    // results were found, so good branch-scoped results are never diluted. Gate
+    // on CODE hits (not `results.length`): the project-memory scratchpad lane
+    // appends notes into `results`, and a matching note must NOT mask missing
+    // cross-branch code (that would defeat the parity). Never crosses the tenant
+    // boundary — currentProjectId still filters the tenant, only branch widens.
+    const codeHits = (r: SearchResponse): number =>
+      r.results.filter((x) => x.collection !== SCRATCHPAD_COLLECTION).length;
+    if (codeHits(primary) === 0 && scope === 'project' && concreteEffective && currentProjectId) {
       const widened = await runFinalize(applyEffectiveBranch(options, '*'), undefined);
-      if (widened.results.length > 0) {
+      if (codeHits(widened) > 0) {
         const note = `No semantic matches on branch "${concreteEffective}" — widened to all branches; results may be from another indexed branch.`;
         widened.hint = widened.hint ? `${widened.hint} ${note}` : note;
         return widened;

@@ -45,15 +45,22 @@ export function pathFilterExcludedAllMessage(
 }
 
 /**
- * The requested branch has no indexed content at all — a freshly created /
- * not-yet-indexed branch, distinct from a genuinely absent pattern.
+ * The requested branch has 0 files listed under its own name in the index. This
+ * is a soft signal, not a verdict: it usually means a freshly created /
+ * not-yet-indexed branch, but a file UNCHANGED across a checkout can stay tagged
+ * under the branch it was last modified on (branch-membership drift), so a
+ * branch that IS effectively indexed can still show 0 under its own name. The
+ * message hedges accordingly and does NOT suggest `branch:"*"` as a next step —
+ * the callers (grep / exact) already auto-widened across all branches before
+ * reaching this probe, so the cross-branch content (if any) was already checked.
  */
 export function branchNotIndexedMessage(branch: string, indexedBranches: string[]): string {
   const list = indexedBranches.length > 0 ? indexedBranches.slice(0, 6).join(', ') : '(none yet)';
   return (
-    `Branch "${branch}" has no indexed content yet (0 files) — this looks like a freshly created ` +
-    'or not-yet-indexed branch, not a missing pattern. Indexed branches for this project: ' +
-    `${list}. Pass branch:"*" to search across all of them, or an indexed branch name to scope.`
+    `Branch "${branch}" has 0 files indexed under its own name (likely a freshly created or ` +
+    'not-yet-indexed branch — or its files are still tagged under the branch they were last ' +
+    'modified on). The pattern was also not found on any other indexed branch. Indexed branches ' +
+    `for this project: ${list}. If this branch was just created, let the daemon index it and retry.`
   );
 }
 

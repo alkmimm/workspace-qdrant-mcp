@@ -116,7 +116,7 @@ describe('searchExact — empty-result diagnosis', () => {
       ])
     );
     expect(res.results).toHaveLength(0);
-    expect(res.hint).toMatch(/no indexed content yet/i);
+    expect(res.hint).toMatch(/0 files indexed under its own name/i);
     expect(res.hint).toMatch(/main, develop/);
   });
 
@@ -134,7 +134,31 @@ describe('searchExact — empty-result diagnosis', () => {
       makeReader([{ branch: 'main', files: 99 }])
     );
     expect(res.results).toHaveLength(0);
-    expect(res.hint).not.toMatch(/no indexed content/i);
+    expect(res.hint).not.toMatch(/0 files indexed under its own name/i);
     expect(res.hint).toMatch(/scope:"all"/i);
+  });
+
+  it('does NOT claim "results may be from another branch" when pathExclude emptied the widened set', async () => {
+    // Primary branch is empty → branch-widen fires and finds a cross-branch hit,
+    // but pathExclude then removes it → results:[]. The hint must be honest about
+    // the exclusion, not the misleading "results may be from another branch".
+    const excludedHit = { ...MATCH, file_path: '/repo/excluded/Foo.java' };
+    const daemon = makeDaemon((req) =>
+      req.branch === 'main'
+        ? Promise.resolve({ matches: [], total_matches: 0, truncated: false })
+        : Promise.resolve({ matches: [excludedHit], total_matches: 1, truncated: false })
+    );
+    const res = await searchExact(
+      makeQdrant(),
+      daemon,
+      makeStateManager(),
+      makeProjectDetector('p-a'),
+      opts({ branch: 'main', pathExclude: 'excluded/**' }),
+      'evt-4',
+      makeReader([{ branch: 'main', files: 99 }])
+    );
+    expect(res.results).toHaveLength(0);
+    expect(res.hint).toMatch(/removed by pathExclude/i);
+    expect(res.hint).not.toMatch(/results may be from another indexed branch/i);
   });
 });
