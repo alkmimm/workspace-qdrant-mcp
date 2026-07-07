@@ -14,11 +14,13 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 use workspace_qdrant_core::text_search::{
     attach_context_lines, search_exact, search_regex, SearchOptions, SearchResults,
 };
-use workspace_qdrant_core::{SearchDbError, SearchDbManager};
+use workspace_qdrant_core::SearchDbManager;
+
+use super::text_search_errors::map_search_error;
 
 use crate::proto::{
     text_search_service_server::TextSearchService, TextSearchCountResponse, TextSearchMatch,
@@ -205,28 +207,6 @@ impl TextSearchServiceImpl {
 
         self.cache_put(key, results.clone()).await;
         Ok(results)
-    }
-}
-
-/// Map a search failure to the right gRPC status.
-///
-/// A bad regex or bad `path_glob` is CALLER input, not a server fault, so it
-/// must surface as `invalid_argument` (with a RE2 hint) — mirroring how the rest
-/// of the daemon validates input — rather than `internal`, which implies a bug
-/// and reads as retryable. Every other `SearchDbError` (DB/IO/migration) stays
-/// `internal`. Shared by `search` and `count_matches` via `execute_or_cached`.
-fn map_search_error(e: SearchDbError) -> Status {
-    match e {
-        SearchDbError::InvalidPattern(msg) => Status::invalid_argument(format!(
-            "Invalid search pattern: {msg}. The FTS engine is RE2-based: look-around \
-             (e.g. (?<!x)) and backreferences are unsupported; use \\b or a fixed \
-             pattern. For a path filter, pathGlob must match the absolute path and \
-             multi-segment literals must be adjacent."
-        )),
-        other => {
-            error!("TextSearch failed: {:?}", other);
-            Status::internal(format!("Search failed: {other}"))
-        }
     }
 }
 

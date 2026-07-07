@@ -37,28 +37,35 @@ export function matchesGlob(value: string, glob: string): boolean {
 }
 
 /**
- * Match a path against an EXCLUDE glob, floating so it drops a dir at the repo
- * root AND at any nested depth — the forgiving behaviour a caller expects from
- * "exclude old_project/". `matchesGlob` anchors both ends, so a bare
- * `old_project/**` would only hit the root copy; also testing `** /<glob>`
- * lets a nested `pkg/old_project/x` match too. Absolute paths (the metadata
- * `file_path`) match via the same floated form. Patterns already floating
- * (`**\/…`) stay correct — the extra prefix is a no-op there.
+ * Floating glob match: matches the glob at the repo root AND at any nested
+ * depth. `matchesGlob` anchors both ends, so a bare `old_project/**` would only
+ * hit the root copy; also testing `**\/<glob>` lets a nested `pkg/old_project/x`
+ * match too. Absolute paths (the metadata `file_path`) match via the same
+ * floated form. Patterns already floating (`**\/…`) stay correct — the extra
+ * prefix is a no-op there. Single source of truth for both the exclude and
+ * include matchers so their semantics can never drift apart.
  */
-export function matchesPathExclude(value: string, glob: string): boolean {
+function matchesFloatingGlob(value: string, glob: string): boolean {
   return matchesGlob(value, glob) || matchesGlob(value, `**/${glob}`);
 }
 
 /**
- * Match a path against an INCLUDE glob (`pathGlob`), floating exactly like
- * {@link matchesPathExclude} so a relative pattern like `management/test/**`
- * matches at the repo root AND at any nested depth. This gives the semantic
- * search's `pathGlob` post-filter the SAME floating semantics as `pathExclude`
- * and as the daemon-side FTS glob used by grep / exact search (which anchors
- * relative patterns with a `**\/` prefix) — instead of the previous both-ends
- * anchored `matchesGlob`, under which `management/test/**` only matched when the
- * path STARTED with `management/test/`.
+ * Match a path against an EXCLUDE glob (`pathExclude`) — the forgiving behaviour
+ * a caller expects from "exclude old_project/". Floats via
+ * {@link matchesFloatingGlob}.
+ */
+export function matchesPathExclude(value: string, glob: string): boolean {
+  return matchesFloatingGlob(value, glob);
+}
+
+/**
+ * Match a path against an INCLUDE glob (`pathGlob`). Floats exactly like
+ * {@link matchesPathExclude} (both delegate to {@link matchesFloatingGlob}) so a
+ * relative pattern like `management/test/**` matches at any depth — parity with
+ * the daemon-side FTS glob used by grep / exact search, instead of the previous
+ * both-ends anchored `matchesGlob` under which it only matched when the path
+ * STARTED with `management/test/`.
  */
 export function matchesPathInclude(value: string, glob: string): boolean {
-  return matchesGlob(value, glob) || matchesGlob(value, `**/${glob}`);
+  return matchesFloatingGlob(value, glob);
 }

@@ -94,8 +94,18 @@ const PERCENT_ESCAPE = /%[0-9A-Fa-f]{2}/;
  *   - preserves the error's prototype, `code`, and `metadata` (only the display
  *     text changes) so retry classification and `instanceof` checks still work;
  *   - only acts on strings that actually contain a `%xx` escape, so it is a
- *     no-op on already-plain messages and cannot double-decode ordinary text;
+ *     no-op on already-plain messages;
  *   - never throws — malformed encoding falls back to the original string.
+ *
+ * ASSUMPTION (load-bearing): the pinned `@grpc/grpc-js` does NOT decode the
+ * trailer, so exactly ONE decode reverses the transport encoding. A literal `%`
+ * in the daemon's message (e.g. a user pattern `data/%2F`) is transmitted as
+ * `%25`, so one decode restores it correctly — no corruption. If grpc-js is ever
+ * upgraded to a version that decodes `grpc-message` itself, this would become a
+ * DOUBLE decode and mangle any literal `%xx` in the surfaced pattern; revisit
+ * (drop this decode, or gate it on transport behavior) at that point. The
+ * `%3F`-round-trip test in tests/clients/grpc-error-decode.test.ts pins the
+ * current contract.
  */
 export function decodePercentEncodedGrpcMessage<T>(error: T): T {
   if (!(error instanceof Error)) return error;
