@@ -25,6 +25,13 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 export interface RequestContext {
   /** Host-side absolute path the client is operating from. */
   hostCwd?: string;
+  /**
+   * MCP session id of the request (the `Mcp-Session-Id` header on the HTTP
+   * transport). Consumed by the effectiveness-signals instrumentation to
+   * group search events into sessions (spec 20 §1.2); absent on stdio and
+   * on the anonymous `initialize` request.
+   */
+  mcpSessionId?: string;
 }
 
 const storage = new AsyncLocalStorage<RequestContext>();

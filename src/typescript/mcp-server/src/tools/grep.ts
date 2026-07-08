@@ -18,6 +18,7 @@ import type { TextSearchMatch } from '../clients/grpc-types.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
 import { finishToolEvent, logSearchEvent } from '../clients/search-event-queries.js';
+import { effectivenessTracker } from '../clients/effectiveness-signals.js';
 import { SERVER_VERSION as MCP_SERVER_VERSION } from '../server-types.js';
 import {
   concreteBranchFilter,
@@ -509,6 +510,12 @@ export class GrepTool {
         }
       }
       const economy = computeGrepEconomy(matches);
+      // Effectiveness signals (spec 20 §1.2): a retrieve() of one of these
+      // files within the escalation window links back via parent_event_id.
+      effectivenessTracker.noteHits(
+        eventId,
+        matches.map((m) => m.file)
+      );
       const latencyMs = Date.now() - startTime;
       finishToolEvent(this.daemonClient, eventId, {
         resultCount: matches.length,

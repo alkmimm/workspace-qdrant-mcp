@@ -28,6 +28,7 @@ import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import { FIELD_CONTENT, FIELD_TENANT_ID, FIELD_LIBRARY_NAME } from '../common/native-bridge.js';
 import { finishToolEvent, logSearchEvent } from '../clients/search-event-queries.js';
+import { currentSessionId, effectivenessTracker } from '../clients/effectiveness-signals.js';
 import { SERVER_VERSION as MCP_SERVER_VERSION } from '../server-types.js';
 import { resolveProjectIdentity } from './branch-scope.js';
 
@@ -300,6 +301,22 @@ export class RetrieveTool {
           ? JSON.stringify(filter).slice(0, 500)
           : `:${collection}`);
 
+    // Effectiveness signals (spec 20 §1.2): when this retrieve targets a
+    // document/path a recent same-session search returned, link the event
+    // to that search via parent_event_id — the `token_savings` view counts
+    // it into the origin's had_escalation ("the trimmed payload wasn't
+    // enough; the agent paid for the full document").
+    const escalationRefs = [
+      documentId,
+      filePath,
+      typeof filter?.['document_id'] === 'string' ? (filter['document_id'] as string) : undefined,
+    ].filter((r): r is string => typeof r === 'string' && r !== '');
+    const escalationOrigin = effectivenessTracker.findOrigin(
+      currentSessionId(),
+      escalationRefs,
+      Date.now()
+    );
+
     // Log start. queryText carries documentId for by-id lookups, a
     // filePath/lineNumber locator for exact-search hits, or a compact
     // filter summary for by-filter scans, so retrieve events remain
@@ -312,6 +329,7 @@ export class RetrieveTool {
       queryText,
       topK: limit,
       projectId: projectId,
+      parentEventId: escalationOrigin,
     });
 
     // Refuse unknown argument names before any scope resolution. Silently

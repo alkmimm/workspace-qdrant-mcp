@@ -80,7 +80,14 @@ export function reapIdleSessions(
 function buildRequestContext(req: IncomingMessage): RequestContext {
   const raw = req.headers[HOST_CWD_HEADER];
   const hostCwd = Array.isArray(raw) ? raw[0] : raw;
-  return hostCwd && hostCwd.length > 0 ? { hostCwd } : {};
+  const ctx: RequestContext = {};
+  if (hostCwd && hostCwd.length > 0) ctx.hostCwd = hostCwd;
+  // Session identity for effectiveness signals (spec 20 §1.2): the header is
+  // absent only on the anonymous `initialize` request, which is never a tool
+  // call, so tool events always see it.
+  const mcpSessionId = getSessionId(req);
+  if (mcpSessionId) ctx.mcpSessionId = mcpSessionId;
+  return ctx;
 }
 
 /**

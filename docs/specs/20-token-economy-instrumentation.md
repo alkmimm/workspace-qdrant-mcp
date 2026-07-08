@@ -70,6 +70,23 @@ A search is "effective" if it is `success` and **not** `followup`/`escalation`.
 A high `savings_ratio` paired with a high `escalation_rate` is a red flag: we
 are shrinking payloads at the cost of forcing follow-up calls.
 
+**Implementation note (v44).** Both signals are classified at write time by
+the MCP server (`src/typescript/mcp-server/src/clients/effectiveness-signals.ts`)
+rather than inferred purely in SQL:
+
+- Every event gets a `session_id` — the MCP HTTP session (`Mcp-Session-Id`
+  header, carried via the request context) or a per-process fallback for
+  stdio.
+- A `search`/`search_exact` whose terms overlap a same-session query issued
+  < `FOLLOWUP_WINDOW` earlier is written as `op = 'followup'` with
+  `parent_event_id` = the origin event. `grep` records the same lineage but
+  keeps its op.
+- A `retrieve` of a document id / file path a same-session search returned
+  < `ESCALATION_WINDOW` earlier is written with `parent_event_id` = that
+  search. The v44 `token_savings` view counts `op IN ('open','expand',
+  'retrieve')` rows linked by `parent_event_id` as escalations, and
+  parent-linked (or legacy same-session) `op='followup'` rows as followups.
+
 ### 2. Schema additions
 
 Extend `search_events` (defined in
