@@ -57,7 +57,12 @@ function createTools(
     projectDetector,
     searchDbReader
   );
-  const retrieveTool = new RetrieveTool(qdrantConfig, projectDetector, daemonClient);
+  const retrieveTool = new RetrieveTool(
+    qdrantConfig,
+    projectDetector,
+    daemonClient,
+    stateManager
+  );
   const rulesConfig: { qdrantUrl: string; qdrantApiKey?: string; duplicationThreshold?: number } = {
     ...qdrantConfig,
   };

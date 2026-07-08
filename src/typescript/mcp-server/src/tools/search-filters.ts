@@ -72,17 +72,33 @@ function buildBasePointCondition(params: FilterParams): Record<string, unknown> 
   return { key: FIELD_BASE_POINT, match: { any: params.basePoints } };
 }
 
-function buildBranchCondition(params: FilterParams): Record<string, unknown> | null {
-  if (!params.branch || params.branch === '*') return null;
-  if (params.fallbackBranch && params.fallbackBranch !== params.branch) {
+/**
+ * Build the Qdrant branch-scope clause shared by every project-scoped reader.
+ *
+ * `branch` unset or `"*"` → no clause (cross-branch). Otherwise scope to
+ * `branch`, widening with a `should` to also accept `fallbackBranch` (the base
+ * branch the daemon tags unchanged files under — see {@link resolveFallbackBranch}).
+ * Exported so `retrieve` (and any other Qdrant reader) reuses the exact same
+ * clause instead of re-deriving branch semantics that could drift from search.
+ */
+export function branchFilterClause(
+  branch: string | undefined,
+  fallbackBranch: string | undefined
+): Record<string, unknown> | null {
+  if (!branch || branch === '*') return null;
+  if (fallbackBranch && fallbackBranch !== branch) {
     return {
       should: [
-        { key: FIELD_BRANCH, match: { value: params.branch } },
-        { key: FIELD_BRANCH, match: { value: params.fallbackBranch } },
+        { key: FIELD_BRANCH, match: { value: branch } },
+        { key: FIELD_BRANCH, match: { value: fallbackBranch } },
       ],
     };
   }
-  return { key: FIELD_BRANCH, match: { value: params.branch } };
+  return { key: FIELD_BRANCH, match: { value: branch } };
+}
+
+function buildBranchCondition(params: FilterParams): Record<string, unknown> | null {
+  return branchFilterClause(params.branch, params.fallbackBranch);
 }
 
 function buildFileTypeCondition(params: FilterParams): Record<string, unknown> | null {

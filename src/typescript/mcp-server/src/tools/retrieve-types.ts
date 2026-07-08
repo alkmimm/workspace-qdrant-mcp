@@ -31,6 +31,13 @@ export interface RetrieveOptions {
   projectId?: string;
   libraryName?: string;
   /**
+   * Branch to scope project/scratchpad scroll paths to. Defaults to the
+   * caller's current Git branch (widened to the daemon's base branch for files
+   * unchanged on a feature branch). Pass `"*"` to read across all branches —
+   * the explicit opt-out that restores the old cross-branch behavior.
+   */
+  branch?: string;
+  /**
    * Argument names the caller passed that retrieve does not accept (set by
    * the builder). When present, `retrieve()` refuses the call with an
    * explanatory message instead of silently dropping the arguments.

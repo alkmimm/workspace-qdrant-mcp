@@ -66,6 +66,11 @@ export const retrieveToolDefinition = {
         type: 'string',
         description: 'Library name for libraries collection',
       },
+      branch: {
+        type: 'string',
+        description:
+          'Branch to scope project/scratchpad results to (default: your current Git branch, widened to the base branch for files unchanged on a feature branch). Pass "*" to retrieve across all branches — use this only when you deliberately want stale/other-branch versions.',
+      },
     },
   },
 };
