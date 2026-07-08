@@ -12,6 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import type { QdrantClient } from '@qdrant/js-client-rest';
 import { getQdrantClient } from '../clients/qdrant-client-factory.js';
+import { effectivenessTracker } from '../clients/effectiveness-signals.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
@@ -236,6 +237,21 @@ export class SearchTool {
       shapeMode: metrics.mode,
       toolVersion: MCP_SERVER_VERSION,
     });
+    // Effectiveness signals (spec 20 §1.2): remember what this search
+    // returned so a retrieve() of one of these hits within the escalation
+    // window links back via parent_event_id. Covers the exact path too —
+    // it exits through this same shaping boundary. Record every spelling a
+    // later retrieve might use: point id, document_id, absolute and
+    // repo-relative paths (ref matching is exact-string).
+    const hitRefs: string[] = [];
+    for (const r of shaped.results) {
+      hitRefs.push(String(r.id));
+      for (const key of ['document_id', 'file_path', 'relative_path']) {
+        const v = r.metadata?.[key];
+        if (typeof v === 'string' && v !== '') hitRefs.push(v);
+      }
+    }
+    effectivenessTracker.noteHits(eventId, hitRefs);
     return shaped;
   }
 

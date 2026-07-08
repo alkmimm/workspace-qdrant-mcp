@@ -20,6 +20,7 @@ import type { TextSearchMatch } from '../clients/grpc-types.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
 import { finishToolEvent, logSearchEvent } from '../clients/search-event-queries.js';
+import { effectivenessTracker } from '../clients/effectiveness-signals.js';
 import { SERVER_VERSION as MCP_SERVER_VERSION } from '../server-types.js';
 import {
   concreteBranchFilter,
@@ -301,7 +302,7 @@ export function filterGrepMatchesByExclude(
 }
 
 /** Map daemon TextSearchMatch array to GrepMatch array. */
-function mapGrepMatches(matches: TextSearchMatch[]): GrepMatch[] {
+export function mapGrepMatches(matches: TextSearchMatch[]): GrepMatch[] {
   return matches.map((m: TextSearchMatch) => {
     const out: GrepMatch = {
       file: m.file_path,
@@ -311,10 +312,16 @@ function mapGrepMatches(matches: TextSearchMatch[]): GrepMatch[] {
       context_after: m.context_after ?? [],
     };
     // Carry file_size through when the daemon reported it (spec 20
-    // §3.2 file-size probe). Skip 0 — proto3 defaults non-optional
-    // int64 fields to 0, and an unset optional decodes to undefined
-    // (which we want); keep the conditional defensive.
-    if (m.file_size !== undefined && m.file_size > 0) out.file_size = m.file_size;
+    // §3.2 file-size probe). The proto field is int64, and the client
+    // loads protos with `longs: String` — so at runtime this is a
+    // STRING and MUST be coerced before any arithmetic: summing string
+    // sizes concatenates digits, and the resulting "sum" overflows i64
+    // on the write path where gRPC clamps it to i64::MAX, which in turn
+    // blows up SUM(bytes_in) in the token_savings view. Skip 0 —
+    // proto3 defaults non-optional int64 fields to 0, and an unset
+    // optional decodes to undefined (Number(undefined) is NaN).
+    const fileSize = Number(m.file_size);
+    if (Number.isFinite(fileSize) && fileSize > 0) out.file_size = fileSize;
     return out;
   });
 }
@@ -611,6 +618,14 @@ export class GrepTool {
       // without a bound — the same budget semantics as the search tool.
       const shaped = shapeGrepMatches(matches, shaping);
       const economy = computeGrepEconomy(shaped.matches);
+      // Effectiveness signals (spec 20 §1.2): a retrieve() of one of these
+      // files within the escalation window links back via parent_event_id.
+      // Uses the SHAPED matches — refs the agent actually received (a
+      // budget-dropped match never reached it, so it cannot escalate).
+      effectivenessTracker.noteHits(
+        eventId,
+        shaped.matches.map((m) => m.file)
+      );
       const latencyMs = Date.now() - startTime;
       finishToolEvent(this.daemonClient, eventId, {
         resultCount: shaped.matches.length,
