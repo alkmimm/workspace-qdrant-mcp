@@ -131,7 +131,7 @@ export interface UpdateSearchEventEconomyRequest {
   bytes_in: number;
   bytes_out: number;
   hits_truncated: number;
-  shape_mode: 'truncate' | 'summary' | 'none';
+  shape_mode: 'truncate' | 'summary' | 'none' | 'packed';
   tool_version?: string;
 }
 

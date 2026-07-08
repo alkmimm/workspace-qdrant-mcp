@@ -42,7 +42,7 @@ session, project, or time window.
 | `bytes_in` | Sum of bytes the agent **would have had to load** to access the same information without the tool. For `search`/`grep`: sum of file sizes referenced by the hits, capped at `top_k × FILE_PROBE_CAP` (default `FILE_PROBE_CAP = 64 KiB`) to avoid pathological inflation. For `retrieve`: full document size. For `list`: estimated bytes of an equivalent `ls -R` output on the same paths. | bytes |
 | `bytes_out` | Bytes of the JSON payload the server actually ships to the MCP client, measured **after** `search-shaping.ts` runs (i.e. after truncate/summary). | bytes |
 | `hits_truncated` | Number of hits whose `content`/`parent_context.unit_text` was truncated by the shaping pass (0 in summary mode). | int |
-| `mode` | `truncate` (default), `summary`, or `none` (cap disabled). | enum |
+| `mode` | `truncate` (default), `summary`, `packed` (single ranked, deduplicated context bundle under the response budget — `responseFormat: "packed"`), or `none` (cap disabled). | enum |
 
 Derived per-row:
 
@@ -179,8 +179,15 @@ emits a search event with `op = 'grep'`:
   to a per-unique-file proxy (`GREP_BYTES_IN_PER_FILE_PROXY`, 8 KiB).
   `bytes_in` is always floored at `bytes_out` so we never claim
   savings for content the agent actually received.
-- `shape_mode = 'none'` (grep does not shape today; if shaping is added
-  later, populate accordingly).
+- `shape_mode = 'truncate'`: grep now shapes its responses — match content
+  and context lines are capped per line (`maxBytesPerLine`, default 500,
+  `…[+N chars]` marker) and the summed match bodies are bounded by the same
+  response byte budget as search (`maxResponseBytes`, default ~24000,
+  shared `applyByteBudget` helper; trailing matches dropped are reported
+  via `budget_truncated`). `bytes_out` is measured AFTER shaping;
+  `hits_truncated` counts matches with at least one capped line. Passing
+  `maxBytesPerLine: 0` and `maxResponseBytes: 0` disables shaping
+  (`shape_mode = 'none'`).
 
 #### 3.3 `retrieve` tool
 

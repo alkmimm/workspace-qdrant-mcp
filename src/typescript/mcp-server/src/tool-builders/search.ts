@@ -115,7 +115,7 @@ function extractOutputOptions(
   if (summary !== undefined) options.summary = summary;
 
   const responseFormat = args?.['responseFormat'] as string | undefined;
-  if (responseFormat === 'concise' || responseFormat === 'detailed') {
+  if (responseFormat === 'concise' || responseFormat === 'detailed' || responseFormat === 'packed') {
     options.responseFormat = responseFormat;
   }
 
