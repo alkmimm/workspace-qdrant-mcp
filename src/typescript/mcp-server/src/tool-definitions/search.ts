@@ -131,9 +131,9 @@ export const searchToolDefinition = {
       },
       responseFormat: {
         type: 'string',
-        enum: ['concise', 'detailed'],
+        enum: ['concise', 'detailed', 'packed'],
         description:
-          'Response verbosity (default: concise). "concise" truncates each hit body with a retrieve() marker; "detailed" returns full bodies (per-hit cap off). Prefer concise for discovery; detailed only when you need whole chunks. `summary` (metadata-only) is stronger than either.',
+          'Response verbosity (default: concise). "concise" truncates each hit body with a retrieve() marker; "detailed" returns full bodies (per-hit cap off); "packed" returns ONE ranked, deduplicated context bundle (packed_bundle.text: per-hit "location · symbol" header + capped body) assembled under maxResponseBytes, with metadata-only entries in results — the most token-efficient way to READ several hits at once. Prefer concise for discovery; packed when you intend to read the top hits; `summary` (metadata-only) is stronger than all.',
       },
       maxResponseBytes: {
         type: 'number',

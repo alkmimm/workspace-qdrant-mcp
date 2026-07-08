@@ -111,9 +111,13 @@ export interface SearchOptions {
    *  pure discovery before a follow-up retrieve(). Default: false. */
   summary?: boolean;
   /** Response verbosity. `concise` (default) truncates each hit body to the
-   *  per-hit cap; `detailed` returns full bodies (disables the per-hit cap). An
-   *  explicit `maxBytesPerHit` overrides this; `summary` is stronger than both. */
-  responseFormat?: 'concise' | 'detailed';
+   *  per-hit cap; `detailed` returns full bodies (disables the per-hit cap);
+   *  `packed` assembles ONE ranked, deduplicated context bundle under the
+   *  response byte budget (see {@link SearchResponse.packed_bundle}) with
+   *  metadata-only entries in `results`. An explicit `maxBytesPerHit`
+   *  overrides the per-hit cap in concise/packed; `summary` is stronger
+   *  than all three. */
+  responseFormat?: 'concise' | 'detailed' | 'packed';
   /** Global cap (chars) on the summed hit bodies of the whole response; trailing
    *  hits beyond it are dropped (>=1 kept) and reported via
    *  {@link SearchResponse.budget_truncated}. Defaults to
@@ -271,6 +275,17 @@ export interface SearchResponse {
   /** Set when more code candidates exist beyond the returned page — pass it back
    *  as `offset` to fetch the next page. Absent on the last page. */
   next_offset?: number;
+  /** Present only for `responseFormat: "packed"`: ONE ranked, deduplicated
+   *  context bundle assembled under the response byte budget. `text` holds
+   *  the bundle (per-hit header + capped body per section); `included` is how
+   *  many hits made it in; `dropped` is how many page hits were left out
+   *  (budget, duplicate body, or empty body) — their metadata still appears
+   *  in `results`, so the agent can retrieve() them individually. */
+  packed_bundle?: { text: string; included: number; dropped: number };
+  /** Count of hits collapsed because their body was byte-identical to a
+   *  higher-ranked hit from a DIFFERENT file (vendored/copied code). Same-file
+   *  chunks are already collapsed upstream by the per-file dedup. Absent when 0. */
+  duplicates_collapsed?: number;
 }
 
 /**
@@ -292,7 +307,7 @@ export interface ShapingMetrics {
   /** Number of hits whose body was truncated (0 in summary mode). */
   hitsTruncated: number;
   /** Which shaping mode produced the response. */
-  mode: 'truncate' | 'summary' | 'none';
+  mode: 'truncate' | 'summary' | 'none' | 'packed';
 }
 
 export interface SearchToolConfig {

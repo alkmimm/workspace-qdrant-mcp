@@ -58,6 +58,16 @@ export const grepToolDefinition = {
         type: 'string',
         description: 'Specific project ID to search',
       },
+      maxBytesPerLine: {
+        type: 'number',
+        description:
+          'Per-line cap in characters on match content and context lines (default: 500). Longer lines — typically minified/generated code — are cut with a "…[+N chars]" marker. Set 0 to disable.',
+      },
+      maxResponseBytes: {
+        type: 'number',
+        description:
+          'Cap on the total match-body chars of one response (default ~24000, same budget as search). When exceeded, trailing matches are dropped (>=1 kept) and budget_truncated.dropped reports how many — narrow with pathGlob or raise the cap. 0 disables.',
+      },
       cwd: {
         type: 'string',
         description:

@@ -46,7 +46,7 @@ export interface SearchEventEconomyInput {
   bytesIn: number;
   bytesOut: number;
   hitsTruncated: number;
-  shapeMode: 'truncate' | 'summary' | 'none';
+  shapeMode: 'truncate' | 'summary' | 'none' | 'packed';
   toolVersion?: string | undefined;
 }
 
@@ -178,7 +178,7 @@ export function updateSearchEventEconomy(
     bytes_in: number;
     bytes_out: number;
     hits_truncated: number;
-    shape_mode: 'truncate' | 'summary' | 'none';
+    shape_mode: 'truncate' | 'summary' | 'none' | 'packed';
     tool_version?: string;
   } = {
     event_id: eventId,
@@ -215,11 +215,11 @@ export interface ToolEventFinish {
   toolVersion?: string | undefined;
   outcome?: string | undefined;
   /**
-   * Optional shaping mode. Defaults to `'none'` — these tools don't
-   * currently shape responses. If a tool later grows a shaping pass,
-   * pass `'truncate'` or `'summary'` accordingly.
+   * Optional shaping mode. Defaults to `'none'` for tools without a
+   * shaping pass; grep passes `'truncate'` now that it caps lines and
+   * enforces the response byte budget.
    */
-  shapeMode?: 'truncate' | 'summary' | 'none' | undefined;
+  shapeMode?: 'truncate' | 'summary' | 'none' | 'packed' | undefined;
   /** Optional truncated-hit count. Defaults to 0 when shapeMode is 'none'. */
   hitsTruncated?: number | undefined;
 }

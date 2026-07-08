@@ -12,6 +12,8 @@
 
 import { randomUUID } from 'node:crypto';
 import { matchesPathExclude } from '../utils/path-glob.js';
+import { applyByteBudget } from './response-budget.js';
+import { DEFAULT_MAX_RESPONSE_BYTES } from './search-types.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import type { TextSearchMatch } from '../clients/grpc-types.js';
@@ -87,6 +89,82 @@ export function computeGrepEconomy(matches: GrepMatch[]): {
   return { bytesOut, bytesIn };
 }
 
+/** Per-line cap for grep match content/context (chars). Grep is line-scoped,
+ *  so 500 chars comfortably fits real code lines while bounding
+ *  minified/generated one-liners, which otherwise ship kilobytes for a
+ *  single match. Spec 20 §3.2 (grep shaping). */
+export const DEFAULT_GREP_MAX_BYTES_PER_LINE = 500;
+
+/** Shaping knobs threaded from GrepOptions. */
+export interface GrepShapingOptions {
+  maxBytesPerLine?: number | undefined;
+  maxResponseBytes?: number | undefined;
+}
+
+export interface ShapedGrepMatches {
+  matches: GrepMatch[];
+  /** Matches with at least one line cut by the per-line cap. */
+  hitsTruncated: number;
+  /** Trailing matches dropped by the response byte budget. */
+  dropped: number;
+  shapeMode: 'truncate' | 'none';
+}
+
+function capLine(line: string, cap: number): string {
+  if (line.length <= cap) return line;
+  // Compact marker — grep output is line-dense, so tell the agent how much
+  // was cut without repeating a full retrieve() call per line.
+  return `${line.slice(0, cap)}…[+${line.length - cap} chars]`;
+}
+
+/** Payload cost of one match: content + context lines (what bytes_out counts). */
+function grepMatchBytes(m: GrepMatch): number {
+  let bytes = m.content.length;
+  for (const line of m.context_before) bytes += line.length;
+  for (const line of m.context_after) bytes += line.length;
+  return bytes;
+}
+
+/**
+ * Shape a grep match set before it ships (spec 20 §3.2):
+ *  - cap match content and each context line at `maxBytesPerLine`;
+ *  - enforce the global response byte budget over the (capped) matches,
+ *    dropping trailing matches once the running total exceeds it (>=1 kept),
+ *    via the same shared helper the search tool uses.
+ * Both knobs accept 0 to disable; with both disabled this is a pass-through
+ * reported as shapeMode 'none'.
+ */
+export function shapeGrepMatches(
+  matches: GrepMatch[],
+  opts: GrepShapingOptions
+): ShapedGrepMatches {
+  const cap = opts.maxBytesPerLine ?? DEFAULT_GREP_MAX_BYTES_PER_LINE;
+  const budget = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  if (cap <= 0 && budget <= 0) {
+    return { matches, hitsTruncated: 0, dropped: 0, shapeMode: 'none' };
+  }
+  let hitsTruncated = 0;
+  const capped =
+    cap <= 0
+      ? matches
+      : matches.map((m) => {
+          const over =
+            m.content.length > cap ||
+            m.context_before.some((l) => l.length > cap) ||
+            m.context_after.some((l) => l.length > cap);
+          if (!over) return m;
+          hitsTruncated += 1;
+          return {
+            ...m,
+            content: capLine(m.content, cap),
+            context_before: m.context_before.map((l) => capLine(l, cap)),
+            context_after: m.context_after.map((l) => capLine(l, cap)),
+          };
+        });
+  const { kept, dropped } = applyByteBudget(capped, grepMatchBytes, budget);
+  return { matches: kept, hitsTruncated, dropped, shapeMode: 'truncate' };
+}
+
 export interface GrepOptions {
   pattern: string;
   regex?: boolean;
@@ -98,6 +176,15 @@ export interface GrepOptions {
   maxResults?: number;
   branch?: string;
   projectId?: string;
+  /** Per-line cap (chars) on match content and each context line. Longer
+   *  lines are truncated with a `…[+N chars]` marker. Defaults to
+   *  {@link DEFAULT_GREP_MAX_BYTES_PER_LINE}; 0 disables. */
+  maxBytesPerLine?: number;
+  /** Global cap (chars) on the summed match bodies of the response; trailing
+   *  matches beyond it are dropped (>=1 kept) and reported via
+   *  `budget_truncated`. Defaults to the search tool's response budget
+   *  ({@link DEFAULT_MAX_RESPONSE_BYTES}); 0 disables. */
+  maxResponseBytes?: number;
 }
 
 export interface GrepMatch {
@@ -121,6 +208,10 @@ export interface GrepResponse {
   truncated: boolean;
   latency_ms: number;
   message?: string;
+  /** Attached only when the response byte budget dropped trailing matches:
+   *  `dropped` is how many were cut (the kept set always has >=1). Narrow
+   *  with pathGlob, lower contextLines, or raise `maxResponseBytes`. */
+  budget_truncated?: { dropped: number };
 }
 
 /** Build the text search request object for the daemon. */
@@ -305,7 +396,10 @@ export class GrepTool {
       maxResults = 1000,
       branch,
       projectId,
+      maxBytesPerLine,
+      maxResponseBytes,
     } = options;
+    const shaping: GrepShapingOptions = { maxBytesPerLine, maxResponseBytes };
 
     if (!pattern) return grepError('Search pattern is required', 0);
 
@@ -368,6 +462,7 @@ export class GrepTool {
       pathExclude,
       startTime,
       eventId,
+      shaping,
       fallbackBranch
     );
   }
@@ -409,6 +504,7 @@ export class GrepTool {
     pathExclude: string | undefined,
     startTime: number,
     eventId: string,
+    shaping: GrepShapingOptions,
     fallbackBranch?: string
   ): Promise<GrepResponse> {
     try {
@@ -515,39 +611,44 @@ export class GrepTool {
           }
         }
       }
-      const economy = computeGrepEconomy(matches);
+      // Shaping (spec 20 §3.2): per-line cap + global response byte budget,
+      // applied BEFORE the economy is computed so bytes_out reflects what
+      // actually ships. Grep matches are line-scoped, but minified/generated
+      // one-liners and high maxResults × contextLines sweeps still explode
+      // without a bound — the same budget semantics as the search tool.
+      const shaped = shapeGrepMatches(matches, shaping);
+      const economy = computeGrepEconomy(shaped.matches);
       // Effectiveness signals (spec 20 §1.2): a retrieve() of one of these
       // files within the escalation window links back via parent_event_id.
+      // Uses the SHAPED matches — refs the agent actually received (a
+      // budget-dropped match never reached it, so it cannot escalate).
       effectivenessTracker.noteHits(
         eventId,
-        matches.map((m) => m.file)
+        shaped.matches.map((m) => m.file)
       );
       const latencyMs = Date.now() - startTime;
       finishToolEvent(this.daemonClient, eventId, {
-        resultCount: matches.length,
+        resultCount: shaped.matches.length,
         latencyMs,
         bytesIn: economy.bytesIn,
         bytesOut: economy.bytesOut,
         toolVersion: MCP_SERVER_VERSION,
+        shapeMode: shaped.shapeMode,
+        hitsTruncated: shaped.hitsTruncated,
       });
-      // No response byte budget here (unlike search's applyResponseBudget): grep
-      // matches are line-scoped — one matched line plus bounded context — and the
-      // daemon already truncates the match set, so the payload is intrinsically
-      // small. The byte budget exists for search's full chunk bodies, which grep
-      // never returns. (list is likewise budget-free: its `listing` is a single
-      // pre-formatted, already-bounded string.)
       return {
         success: true,
-        matches,
+        matches: shaped.matches,
         // Report the deduped count. When the daemon truncated, its
         // total_matches is an upper bound over the (duplicated) full set —
         // discount the duplicates seen on this page as a best effort.
         total_matches: truncated
           ? Math.max(matches.length, totalMatches - duplicatesDropped)
           : matches.length,
-        truncated,
+        truncated: truncated || shaped.dropped > 0,
         latency_ms: latencyMs,
         ...(message ? { message } : {}),
+        ...(shaped.dropped > 0 ? { budget_truncated: { dropped: shaped.dropped } } : {}),
       };
     } catch (error) {
       const latencyMs = Date.now() - startTime;

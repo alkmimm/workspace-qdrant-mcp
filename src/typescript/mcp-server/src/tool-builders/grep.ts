@@ -24,6 +24,8 @@ export type GrepOptions = {
   maxResults?: number;
   branch?: string;
   projectId?: string;
+  maxBytesPerLine?: number;
+  maxResponseBytes?: number;
 };
 
 /** Build grep options from raw tool arguments. */
@@ -61,6 +63,12 @@ export function buildGrepOptions(args: Record<string, unknown> | undefined): Gre
 
   const projectId = args?.['projectId'] as string | undefined;
   if (projectId) options.projectId = projectId;
+
+  const maxBytesPerLine = args?.['maxBytesPerLine'] as number | undefined;
+  if (maxBytesPerLine !== undefined) options.maxBytesPerLine = maxBytesPerLine;
+
+  const maxResponseBytes = args?.['maxResponseBytes'] as number | undefined;
+  if (maxResponseBytes !== undefined) options.maxResponseBytes = maxResponseBytes;
 
   return options;
 }

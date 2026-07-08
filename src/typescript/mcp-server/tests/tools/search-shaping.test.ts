@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { shapeHitPayloads } from '../../src/tools/search-shaping.js';
+import { shapeHitPayloads, dedupeIdenticalBodies } from '../../src/tools/search-shaping.js';
 import {
   DEFAULT_MAX_BYTES_PER_HIT,
   type SearchOptions,
@@ -492,5 +492,130 @@ describe('in-band graph hint (item 3)', () => {
     const response = makeResponse([r]);
     shapeHitPayloads(response, baseOptions());
     expect(response.hint).toBeUndefined();
+  });
+});
+
+// ───────────────────── cross-file identical-body dedup ─────────────────────
+
+describe('dedupeIdenticalBodies', () => {
+  const bigBody = 'const x = 1;\n'.repeat(20); // > DUPLICATE_BODY_MIN_CHARS
+
+  it('collapses a byte-identical body from another file onto the best-ranked hit', () => {
+    const a = makeResult({ id: 'a', content: bigBody, metadata: { file_path: 'src/a.ts' } });
+    const b = makeResult({ id: 'b', content: bigBody, metadata: { file_path: 'vendor/a.ts' } });
+    const { kept, dropped } = dedupeIdenticalBodies([a, b]);
+    expect(kept.map((r) => r.id)).toEqual(['a']);
+    expect(dropped).toBe(1);
+  });
+
+  it('keeps distinct bodies and short identical snippets', () => {
+    const a = makeResult({ id: 'a', content: bigBody });
+    const b = makeResult({ id: 'b', content: `${bigBody}// different` });
+    const shortDup1 = makeResult({ id: 'c', content: 'return null;' });
+    const shortDup2 = makeResult({ id: 'd', content: 'return null;' });
+    const { kept, dropped } = dedupeIdenticalBodies([a, b, shortDup1, shortDup2]);
+    expect(kept).toHaveLength(4);
+    expect(dropped).toBe(0);
+  });
+
+  it('compares trimmed bodies so trailing whitespace does not defeat the dedup', () => {
+    const a = makeResult({ id: 'a', content: bigBody });
+    const b = makeResult({ id: 'b', content: `${bigBody}\n\n` });
+    const { kept } = dedupeIdenticalBodies([a, b]);
+    expect(kept.map((r) => r.id)).toEqual(['a']);
+  });
+});
+
+// ───────────────────── packed bundle (responseFormat: "packed") ─────────────────────
+
+describe('responseFormat "packed"', () => {
+  function packedOptions(extra: Partial<SearchOptions> = {}): SearchOptions {
+    return baseOptions({ responseFormat: 'packed', ...extra });
+  }
+
+  it('assembles one bundle with location · symbol headers and capped bodies', () => {
+    const r = makeResult({
+      id: 'doc-1',
+      content: 'fn body line',
+      metadata: {
+        relative_path: 'src/a.rs',
+        file_path: '/repo/src/a.rs',
+        chunk_symbol_name: 'process_batch',
+        chunk_start_line: 10,
+        chunk_end_line: 42,
+      },
+    });
+    const { response, metrics } = shapeHitPayloads(makeResponse([r]), packedOptions());
+    expect(response.packed_bundle).toBeDefined();
+    const bundle = response.packed_bundle!;
+    expect(bundle.text).toContain('src/a.rs:10-42');
+    expect(bundle.text).toContain('process_batch');
+    expect(bundle.text).toContain('fn body line');
+    expect(bundle.included).toBe(1);
+    expect(metrics.mode).toBe('packed');
+    // results carry metadata-only entries (summary allowlist).
+    expect(response.results[0].content).toBe('');
+  });
+
+  it('fills rank-strictly under maxResponseBytes and reports the dropped tail', () => {
+    const body = 'y'.repeat(400);
+    const results = [1, 2, 3, 4].map((i) =>
+      makeResult({ id: `d${i}`, content: `${body}${i}`, metadata: { file_path: `src/f${i}.ts` } })
+    );
+    // Budget fits roughly two ~430-byte sections.
+    const { response } = shapeHitPayloads(
+      makeResponse(results),
+      packedOptions({ maxResponseBytes: 900 })
+    );
+    const bundle = response.packed_bundle!;
+    expect(bundle.included).toBe(2);
+    expect(bundle.dropped).toBe(2);
+    expect(bundle.text.length).toBeLessThanOrEqual(900);
+    // All four hits remain discoverable as metadata entries.
+    expect(response.results).toHaveLength(4);
+  });
+
+  it('always packs at least one section even when the budget is tiny', () => {
+    const r = makeResult({ content: 'z'.repeat(500) });
+    const { response } = shapeHitPayloads(
+      makeResponse([r]),
+      packedOptions({ maxResponseBytes: 10 })
+    );
+    expect(response.packed_bundle!.included).toBe(1);
+  });
+
+  it('skips byte-identical duplicate bodies inside the bundle', () => {
+    const dupBody = 'const shared = true;\n'.repeat(10);
+    const a = makeResult({ id: 'a', content: dupBody, metadata: { file_path: 'src/a.ts' } });
+    const b = makeResult({ id: 'b', content: dupBody, metadata: { file_path: 'vendor/b.ts' } });
+    const { response } = shapeHitPayloads(makeResponse([a, b]), packedOptions());
+    const bundle = response.packed_bundle!;
+    expect(bundle.included).toBe(1);
+    expect(bundle.dropped).toBe(1);
+  });
+
+  it('caps long bodies at maxBytesPerHit with a retrieve() marker and counts them truncated', () => {
+    const r = makeResult({ id: 'doc-9', content: 'w'.repeat(5000) });
+    const { response, metrics } = shapeHitPayloads(makeResponse([r]), packedOptions());
+    expect(metrics.hitsTruncated).toBe(1);
+    expect(response.packed_bundle!.text).toContain('retrieve');
+    expect(response.packed_bundle!.text.length).toBeLessThan(5000);
+  });
+
+  it('reports bytesOutShaped as the bundle length', () => {
+    const r = makeResult({ content: 'body text here' });
+    const { response, metrics } = shapeHitPayloads(makeResponse([r]), packedOptions());
+    expect(metrics.bytesOutShaped).toBe(response.packed_bundle!.text.length);
+    expect(metrics.bytesInShaped).toBeGreaterThan(0);
+  });
+
+  it('summary:true still wins over packed', () => {
+    const r = makeResult({ content: 'body' });
+    const { response, metrics } = shapeHitPayloads(
+      makeResponse([r]),
+      packedOptions({ summary: true })
+    );
+    expect(metrics.mode).toBe('summary');
+    expect(response.packed_bundle).toBeUndefined();
   });
 });

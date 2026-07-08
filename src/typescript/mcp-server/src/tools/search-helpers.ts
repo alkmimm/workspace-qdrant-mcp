@@ -31,6 +31,7 @@ import {
   resolveDerankConfig,
 } from './search-types.js';
 import { buildFilter } from './search-filters.js';
+import { dedupeIdenticalBodies } from './search-shaping.js';
 import { filterResultsByPathExclude, applyPathDerank } from './search-path-filters.js';
 import {
   searchCollection,
@@ -1249,7 +1250,13 @@ export async function finalizeResults(
   fusedResults.sort((a, b) => b.score - a.score);
   // Collapse same-file chunks BEFORE reranking/slicing so the pool holds
   // distinct files, not repeated chunks of one file.
-  const deduped = dedupeByFile(fusedResults);
+  const fileDeduped = dedupeByFile(fusedResults);
+  // Cross-FILE body dedup: vendored/copied files surface the byte-identical
+  // snippet once per copy — collapse to the best-ranked occurrence so the
+  // page (and its token cost) holds distinct content. Same-file overlap is
+  // already gone via dedupeByFile; this closes the cross-file case. The
+  // count is surfaced as `duplicates_collapsed` on the response.
+  const { kept: deduped, dropped: duplicatesCollapsed } = dedupeIdenticalBodies(fileDeduped);
   // Cross-encoder rerank is ON by a soft default (a weak w=0.10 blend below;
   // WQM_SEARCH_RERANK=0 disables it). It was historically OFF. Measured on the 12-query
   // known-item benchmark (settled ext4 index, 2026-06-02): the cross-encoder
@@ -1346,5 +1353,6 @@ export async function finalizeResults(
   // More code candidates beyond this page → tell the agent how to fetch them.
   // (The page-1-only scratchpad lane is intentionally not paginated.)
   if (hasMoreCode) response.next_offset = windowEnd;
+  if (duplicatesCollapsed > 0) response.duplicates_collapsed = duplicatesCollapsed;
   return response;
 }
