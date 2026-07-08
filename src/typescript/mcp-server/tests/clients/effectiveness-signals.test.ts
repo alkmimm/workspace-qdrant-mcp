@@ -141,7 +141,7 @@ describe('logSearchEvent effectiveness integration', () => {
     expect(sink[0]!.session_id).toBeTruthy();
   });
 
-  it('reclassifies an overlapping repeat search as followup with a parent link', () => {
+  it('links an overlapping repeat search via parent_event_id and PRESERVES its op', () => {
     const sink: CapturedRequest[] = [];
     const client = captureClient(sink);
     // Distinctive tokens: the module-level tracker is shared across tests.
@@ -160,8 +160,60 @@ describe('logSearchEvent effectiveness integration', () => {
       queryText: 'qqfollowupzz probe again',
     });
     expect(sink[0]!.op).toBe('search');
-    expect(sink[1]!.op).toBe('followup');
+    // op is event identity — op-keyed analytics need the full census. The
+    // followup signal travels on the parent link alone (view derives it).
+    expect(sink[1]!.op).toBe('search');
     expect(sink[1]!.parent_event_id).toBe('evt-fu-origin');
+  });
+
+  it('does not link queries that share only stopwords or short common tokens', () => {
+    const sink: CapturedRequest[] = [];
+    const client = captureClient(sink);
+    logSearchEvent(client, {
+      id: 'evt-stop-a',
+      actor: 'claude',
+      tool: 'mcp_qdrant',
+      op: 'search',
+      queryText: 'where does the daemon store the qqstopzza',
+    });
+    logSearchEvent(client, {
+      id: 'evt-stop-b',
+      actor: 'claude',
+      tool: 'mcp_qdrant',
+      op: 'search',
+      queryText: 'where is the qqstopzzb parsed for this',
+    });
+    expect(sink[1]!.parent_event_id).toBeUndefined();
+  });
+
+  it('ignores non-claude actors entirely (no link, no tracker pollution)', () => {
+    const sink: CapturedRequest[] = [];
+    const client = captureClient(sink);
+    logSearchEvent(client, {
+      id: 'evt-bench-a',
+      actor: 'benchmark',
+      tool: 'mcp_qdrant',
+      op: 'search',
+      queryText: 'qqbenchzz sweep case alpha',
+    });
+    logSearchEvent(client, {
+      id: 'evt-bench-b',
+      actor: 'benchmark',
+      tool: 'mcp_qdrant',
+      op: 'search',
+      queryText: 'qqbenchzz sweep case beta',
+    });
+    // Benchmark traffic is never classified...
+    expect(sink[1]!.parent_event_id).toBeUndefined();
+    // ...and never recorded: an agent query overlapping it finds no origin.
+    logSearchEvent(client, {
+      id: 'evt-bench-claude',
+      actor: 'claude',
+      tool: 'mcp_qdrant',
+      op: 'search',
+      queryText: 'qqbenchzz sweep case gamma',
+    });
+    expect(sink[2]!.parent_event_id).toBeUndefined();
   });
 
   it('gives grep the parent link but keeps op=grep', () => {

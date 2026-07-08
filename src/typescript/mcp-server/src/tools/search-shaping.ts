@@ -258,17 +258,29 @@ function emptyMetrics(mode: ShapingMetrics['mode']): ShapingMetrics {
   return { bytesInShaped: 0, bytesOutShaped: 0, hitsTruncated: 0, mode };
 }
 
-/** Header line for one packed-bundle section: grep-like locator, chunk end
- *  line when known, and the symbol name — the minimal framing an agent needs
- *  to attribute a body without digging through a metadata bag. */
+/** Separator between packed-bundle sections. Its cost is charged to every
+ *  section in the budget pass so the joined bundle can never exceed the
+ *  response budget. */
+const PACKED_JOINER = '\n\n';
+
+/** Header line for one packed-bundle section: grep-like locator with the
+ *  chunk's line RANGE when the chunk metadata carries one, and the symbol
+ *  name — the minimal framing an agent needs to attribute a body without
+ *  digging through a metadata bag. The range is built from
+ *  chunk_start_line/chunk_end_line directly (never by extending
+ *  deriveLocation's output, which prefers exact-search line_number and would
+ *  glue mismatched semantics into an incoherent span). */
 function packedSectionHeader(r: SearchResult): string {
-  const loc = deriveLocation(r.metadata) ?? `${r.collection}:${r.id}`;
-  const endLine = metadataNumber(r.metadata['chunk_end_line']);
-  // deriveLocation ends with the start line when one is known; extend it to
-  // a range so the agent sees the section's true extent.
-  const range = endLine !== undefined && /:\d+$/.test(loc) ? `-${endLine}` : '';
+  const path =
+    metadataString(r.metadata, 'relative_path') ?? metadataString(r.metadata, 'file_path');
+  const start = metadataNumber(r.metadata['chunk_start_line']);
+  const end = metadataNumber(r.metadata['chunk_end_line']);
+  const loc =
+    path !== undefined && start !== undefined && end !== undefined
+      ? `${path}:${start}-${end}`
+      : (deriveLocation(r.metadata) ?? `${r.collection}:${r.id}`);
   const symbol = metadataString(r.metadata, 'chunk_symbol_name');
-  return `── ${loc}${range}${symbol !== undefined ? ` · ${symbol}` : ''} ──`;
+  return `── ${loc}${symbol !== undefined ? ` · ${symbol}` : ''} ──`;
 }
 
 /**
@@ -276,12 +288,14 @@ function packedSectionHeader(r: SearchResult): string {
  * bundle under the response byte budget instead of N independently-truncated
  * hits.
  *
- * Fill is rank-strict and greedy: sections are appended in rank order until
- * the next section would exceed the budget (at least one is always kept, and
- * skipped-not-counted sections are empty bodies and byte-identical duplicate
- * bodies — the cross-file copy case). `results` carries metadata-only entries
- * for the FULL page (same allowlist as summary mode), so everything the
- * bundle had no room for remains discoverable and retrievable.
+ * Composition of the module's own primitives so all drop counters agree:
+ * empty bodies are skipped, {@link dedupeIdenticalBodies} collapses
+ * byte-identical cross-file copies, and {@link applyByteBudget} does the
+ * rank-strict greedy fill (>=1 kept) with each section charged its joiner,
+ * so the joined bundle never exceeds the budget. `results` carries
+ * metadata-only entries for the FULL page (same allowlist as summary mode),
+ * so everything the bundle had no room for remains discoverable and
+ * retrievable.
  */
 function shapeAsPackedBundle(
   response: SearchResponse,
@@ -293,31 +307,25 @@ function shapeAsPackedBundle(
   for (const r of response.results) metrics.bytesInShaped += hitShapedBytes(r);
 
   const cap = options.maxBytesPerHit ?? DEFAULT_MAX_BYTES_PER_HIT;
-  const sections: string[] = [];
-  const seenBodies = new Set<string>();
-  let used = 0;
-  for (const r of response.results) {
+  const bodied = response.results.filter((r) => (r.content ?? '').trim() !== '');
+  const { kept: unique } = dedupeIdenticalBodies(bodied);
+  const sections = unique.map((r) => {
     const body = (r.content ?? '').trim();
-    if (body === '') continue;
-    if (body.length >= DUPLICATE_BODY_MIN_CHARS && seenBodies.has(body)) continue;
     const packedBody = cap > 0 ? truncateText(body, cap, buildRetrieveReference(r)) : body;
-    const section = `${packedSectionHeader(r)}\n${packedBody}`;
-    if (sections.length > 0 && budget > 0 && used + section.length > budget) break;
-    if (packedBody.length < body.length) metrics.hitsTruncated += 1;
-    sections.push(section);
-    seenBodies.add(body);
-    used += section.length;
-  }
+    return { text: `${packedSectionHeader(r)}\n${packedBody}`, truncated: packedBody.length < body.length };
+  });
+  const { kept } = applyByteBudget(sections, (s) => s.text.length + PACKED_JOINER.length, budget);
+  for (const s of kept) if (s.truncated) metrics.hitsTruncated += 1;
 
-  const bundleText = sections.join('\n\n');
+  const bundleText = kept.map((s) => s.text).join(PACKED_JOINER);
   metrics.bytesOutShaped = bundleText.length;
   const out: SearchResponse = {
     ...response,
     results: response.results.map((r) => shapeAsSummary(r)),
     packed_bundle: {
       text: bundleText,
-      included: sections.length,
-      dropped: response.results.length - sections.length,
+      included: kept.length,
+      dropped: response.results.length - kept.length,
     },
   };
   if (hint !== undefined && out.hint === undefined) out.hint = hint;

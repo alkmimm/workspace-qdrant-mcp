@@ -1310,7 +1310,13 @@ export async function finalizeResults(
     rerankEnabled && rerankWeight > 0
       ? await rerankResults(daemonClient, params.query, deduped, windowEnd, rerankWeight)
       : deduped;
-  const { page: finalResults, hasMore: hasMoreCode } = paginateRanked(ranked, offset, params.limit);
+  const { page: finalResults, hasMore } = paginateRanked(ranked, offset, params.limit);
+  // Body-dedup can shrink the over-fetched pool below the window probe even
+  // though more ranked candidates exist upstream (the pool was fetched at
+  // fetchLimit and then collapsed). The PRE-dedup pool size still proves more
+  // candidates exist — without this, a duplicate-heavy repo silently loses
+  // next_offset and deeper pages become unreachable.
+  const hasMoreCode = hasMore || fileDeduped.length > windowEnd;
 
   // Restore the display score: the ordering above used the path-boosted (and,
   // when enabled, reranked) score, but the number we RETURN is the pre-boost
@@ -1353,6 +1359,11 @@ export async function finalizeResults(
   // More code candidates beyond this page → tell the agent how to fetch them.
   // (The page-1-only scratchpad lane is intentionally not paginated.)
   if (hasMoreCode) response.next_offset = windowEnd;
-  if (duplicatesCollapsed > 0) response.duplicates_collapsed = duplicatesCollapsed;
+  // Pool-level count (collapses across the whole fused candidate pool, not
+  // just this page), so report it once — on the first page only — instead of
+  // repeating the same number on every page as if each page had deduped it.
+  if (duplicatesCollapsed > 0 && offset === 0) {
+    response.duplicates_collapsed = duplicatesCollapsed;
+  }
   return response;
 }

@@ -301,47 +301,38 @@ export class RetrieveTool {
           ? JSON.stringify(filter).slice(0, 500)
           : `:${collection}`);
 
-    // Effectiveness signals (spec 20 §1.2): when this retrieve targets a
-    // document/path a recent same-session search returned, link the event
-    // to that search via parent_event_id — the `token_savings` view counts
-    // it into the origin's had_escalation ("the trimmed payload wasn't
-    // enough; the agent paid for the full document").
-    const escalationRefs = [
-      documentId,
-      filePath,
-      typeof filter?.['document_id'] === 'string' ? (filter['document_id'] as string) : undefined,
-    ].filter((r): r is string => typeof r === 'string' && r !== '');
-    const escalationOrigin = effectivenessTracker.findOrigin(
-      currentSessionId(),
-      escalationRefs,
-      Date.now()
-    );
-
     // Log start. queryText carries documentId for by-id lookups, a
     // filePath/lineNumber locator for exact-search hits, or a compact
     // filter summary for by-filter scans, so retrieve events remain
-    // self-describing under `wqm admin token-savings`.
-    logSearchEvent(this.daemonClient, {
-      id: eventId,
-      actor: 'claude',
-      tool: 'mcp_qdrant',
-      op: 'retrieve',
-      queryText,
-      topK: limit,
-      projectId: projectId,
-      parentEventId: escalationOrigin,
-    });
+    // self-describing under `wqm admin token-savings`. The escalation
+    // parent link is deliberately attached AFTER argument validation
+    // (a refused retrieve never delivered a document, so it must not
+    // mark the origin search as escalated).
+    const logStart = (parentEventId?: string): void => {
+      logSearchEvent(this.daemonClient, {
+        id: eventId,
+        actor: 'claude',
+        tool: 'mcp_qdrant',
+        op: 'retrieve',
+        queryText,
+        topK: limit,
+        projectId: projectId,
+        parentEventId,
+      });
+    };
 
     // Refuse unknown argument names before any scope resolution. Silently
     // dropping them would turn a mis-shaped call into an unrelated error
     // (or worse, an unintended broad read) further down.
     if (unknownArgs && unknownArgs.length > 0) {
+      logStart();
       const result = invalidArgsResponse(unknownArgs);
       this.finishRetrieve(eventId, result, startTime, 'invalid_args');
       return result;
     }
 
     if (lineNumber !== undefined && !filePath) {
+      logStart();
       const result = failureResponse(
         'lineNumber requires filePath.',
         'Pass `filePath` together with `lineNumber` for exact-search hits.'
@@ -349,6 +340,22 @@ export class RetrieveTool {
       this.finishRetrieve(eventId, result, startTime, 'invalid_args');
       return result;
     }
+
+    // Effectiveness signals (spec 20 §1.2): when this retrieve targets a
+    // document/path a recent same-session search returned, link the event
+    // to that search via parent_event_id — the `token_savings` view counts
+    // it into the origin's had_escalation ("the trimmed payload wasn't
+    // enough; the agent paid for the full document"). The view additionally
+    // requires result_count > 0, so a linked-but-empty retrieve still does
+    // not count as an escalation.
+    const escalationRefs = [
+      documentId,
+      filePath,
+      typeof filter?.['document_id'] === 'string' ? (filter['document_id'] as string) : undefined,
+    ].filter((r): r is string => typeof r === 'string' && r !== '');
+    logStart(
+      effectivenessTracker.findOrigin(currentSessionId(), escalationRefs, Date.now())
+    );
 
     // F-002 / F-011: resolve the tenant context up front so that BOTH
     // by-id verification AND by-filter scoping share the same answer.

@@ -1270,7 +1270,7 @@ message UpdateSearchEventEconomyRequest {
     int64 bytes_in = 2;                               // Sum of bytes BEFORE shaping
     int64 bytes_out = 3;                              // Sum of bytes AFTER shaping
     int32 hits_truncated = 4;                         // Hits whose body was truncated
-    string shape_mode = 5;                            // "truncate" | "summary" | "none"
+    string shape_mode = 5;                            // "truncate" | "summary" | "none" | "packed"
     optional string tool_version = 6;                 // MCP server version
 }
 

@@ -74,13 +74,16 @@ def iso_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
-def write_mcp_config(enabled: bool) -> str:
+def write_mcp_config(enabled: bool, dry_run: bool = False) -> str:
     """Materialize a --strict-mcp-config file: either exactly our HTTP server
     or an empty registry (native condition)."""
     if enabled:
         token = os.environ.get("MCP_HTTP_TOKEN")
         if not token:
-            sys.exit("MCP_HTTP_TOKEN is not set — required for the mcp* conditions.")
+            if dry_run:
+                token = "<MCP_HTTP_TOKEN>"  # dry-run prints commands, runs nothing
+            else:
+                sys.exit("MCP_HTTP_TOKEN is not set — required for the mcp* conditions.")
         cfg = {
             "mcpServers": {
                 "workspace-qdrant": {
@@ -120,35 +123,44 @@ def build_command(prompt: str, condition: str, mcp_config_path: str, args) -> li
     return cmd
 
 
-def server_metrics(t_start: str, t_end: str) -> dict:
-    """Aggregate search_events in [t_start, t_end] via python3 inside the
-    memexd container (no sqlite3 binary there; DB lives in the volume)."""
-    query = f"""
-import json, sqlite3
-conn = sqlite3.connect("file:{MEMEXD_DB}?mode=ro", uri=True)
+# Plain constant — window bounds arrive via argv, so there is no f-string
+# brace-doubling or quote-injection to fight, and the script stays
+# copy-pasteable for standalone debugging.
+SERVER_METRICS_SCRIPT = """
+import json, sqlite3, sys
+t_start, t_end, db_path = sys.argv[1], sys.argv[2], sys.argv[3]
+conn = sqlite3.connect("file:" + db_path + "?mode=ro", uri=True)
 c = conn.cursor()
 rows = c.execute(
     "SELECT op, COUNT(*), COALESCE(SUM(bytes_in),0), COALESCE(SUM(bytes_out),0), "
     "COALESCE(SUM(hits_truncated),0) FROM search_events "
     "WHERE tool='mcp_qdrant' AND ts >= ? AND ts <= ? GROUP BY op",
-    ({t_start!r}, {t_end!r}),
+    (t_start, t_end),
 ).fetchall()
 sessions = [r[0] for r in c.execute(
     "SELECT DISTINCT session_id FROM search_events "
     "WHERE tool='mcp_qdrant' AND ts >= ? AND ts <= ? AND session_id IS NOT NULL",
-    ({t_start!r}, {t_end!r}),
+    (t_start, t_end),
 )]
-print(json.dumps({{
-    "by_op": {{r[0]: {{"calls": r[1], "bytes_in": r[2], "bytes_out": r[3], "hits_truncated": r[4]}} for r in rows}},
+print(json.dumps({
+    "by_op": {r[0]: {"calls": r[1], "bytes_in": r[2], "bytes_out": r[3], "hits_truncated": r[4]} for r in rows},
     "total_calls": sum(r[1] for r in rows),
     "bytes_in": sum(r[2] for r in rows),
     "bytes_out": sum(r[3] for r in rows),
     "sessions": sessions,
-}}))
+}))
 """
+
+
+def server_metrics(t_start: str, t_end: str) -> dict:
+    """Aggregate search_events in [t_start, t_end] via python3 inside the
+    memexd container (no sqlite3 binary there; DB lives in the volume)."""
     try:
         out = subprocess.run(
-            ["docker", "exec", MEMEXD_CONTAINER, "python3", "-c", query],
+            [
+                "docker", "exec", MEMEXD_CONTAINER, "python3", "-c",
+                SERVER_METRICS_SCRIPT, t_start, t_end, MEMEXD_DB,
+            ],
             capture_output=True,
             text=True,
             timeout=30,
@@ -167,23 +179,40 @@ def check_success(result_text: str, expected: list) -> bool:
 def run_one(task: dict, condition: str, mcp_config_path: str, args) -> dict:
     cmd = build_command(task["prompt"], condition, mcp_config_path, args)
     t0 = datetime.now(timezone.utc)
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        cwd=str(REPO_ROOT),
-        timeout=args.timeout,
-    )
-    t1 = datetime.now(timezone.utc)
     record = {
         "task": task["id"],
         "category": task.get("category"),
         "condition": condition,
         "t_start": iso_z(t0),
-        "t_end": iso_z(t1),
-        "wall_ms": int((t1 - t0).total_seconds() * 1000),
-        "exit_code": proc.returncode,
     }
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            timeout=args.timeout,
+        )
+    except subprocess.TimeoutExpired:
+        # One hung run must not abort the whole campaign: record the cell as
+        # errored and let the grid continue.
+        t1 = datetime.now(timezone.utc)
+        record.update(
+            {
+                "t_end": iso_z(t1),
+                "wall_ms": int((t1 - t0).total_seconds() * 1000),
+                "error": f"run timed out after {args.timeout}s",
+            }
+        )
+        return record
+    t1 = datetime.now(timezone.utc)
+    record.update(
+        {
+            "t_end": iso_z(t1),
+            "wall_ms": int((t1 - t0).total_seconds() * 1000),
+            "exit_code": proc.returncode,
+        }
+    )
     try:
         result = json.loads(proc.stdout)
     except json.JSONDecodeError:
@@ -208,13 +237,16 @@ def run_one(task: dict, condition: str, mcp_config_path: str, args) -> dict:
             "answer_excerpt": text[:400],
         }
     )
-    # ±1s slack: the daemon stamps ts with its own clock at event INSERT
-    # (same machine, but be robust to sub-second skew). Runs are sequential
-    # with a 3s gap, so windows never overlap.
+    # Attribution window: −1s on the start (clock-skew safety) and +2s on the
+    # end — search_events writes are FIRE-AND-FORGET and ts is stamped at
+    # INSERT inside the write actor, so the last calls of a run can land
+    # slightly after t_end under load. The settle sleep below plus the
+    # inter-run gap in main() keep consecutive windows disjoint.
     from datetime import timedelta
 
+    time.sleep(2)  # let fire-and-forget telemetry writes land
     record["server"] = server_metrics(
-        iso_z(t0 - timedelta(seconds=1)), iso_z(t1 + timedelta(seconds=1))
+        iso_z(t0 - timedelta(seconds=1)), iso_z(t1 + timedelta(seconds=2))
     )
     return record
 
@@ -245,7 +277,9 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    configs = {c: write_mcp_config(enabled=c != "native") for c in conditions}
+    configs = {
+        c: write_mcp_config(enabled=c != "native", dry_run=args.dry_run) for c in conditions
+    }
     try:
         total = len(tasks) * len(conditions) * args.repeat
         n = 0
@@ -270,7 +304,10 @@ def main() -> None:
                         f"mcp_calls={record.get('server', {}).get('total_calls', 0)} "
                         f"wall={record['wall_ms']}ms"
                     )
-                    time.sleep(3)  # keep attribution windows disjoint (±1s slack each side)
+                    # Keep attribution windows disjoint: the previous window
+                    # ends at t_end+2s (post 2s settle); the next starts at
+                    # t_start-1s, which this gap pushes safely past it.
+                    time.sleep(4)
     finally:
         for path in configs.values():
             try:

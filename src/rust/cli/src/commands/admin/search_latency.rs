@@ -199,10 +199,15 @@ struct ChainEvent {
 }
 
 fn query_chain(conn: &rusqlite::Connection, session_id: &str) -> Result<Vec<ChainEvent>> {
-    // Order a session's events by ts (the only chaining signal currently
-    // written) and diff adjacent rows to flag reformulations. `escalation`
-    // depends on parent_event_id, which NO current MCP call site writes — so it
-    // is effectively inert today (see the note printed below the table).
+    // Chain classification. Since the effectiveness-signals change the MCP
+    // server writes parent_event_id with the ORIGINAL op preserved:
+    //   - parent-linked retrieve  → escalation (search → full document)
+    //   - parent-linked search/search_exact (or interim 'followup' rows
+    //     written by the v44-era server) → reformulation
+    //   - parent-linked grep → lineage (query overlap recorded, not a
+    //     followup by definition)
+    // The adjacent-row heuristic remains as a fallback for events written
+    // before the linkage existed.
     let sql = "WITH ordered AS ( \
             SELECT id, ts, tool, op, query_text, result_count, latency_ms, parent_event_id, \
                    LAG(query_text) OVER w AS prev_query, LAG(op) OVER w AS prev_op, \
@@ -211,9 +216,12 @@ fn query_chain(conn: &rusqlite::Connection, session_id: &str) -> Result<Vec<Chai
          ) \
          SELECT ts, tool, op, substr(COALESCE(query_text,''),1,48) AS query, \
                 result_count, latency_ms, \
-                CASE WHEN prev_op = op AND op IN ('search','search_exact') \
+                CASE WHEN parent_event_id IS NOT NULL AND op = 'retrieve' THEN 'escalation' \
+                     WHEN parent_event_id IS NOT NULL \
+                          AND op IN ('search','search_exact','followup') THEN 'reformulation' \
+                     WHEN parent_event_id IS NOT NULL THEN 'lineage' \
+                     WHEN prev_op = op AND op IN ('search','search_exact') \
                           AND gap_s < 60 AND prev_query IS NOT query_text THEN 'reformulation' \
-                     WHEN parent_event_id IS NOT NULL THEN 'escalation' \
                      ELSE 'root' END AS link \
          FROM ordered ORDER BY ts";
     let mut stmt = conn.prepare(sql)?;
@@ -256,10 +264,10 @@ fn print_chain_table(events: &[ChainEvent], session_id: &str) {
         .collect();
     output::print_table_auto(&rows);
     output::info(
-        "Note: 'escalation' depends on parent_event_id, which no MCP call site \
-         currently writes, so the v38 token_savings view's had_followup/had_escalation \
-         are inert until that is wired. Chain order + 'reformulation' come from \
-         session_id + ts."
+        "Note: parent_event_id is written by the MCP server (effectiveness \
+         signals): linked retrieves = 'escalation', linked repeat searches = \
+         'reformulation', linked greps = 'lineage'. Events older than that \
+         change fall back to the adjacent-row heuristic."
             .to_string(),
     );
 }
