@@ -5,6 +5,8 @@
 
 use tracing::{debug, info};
 
+use wqm_common::hashing::normalize_line_endings;
+
 use crate::code_lines_schema::{initial_seq, FTS5_DELETE_ROW_SQL, FTS5_INSERT_ROW_SQL};
 use crate::line_diff::compute_line_diff;
 use crate::search_db::{SearchDbError, SearchDbManager};
@@ -260,7 +262,10 @@ impl<'a> FtsBatchProcessor<'a> {
     ) -> Result<BatchStats, SearchDbError> {
         let start = std::time::Instant::now();
         let pool = self.search_db.pool();
-        let lines: Vec<&str> = content.split('\n').collect();
+        // Normalize EOL so stored code_lines carry no trailing '\r' (CRLF files);
+        // `content.len()` below still records the true on-disk size.
+        let normalized = normalize_line_endings(content);
+        let lines: Vec<&str> = normalized.split('\n').collect();
 
         let mut tx = pool.begin().await?;
 

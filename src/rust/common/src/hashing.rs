@@ -4,6 +4,7 @@
 //! and content/file hashing using SHA256.
 
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
 
@@ -109,8 +110,25 @@ impl fmt::Display for IdempotencyKeyError {
 
 impl std::error::Error for IdempotencyKeyError {}
 
-/// Compute SHA256 hash of file content
-pub fn compute_file_hash(path: &Path) -> std::io::Result<String> {
+/// Normalize line endings to `\n` for stable, EOL-agnostic content identity.
+///
+/// Converts CRLF (`\r\n`) and lone CR (`\r`) to LF (`\n`). Returns the input
+/// borrowed unchanged when it contains no `\r` (the common case), so this is
+/// zero-copy for LF-only content.
+///
+/// This is what makes the SAME file committed with Windows (CRLF) and Unix (LF)
+/// line endings map to ONE `base_point` / ONE Qdrant point instead of two — see
+/// [`compute_file_hash`] and [`compute_base_point`].
+pub fn normalize_line_endings(content: &str) -> Cow<'_, str> {
+    if !content.contains('\r') {
+        return Cow::Borrowed(content);
+    }
+    Cow::Owned(content.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+/// Streaming SHA256 of raw file bytes (no normalization). Used for large files
+/// and as the binary fallback in [`compute_file_hash`].
+fn hash_file_bytes_streaming(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -123,6 +141,45 @@ pub fn compute_file_hash(path: &Path) -> std::io::Result<String> {
         hasher.update(&buffer[..bytes_read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Compute the content-identity hash of a file.
+///
+/// For UTF-8 text the hash is taken over EOL-NORMALIZED content (see
+/// [`normalize_line_endings`]), so a CRLF copy and an LF copy of the same file
+/// share one hash — and therefore one `base_point` — collapsing the cross-EOL
+/// duplication that otherwise stored the file twice and inflated search/grep
+/// results. Non-UTF-8 (binary) files are hashed byte-for-byte, unchanged.
+///
+/// Files larger than `MAX_NORMALIZE_BYTES` are streamed raw (no normalization):
+/// source/config/CI files — the ones with CRLF/LF churn — are far below the
+/// cap, and buffering a large file just to normalize it is not worth the memory.
+///
+/// NOTE: this is the file's IDENTITY for base_point + change detection, not a
+/// byte-integrity checksum. A pure line-ending change no longer counts as a
+/// content change — by design, since the indexed text is identical.
+pub fn compute_file_hash(path: &Path) -> std::io::Result<String> {
+    const MAX_NORMALIZE_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB
+    let too_large = std::fs::metadata(path)
+        .map(|m| m.len() > MAX_NORMALIZE_BYTES)
+        .unwrap_or(true);
+    if too_large {
+        return hash_file_bytes_streaming(path);
+    }
+
+    let bytes = std::fs::read(path)?;
+    match std::str::from_utf8(&bytes) {
+        Ok(text) => {
+            let normalized = normalize_line_endings(text);
+            Ok(compute_content_hash(&normalized))
+        }
+        Err(_) => {
+            // Binary file: hash the raw bytes (already in memory) unchanged.
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            Ok(format!("{:x}", hasher.finalize()))
+        }
+    }
 }
 
 /// Compute SHA256 hash of a string (for chunk content)
@@ -268,6 +325,33 @@ mod tests {
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
         assert_eq!(hash1.len(), 64);
+    }
+
+    #[test]
+    fn test_normalize_line_endings() {
+        assert_eq!(&*normalize_line_endings("a\r\nb"), "a\nb");
+        assert_eq!(&*normalize_line_endings("a\rb"), "a\nb");
+        assert_eq!(&*normalize_line_endings("a\r\nb\r\n"), "a\nb\n");
+        // Mixed CRLF + LF collapses to LF.
+        assert_eq!(&*normalize_line_endings("a\r\nb\nc"), "a\nb\nc");
+        // LF-only content is returned borrowed (zero-copy).
+        assert!(matches!(normalize_line_endings("a\nb"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_content_hash_is_eol_invariant() {
+        // The identity hash of CRLF and LF versions of the same text must match
+        // — this is what collapses the cross-EOL duplicate base_points that
+        // otherwise stored the same file twice and inflated search/grep results.
+        let crlf =
+            compute_content_hash(&normalize_line_endings("fn main() {\r\n    ok();\r\n}\r\n"));
+        let lf = compute_content_hash(&normalize_line_endings("fn main() {\n    ok();\n}\n"));
+        assert_eq!(crlf, lf);
+
+        // And the base_point built from those hashes is identical.
+        let bp_crlf = compute_base_point("t", "src/main.rs", &crlf);
+        let bp_lf = compute_base_point("t", "src/main.rs", &lf);
+        assert_eq!(bp_crlf, bp_lf);
     }
 
     #[test]
