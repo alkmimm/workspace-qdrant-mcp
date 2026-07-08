@@ -70,12 +70,63 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_extension_less_files() {
+    fn test_known_extensionless_files_allowed() {
         let ae = AllowedExtensions::default();
-        assert!(!ae.is_allowed("Makefile", "projects"));
-        assert!(!ae.is_allowed("Dockerfile", "projects"));
-        assert!(!ae.is_allowed("LICENSE", "projects"));
-        assert!(!ae.is_allowed("/home/user/.bashrc", "projects"));
+        // Well-known build/CI/config/docs files carry no extension but are the
+        // heart of an infra repo — they must be indexed.
+        assert!(ae.is_allowed("Makefile", "projects"));
+        assert!(ae.is_allowed("Dockerfile", "projects"));
+        assert!(ae.is_allowed("Jenkinsfile", "projects"));
+        assert!(ae.is_allowed("LICENSE", "projects"));
+        assert!(ae.is_allowed("/repo/gateway/Jenkinsfile", "projects"));
+        assert!(ae.is_allowed("/home/user/.bashrc", "projects"));
+        assert!(ae.is_allowed(".gitignore", "projects"));
+        // Also accepted in the library set (superset).
+        assert!(ae.is_allowed("Makefile", "libraries"));
+    }
+
+    #[test]
+    fn test_filename_variant_globs_allowed() {
+        let ae = AllowedExtensions::default();
+        // The real-world reason this was filed: suffixed Jenkinsfiles and
+        // Dockerfiles must index.
+        assert!(ae.is_allowed("/repo/worker-command/Jenkinsfile_ECS", "projects"));
+        assert!(ae.is_allowed("/repo/api-service/Jenkinsfile_dev", "projects"));
+        assert!(ae.is_allowed("Dockerfile.prod", "projects"));
+        assert!(ae.is_allowed("api.Dockerfile", "projects"));
+        assert!(ae.is_allowed("Makefile.am", "projects"));
+        // Case-insensitive.
+        assert!(ae.is_allowed("DOCKERFILE", "projects"));
+        assert!(ae.is_allowed("jenkinsfile_ecs", "projects"));
+    }
+
+    #[test]
+    fn test_unknown_extensionless_files_rejected() {
+        let ae = AllowedExtensions::default();
+        // A random extensionless file with no known name stays excluded.
+        assert!(!ae.is_allowed("randomfile", "projects"));
+        assert!(!ae.is_allowed("/tmp/notes", "projects"));
+        assert!(!ae.is_allowed("data", "projects"));
+    }
+
+    #[test]
+    fn test_glob_does_not_overmatch() {
+        let ae = AllowedExtensions::default();
+        // Files that merely START with a well-known stem but carry an unrelated,
+        // non-allowlisted extension must NOT be swallowed by the variant globs.
+        assert!(!ae.is_allowed("jenkinsfileresults.log", "projects"));
+        assert!(!ae.is_allowed("dockerfiles.zip", "projects"));
+    }
+
+    #[test]
+    fn test_credential_files_never_indexed() {
+        let ae = AllowedExtensions::default();
+        // Secret-bearing files must NOT be indexed even though they are
+        // extensionless / dotfiles — indexing would copy secrets into Qdrant.
+        assert!(!ae.is_allowed("/repo/.env", "projects"));
+        assert!(!ae.is_allowed("/home/user/.netrc", "projects"));
+        assert!(!ae.is_allowed("/home/user/.npmrc", "projects"));
+        assert!(!ae.is_allowed("/home/user/.ssh/id_rsa", "projects"));
     }
 
     #[test]
@@ -304,14 +355,28 @@ mod tests {
     }
 
     #[test]
-    fn test_route_extensionless_excluded() {
+    fn test_route_extensionless_known_files() {
         let ae = AllowedExtensions::default();
+        // Known build/CI files route to the project collection (text/code,
+        // never binary documents), and to the library collection under a
+        // library watch.
         assert_eq!(
             ae.route_file("Makefile", "projects", "proj"),
-            FileRoute::Excluded
+            FileRoute::ProjectCollection
+        );
+        assert_eq!(
+            ae.route_file("/repo/worker-command/Jenkinsfile_ECS", "projects", "proj"),
+            FileRoute::ProjectCollection
         );
         assert_eq!(
             ae.route_file("Dockerfile", "libraries", "lib"),
+            FileRoute::LibraryCollection {
+                source_project_id: None
+            }
+        );
+        // An unknown extensionless file is still excluded.
+        assert_eq!(
+            ae.route_file("randomfile", "projects", "proj"),
             FileRoute::Excluded
         );
     }
