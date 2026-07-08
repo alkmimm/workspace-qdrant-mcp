@@ -40,8 +40,13 @@ export interface TextSearchMatch {
    * (spec docs/specs/20-token-economy-instrumentation.md §3.2).
    * `undefined` when search.db is at v6 or below — the tool falls
    * back to a per-file proxy in that case.
+   *
+   * Typed `number | string` because the proto field is int64 and the
+   * client loads protos with `longs: String` — at runtime this arrives
+   * as a decimal STRING. Coerce with Number() before any arithmetic
+   * (string `+=` concatenates digits; see mapGrepMatches in grep.ts).
    */
-  file_size?: number;
+  file_size?: number | string;
 }
 
 // ── GraphService ──
