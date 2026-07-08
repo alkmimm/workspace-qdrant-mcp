@@ -15,6 +15,8 @@
 
 use imara_diff::{Algorithm, Diff, InternedInput};
 
+use wqm_common::hashing::normalize_line_endings;
+
 /// A single diff operation between old and new file content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffOp {
@@ -121,6 +123,15 @@ fn build_change_flags<'a>(
 /// Uses the Histogram algorithm (best general-purpose performance for code).
 /// Lines are split on `\n`. Both inputs should be UTF-8 strings.
 pub fn compute_line_diff(old_content: &str, new_content: &str) -> DiffResult {
+    // Normalize the NEW content's line endings so stored code_lines never carry
+    // a trailing '\r' (CRLF files). Only the new side: leaving `old_content`
+    // as-stored means a line that differs from disk only by '\r' is seen as
+    // Changed and rewritten clean on re-ingest, instead of Unchanged (which
+    // would keep the stale '\r'). Steady state doesn't churn — an EOL-only
+    // change no longer alters the file hash, so re-ingest is skipped upstream
+    // before it ever reaches here.
+    let new_norm = normalize_line_endings(new_content);
+    let new_content: &str = &new_norm;
     let old_lines: Vec<&str> = old_content.split('\n').collect();
     let new_lines: Vec<&str> = new_content.split('\n').collect();
 
@@ -521,5 +532,43 @@ fn process(val: i32, extra: i32) {
         assert_eq!(result.new_line_count, 3);
         // The diff should report some change (the new empty line)
         assert!(result.change_count() > 0);
+    }
+
+    #[test]
+    fn test_crlf_new_content_is_normalized() {
+        // Lines stored from CRLF content must not carry a trailing '\r'.
+        let result = compute_line_diff("", "alpha\r\nbeta\r\ngamma\r\n");
+        for op in &result.ops {
+            let stored = match op {
+                DiffOp::Changed { new_content, .. } | DiffOp::Inserted { new_content, .. } => {
+                    Some(new_content)
+                }
+                _ => None,
+            };
+            if let Some(content) = stored {
+                assert!(
+                    !content.contains('\r'),
+                    "stored code_line content must not contain CR: {:?}",
+                    content
+                );
+            }
+        }
+
+        // The normalized diff matches the LF-only equivalent line-for-line.
+        let lf = compute_line_diff("", "alpha\nbeta\ngamma\n");
+        assert_eq!(result.new_line_count, lf.new_line_count);
+    }
+
+    #[test]
+    fn test_crlf_only_change_still_rewrites_stale_cr() {
+        // A line already stored WITH a '\r' (old content) whose disk form is now
+        // LF-normalized is seen as Changed, so re-ingest cleans it.
+        let result = compute_line_diff("keep\r", "keep");
+        assert_eq!(result.modified_count(), 1);
+        if let DiffOp::Changed { new_content, .. } = &result.ops[0] {
+            assert_eq!(new_content, "keep");
+        } else {
+            panic!("expected a Changed op, got {:?}", result.ops[0]);
+        }
     }
 }

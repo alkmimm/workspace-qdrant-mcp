@@ -12,6 +12,8 @@
 
 use std::collections::HashSet;
 
+use wqm_common::hashing::normalize_line_endings;
+
 use crate::code_lines_schema::initial_seq;
 use crate::code_lines_schema::{FTS5_DELETE_ROW_SQL, FTS5_INSERT_ROW_SQL};
 use crate::line_diff::{DiffOp, DiffResult};
@@ -84,7 +86,9 @@ async fn insert_all_lines(
     content: &str,
 ) -> Result<FileDiffStats, SearchDbError> {
     let mut stats = FileDiffStats::default();
-    let lines: Vec<&str> = content.split('\n').collect();
+    // Normalize EOL so first-ingestion code_lines carry no trailing '\r'.
+    let normalized = normalize_line_endings(content);
+    let lines: Vec<&str> = normalized.split('\n').collect();
     for (i, line) in lines.iter().enumerate() {
         let seq = initial_seq(i);
         let line_number = (i + 1) as i64;
