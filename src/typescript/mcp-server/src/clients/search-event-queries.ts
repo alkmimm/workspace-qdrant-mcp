@@ -6,6 +6,13 @@
  */
 
 import type { DaemonClient } from './daemon-client.js';
+import { currentSessionId, effectivenessTracker } from './effectiveness-signals.js';
+
+/** Ops that carry a user query and participate in followup classification.
+ *  `grep` records its query for escalation lineage but keeps its op — spec
+ *  20 §1.2 defines followup_rate over search ops only. */
+const FOLLOWUP_RECLASSIFY_OPS = new Set(['search', 'search_exact']);
+const QUERY_TRACKING_OPS = new Set(['search', 'search_exact', 'grep']);
 
 export interface SearchEventInput {
   id: string;
@@ -52,6 +59,29 @@ export interface SearchEventEconomyInput {
 export function logSearchEvent(daemonClient: DaemonClient | null, event: SearchEventInput): void {
   if (!daemonClient) return;
 
+  // Effectiveness signals (spec 20 §1.2), applied at the single event-write
+  // boundary so every tool gets them uniformly instead of per-call-site:
+  //  - session_id: no caller ever had one to pass (the column was NULL on
+  //    100% of live rows, so the view's per-session probes could never
+  //    fire); default to the transport-scoped MCP session, falling back to
+  //    a per-process id.
+  //  - followup: a search/search_exact whose terms overlap a same-session
+  //    query issued < 60s earlier is written as op='followup' with
+  //    parent_event_id = the origin — the `token_savings` view counts it
+  //    into the origin's had_followup.
+  //  - grep gets the same parent lineage but keeps op='grep'.
+  // An explicit caller-provided sessionId/parentEventId always wins.
+  const sessionId = event.sessionId ?? currentSessionId();
+  let op = event.op;
+  let parentEventId = event.parentEventId;
+  if (QUERY_TRACKING_OPS.has(op) && event.queryText !== undefined && event.queryText !== '') {
+    const origin = effectivenessTracker.noteQuery(event.id, sessionId, event.queryText, Date.now());
+    if (origin !== undefined && parentEventId === undefined) {
+      parentEventId = origin;
+      if (FOLLOWUP_RECLASSIFY_OPS.has(op)) op = 'followup';
+    }
+  }
+
   // Fire-and-forget — catch errors to avoid breaking search
   const request: {
     id: string;
@@ -72,9 +102,9 @@ export function logSearchEvent(daemonClient: DaemonClient | null, event: SearchE
     id: event.id,
     actor: event.actor,
     tool: event.tool,
-    op: event.op,
+    op,
   };
-  if (event.sessionId !== undefined) request.session_id = event.sessionId;
+  request.session_id = sessionId;
   if (event.projectId !== undefined) request.project_id = event.projectId;
   if (event.queryText !== undefined) request.query_text = event.queryText;
   if (event.filters !== undefined) request.filters = event.filters;
@@ -83,7 +113,7 @@ export function logSearchEvent(daemonClient: DaemonClient | null, event: SearchE
   if (event.latencyMs !== undefined) request.latency_ms = event.latencyMs;
   if (event.topResultRefs !== undefined) request.top_result_refs = event.topResultRefs;
   if (event.outcome !== undefined) request.outcome = event.outcome;
-  if (event.parentEventId !== undefined) request.parent_event_id = event.parentEventId;
+  if (parentEventId !== undefined) request.parent_event_id = parentEventId;
 
   daemonClient.logSearchEvent(request).catch((err: unknown) => {
     // Instrumentation must never break search, but log for diagnostics
