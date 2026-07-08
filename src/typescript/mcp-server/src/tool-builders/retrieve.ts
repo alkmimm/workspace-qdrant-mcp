@@ -55,6 +55,9 @@ export function buildRetrieveOptions(args: Record<string, unknown> | undefined):
   const libraryName = args?.['libraryName'] as string | undefined;
   if (libraryName) options.libraryName = libraryName;
 
+  const branch = args?.['branch'] as string | undefined;
+  if (branch) options.branch = branch;
+
   const unknownArgs = args ? Object.keys(args).filter((key) => !KNOWN_ARG_KEYS.has(key)) : [];
   if (unknownArgs.length > 0) options.unknownArgs = unknownArgs;
 

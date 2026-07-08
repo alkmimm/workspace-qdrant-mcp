@@ -25,12 +25,30 @@ import { randomUUID } from 'node:crypto';
 import type { QdrantClient } from '@qdrant/js-client-rest';
 import { getQdrantClient } from '../clients/qdrant-client-factory.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
+import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import { FIELD_CONTENT, FIELD_TENANT_ID, FIELD_LIBRARY_NAME } from '../common/native-bridge.js';
 import { finishToolEvent, logSearchEvent } from '../clients/search-event-queries.js';
 import { currentSessionId, effectivenessTracker } from '../clients/effectiveness-signals.js';
 import { SERVER_VERSION as MCP_SERVER_VERSION } from '../server-types.js';
-import { resolveProjectIdentity } from './branch-scope.js';
+import {
+  resolveProjectIdentity,
+  resolveEffectiveBranch,
+  resolveFallbackBranch,
+  concreteBranchFilter,
+} from './branch-scope.js';
+import { branchFilterClause } from './search-filters.js';
+
+/**
+ * Branch scope for project/scratchpad scroll paths. `branch` is the caller's
+ * effective branch (their current Git branch, or an explicit value / `"*"`);
+ * `fallbackBranch` is the base branch the daemon tags unchanged files under.
+ * Both feed {@link branchFilterClause}, the same clause `search` uses.
+ */
+interface BranchScope {
+  branch?: string;
+  fallbackBranch?: string;
+}
 
 // Re-export all types so existing imports from './retrieve.js' continue to work
 export type {
@@ -260,11 +278,13 @@ export class RetrieveTool {
   private readonly qdrantClient: QdrantClient;
   private readonly projectDetector: ProjectDetector;
   private readonly daemonClient: DaemonClient | null;
+  private readonly stateManager: SqliteStateManager | null;
 
   constructor(
     config: RetrieveToolConfig,
     projectDetector: ProjectDetector,
-    daemonClient?: DaemonClient
+    daemonClient?: DaemonClient,
+    stateManager?: SqliteStateManager
   ) {
     this.qdrantClient = getQdrantClient({
       url: config.qdrantUrl,
@@ -273,6 +293,7 @@ export class RetrieveTool {
     });
     this.projectDetector = projectDetector;
     this.daemonClient = daemonClient ?? null;
+    this.stateManager = stateManager ?? null;
   }
 
   async retrieve(options: RetrieveOptions): Promise<RetrieveResponse> {
@@ -358,11 +379,19 @@ export class RetrieveTool {
     );
 
     // F-002 / F-011: resolve the tenant context up front so that BOTH
-    // by-id verification AND by-filter scoping share the same answer.
-    const resolvedProjectId =
-      collection === 'projects' || collection === 'scratchpad'
-        ? (projectId ?? (await this.resolveProjectId()))
-        : undefined;
+    // by-id verification AND by-filter scoping share the same answer. For
+    // project/scratchpad reads also resolve the branch scope now, so the
+    // scroll paths (document_id fallback, path locator, metadata filter) are
+    // scoped to the caller's branch instead of leaking stale chunks tagged on
+    // other branches — the same default-to-current-branch rule search / grep /
+    // search_exact already apply.
+    let resolvedProjectId: string | undefined;
+    let branchScope: BranchScope = {};
+    if (collection === 'projects' || collection === 'scratchpad') {
+      const identity = await resolveProjectIdentity(this.projectDetector, projectId);
+      resolvedProjectId = identity.projectId;
+      branchScope = this.resolveBranchScope(options.branch, identity);
+    }
 
     if (filePath) {
       const locationParams = {
@@ -373,6 +402,7 @@ export class RetrieveTool {
         offset,
         projectId: resolvedProjectId,
         libraryName,
+        branchScope,
         ...(filter ? { filter } : {}),
         ...(lineNumber !== undefined ? { lineNumber } : {}),
       };
@@ -389,7 +419,8 @@ export class RetrieveTool {
         resolvedProjectId,
         libraryName,
         limit,
-        offset
+        offset,
+        branchScope
       );
       this.finishRetrieve(eventId, result, startTime);
       return result;
@@ -421,7 +452,16 @@ export class RetrieveTool {
       offset: number;
       projectId: string | undefined;
       libraryName: string | undefined;
-    } = { collectionName, collection, limit, offset, projectId: resolvedProjectId, libraryName };
+      branchScope: BranchScope;
+    } = {
+      collectionName,
+      collection,
+      limit,
+      offset,
+      projectId: resolvedProjectId,
+      libraryName,
+      branchScope,
+    };
     if (filter) filterParams.filter = filter;
 
     const result = await this.retrieveByFilter(filterParams);
@@ -443,6 +483,7 @@ export class RetrieveTool {
     offset: number;
     projectId: string | undefined;
     libraryName: string | undefined;
+    branchScope?: BranchScope;
   }): Promise<RetrieveResponse> {
     const {
       collectionName,
@@ -454,6 +495,7 @@ export class RetrieveTool {
       offset,
       projectId,
       libraryName,
+      branchScope,
     } = params;
 
     // The exact-search `id` field carries the ABSOLUTE file_path, but agents
@@ -469,6 +511,7 @@ export class RetrieveTool {
       offset,
       projectId,
       libraryName,
+      branchScope: branchScope ?? {},
     });
 
     if (!fallback.success) {
@@ -527,7 +570,8 @@ export class RetrieveTool {
     resolvedProjectId: string | undefined,
     libraryName: string | undefined,
     limit: number,
-    offset: number
+    offset: number,
+    branchScope: BranchScope = {}
   ): Promise<RetrieveResponse> {
     // F-002: project-scope and library-scope lookups MUST resolve their
     // scope before reading. Without it, the verification step below
@@ -553,6 +597,7 @@ export class RetrieveTool {
         offset,
         projectId: resolvedProjectId,
         libraryName,
+        branchScope,
       });
     }
 
@@ -573,6 +618,7 @@ export class RetrieveTool {
           offset: 0,
           projectId: resolvedProjectId,
           libraryName,
+          branchScope,
         });
 
         if (fallback.success && fallback.documents.length > 0) {
@@ -621,12 +667,32 @@ export class RetrieveTool {
     offset: number;
     projectId: string | undefined;
     libraryName: string | undefined;
+    branchScope?: BranchScope;
   }): Promise<RetrieveResponse> {
-    const { collectionName, collection, filter, pathLocator, limit, offset, projectId, libraryName } =
-      params;
+    const {
+      collectionName,
+      collection,
+      filter,
+      pathLocator,
+      limit,
+      offset,
+      projectId,
+      libraryName,
+      branchScope,
+    } = params;
+    const branch = branchScope?.branch;
+    const fallbackBranch = branchScope?.fallbackBranch;
 
-    try {
-      const qdrantFilter = this.buildFilter(collection, filter, projectId, libraryName, pathLocator);
+    const scroll = (useBranch: boolean) => {
+      const qdrantFilter = this.buildFilter(
+        collection,
+        filter,
+        projectId,
+        libraryName,
+        pathLocator,
+        useBranch ? branch : undefined,
+        useBranch ? fallbackBranch : undefined
+      );
       const scrollRequest: {
         limit: number;
         offset?: number;
@@ -636,8 +702,23 @@ export class RetrieveTool {
       } = { limit: limit + 1, with_payload: true, with_vector: false };
       if (offset > 0) scrollRequest.offset = offset;
       if (qdrantFilter) scrollRequest.filter = qdrantFilter;
+      return this.qdrantClient.scroll(collectionName, scrollRequest);
+    };
 
-      const result = await this.qdrantClient.scroll(collectionName, scrollRequest);
+    try {
+      let result = await scroll(true);
+
+      // Auto-widen (mirrors grep / search_exact #151): a branch-scoped scroll
+      // that finds nothing may just be missing a version the daemon tagged
+      // under another branch — unchanged files live under the base branch, and
+      // a file can exist only on a different feature branch. `retrieve` is a
+      // known-point lookup, so widen to all branches rather than returning
+      // empty. The tenant filter still applies, so this never crosses project
+      // boundaries.
+      const branchApplied = branchFilterClause(branch, fallbackBranch) !== null;
+      if (branchApplied && result.points.length === 0) {
+        result = await scroll(false);
+      }
 
       const hasMore = result.points.length > limit;
       const points = hasMore ? result.points.slice(0, limit) : result.points;
@@ -680,7 +761,9 @@ export class RetrieveTool {
     filter?: Record<string, string>,
     projectId?: string,
     libraryName?: string,
-    pathLocator?: string
+    pathLocator?: string,
+    branch?: string,
+    fallbackBranch?: string
   ): Record<string, unknown> | null {
     const mustConditions: Record<string, unknown>[] = [];
 
@@ -688,6 +771,14 @@ export class RetrieveTool {
       mustConditions.push({ key: FIELD_TENANT_ID, match: { value: projectId } });
     } else if (collection === 'libraries' && libraryName) {
       mustConditions.push({ key: FIELD_TENANT_ID, match: { value: libraryName } });
+    }
+
+    // Branch scope applies only to the branch-partitioned collections. Reuses
+    // the exact clause `search` builds (`branchFilterClause`) so retrieve can
+    // never drift from the canonical branch semantics.
+    if (collection === 'projects' || collection === 'scratchpad') {
+      const branchCond = branchFilterClause(branch, fallbackBranch);
+      if (branchCond) mustConditions.push(branchCond);
     }
 
     if (filter) {
@@ -711,7 +802,35 @@ export class RetrieveTool {
     return mustConditions.length > 0 ? { must: mustConditions } : null;
   }
 
-  private async resolveProjectId(): Promise<string | undefined> {
-    return (await resolveProjectIdentity(this.projectDetector, undefined)).projectId;
+  /**
+   * Resolve the branch scope for a project/scratchpad read. Mirrors search /
+   * grep / search_exact: default to the caller's current Git branch, widened to
+   * the base branch the daemon tags unchanged files under. An explicit `branch`
+   * (including `"*"` for cross-branch) is honored verbatim. Without a
+   * `stateManager` (e.g. in unit tests) only the effective branch is applied.
+   */
+  private resolveBranchScope(
+    explicitBranch: string | undefined,
+    identity: { projectId: string | undefined; projectPath: string | undefined }
+  ): BranchScope {
+    const effectiveBranch = resolveEffectiveBranch({
+      explicitBranch,
+      scope: 'project',
+      projectId: identity.projectId,
+      projectPath: identity.projectPath,
+    });
+    const scope: BranchScope = {};
+    if (effectiveBranch !== undefined) scope.branch = effectiveBranch;
+
+    const concreteEffective = concreteBranchFilter(effectiveBranch);
+    if (identity.projectId && concreteEffective && this.stateManager) {
+      const watchFolderId = this.stateManager.getWatchFolderIdByTenantId(identity.projectId);
+      const baseBranch = watchFolderId
+        ? this.stateManager.getBaseBranch(watchFolderId, concreteEffective)
+        : null;
+      const fallbackBranch = resolveFallbackBranch({ effectiveBranch, baseBranch });
+      if (fallbackBranch !== undefined) scope.fallbackBranch = fallbackBranch;
+    }
+    return scope;
   }
 }
