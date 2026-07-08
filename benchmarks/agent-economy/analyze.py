@@ -47,11 +47,18 @@ def summarize(runs: list) -> dict:
             out = [r[key] for r in rows if r.get(key) is not None]
             return out
 
-        server_calls = [r.get("server", {}).get("total_calls", 0) for r in rows]
-        server_out = [r.get("server", {}).get("bytes_out", 0) for r in rows]
-        server_in = [r.get("server", {}).get("bytes_in", 0) for r in rows]
+        # Server-plane means EXCLUDE runs whose probe errored: folding an
+        # error dict in as zeros would make the mcp conditions read as
+        # "never used the server" the moment the probe breaks — silently
+        # wrong conclusions instead of a visible data gap.
+        server_ok = [r.get("server", {}) for r in rows if "error" not in r.get("server", {})]
+        server_errors = len(rows) - len(server_ok)
+        server_calls = [s.get("total_calls", 0) for s in server_ok]
+        server_out = [s.get("bytes_out", 0) for s in server_ok]
+        server_in = [s.get("bytes_in", 0) for s in server_ok]
         summary[cond] = {
             "runs": len(rows),
+            "server_probe_errors": server_errors,
             "success_rate": mean(1 if r.get("success") else 0 for r in rows),
             "mean_cost_usd": mean(vals("cost_usd")) if vals("cost_usd") else None,
             "median_cost_usd": median(vals("cost_usd")) if vals("cost_usd") else None,
@@ -60,9 +67,9 @@ def summarize(runs: list) -> dict:
             "mean_cache_read_tokens": mean(vals("cache_read_tokens")) if vals("cache_read_tokens") else None,
             "mean_turns": mean(vals("num_turns")) if vals("num_turns") else None,
             "mean_duration_ms": mean(vals("duration_ms")) if vals("duration_ms") else None,
-            "mean_mcp_calls": mean(server_calls) if server_calls else 0,
-            "mean_server_bytes_out": mean(server_out) if server_out else 0,
-            "mean_server_bytes_in": mean(server_in) if server_in else 0,
+            "mean_mcp_calls": mean(server_calls) if server_calls else None,
+            "mean_server_bytes_out": mean(server_out) if server_out else None,
+            "mean_server_bytes_in": mean(server_in) if server_in else None,
         }
         # Cost per completed task — the headline metric: total spend divided
         # by the number of SUCCESSFUL runs (a cheap condition that fails is
@@ -76,6 +83,7 @@ def summarize(runs: list) -> dict:
 def print_summary(summary: dict) -> None:
     metrics = [
         ("runs", "{:d}"),
+        ("server_probe_errors", "{:d}"),
         ("success_rate", "{:.1%}"),
         ("cost_per_completed_usd", "{:.4f}"),
         ("mean_cost_usd", "{:.4f}"),

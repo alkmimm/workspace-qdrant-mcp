@@ -8,10 +8,12 @@
 import type { DaemonClient } from './daemon-client.js';
 import { currentSessionId, effectivenessTracker } from './effectiveness-signals.js';
 
-/** Ops that carry a user query and participate in followup classification.
- *  `grep` records its query for escalation lineage but keeps its op — spec
- *  20 §1.2 defines followup_rate over search ops only. */
-const FOLLOWUP_RECLASSIFY_OPS = new Set(['search', 'search_exact']);
+/** Ops that carry a user query and participate in effectiveness tracking.
+ *  All three get followup lineage via parent_event_id; the stored `op` is
+ *  NEVER rewritten — op is event identity, and every op-keyed consumer
+ *  (adoption sampler, Grafana series, `wqm admin search-latency` chains)
+ *  depends on the census staying complete. The `token_savings` view derives
+ *  "followup" from the parent link + op instead. */
 const QUERY_TRACKING_OPS = new Set(['search', 'search_exact', 'grep']);
 
 export interface SearchEventInput {
@@ -65,20 +67,26 @@ export function logSearchEvent(daemonClient: DaemonClient | null, event: SearchE
   //    100% of live rows, so the view's per-session probes could never
   //    fire); default to the transport-scoped MCP session, falling back to
   //    a per-process id.
-  //  - followup: a search/search_exact whose terms overlap a same-session
-  //    query issued < 60s earlier is written as op='followup' with
-  //    parent_event_id = the origin — the `token_savings` view counts it
-  //    into the origin's had_followup.
-  //  - grep gets the same parent lineage but keeps op='grep'.
+  //  - followup lineage: a search/search_exact/grep whose terms overlap a
+  //    same-session query issued < 60s earlier gets parent_event_id = the
+  //    origin. The stored `op` is preserved — the view derives "followup"
+  //    from the link, so op-keyed analytics keep their full census.
+  //  - agent traffic only: benchmark/eval runs (telemetryActor 'benchmark' /
+  //    'user') fire dozens of related queries back-to-back in one session;
+  //    classifying those would flood followup_rate with self-inflicted
+  //    signal, so only actor 'claude' participates in tracking.
   // An explicit caller-provided sessionId/parentEventId always wins.
   const sessionId = event.sessionId ?? currentSessionId();
-  let op = event.op;
   let parentEventId = event.parentEventId;
-  if (QUERY_TRACKING_OPS.has(op) && event.queryText !== undefined && event.queryText !== '') {
+  if (
+    event.actor === 'claude' &&
+    QUERY_TRACKING_OPS.has(event.op) &&
+    event.queryText !== undefined &&
+    event.queryText !== ''
+  ) {
     const origin = effectivenessTracker.noteQuery(event.id, sessionId, event.queryText, Date.now());
     if (origin !== undefined && parentEventId === undefined) {
       parentEventId = origin;
-      if (FOLLOWUP_RECLASSIFY_OPS.has(op)) op = 'followup';
     }
   }
 
@@ -102,7 +110,7 @@ export function logSearchEvent(daemonClient: DaemonClient | null, event: SearchE
     id: event.id,
     actor: event.actor,
     tool: event.tool,
-    op,
+    op: event.op,
   };
   request.session_id = sessionId;
   if (event.projectId !== undefined) request.project_id = event.projectId;

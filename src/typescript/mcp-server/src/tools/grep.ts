@@ -12,8 +12,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { matchesPathExclude } from '../utils/path-glob.js';
-import { applyByteBudget } from './response-budget.js';
-import { DEFAULT_MAX_RESPONSE_BYTES } from './search-types.js';
+import { shapeGrepMatches, type GrepShapingOptions } from './grep-shaping.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import type { TextSearchMatch } from '../clients/grpc-types.js';
@@ -21,6 +20,7 @@ import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
 import { finishToolEvent, logSearchEvent } from '../clients/search-event-queries.js';
 import { effectivenessTracker } from '../clients/effectiveness-signals.js';
+import { int64ToNumber } from '../clients/daemon-client/system-methods.js';
 import { SERVER_VERSION as MCP_SERVER_VERSION } from '../server-types.js';
 import {
   concreteBranchFilter,
@@ -89,81 +89,14 @@ export function computeGrepEconomy(matches: GrepMatch[]): {
   return { bytesOut, bytesIn };
 }
 
-/** Per-line cap for grep match content/context (chars). Grep is line-scoped,
- *  so 500 chars comfortably fits real code lines while bounding
- *  minified/generated one-liners, which otherwise ship kilobytes for a
- *  single match. Spec 20 §3.2 (grep shaping). */
-export const DEFAULT_GREP_MAX_BYTES_PER_LINE = 500;
-
-/** Shaping knobs threaded from GrepOptions. */
-export interface GrepShapingOptions {
-  maxBytesPerLine?: number | undefined;
-  maxResponseBytes?: number | undefined;
-}
-
-export interface ShapedGrepMatches {
-  matches: GrepMatch[];
-  /** Matches with at least one line cut by the per-line cap. */
-  hitsTruncated: number;
-  /** Trailing matches dropped by the response byte budget. */
-  dropped: number;
-  shapeMode: 'truncate' | 'none';
-}
-
-function capLine(line: string, cap: number): string {
-  if (line.length <= cap) return line;
-  // Compact marker — grep output is line-dense, so tell the agent how much
-  // was cut without repeating a full retrieve() call per line.
-  return `${line.slice(0, cap)}…[+${line.length - cap} chars]`;
-}
-
-/** Payload cost of one match: content + context lines (what bytes_out counts). */
-function grepMatchBytes(m: GrepMatch): number {
-  let bytes = m.content.length;
-  for (const line of m.context_before) bytes += line.length;
-  for (const line of m.context_after) bytes += line.length;
-  return bytes;
-}
-
-/**
- * Shape a grep match set before it ships (spec 20 §3.2):
- *  - cap match content and each context line at `maxBytesPerLine`;
- *  - enforce the global response byte budget over the (capped) matches,
- *    dropping trailing matches once the running total exceeds it (>=1 kept),
- *    via the same shared helper the search tool uses.
- * Both knobs accept 0 to disable; with both disabled this is a pass-through
- * reported as shapeMode 'none'.
- */
-export function shapeGrepMatches(
-  matches: GrepMatch[],
-  opts: GrepShapingOptions
-): ShapedGrepMatches {
-  const cap = opts.maxBytesPerLine ?? DEFAULT_GREP_MAX_BYTES_PER_LINE;
-  const budget = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-  if (cap <= 0 && budget <= 0) {
-    return { matches, hitsTruncated: 0, dropped: 0, shapeMode: 'none' };
-  }
-  let hitsTruncated = 0;
-  const capped =
-    cap <= 0
-      ? matches
-      : matches.map((m) => {
-          const over =
-            m.content.length > cap ||
-            m.context_before.some((l) => l.length > cap) ||
-            m.context_after.some((l) => l.length > cap);
-          if (!over) return m;
-          hitsTruncated += 1;
-          return {
-            ...m,
-            content: capLine(m.content, cap),
-            context_before: m.context_before.map((l) => capLine(l, cap)),
-            context_after: m.context_after.map((l) => capLine(l, cap)),
-          };
-        });
-  const { kept, dropped } = applyByteBudget(capped, grepMatchBytes, budget);
-  return { matches: kept, hitsTruncated, dropped, shapeMode: 'truncate' };
-}
+// Response shaping (per-line cap + byte budget) lives in grep-shaping.ts —
+// re-exported here so existing consumers/tests keep their import path.
+export {
+  shapeGrepMatches,
+  DEFAULT_GREP_MAX_BYTES_PER_LINE,
+  type GrepShapingOptions,
+  type ShapedGrepMatches,
+} from './grep-shaping.js';
 
 export interface GrepOptions {
   pattern: string;
@@ -319,9 +252,9 @@ export function mapGrepMatches(matches: TextSearchMatch[]): GrepMatch[] {
     // on the write path where gRPC clamps it to i64::MAX, which in turn
     // blows up SUM(bytes_in) in the token_savings view. Skip 0 —
     // proto3 defaults non-optional int64 fields to 0, and an unset
-    // optional decodes to undefined (Number(undefined) is NaN).
-    const fileSize = Number(m.file_size);
-    if (Number.isFinite(fileSize) && fileSize > 0) out.file_size = fileSize;
+    // optional decodes to undefined (coerced to the 0 fallback).
+    const fileSize = int64ToNumber(m.file_size);
+    if (fileSize > 0) out.file_size = fileSize;
     return out;
   });
 }
@@ -636,6 +569,18 @@ export class GrepTool {
         shapeMode: shaped.shapeMode,
         hitsTruncated: shaped.hitsTruncated,
       });
+      // Budget drops get their own signal — do NOT fold them into `truncated`,
+      // whose long-standing meaning is "the daemon capped the match set at
+      // maxResults" with "raise maxResults / narrow the pattern" as the remedy.
+      // A budget drop needs a DIFFERENT lever, so overloading the flag sends
+      // pre-existing consumers into a raise-maxResults retry loop that returns
+      // the identical page. The message teaches the right knob in-band.
+      if (shaped.dropped > 0) {
+        const budgetNote =
+          `Response byte budget dropped ${shaped.dropped} trailing match(es) — ` +
+          `narrow with pathGlob, lower contextLines, or raise maxResponseBytes.`;
+        message = message ? `${message} ${budgetNote}` : budgetNote;
+      }
       return {
         success: true,
         matches: shaped.matches,
@@ -645,7 +590,7 @@ export class GrepTool {
         total_matches: truncated
           ? Math.max(matches.length, totalMatches - duplicatesDropped)
           : matches.length,
-        truncated: truncated || shaped.dropped > 0,
+        truncated,
         latency_ms: latencyMs,
         ...(message ? { message } : {}),
         ...(shaped.dropped > 0 ? { budget_truncated: { dropped: shaped.dropped } } : {}),

@@ -173,7 +173,12 @@ export class WorkspaceQdrantMcpServer {
     });
     if (sticky) sessionState.lastHostCwd = sticky;
     if (bind) {
-      return runWithRequestContext({ hostCwd: bind }, () =>
+      // PRESERVE the transport-bound context (mcpSessionId!) and only override
+      // the cwd. Replacing the object wholesale dropped the MCP session id on
+      // exactly the dominant HTTP path (body-`cwd` / sticky-cwd calls), so
+      // every search event fell back to the per-process session key —
+      // cross-linking followup/escalation signals between concurrent clients.
+      return runWithRequestContext({ ...getRequestContext(), hostCwd: bind }, () =>
         dispatchToolCall(toolName, args, components, sessionState)
       );
     }

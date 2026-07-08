@@ -284,7 +284,9 @@ export interface SearchResponse {
   packed_bundle?: { text: string; included: number; dropped: number };
   /** Count of hits collapsed because their body was byte-identical to a
    *  higher-ranked hit from a DIFFERENT file (vendored/copied code). Same-file
-   *  chunks are already collapsed upstream by the per-file dedup. Absent when 0. */
+   *  chunks are already collapsed upstream by the per-file dedup. Counted over
+   *  the whole candidate pool (not just this page) and therefore reported on
+   *  the FIRST page only. Absent when 0. */
   duplicates_collapsed?: number;
 }
 

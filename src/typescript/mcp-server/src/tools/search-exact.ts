@@ -91,6 +91,11 @@ function mapExactResults(
   }));
 }
 
+// Exact-mode dedup is (file, line, content)-keyed and intentionally does NOT
+// apply the semantic pipeline's cross-file identical-BODY collapse
+// (dedupeIdenticalBodies): exact hits are single lines, and identical lines
+// across different files (imports, common statements) are legitimate distinct
+// results, not vendored-copy noise.
 function dedupeExactResults(results: SearchResult[]): SearchResult[] {
   const seen = new Set<string>();
   const out: SearchResult[] = [];

@@ -13,20 +13,13 @@
  */
 const DEFAULT_GREP_MAX_RESULTS = 100;
 
-export type GrepOptions = {
-  pattern: string;
-  regex?: boolean;
-  caseSensitive?: boolean;
-  pathGlob?: string;
-  pathExclude?: string;
-  scope?: 'project' | 'all';
-  contextLines?: number;
-  maxResults?: number;
-  branch?: string;
-  projectId?: string;
-  maxBytesPerLine?: number;
-  maxResponseBytes?: number;
-};
+// Single source of truth for the options shape: the tool's own interface.
+// A structural clone here was a fourth sync point for every new knob — a
+// forgotten copy passes JSON-schema validation and is silently dropped
+// before reaching the tool.
+import type { GrepOptions } from '../tools/grep.js';
+
+export type { GrepOptions };
 
 /** Build grep options from raw tool arguments. */
 export function buildGrepOptions(args: Record<string, unknown> | undefined): GrepOptions {

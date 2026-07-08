@@ -36,8 +36,11 @@ import {
   grpcUnaryWithTimeout,
 } from './connection.js';
 
-/** Coerce a proto `int64` (decoded as a string by the gRPC client) to a number. */
-function int64ToNumber(value: unknown, fallback = 0): number {
+/** Coerce a proto `int64` (decoded as a string by the gRPC client — the
+ *  loader uses `longs: String`) to a number. Exported as THE shared coercion
+ *  for int64 fields consumed arithmetically anywhere in the server: summing
+ *  string int64s concatenates digits (the grep bytes_in incident). */
+export function int64ToNumber(value: unknown, fallback = 0): number {
   if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
   if (typeof value === 'string' && value.trim() !== '') {
     const n = Number(value);

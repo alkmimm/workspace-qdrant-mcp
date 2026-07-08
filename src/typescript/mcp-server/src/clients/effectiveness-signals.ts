@@ -59,18 +59,46 @@ interface RecentQuery {
 const MAX_RECENT = 100;
 /** Tokens shorter than this carry no overlap signal ("a", "of", "rs"). */
 const MIN_TOKEN_LEN = 3;
+/** Single-token overlap needs at least this length to count — short shared
+ *  words ("file", "code", "grep") are near-universal in this domain and link
+ *  unrelated queries. */
+const MIN_SINGLE_TOKEN_LEN = 5;
 
-/** Lowercased identifier-ish tokens of a query, for overlap comparison. */
+/** English function words that pass the length filter but carry no topical
+ *  signal. Agent queries are natural-language sentences, so without this any
+ *  two consecutive questions overlap on "where"/"the"/"does" and every pair
+ *  classifies as a followup. */
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'are', 'was', 'were', 'not', 'you', 'all', 'any',
+  'can', 'has', 'have', 'had', 'this', 'that', 'these', 'those', 'with',
+  'from', 'into', 'onto', 'when', 'where', 'which', 'what', 'who', 'whom',
+  'why', 'how', 'does', 'did', 'done', 'will', 'would', 'should', 'could',
+  'there', 'their', 'then', 'than', 'them', 'they', 'its', 'his', 'her',
+  'our', 'your', 'one', 'two', 'per', 'via', 'use', 'used', 'using',
+]);
+
+/** Lowercased identifier-ish tokens of a query, for overlap comparison.
+ *  Stopwords are dropped — they pass the length filter but make unrelated
+ *  natural-language queries "overlap". */
 export function queryTokens(queryText: string): Set<string> {
   const out = new Set<string>();
   for (const tok of queryText.toLowerCase().split(/[^a-z0-9_]+/)) {
-    if (tok.length >= MIN_TOKEN_LEN) out.add(tok);
+    if (tok.length >= MIN_TOKEN_LEN && !STOPWORDS.has(tok)) out.add(tok);
   }
   return out;
 }
 
+/** Overlap rule tuned for precision: two shared topical tokens, or one
+ *  shared token long enough to be identifier-ish (>= MIN_SINGLE_TOKEN_LEN).
+ *  A single short shared word is too weak a signal — it links unrelated
+ *  same-session queries and inflates followup_rate. */
 function tokensOverlap(a: Set<string>, b: Set<string>): boolean {
-  for (const t of a) if (b.has(t)) return true;
+  let shared = 0;
+  for (const t of a) {
+    if (!b.has(t)) continue;
+    shared += 1;
+    if (shared >= 2 || t.length >= MIN_SINGLE_TOKEN_LEN) return true;
+  }
   return false;
 }
 
@@ -141,6 +169,11 @@ export class EffectivenessTracker {
   }
 
   private push(entry: RecentQuery): void {
+    // Monotonize: reverse iteration `break`s at the first out-of-window entry,
+    // which requires non-decreasing tsMs — but Date.now() is wall-clock and
+    // can step backwards (NTP correction). Clamp instead of trusting it.
+    const last = this.recent[this.recent.length - 1];
+    if (last !== undefined && entry.tsMs < last.tsMs) entry.tsMs = last.tsMs;
     this.recent.push(entry);
     if (this.recent.length > MAX_RECENT) {
       this.recent.splice(0, this.recent.length - MAX_RECENT);

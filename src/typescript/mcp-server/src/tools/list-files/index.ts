@@ -44,6 +44,10 @@ export const LIST_BYTES_IN_PER_FILE_PROXY = 96;
  * `bytes_out` is the rendered listing (the actual payload shipped);
  * `bytes_in` approximates the cost of an unshaped `ls -R` over the
  * matching file set.
+ *
+ * list is intentionally budget-free (unlike search/grep shaping): its
+ * `listing` is a single pre-formatted, already-bounded string, so there is
+ * no per-item body for a byte budget to trim.
  */
 export function computeListEconomy(
   listing: string,
