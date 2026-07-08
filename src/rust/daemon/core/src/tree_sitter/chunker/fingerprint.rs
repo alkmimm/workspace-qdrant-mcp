@@ -29,7 +29,13 @@ use std::sync::OnceLock;
 ///   (`splitting.rs`) instead of the raw char-boundary stride, so fragments
 ///   no longer begin mid-token. Bumped so already-indexed files re-chunk on
 ///   their next scan.
-const CHUNKER_LOGIC_VERSION: u32 = 2;
+/// - v3: line endings are normalized to LF before hashing/chunking (#238) and
+///   before the FTS5 code_lines write + its content-hash skip (#240), so a CRLF
+///   file no longer stores a trailing `\r` in the line index. Bumped so
+///   already-indexed CRLF files (whose content hash is unchanged) re-chunk on
+///   their next scan/re-embed and shed the stale `\r` — without this the
+///   unchanged-hash + fingerprint-match gate skips them forever.
+const CHUNKER_LOGIC_VERSION: u32 = 3;
 
 /// Per-language fingerprints, computed once from the bundled registry.
 ///
