@@ -4,6 +4,18 @@ use super::super::types::RegexLiterals;
 
 /// Core extraction logic, separated for recursion on group contents.
 pub(super) fn extract_literals_recursive(pattern: &str, result: &mut RegexLiterals) {
+    // A top-level alternation (`a|b|c`, no enclosing group) must be treated
+    // exactly like the group form `(a|b|c)`: every branch collapses into ONE
+    // OR'd alternation group. Route it through the shared group path so the
+    // branch handling is identical. This fixes the previous binary-split logic,
+    // where 3+ top-level branches produced multiple alternation groups that
+    // `build_fts5_query` then AND'd together — yielding an impossible
+    // `("b" OR "c") AND "a"` candidate query that matched zero rows.
+    if split_alternation(pattern).len() > 1 {
+        process_group_with_affixes("", "", pattern, result);
+        return;
+    }
+
     let mut current = String::new();
     let mut chars = pattern.chars().peekable();
 
@@ -50,33 +62,14 @@ pub(super) fn extract_literals_recursive(pattern: &str, result: &mut RegexLitera
                     result.mandatory.push(suffix);
                 }
             }
-            // Alternation at top level — treat remaining pattern as alternate branch.
+            // Unreachable in practice: any depth-0 `|` makes `split_alternation`
+            // return >1 branch, so top-level alternations are handled by the
+            // guard at the top of this function before the walk begins, and a
+            // `|` inside a group or character class is consumed by their
+            // handlers. Kept defensive: treat a stray `|` as a run terminator
+            // rather than reviving the broken binary-split.
             '|' => {
                 flush_to_mandatory(&mut current, &mut result.mandatory);
-                let rest: String = chars.collect();
-                let mut left_lits = std::mem::take(&mut result.mandatory);
-                let mut right_result = RegexLiterals {
-                    mandatory: Vec::new(),
-                    alternations: Vec::new(),
-                };
-                extract_literals_recursive(&rest, &mut right_result);
-                let mut right_lits = right_result.mandatory;
-                result.alternations.extend(right_result.alternations);
-                if !left_lits.is_empty() || !right_lits.is_empty() {
-                    let mut group = Vec::new();
-                    if !left_lits.is_empty() {
-                        group.append(&mut left_lits);
-                    }
-                    if !right_lits.is_empty() {
-                        // For top-level alternation, each side becomes a branch
-                        // We need to restructure: put all left as one alt, all right as another
-                    }
-                    group.append(&mut right_lits);
-                    if !group.is_empty() {
-                        result.alternations.push(group);
-                    }
-                }
-                return; // rest already consumed
             }
             // Other metacharacters that end a literal run
             '.' | '*' | '+' | '?' | ']' | ')' | '{' | '}' | '^' | '$' => {
@@ -179,9 +172,26 @@ pub(super) fn process_group_with_affixes(
             };
             extract_literals_recursive(branch, &mut branch_result);
             if branch_result.mandatory.is_empty() {
-                let combined = format!("{}{}{}", prefix, branch, suffix);
-                if combined.len() >= 3 && is_all_literal(branch) {
-                    alt_group.push(combined);
+                if branch_result.alternations.is_empty() {
+                    // Plain literal branch.
+                    let combined = format!("{}{}{}", prefix, branch, suffix);
+                    if combined.len() >= 3 && is_all_literal(branch) {
+                        alt_group.push(combined);
+                    }
+                } else {
+                    // Branch is itself a (possibly nested) pure alternation, e.g.
+                    // `a|(b|c)`. Its sub-branches are OR-siblings of THIS group,
+                    // so merge them in (with affixes) rather than emitting them as
+                    // a separate group that build_fts5_query would wrongly AND —
+                    // the same zero-candidate failure the flat case had.
+                    for sub in branch_result.alternations.drain(..) {
+                        for term in sub {
+                            let combined = format!("{}{}{}", prefix, term, suffix);
+                            if combined.len() >= 3 {
+                                alt_group.push(combined);
+                            }
+                        }
+                    }
                 }
             } else {
                 for lit in &branch_result.mandatory {
@@ -192,8 +202,14 @@ pub(super) fn process_group_with_affixes(
                         alt_group.push(lit.clone());
                     }
                 }
+                // Rare mixed case (branch has mandatory literals AND nested
+                // alternations, e.g. `foo.*(a|b)`): the flat literal model can't
+                // represent `mandatory AND (a OR b)` as one OR-sibling, so surface
+                // the sub-alternations as their own groups (prior behavior).
+                result
+                    .alternations
+                    .extend(std::mem::take(&mut branch_result.alternations));
             }
-            result.alternations.extend(branch_result.alternations);
         }
         if !alt_group.is_empty() {
             result.alternations.push(alt_group);
@@ -222,6 +238,21 @@ fn split_alternation(content: &str) -> Vec<String> {
                 current.push(ch);
                 if let Some(next) = chars.next() {
                     current.push(next);
+                }
+            }
+            // Character class: copy verbatim through the closing `]` so a literal
+            // `|` inside `[...]` is never treated as an alternation separator.
+            '[' => {
+                current.push(ch);
+                while let Some(inner) = chars.next() {
+                    current.push(inner);
+                    if inner == '\\' {
+                        if let Some(esc) = chars.next() {
+                            current.push(esc);
+                        }
+                    } else if inner == ']' {
+                        break;
+                    }
                 }
             }
             '|' if depth == 0 => {

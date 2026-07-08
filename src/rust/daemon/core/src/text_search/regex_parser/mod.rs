@@ -229,4 +229,101 @@ mod tests {
             Some("(\".await\" OR \".unwrap\" OR \".expect\")".to_string())
         );
     }
+
+    // ── Top-level (non-parenthesized) alternation regressions ──
+    //
+    // Bug: `a|b|c` at top level was binary-split into multiple alternation
+    // groups, which `build_fts5_query` AND'd into an impossible
+    // `("b" OR "c") AND "a"` candidate query → zero FTS candidates → grep
+    // silently returned no matches for identifiers that provably exist.
+
+    #[test]
+    fn test_extract_literals_top_level_three_branch_single_group() {
+        let lits = extract_literals_from_regex("cleanExpired|removeStale|addFresh");
+        assert!(
+            lits.mandatory.is_empty(),
+            "no branch is mandatory across an alternation: {lits:?}"
+        );
+        assert_eq!(
+            lits.alternations.len(),
+            1,
+            "3 top-level branches must collapse into ONE OR'd group: {lits:?}"
+        );
+        assert_eq!(
+            lits.alternations[0],
+            vec!["cleanExpired", "removeStale", "addFresh"]
+        );
+    }
+
+    #[test]
+    fn test_build_fts5_query_top_level_three_branch_is_or_not_and() {
+        let lits = extract_literals_from_regex("resolveStub|exceedsThreshold|escapePattern");
+        let query = build_fts5_query(&lits).expect("should build an FTS query");
+        assert_eq!(
+            query,
+            "(\"resolveStub\" OR \"exceedsThreshold\" OR \"escapePattern\")"
+        );
+        assert!(
+            !query.contains(" AND "),
+            "top-level alternation branches must be OR'd, never AND'd: {query}"
+        );
+    }
+
+    #[test]
+    fn test_build_fts5_query_top_level_four_branch_is_single_or() {
+        let lits = extract_literals_from_regex("alphaOne|bravoTwo|charlieThree|deltaFour");
+        let query = build_fts5_query(&lits).expect("should build an FTS query");
+        assert_eq!(
+            query,
+            "(\"alphaOne\" OR \"bravoTwo\" OR \"charlieThree\" OR \"deltaFour\")"
+        );
+        assert!(!query.contains(" AND "));
+    }
+
+    #[test]
+    fn test_top_level_and_parenthesized_alternation_agree() {
+        // The bare and wrapped forms of the same alternation must produce an
+        // identical candidate query.
+        let bare = build_fts5_query(&extract_literals_from_regex("foobar|bazqux|quuxxy"));
+        let paren = build_fts5_query(&extract_literals_from_regex("(foobar|bazqux|quuxxy)"));
+        assert_eq!(bare, paren);
+        assert_eq!(
+            bare,
+            Some("(\"foobar\" OR \"bazqux\" OR \"quuxxy\")".to_string())
+        );
+    }
+
+    #[test]
+    fn test_nested_alternation_flattens_into_single_or() {
+        // `a|(b|c)` is semantically `a|b|c`; a nested *pure* alternation must
+        // merge into one OR group, not degrade to `("b" OR "c") AND "a"`.
+        let lits = extract_literals_from_regex("cleanExpired|(removeStale|addFresh)");
+        assert!(lits.mandatory.is_empty(), "{lits:?}");
+        assert_eq!(lits.alternations.len(), 1, "{lits:?}");
+        let query = build_fts5_query(&lits).expect("should build an FTS query");
+        assert!(
+            !query.contains(" AND "),
+            "nested alternation must be OR'd, never AND'd: {query}"
+        );
+        assert_eq!(
+            query,
+            "(\"cleanExpired\" OR \"removeStale\" OR \"addFresh\")"
+        );
+    }
+
+    #[test]
+    fn test_pipe_inside_char_class_is_not_an_alternation() {
+        // A `|` inside `[...]` is a literal, not an alternation separator; it
+        // must not fragment the surrounding literals or create an alternation
+        // group. The two runs are sequential in a single branch, so AND them.
+        let lits = extract_literals_from_regex("logger[|]separator");
+        assert!(
+            lits.alternations.is_empty(),
+            "a class-local `|` must not create an alternation: {lits:?}"
+        );
+        assert_eq!(
+            build_fts5_query(&lits),
+            Some("\"logger\" AND \"separator\"".to_string())
+        );
+    }
 }
