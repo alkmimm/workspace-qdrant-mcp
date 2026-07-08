@@ -16,8 +16,8 @@ use super::metrics_factories::{
     create_graph_metrics, create_indexed_project_metrics, create_lsp_metrics,
     create_per_tenant_eta_metric, create_per_tenant_indexing_metric, create_queue_metrics,
     create_search_adoption_metrics, create_session_metrics, create_system_metrics,
-    create_telemetry_extension_metrics, create_tenant_metrics, create_unified_queue_metrics,
-    create_watch_metrics, register_all,
+    create_telemetry_extension_metrics, create_tenant_metrics, create_token_economy_metrics,
+    create_unified_queue_metrics, create_watch_metrics, register_all,
 };
 
 /// Global metrics registry
@@ -280,6 +280,23 @@ pub struct DaemonMetrics {
     /// MCP read-tool events that could not resolve a project in the last 24h.
     /// Labels: outcome (unresolved_tenant, unresolved_project, error)
     pub mcp_search_unresolved_recent: IntGaugeVec,
+
+    // MCP token-economy (spec 20; sampled from token_savings by start_token_economy_sampler).
+    // Labeled by `op` (all MCP read tools write tool="mcp_qdrant"), matching the adoption sampler.
+    /// Token-tracked MCP calls in the last 24h. Labels: op, actor
+    pub mcp_token_calls_recent: IntGaugeVec,
+    /// Sum of pre-shaping bytes (bytes_in) in the last 24h. Labels: op, actor
+    pub mcp_token_bytes_in_recent: IntGaugeVec,
+    /// Sum of delivered bytes (bytes_out) in the last 24h. Labels: op, actor
+    pub mcp_token_bytes_out_recent: IntGaugeVec,
+    /// Sum of hits dropped by shaping in the last 24h. Labels: op, actor
+    pub mcp_token_hits_truncated_recent: IntGaugeVec,
+    /// Calls with a followup re-query (had_followup) in the last 24h. Labels: op, actor
+    pub mcp_token_followup_recent: IntGaugeVec,
+    /// Calls escalated to a delivered retrieve (had_escalation) in the last 24h. Labels: op, actor
+    pub mcp_token_escalation_recent: IntGaugeVec,
+    /// Token-tracked calls in the last 24h by shape_mode. Labels: shape_mode, actor
+    pub mcp_token_calls_by_shape_recent: IntGaugeVec,
 }
 
 /// Intermediate struct holding all created metrics before registration.
@@ -346,6 +363,13 @@ struct CreatedMetrics {
     mcp_search_events_recent: IntGaugeVec,
     mcp_search_empty_recent: IntGaugeVec,
     mcp_search_unresolved_recent: IntGaugeVec,
+    mcp_token_calls_recent: IntGaugeVec,
+    mcp_token_bytes_in_recent: IntGaugeVec,
+    mcp_token_bytes_out_recent: IntGaugeVec,
+    mcp_token_hits_truncated_recent: IntGaugeVec,
+    mcp_token_followup_recent: IntGaugeVec,
+    mcp_token_escalation_recent: IntGaugeVec,
+    mcp_token_calls_by_shape_recent: IntGaugeVec,
 }
 
 /// Create all metric instances from subsystem factories.
@@ -449,6 +473,15 @@ fn create_all_metrics() -> CreatedMetrics {
 
     let (mcp_search_events_recent, mcp_search_empty_recent, mcp_search_unresolved_recent) =
         create_search_adoption_metrics();
+    let (
+        mcp_token_calls_recent,
+        mcp_token_bytes_in_recent,
+        mcp_token_bytes_out_recent,
+        mcp_token_hits_truncated_recent,
+        mcp_token_followup_recent,
+        mcp_token_escalation_recent,
+        mcp_token_calls_by_shape_recent,
+    ) = create_token_economy_metrics();
 
     CreatedMetrics {
         active_sessions,
@@ -513,6 +546,13 @@ fn create_all_metrics() -> CreatedMetrics {
         mcp_search_events_recent,
         mcp_search_empty_recent,
         mcp_search_unresolved_recent,
+        mcp_token_calls_recent,
+        mcp_token_bytes_in_recent,
+        mcp_token_bytes_out_recent,
+        mcp_token_hits_truncated_recent,
+        mcp_token_followup_recent,
+        mcp_token_escalation_recent,
+        mcp_token_calls_by_shape_recent,
     }
 }
 
@@ -583,6 +623,13 @@ fn register_metrics(registry: &Registry, m: &CreatedMetrics) {
             Box::new(m.mcp_search_events_recent.clone()),
             Box::new(m.mcp_search_empty_recent.clone()),
             Box::new(m.mcp_search_unresolved_recent.clone()),
+            Box::new(m.mcp_token_calls_recent.clone()),
+            Box::new(m.mcp_token_bytes_in_recent.clone()),
+            Box::new(m.mcp_token_bytes_out_recent.clone()),
+            Box::new(m.mcp_token_hits_truncated_recent.clone()),
+            Box::new(m.mcp_token_followup_recent.clone()),
+            Box::new(m.mcp_token_escalation_recent.clone()),
+            Box::new(m.mcp_token_calls_by_shape_recent.clone()),
         ],
     );
 }
@@ -658,6 +705,13 @@ impl DaemonMetrics {
             mcp_search_events_recent: m.mcp_search_events_recent,
             mcp_search_empty_recent: m.mcp_search_empty_recent,
             mcp_search_unresolved_recent: m.mcp_search_unresolved_recent,
+            mcp_token_calls_recent: m.mcp_token_calls_recent,
+            mcp_token_bytes_in_recent: m.mcp_token_bytes_in_recent,
+            mcp_token_bytes_out_recent: m.mcp_token_bytes_out_recent,
+            mcp_token_hits_truncated_recent: m.mcp_token_hits_truncated_recent,
+            mcp_token_followup_recent: m.mcp_token_followup_recent,
+            mcp_token_escalation_recent: m.mcp_token_escalation_recent,
+            mcp_token_calls_by_shape_recent: m.mcp_token_calls_by_shape_recent,
         }
     }
 

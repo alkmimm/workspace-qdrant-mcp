@@ -826,6 +826,151 @@ pub fn start_search_adoption_sampler(pool: SqlitePool) -> JoinHandle<()> {
     })
 }
 
+/// One per-(op, actor) token-economy aggregate row. `op` (search / grep /
+/// retrieve / …) is the read-tool dimension — every MCP read tool writes
+/// tool="mcp_qdrant", so `tool` would collapse them into one series.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TokenEconomyRow {
+    op: String,
+    actor: String,
+    calls: i64,
+    bytes_in: i64,
+    bytes_out: i64,
+    hits_truncated: i64,
+    followup: i64,
+    escalation: i64,
+}
+
+/// One per-(shape_mode, actor) token-economy shape row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TokenShapeRow {
+    shape_mode: String,
+    actor: String,
+    calls: i64,
+}
+
+/// Aggregate the `token_savings` view over the last 24h for the token-economy
+/// Prometheus gauges. The view drops `actor`, so we join it back to
+/// `search_events` on the point id to keep agent traffic (actor="claude")
+/// separable from the eval/benchmark harness (actor="user"), and group by the
+/// view's `op` (the read-tool dimension; `tool` is always "mcp_qdrant"). Kept
+/// out of the spawn loop so it is unit-testable against a seeded view.
+///
+/// `had_followup` / `had_escalation` are 0/1 columns derived by the view; we sum
+/// them with the same `SUM(CASE WHEN … THEN 1 ELSE 0 END)` shape the
+/// `wqm admin token-savings` CLI uses. The `ts` cutoff is the stored ISO-Z
+/// format so the TEXT comparison is a correct lexical compare.
+async fn sample_token_economy(
+    pool: &SqlitePool,
+) -> Result<(Vec<TokenEconomyRow>, Vec<TokenShapeRow>), sqlx::Error> {
+    let by_op = r#"
+        SELECT se.actor                                        AS actor,
+               tsv.op                                          AS op,
+               COUNT(*)                                        AS calls,
+               COALESCE(SUM(tsv.bytes_in),       0)            AS bytes_in,
+               COALESCE(SUM(tsv.bytes_out),      0)            AS bytes_out,
+               COALESCE(SUM(tsv.hits_truncated), 0)            AS hits_truncated,
+               SUM(CASE WHEN tsv.had_followup   THEN 1 ELSE 0 END) AS followup,
+               SUM(CASE WHEN tsv.had_escalation THEN 1 ELSE 0 END) AS escalation
+        FROM token_savings tsv
+        JOIN search_events se ON se.id = tsv.id
+        WHERE tsv.ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')
+        GROUP BY se.actor, tsv.op
+    "#;
+    let rows: Vec<TokenEconomyRow> = sqlx::query(by_op)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| TokenEconomyRow {
+            op: row.try_get("op").unwrap_or_default(),
+            actor: row.try_get("actor").unwrap_or_default(),
+            calls: row.try_get("calls").unwrap_or(0),
+            bytes_in: row.try_get("bytes_in").unwrap_or(0),
+            bytes_out: row.try_get("bytes_out").unwrap_or(0),
+            hits_truncated: row.try_get("hits_truncated").unwrap_or(0),
+            followup: row.try_get("followup").unwrap_or(0),
+            escalation: row.try_get("escalation").unwrap_or(0),
+        })
+        .collect();
+
+    let by_shape = r#"
+        SELECT se.actor                             AS actor,
+               COALESCE(tsv.shape_mode, 'none')     AS shape_mode,
+               COUNT(*)                             AS calls
+        FROM token_savings tsv
+        JOIN search_events se ON se.id = tsv.id
+        WHERE tsv.ts >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')
+        GROUP BY se.actor, COALESCE(tsv.shape_mode, 'none')
+    "#;
+    let shapes: Vec<TokenShapeRow> = sqlx::query(by_shape)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| TokenShapeRow {
+            shape_mode: row.try_get("shape_mode").unwrap_or_default(),
+            actor: row.try_get("actor").unwrap_or_default(),
+            calls: row.try_get("calls").unwrap_or(0),
+        })
+        .collect();
+
+    Ok((rows, shapes))
+}
+
+/// Sample MCP token-economy aggregates (spec 20) from the `token_savings` view
+/// into Prometheus gauges, so savings and re-query friction are visible in
+/// Grafana next to the adoption signals:
+///   - `memexd_mcp_token_bytes_in_recent{op,actor}` / `..._bytes_out_recent`
+///     — the savings ratio is `1 - out/in`; a ratio that only holds by forcing
+///     re-queries is not a real saving, hence:
+///   - `memexd_mcp_token_followup_recent{op,actor}`   — overlapping re-queries
+///   - `memexd_mcp_token_escalation_recent{op,actor}` — delivered retrieves
+///   - `memexd_mcp_token_calls_by_shape_recent{shape_mode,actor}` — packed/
+///     truncate/none adoption.
+/// Sampled every 60s (a 24h snapshot), mirroring `start_search_adoption_sampler`.
+pub fn start_token_economy_sampler(pool: SqlitePool) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            match sample_token_economy(&pool).await {
+                Ok((rows, shapes)) => {
+                    // reset() drops stale (tool,actor) / (shape_mode,actor) series
+                    // so a no-longer-seen label disappears from /metrics.
+                    METRICS.mcp_token_calls_recent.reset();
+                    METRICS.mcp_token_bytes_in_recent.reset();
+                    METRICS.mcp_token_bytes_out_recent.reset();
+                    METRICS.mcp_token_hits_truncated_recent.reset();
+                    METRICS.mcp_token_followup_recent.reset();
+                    METRICS.mcp_token_escalation_recent.reset();
+                    for r in &rows {
+                        let labels = &[r.op.as_str(), r.actor.as_str()];
+                        METRICS.mcp_token_calls_recent.with_label_values(labels).set(r.calls);
+                        METRICS.mcp_token_bytes_in_recent.with_label_values(labels).set(r.bytes_in);
+                        METRICS.mcp_token_bytes_out_recent.with_label_values(labels).set(r.bytes_out);
+                        METRICS
+                            .mcp_token_hits_truncated_recent
+                            .with_label_values(labels)
+                            .set(r.hits_truncated);
+                        METRICS.mcp_token_followup_recent.with_label_values(labels).set(r.followup);
+                        METRICS
+                            .mcp_token_escalation_recent
+                            .with_label_values(labels)
+                            .set(r.escalation);
+                    }
+                    METRICS.mcp_token_calls_by_shape_recent.reset();
+                    for s in &shapes {
+                        METRICS
+                            .mcp_token_calls_by_shape_recent
+                            .with_label_values(&[s.shape_mode.as_str(), s.actor.as_str()])
+                            .set(s.calls);
+                    }
+                }
+                Err(e) => warn!("token-economy sampler failed: {}", e),
+            }
+        }
+    })
+}
+
 /// Start the session-liveness reaper (migration v42 model).
 ///
 /// Deletes `project_sessions` rows whose `last_heartbeat_at` has gone stale and
@@ -1473,6 +1618,7 @@ pub fn spawn_all(
     );
     let _project_inventory = start_indexed_project_inventory_exporter(pool.clone());
     let _search_adoption = start_search_adoption_sampler(pool.clone());
+    let _token_economy = start_token_economy_sampler(pool.clone());
     let _chunking_coverage = start_chunking_coverage_exporter(pool.clone());
     let _grammar_backfill = start_grammar_backfill(pool.clone());
     let _file_metadata = start_file_metadata_exporter(Arc::clone(search_db));
@@ -1507,5 +1653,149 @@ mod proc_sampling_tests {
         assert_eq!(parse_cpu_seconds(stat), (100.0 + 50.0) / 100.0);
         // Malformed → 0.0, no panic.
         assert_eq!(parse_cpu_seconds("garbage no paren"), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod token_economy_tests {
+    use super::{sample_token_economy, TokenEconomyRow, TokenShapeRow};
+    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::SqlitePool;
+    use workspace_qdrant_core::schema_version::v38::V38Migration;
+    use workspace_qdrant_core::schema_version::Migration;
+    use workspace_qdrant_core::search_events_schema::{
+        CREATE_SEARCH_EVENTS_INDEXES_SQL, CREATE_SEARCH_EVENTS_SQL,
+    };
+
+    /// Fresh in-memory pool carrying the real `token_savings` view (base
+    /// search_events schema + v38 migration), mirroring the schema_version
+    /// tests. v38's view exposes the exact column set the sampler reads.
+    async fn view_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(CREATE_SEARCH_EVENTS_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for idx in CREATE_SEARCH_EVENTS_INDEXES_SQL {
+            sqlx::query(idx).execute(&pool).await.unwrap();
+        }
+        V38Migration.up(&pool).await.unwrap();
+        pool
+    }
+
+    /// Insert one search_events row. `ts_modifier` is a SQLite datetime modifier
+    /// applied to `now` (e.g. "-10 seconds", "-2 days") so window membership is
+    /// deterministic. `bytes_in = None` keeps the row out of the token_savings
+    /// view while still letting it drive the view's followup/escalation probes.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_event(
+        pool: &SqlitePool,
+        id: &str,
+        session: &str,
+        actor: &str,
+        tool: &str,
+        op: &str,
+        parent: Option<&str>,
+        bytes_in: Option<i64>,
+        bytes_out: Option<i64>,
+        hits_truncated: Option<i64>,
+        shape_mode: &str,
+        ts_modifier: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO search_events \
+             (id, session_id, ts, actor, tool, op, parent_event_id, bytes_in, bytes_out, hits_truncated, shape_mode, result_count) \
+             VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now', ?), ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+        )
+        .bind(id)
+        .bind(session)
+        .bind(ts_modifier)
+        .bind(actor)
+        .bind(tool)
+        .bind(op)
+        .bind(parent)
+        .bind(bytes_in)
+        .bind(bytes_out)
+        .bind(hits_truncated)
+        .bind(shape_mode)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn find<'a>(rows: &'a [TokenEconomyRow], op: &str, actor: &str) -> &'a TokenEconomyRow {
+        rows.iter()
+            .find(|r| r.op == op && r.actor == actor)
+            .unwrap_or_else(|| panic!("no ({op},{actor}) row in {rows:?}"))
+    }
+
+    fn shape_calls(shapes: &[TokenShapeRow], shape_mode: &str, actor: &str) -> i64 {
+        shapes
+            .iter()
+            .find(|s| s.shape_mode == shape_mode && s.actor == actor)
+            .map_or(0, |s| s.calls)
+    }
+
+    #[tokio::test]
+    async fn aggregates_by_op_and_actor_within_window() {
+        let pool = view_pool().await;
+
+        // Every MCP read call is tool="mcp_qdrant"; the read-tool is `op`.
+        // In-view call: claude search, 5000→1000, 2 truncated, 10s ago.
+        insert_event(&pool, "c1", "s1", "claude", "mcp_qdrant", "search", None,
+            Some(5000), Some(1000), Some(2), "truncate", "-10 seconds").await;
+        // Followup + escalation of c1 — NOT view rows (bytes_in NULL), but they
+        // flip c1.had_followup / had_escalation in the view's probes ("now",
+        // i.e. ~10s after c1, inside both windows). Same tool/session as c1.
+        insert_event(&pool, "c1f", "s1", "claude", "mcp_qdrant", "followup", None,
+            None, None, None, "none", "-0 seconds").await;
+        insert_event(&pool, "c1o", "s1", "claude", "mcp_qdrant", "open", Some("c1"),
+            None, None, None, "none", "-0 seconds").await;
+        // In-view call: claude grep, 3000→1500, truncate.
+        insert_event(&pool, "c2", "s2", "claude", "mcp_qdrant", "grep", None,
+            Some(3000), Some(1500), Some(1), "truncate", "-1 minute").await;
+        // In-view call: user search (separate actor), unshaped.
+        insert_event(&pool, "u1", "s3", "user", "mcp_qdrant", "search", None,
+            Some(9000), Some(9000), Some(0), "none", "-1 minute").await;
+        // Excluded: outside the 24h window.
+        insert_event(&pool, "old", "s4", "claude", "mcp_qdrant", "search", None,
+            Some(1234), Some(1), Some(9), "truncate", "-2 days").await;
+        // Excluded: no bytes_in → not a token_savings row.
+        insert_event(&pool, "nob", "s5", "claude", "mcp_qdrant", "search", None,
+            None, None, None, "none", "-0 seconds").await;
+
+        let (rows, shapes) = sample_token_economy(&pool).await.unwrap();
+
+        // Exactly three (op,actor) groups — old/nob/c1f/c1o are all excluded.
+        assert_eq!(rows.len(), 3, "unexpected groups: {rows:?}");
+
+        let cs = find(&rows, "search", "claude");
+        assert_eq!(cs.calls, 1);
+        assert_eq!(cs.bytes_in, 5000);
+        assert_eq!(cs.bytes_out, 1000);
+        assert_eq!(cs.hits_truncated, 2);
+        assert_eq!(cs.followup, 1, "c1f should flip had_followup");
+        assert_eq!(cs.escalation, 1, "c1o should flip had_escalation");
+
+        let cg = find(&rows, "grep", "claude");
+        assert_eq!(cg.calls, 1);
+        assert_eq!(cg.bytes_in, 3000);
+        assert_eq!(cg.bytes_out, 1500);
+        assert_eq!(cg.followup, 0);
+
+        let us = find(&rows, "search", "user");
+        assert_eq!(us.calls, 1);
+        assert_eq!(us.bytes_in, 9000);
+        assert_eq!(us.bytes_out, 9000);
+
+        // Shape adoption: truncate=2 (c1,c2) for claude, none=1 for user; the
+        // excluded rows contribute nothing.
+        assert_eq!(shape_calls(&shapes, "truncate", "claude"), 2);
+        assert_eq!(shape_calls(&shapes, "none", "user"), 1);
+        assert_eq!(shape_calls(&shapes, "truncate", "user"), 0);
     }
 }
