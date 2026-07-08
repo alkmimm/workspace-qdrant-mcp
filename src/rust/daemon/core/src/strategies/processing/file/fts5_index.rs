@@ -15,7 +15,7 @@ use crate::fts_batch_processor::{
 };
 use crate::indexed_content_schema;
 use crate::search_db::{Fts5WorkItem, SearchDbError, SearchDbManager};
-use wqm_common::hashing::compute_content_hash;
+use wqm_common::hashing::{compute_content_hash, normalize_line_endings};
 
 /// Outcome of `update_fts5_for_file_or_enqueue` — tells the caller how to
 /// handle `search_status` for the queue item.
@@ -73,7 +73,12 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
     // parallel for that work, then `send` and return — the actor owns
     // every write after this point.
     let new_content = match tokio::fs::read_to_string(file_path).await {
-        Ok(c) => c,
+        // Normalize EOL up front so the content hash below — and the skip
+        // decision it drives — is line-ending agnostic. Otherwise an existing
+        // CRLF file's raw hash matches the cache and the code_lines rewrite
+        // that strips the trailing '\r' is skipped entirely. Matches the
+        // base_point identity (compute_file_hash).
+        Ok(c) => normalize_line_endings(&c).into_owned(),
         Err(e) => {
             debug!(
                 "FTS5: cannot read file for indexing (may be binary): {}: {}",
@@ -170,7 +175,9 @@ pub(super) async fn update_fts5_for_file(
 
     // Read file content from disk
     let new_content = match tokio::fs::read_to_string(file_path).await {
-        Ok(content) => content,
+        // See update_fts5_for_file_or_enqueue: normalize EOL before hashing so
+        // the raw-content skip can't strand an existing CRLF file's stale '\r'.
+        Ok(content) => normalize_line_endings(&content).into_owned(),
         Err(e) => {
             debug!(
                 "FTS5: cannot read file for indexing (may be binary): {}: {}",

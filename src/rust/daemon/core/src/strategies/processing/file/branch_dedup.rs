@@ -32,7 +32,7 @@ use crate::search_db::Fts5WorkItem;
 use crate::tracked_files_schema::{self, ProcessingStatus};
 use crate::unified_queue_processor::UnifiedProcessorError;
 use crate::unified_queue_schema::{DestinationStatus, FilePayload, QueueOperation, UnifiedQueueItem};
-use wqm_common::hashing::{compute_base_point, compute_content_hash};
+use wqm_common::hashing::{compute_base_point, compute_content_hash, normalize_line_endings};
 
 /// Outcome of [`try_branch_dedup`] — `Some` means the dedup fast-path completed
 /// and the caller must return early; `None` means the file is novel (or the
@@ -200,7 +200,10 @@ pub(super) async fn try_branch_dedup(
     // ── 4. Enqueue FTS5 work (batch writer owns search.db writes) ──
     if let Some(sender) = crate::search_db::batch_writer::global_sender() {
         match tokio::fs::read_to_string(file_path).await {
-            Ok(new_content) => {
+            Ok(raw_content) => {
+                // Normalize EOL so this branch-dedup FTS5 enqueue matches the
+                // base_point identity and never re-stores a stale '\r'.
+                let new_content = normalize_line_endings(&raw_content).into_owned();
                 let new_hash = compute_content_hash(&new_content);
                 let change = FileChange {
                     file_id,
