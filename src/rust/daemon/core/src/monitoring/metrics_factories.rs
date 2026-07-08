@@ -84,6 +84,73 @@ pub(super) fn create_search_adoption_metrics() -> (IntGaugeVec, IntGaugeVec, Int
     )
 }
 
+/// MCP token-economy gauges (spec 20), sampled from the `token_savings` view —
+/// joined back to `search_events` to recover the `actor` label the view drops —
+/// by `start_token_economy_sampler`. All are 24h-window snapshots. Labeled by
+/// `op` (search / search_exact / grep / list / retrieve), NOT `tool`: every MCP
+/// read tool writes tool="mcp_qdrant", so `op` is the read-tool dimension — the
+/// same key the search-adoption sampler groups by. Returns `(calls, bytes_in,
+/// bytes_out, hits_truncated, followup, escalation, calls_by_shape)`.
+pub(super) fn create_token_economy_metrics() -> (
+    IntGaugeVec,
+    IntGaugeVec,
+    IntGaugeVec,
+    IntGaugeVec,
+    IntGaugeVec,
+    IntGaugeVec,
+    IntGaugeVec,
+) {
+    // `actor` separates real agent traffic (actor="claude") from the eval/
+    // benchmark harness and CLI (actor="user"): benchmark runs fire dozens of
+    // related queries back-to-back and would otherwise skew the savings ratio
+    // and the followup/escalation rates. Panels default to {actor="claude"} —
+    // the same actor discipline the search-adoption sampler relies on.
+    let calls = int_gauge_vec(
+        "mcp_token_calls_recent",
+        "Token-tracked MCP read-tool calls (token_savings rows, i.e. bytes_in present) in the last 24h, by op and actor",
+        &["op", "actor"],
+    );
+    let bytes_in = int_gauge_vec(
+        "mcp_token_bytes_in_recent",
+        "Sum of pre-shaping response bytes (bytes_in) over the last 24h, by op and actor",
+        &["op", "actor"],
+    );
+    let bytes_out = int_gauge_vec(
+        "mcp_token_bytes_out_recent",
+        "Sum of delivered response bytes (bytes_out) over the last 24h, by op and actor",
+        &["op", "actor"],
+    );
+    let hits_truncated = int_gauge_vec(
+        "mcp_token_hits_truncated_recent",
+        "Sum of hits dropped by shaping (hits_truncated) over the last 24h, by op and actor",
+        &["op", "actor"],
+    );
+    let followup = int_gauge_vec(
+        "mcp_token_followup_recent",
+        "Calls followed by an overlapping re-query (had_followup) in the last 24h, by op and actor",
+        &["op", "actor"],
+    );
+    let escalation = int_gauge_vec(
+        "mcp_token_escalation_recent",
+        "Calls escalated to a delivered retrieve (had_escalation) in the last 24h, by op and actor",
+        &["op", "actor"],
+    );
+    let calls_by_shape = int_gauge_vec(
+        "mcp_token_calls_by_shape_recent",
+        "Token-tracked MCP read-tool calls in the last 24h, by shape_mode (none, truncate, summary, packed) and actor",
+        &["shape_mode", "actor"],
+    );
+    (
+        calls,
+        bytes_in,
+        bytes_out,
+        hits_truncated,
+        followup,
+        escalation,
+        calls_by_shape,
+    )
+}
+
 pub(super) fn create_session_metrics() -> (IntGaugeVec, IntCounterVec, HistogramVec) {
     let active_sessions = int_gauge_vec(
         "active_sessions",

@@ -1,8 +1,9 @@
 # Grafana dashboards
 
-Five pre-built dashboards are provisioned automatically when Grafana starts with
-the config in `docker/grafana/provisioning/`. All dashboards auto-refresh every
-30 seconds and default to a 1-hour time window.
+Pre-built dashboards are provisioned automatically when Grafana starts with the
+config in `docker/grafana/provisioning/`. The provider loads every `*.json` in
+`docker/grafana/dashboards/`, so a new dashboard is picked up just by dropping the
+file there. All dashboards auto-refresh every 30 seconds.
 
 Import JSON files from `docker/grafana/dashboards/` if auto-provisioning is not
 in use (Dashboards -> Import in the Grafana UI).
@@ -15,7 +16,12 @@ in use (Dashboards -> Import in the Grafana UI).
 | `memexd.json` | `wqm-memexd` | WQM — memexd Daemon | Target health, uptime, stale queue items, oldest pending age |
 | `mcp-server.json` | `wqm-mcp-server` | WQM — MCP Server | Tool rates, durations, daemon fallbacks, recent tool logs, cache ratio |
 | `mcp-http.json` | `wqm-mcp-http` | WQM — MCP HTTP Transport | Request mix, auth failures, rate limits |
+| `token-economy.json` | `wqm-token-economy` | WQM — Token Economy | Response-byte savings ratio, followup/escalation friction, shape-mode (packed/truncate) adoption |
 | `qdrant.json` | `wqm-qdrant` | WQM — Qdrant | Collections, target health, resource saturation, REST/gRPC throughput and latency |
+
+(The stack also ships `graph.json`, `lsp.json`, `chunking-coverage.json`,
+`fts5-pressure.json`, `project-language.json`, `system-overview` links and
+`traces.json`, which follow the same provisioning path.)
 
 Navigation links in the System Overview header jump directly to the other four
 dashboards.
@@ -139,6 +145,37 @@ HTTP mode adds a transport-level view of the MCP server.
 | Auth failure share | `sum(rate(wqm_mcp_http_auth_failures_total[5m])) / sum(rate(wqm_mcp_http_requests_total[5m]))` | Useful when tokens are misconfigured. |
 | 5xx share | `sum(rate(wqm_mcp_http_requests_total{status_class="5xx"}[5m])) / sum(rate(wqm_mcp_http_requests_total[5m]))` | Server-side HTTP failures. |
 | Healthz share | `sum(rate(wqm_mcp_http_requests_total{path="/healthz"}[5m])) / sum(rate(wqm_mcp_http_requests_total[5m]))` | Helps distinguish probes from actual tool traffic. |
+
+---
+
+## WQM — Token Economy (`token-economy.json`)
+
+Surfaces the spec-20 token-economy signals that previously lived only in the
+`memexd` SQLite `token_savings` view (reachable via `wqm admin token-savings`
+and the `benchmarks/agent-economy` harness). A background sampler in the daemon
+(`start_token_economy_sampler`, 60s) aggregates the view over a rolling 24h
+window into Prometheus gauges, joining back to `search_events` to recover the
+`actor` label the view drops.
+
+**All series are 24h snapshot gauges — plot them directly, never wrap them in
+`rate()`.** Panels default to agent traffic (`actor="claude"`); the
+eval/benchmark harness and CLI are `actor="user"` and are excluded from the
+ratio panels so a benchmark run cannot skew the savings number.
+
+### Panel inventory
+
+| Panel | Query summary | Interpretation |
+|---|---|---|
+| Savings Ratio (24h, agents) | `1 - sum(bytes_out) / sum(bytes_in)` | Headline number. Higher is better; green ≥ 0.7. |
+| Bytes Saved / ≈ Tokens Saved | `sum(bytes_in) - sum(bytes_out)` (and `/4`) | Absolute saving; the `/4` matches the CLI's tokenizer-independent proxy. |
+| Followup Rate | `sum(memexd_mcp_token_followup_recent) / sum(memexd_mcp_token_calls_recent)` | LOWER is better — a saving that forces a re-query is not a saving (spec 20 §1.2). |
+| Escalation Rate | `sum(memexd_mcp_token_escalation_recent) / sum(memexd_mcp_token_calls_recent)` | Truncated results the agent had to expand via retrieve. |
+| Savings Ratio by Tool | `1 - (memexd_mcp_token_bytes_out_recent / clamp_min(memexd_mcp_token_bytes_in_recent, 1))` | A tool trending to 0 ships its whole payload; negative = shaping overhead grew the response. |
+| Response Bytes In vs Out | `sum(memexd_mcp_token_bytes_in_recent)` vs `..._bytes_out_recent` | The gap is the saving. |
+| Followup & Escalation by Tool | per-tool followup/escalation over calls | High savings + high followup on the same tool = over-shaping. |
+| Shape-mode Adoption | `sum by (shape_mode) (memexd_mcp_token_calls_by_shape_recent)` | How much traffic goes through `packed` / `truncate` vs `none`. |
+| Token-tracked Calls by Tool | `memexd_mcp_token_calls_recent{actor="claude"}` | Volume/denominator for the rates. |
+| Calls by Tool & Actor | `memexd_mcp_token_calls_recent` | All actors — separates real agent traffic from the harness. |
 
 ---
 

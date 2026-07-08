@@ -210,6 +210,64 @@ histogram_quantile(0.95, rate(wqm_tool_duration_seconds_bucket[5m]))
 
 ---
 
+## Token Economy Metrics
+
+Exported by the daemon (`memexd`, `/metrics` on port 9091), not the MCP server.
+A background sampler (`start_token_economy_sampler`, 60s) aggregates the
+`token_savings` SQLite view (spec 20) over a rolling **24h window** into these
+gauges, joining back to `search_events` to recover the `actor` label the view
+drops. **They are point-in-time snapshots — query them directly, never with
+`rate()`.** Grafana: the `WQM — Token Economy` dashboard (`wqm-token-economy`).
+
+The `actor` label separates real agent traffic (`actor="claude"`) from the
+eval/benchmark harness and CLI (`actor="user"`); dashboards default to
+`actor="claude"` so a benchmark run cannot skew the savings ratio.
+
+### Gauges
+
+#### `memexd_mcp_token_calls_recent`
+**Type:** Gauge
+**Labels:** `op`, `actor`
+**Description:** Token-tracked MCP read-tool calls (rows in `token_savings`, i.e. `bytes_in` present) in the last 24h. The denominator for the rates below.
+
+#### `memexd_mcp_token_bytes_in_recent`
+**Type:** Gauge
+**Labels:** `op`, `actor`
+**Description:** Sum of pre-shaping response bytes (`bytes_in`) over the last 24h.
+
+#### `memexd_mcp_token_bytes_out_recent`
+**Type:** Gauge
+**Labels:** `op`, `actor`
+**Description:** Sum of delivered response bytes (`bytes_out`) over the last 24h. Savings ratio = `1 - bytes_out / bytes_in`.
+
+```promql
+# Overall agent savings ratio (24h)
+1 - sum(memexd_mcp_token_bytes_out_recent{actor="claude"})
+  / clamp_min(sum(memexd_mcp_token_bytes_in_recent{actor="claude"}), 1)
+```
+
+#### `memexd_mcp_token_hits_truncated_recent`
+**Type:** Gauge
+**Labels:** `op`, `actor`
+**Description:** Sum of hits dropped by shaping (`hits_truncated`) over the last 24h.
+
+#### `memexd_mcp_token_followup_recent`
+**Type:** Gauge
+**Labels:** `op`, `actor`
+**Description:** Calls followed by an overlapping re-query within 60s (`had_followup`). A high followup rate alongside a high savings ratio signals over-shaping (spec 20 §1.2).
+
+#### `memexd_mcp_token_escalation_recent`
+**Type:** Gauge
+**Labels:** `op`, `actor`
+**Description:** Calls escalated to a delivered retrieve (`had_escalation`) in the last 24h.
+
+#### `memexd_mcp_token_calls_by_shape_recent`
+**Type:** Gauge
+**Labels:** `shape_mode` (`none`, `truncate`, `summary`, `packed`), `actor`
+**Description:** Token-tracked calls in the last 24h by shaping mode — how much traffic goes through the context-packing paths.
+
+---
+
 ## System Metrics
 
 Standard system resource metrics.
