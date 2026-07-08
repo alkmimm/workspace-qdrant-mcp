@@ -1,0 +1,113 @@
+{
+  "description": "Read-only maintenance tasks over THIS repository with ground-truthed answers. Success = the agent's final answer mentions at least one expected_paths substring. Tasks are stable on main (no dependency on unmerged branches).",
+  "tasks": [
+    {
+      "id": "loc-shaping",
+      "category": "localization",
+      "prompt": "In this repository, where does the MCP server truncate search hit bodies before shipping them to the client? Answer with the file path and the main function name.",
+      "expected_paths": ["search-shaping.ts"]
+    },
+    {
+      "id": "loc-search-events-schema",
+      "category": "localization",
+      "prompt": "Which Rust source file defines the CREATE TABLE SQL for the search_events table? Answer with the file path.",
+      "expected_paths": ["search_events_schema.rs"]
+    },
+    {
+      "id": "loc-rrf-fusion",
+      "category": "localization",
+      "prompt": "Where is the RRF (reciprocal rank fusion) of dense and sparse search results implemented in the TypeScript MCP server? Answer with the file path and function name.",
+      "expected_paths": ["search-qdrant.ts"]
+    },
+    {
+      "id": "loc-token-savings-cli",
+      "category": "localization",
+      "prompt": "Which file implements the `wqm admin token-savings` CLI subcommand? Answer with the file path.",
+      "expected_paths": ["token_savings.rs"]
+    },
+    {
+      "id": "loc-token-savings-view",
+      "category": "localization",
+      "prompt": "Which schema migration creates the `token_savings` SQL view? Answer with the migration file path.",
+      "expected_paths": ["v38.rs", "v44.rs"]
+    },
+    {
+      "id": "loc-grep-economy",
+      "category": "localization",
+      "prompt": "Where does the grep MCP tool compute its token-economy bytes_in/bytes_out numbers? Answer with the file path and function name.",
+      "expected_paths": ["tools/grep.ts", "computeGrepEconomy"]
+    },
+    {
+      "id": "loc-write-actor-economy",
+      "category": "localization",
+      "prompt": "Which Rust file executes the SQL UPDATE that persists token-economy metrics (bytes_in, bytes_out, shape_mode) onto a search_events row? Answer with the file path.",
+      "expected_paths": ["exec_tracking.rs"]
+    },
+    {
+      "id": "loc-session-eviction",
+      "category": "localization",
+      "prompt": "The MCP HTTP server evicts idle stateful sessions after a TTL. In which file is that eviction implemented, and which environment variable overrides the TTL? Answer with both.",
+      "expected_paths": ["mcp-http-server.ts", "WQM_MCP_SESSION_TTL_MS"]
+    },
+    {
+      "id": "loc-effective-cwd",
+      "category": "localization",
+      "prompt": "Tool handlers must not use process.cwd() directly — there is a helper that resolves the effective working directory with a per-request override. Which file defines it? Answer with the file path and function name.",
+      "expected_paths": ["request-context.ts", "getEffectiveCwd"]
+    },
+    {
+      "id": "loc-grep-default-cap",
+      "category": "localization",
+      "prompt": "The MCP grep tool caps results at a smaller default than the daemon's. What is the default maxResults value for the MCP grep tool and in which file is it defined?",
+      "expected_paths": ["tool-builders/grep.ts", "100"]
+    },
+    {
+      "id": "comp-dedupe-by-file",
+      "category": "comprehension",
+      "prompt": "In the semantic search pipeline, multiple chunks of the same file could crowd the top-k. Explain which function prevents that, what identity key it uses, and in which file it lives.",
+      "expected_paths": ["dedupeByFile", "resultFileKey", "document_id"]
+    },
+    {
+      "id": "comp-schema-version",
+      "category": "comprehension",
+      "prompt": "What is the current SQLite schema version constant in the daemon, and in which file is it declared? Answer with the number and the file path.",
+      "expected_paths": ["schema_version/mod.rs"]
+    },
+    {
+      "id": "comp-sparse-weight",
+      "category": "comprehension",
+      "prompt": "Hybrid search down-weights the keyword/sparse leg relative to the dense leg. Which two constants control this (one global, one for sparse-only hits), and in which file are they defined?",
+      "expected_paths": ["KEYWORD_WEIGHT", "SPARSE_ONLY_WEIGHT", "search-qdrant.ts"]
+    },
+    {
+      "id": "comp-branch-fallback",
+      "category": "comprehension",
+      "prompt": "When a grep on a feature branch finds nothing because a file is unchanged on that branch, the server resolves a fallback branch. Which module implements resolveFallbackBranch? Answer with the file path.",
+      "expected_paths": ["branch-scope.ts"]
+    },
+    {
+      "id": "comp-validate-gate",
+      "category": "comprehension",
+      "prompt": "This repo has a local CI-parity validation gate that runs inside a Docker build stage. In which Dockerfile is the stage defined, what is the stage called, and what does it run?",
+      "expected_paths": ["Dockerfile.memexd", "validate", "clippy"]
+    },
+    {
+      "id": "comp-idempotency",
+      "category": "comprehension",
+      "prompt": "Queue items carry an idempotency key. Describe the algorithm (hash and fields) used to compute it, per this repo's design docs or code.",
+      "expected_paths": ["SHA256", "tenant_id"]
+    },
+    {
+      "id": "impact-shape-mode",
+      "category": "impact",
+      "prompt": "If the allowed values of the search_events.shape_mode field needed a new value, which TypeScript files carrying a literal union type for shape_mode would have to change? List at least two file paths.",
+      "expected_paths": ["search-event-queries.ts", "grpc-types-messages-embedding-queue-tracking.ts"]
+    },
+    {
+      "id": "impact-summary-allowlist",
+      "category": "impact",
+      "prompt": "The search tool's summary mode keeps only an allowlist of metadata keys. Where is that allowlist defined (file + constant name), and would a new Qdrant payload field appear in summary results by default?",
+      "expected_paths": ["search-shaping.ts", "SUMMARY_METADATA_KEYS"]
+    }
+  ]
+}
