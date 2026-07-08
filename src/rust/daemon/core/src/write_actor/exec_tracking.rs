@@ -4,6 +4,31 @@ use super::actor::WriteActor;
 use super::commands::*;
 use wqm_common::timestamps;
 
+/// Ceiling for plausible token-economy byte counts (1 TiB). This is the
+/// single write point for `search_events.bytes_in`/`bytes_out` across every
+/// producer (MCP server tools today, CLI or others tomorrow), so implausible
+/// values are rejected HERE rather than per-producer: a buggy client once
+/// summed gRPC int64s delivered as strings (digit concatenation), the result
+/// overflowed i64 on the wire and was clamped to i64::MAX — and a single such
+/// row makes `SUM(bytes_in)` in the `token_savings` view raise
+/// "integer overflow". Out-of-range values are stored as NULL ("unknown",
+/// excluded from aggregates per spec 20 §2) and logged.
+const MAX_PLAUSIBLE_ECONOMY_BYTES: i64 = 1 << 40;
+
+fn sanitize_economy_bytes(value: i64, field: &str, event_id: &str) -> Option<i64> {
+    if (0..=MAX_PLAUSIBLE_ECONOMY_BYTES).contains(&value) {
+        Some(value)
+    } else {
+        tracing::warn!(
+            event_id = %event_id,
+            field = field,
+            value = value,
+            "implausible token-economy byte count from producer; storing NULL"
+        );
+        None
+    }
+}
+
 impl WriteActor {
     pub(super) async fn exec_log_search_event(&self, data: LogSearchEventData) -> WriteResult<()> {
         let now = timestamps::now_utc();
@@ -98,8 +123,16 @@ impl WriteActor {
                  shape_mode = ?4, tool_version = ?5 \
              WHERE id = ?6",
         )
-        .bind(data.bytes_in)
-        .bind(data.bytes_out)
+        .bind(sanitize_economy_bytes(
+            data.bytes_in,
+            "bytes_in",
+            &data.event_id,
+        ))
+        .bind(sanitize_economy_bytes(
+            data.bytes_out,
+            "bytes_out",
+            &data.event_id,
+        ))
         .bind(data.hits_truncated)
         .bind(&data.shape_mode)
         .bind(&data.tool_version)
@@ -190,5 +223,32 @@ impl WriteActor {
             .map_err(|e| format!("failed to delete scratchpad mirror: {}", e))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_economy_bytes_accepts_plausible_values() {
+        assert_eq!(sanitize_economy_bytes(0, "bytes_in", "e1"), Some(0));
+        assert_eq!(sanitize_economy_bytes(8192, "bytes_in", "e1"), Some(8192));
+        assert_eq!(
+            sanitize_economy_bytes(MAX_PLAUSIBLE_ECONOMY_BYTES, "bytes_in", "e1"),
+            Some(MAX_PLAUSIBLE_ECONOMY_BYTES)
+        );
+    }
+
+    #[test]
+    fn sanitize_economy_bytes_nulls_garbage() {
+        // Negative (e.g. u64→i64 wrap) and beyond-plausible values (e.g. the
+        // digit-concatenation bug clamped to i64::MAX on the wire) → NULL.
+        assert_eq!(sanitize_economy_bytes(-1, "bytes_in", "e1"), None);
+        assert_eq!(
+            sanitize_economy_bytes(MAX_PLAUSIBLE_ECONOMY_BYTES + 1, "bytes_out", "e1"),
+            None
+        );
+        assert_eq!(sanitize_economy_bytes(i64::MAX, "bytes_in", "e1"), None);
     }
 }

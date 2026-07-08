@@ -12,9 +12,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeGrepEconomy,
+  mapGrepMatches,
   GREP_BYTES_IN_PER_FILE_PROXY,
   type GrepMatch,
 } from '../../src/tools/grep.js';
+import type { TextSearchMatch } from '../../src/clients/grpc-types.js';
 import { computeRetrieveEconomy } from '../../src/tools/retrieve.js';
 import type { RetrievedDocument } from '../../src/tools/retrieve-types.js';
 import {
@@ -140,6 +142,52 @@ describe('computeGrepEconomy', () => {
       const { bytesIn, bytesOut } = computeGrepEconomy(matches);
       expect(bytesIn).toBe(bytesOut);
     });
+  });
+});
+
+// ───────────────────── mapGrepMatches (gRPC boundary) ─────────────────────
+
+function textSearchMatch(overrides: Partial<TextSearchMatch> = {}): TextSearchMatch {
+  return {
+    file_path: 'src/foo.ts',
+    line_number: 1,
+    content: 'hit body',
+    tenant_id: 't1',
+    context_before: [],
+    context_after: [],
+    ...overrides,
+  };
+}
+
+describe('mapGrepMatches int64 coercion (proto-loader longs:String)', () => {
+  it('coerces a string file_size to a number', () => {
+    const [out] = mapGrepMatches([textSearchMatch({ file_size: '3341' })]);
+    expect(out.file_size).toBe(3341);
+    expect(typeof out.file_size).toBe('number');
+  });
+
+  it('drops unset, zero, and non-numeric file_size', () => {
+    const mapped = mapGrepMatches([
+      textSearchMatch({ file_size: undefined }),
+      textSearchMatch({ file_size: 0 }),
+      textSearchMatch({ file_size: '0' }),
+      textSearchMatch({ file_size: 'garbage' }),
+    ]);
+    for (const m of mapped) expect(m.file_size).toBeUndefined();
+  });
+
+  it('regression: string sizes across files sum numerically, not by digit concatenation', () => {
+    // Before the coercion, summing "4096" + "8192" concatenated to
+    // "04096" + "8192" → 40968192-style garbage; with 3+ files the
+    // value exceeded i64 range and was clamped to i64::MAX on the
+    // write path, breaking SUM(bytes_in) in the token_savings view.
+    const raw = [
+      textSearchMatch({ file_path: 'a.ts', file_size: '4096' }),
+      textSearchMatch({ file_path: 'b.ts', file_size: '8192' }),
+      textSearchMatch({ file_path: 'c.ts', file_size: '16384' }),
+    ];
+    const { bytesIn } = computeGrepEconomy(mapGrepMatches(raw));
+    expect(bytesIn).toBe(4096 + 8192 + 16384);
   });
 });
 
