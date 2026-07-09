@@ -44,7 +44,10 @@ const STRUCTURED_OUTPUT_TOOLS = new Set(['search', 'grep', 'list', 'retrieve', '
 // Derived from src/constants/mcp-public-config.json (single source of truth).
 // publicTools = tools exposed in client `enabled_tools` lists.
 // internalTools = tools the server accepts but not advertised to clients by default.
-const KNOWN_TOOLS = [...mcpPublicConfig.publicTools, ...mcpPublicConfig.internalTools] as const;
+export const KNOWN_TOOLS = [
+  ...mcpPublicConfig.publicTools,
+  ...mcpPublicConfig.internalTools,
+] as const;
 
 /** Dispatch the 'store' tool subtypes. */
 async function dispatchStore(
@@ -83,8 +86,15 @@ async function dispatchStore(
  * Fires an implicit heartbeat (fire-and-forget) before dispatching so that
  * active sessions keep their daemon connection alive without adding latency.
  */
-/** Route a validated tool name to its handler and return the raw result. */
-async function routeTool(
+/**
+ * Route a validated tool name to its handler and return the raw result.
+ *
+ * Exported so the admin "tools playground" can invoke a tool through the exact
+ * same path an MCP client uses (no parallel mock), getting the raw result
+ * object back to render. Callers outside the MCP transport must validate the
+ * tool name against {@link KNOWN_TOOLS} first — this throws on an unknown name.
+ */
+export async function routeTool(
   toolName: string,
   args: Record<string, unknown> | undefined,
   components: ServerComponents,
