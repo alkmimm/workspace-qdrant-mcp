@@ -14,6 +14,15 @@ A browser-based dashboard for the workspace-qdrant MCP server. Lives at
 - **Persist** the discovery configuration (`devRoot`, `scanDepth`,
   approved-projects list) in a JSON file under
   `$WQM_DATA_DIR/admin-settings.json` — survives container restarts.
+- **Invoke** any of the MCP tools interactively via the **Tools
+  Playground** — the same server-side `routeTool` dispatch an agent
+  hits, so you can trial `search` / `grep` / `list` / `graph` / … queries
+  and inspect the raw result, ranking, and latency.
+
+The dashboard is organized into five tabs — **Overview**, **Playground**,
+**Projects**, **Indexing**, **Config** — with the health KPI row pinned
+above them (visible on every tab). The active tab is reflected in the URL
+hash (e.g. `…/admin/#playground`) and remembered across reloads.
 
 ## Access
 
@@ -62,6 +71,19 @@ files above.
 
 ## Sections explained
 
+The dashboard groups its cards into five tabs; the **health KPI row**
+(Daemon / Queue / Indexed) stays pinned above the tab bar and is visible
+on every tab. The active tab deep-links via the URL hash (e.g.
+`…/admin/#playground`) and is remembered in `sessionStorage`.
+
+| Tab | Cards |
+|---|---|
+| **Overview** | Host integrations · Stack actions · Debug snapshot |
+| **Playground** | Tools playground |
+| **Projects** | Discovery settings · Discovered candidates · Registered projects · Branch coverage |
+| **Indexing** | Failed indexing items · Largest indexed files |
+| **Config** | Global index exclusions · Behavioral rules · Client configuration · Logs |
+
 ### Header stats (top of page)
 
 - **Daemon** — pill: `healthy` / `unhealthy`. Detail: active project
@@ -71,6 +93,34 @@ files above.
   daemon's `getStatus` gRPC.
 - **Indexed** — total documents in Qdrant, total collections, and the
   number of registered watch folders.
+
+### Tools playground
+
+Invoke any of the MCP server's tools straight from the browser and see
+exactly what an agent would get back. The form is generated per tool
+(one typed field per parameter, with less-common options under an
+**Advanced** disclosure) and driven through the **same** server-side
+`routeTool` dispatch the MCP transport uses — no parallel mock, so the
+result, ranking, branch metadata, and latency are byte-for-byte what a
+client sees.
+
+- **Tool** picker + a **Project** dropdown that fills `cwd`/`projectId`
+  from a registered project (the #1 correctness lever — most tools scope
+  by `cwd`).
+- **Presets** — one-click example argument sets per tool (a semantic
+  `search`, a regex `grep`, a `graph` impact query, …) that fill the form.
+- **Run** posts `{ tool, args }` to `/admin/api/tools/invoke`; the result
+  pane shows a status/latency line, a compact hits table for
+  `search`/`grep`, and the full raw JSON.
+- **Write tools** (`store`, `scratchpad`, `rules`, `workspace_index`) are
+  marked with a ⚠ and gated behind a confirm — they mutate real state.
+
+All 12 tools are exposed. The endpoint validates the tool name against
+the server's known-tools list and runs it in a throwaway session with the
+form's `cwd` bound into the request context, exactly like a real HTTP MCP
+call. Errors from a tool (bad args, not found, …) come back as
+`{ ok: false, error }` and render in the pane; only a malformed request
+gets a 4xx.
 
 ### Discovery settings
 
@@ -140,6 +190,18 @@ Per-row actions adapt to the current state:
   caller's session (decrementing the live-session count); the watch folder
   persists in the database and the daemon keeps the index intact.
 
+### Branch coverage
+
+Per-branch consistency across the three stores (unified queue, tracked
+files, FTS rows), **grouped by project**. Each project is a collapsible
+group header — click it to fold/unfold its branches — showing the repo
+path, `tenant_id`, current git branch, branch count, and an off-branch
+count; a project with a consistency warning gets an amber left-bar and a
+`WARNING` pill (hover for the detail). Nested under each header, one row
+per branch shows its queue / tracked / FTS figures and a **Signal** pill
+(`current` in green, `non-current` highlighted amber, `other` muted).
+Collapse state is kept per project and survives the 5 s refresh.
+
 ### Debug snapshot
 
 A collapsed `<details>` pane showing the raw JSON of the latest
@@ -161,6 +223,7 @@ can do from the command line. All endpoints require
 | `POST` | `/admin/api/projects/scan` | `{ devRoot?, scanDepth? }` (override; defaults to persisted values) | `{ scan: { root, maxDepth, visited, skipped, candidates[], finishedAt }, settings }` |
 | `POST` | `/admin/api/projects/register` | `{ path, registerIfNew? }` | `{ ok, projectId, created, newlyRegistered, isActive, isWorktree, watchPath }` |
 | `POST` | `/admin/api/projects/deregister` | `{ projectId, path? }` | `{ ok, isActive, newPriority }` |
+| `POST` | `/admin/api/tools/invoke` | `{ tool, args }` | `{ ok, tool, latencyMs, result }` — runs an MCP tool through the real `routeTool` dispatch (backs the [Tools playground](#tools-playground)) |
 
 ### Example: scan + register from `curl`
 
