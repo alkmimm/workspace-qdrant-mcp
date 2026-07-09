@@ -2,11 +2,13 @@
  * Shared empty-result diagnosis for the project-scoped FTS read tools (`grep`
  * and exact `search`).
  *
- * A bare "No matches" conflates three very different situations: the pattern is
- * genuinely absent, a `pathGlob`/`pathExclude` excluded every hit, or the
- * requested branch simply has no indexed content yet. Distinguishing them turns
- * a dead-end 0 into an actionable message. Both FTS tools funnel through here so
- * the behavior can't drift (CLAUDE.md shared-behavior rule) — grep and
+ * A bare "No matches" conflates several very different situations: the pattern
+ * is genuinely absent, a `pathGlob`/`pathExclude` whose SHAPE excluded every hit,
+ * a well-formed path filter over files that merely don't contain the pattern, or
+ * a requested branch with no indexed content yet. Distinguishing them turns a
+ * dead-end 0 into an actionable message — and, critically, stops a valid glob
+ * from being falsely accused of being malformed. Both FTS tools funnel through
+ * here so the behavior can't drift (CLAUDE.md shared-behavior rule) — grep and
  * search-exact each supply a `countWithoutPathFilter` closure appropriate to
  * their own request shape.
  */
@@ -20,27 +22,67 @@ import type { SearchDbReader } from '../clients/search-db-reader.js';
  */
 export const EMPTY_DIAGNOSIS_PROBE_LIMIT = 50;
 
+/** Render "pathGlob \"x\" + pathExclude \"y\"" for whichever filters are set. */
+function describePathFilters(
+  pathGlob: string | undefined,
+  pathExclude: string | undefined
+): string {
+  return [
+    pathGlob ? `pathGlob "${pathGlob}"` : undefined,
+    pathExclude ? `pathExclude "${pathExclude}"` : undefined,
+  ]
+    .filter(Boolean)
+    .join(' + ');
+}
+
+/** Format a probe count, appending "+" when it hit the probe cap. */
+function withCapMarker(n: number): string {
+  return `${n}${n >= EMPTY_DIAGNOSIS_PROBE_LIMIT ? '+' : ''}`;
+}
+
 /**
- * A path filter (`pathGlob`/`pathExclude`) removed every match that the same
- * query would otherwise return — the emptiness is the filter, not the pattern.
+ * A path filter (`pathGlob`/`pathExclude`) selected NO indexed file, yet the
+ * same query without it has hits — so the filter shape itself is the problem
+ * (malformed / too restrictive), not the pattern. Only emitted after confirming
+ * the filter matches zero indexed files (see {@link patternAbsentUnderPathFilterMessage}
+ * for the well-formed-but-empty case).
  */
 export function pathFilterExcludedAllMessage(
   nWithout: number,
   pathGlob: string | undefined,
   pathExclude: string | undefined
 ): string {
-  const filters = [
-    pathGlob ? `pathGlob "${pathGlob}"` : undefined,
-    pathExclude ? `pathExclude "${pathExclude}"` : undefined,
-  ]
-    .filter(Boolean)
-    .join(' + ');
   return (
-    `No matches under ${filters}, but the same query WITHOUT the path filter has ` +
-    `${nWithout}${nWithout >= EMPTY_DIAGNOSIS_PROBE_LIMIT ? '+' : ''} — the path filter excluded everything. ` +
+    `No matches under ${describePathFilters(pathGlob, pathExclude)}, but the same query WITHOUT the path filter has ` +
+    `${withCapMarker(nWithout)} — and the filter matches NO indexed file, so its shape excluded everything. ` +
     'pathGlob matches the ABSOLUTE file path and multi-segment literal folders must be ADJACENT ' +
     '(e.g. "a/b/**" needs a and b consecutive); a name-only filter should float as "**/Name.ext". ' +
     'Adjust or drop the filter, then retry.'
+  );
+}
+
+/**
+ * The path filter is WELL-FORMED — it selects real indexed files — but none of
+ * them contain the pattern, while the same query without the filter has hits in
+ * OTHER files. The emptiness is the pattern being absent from the filtered
+ * files, NOT a broken glob. Guards against the false-blame where a valid filter
+ * like `*.proto` is accused of being malformed only because the literal
+ * (e.g. snake_case `reference_schedule`) lives elsewhere under a different
+ * casing (`ReferenceSchedule`).
+ */
+export function patternAbsentUnderPathFilterMessage(
+  nWithout: number,
+  nFilesMatched: number,
+  pathGlob: string | undefined,
+  pathExclude: string | undefined
+): string {
+  return (
+    `No matches under ${describePathFilters(pathGlob, pathExclude)}. The path filter is well-formed — it selects ` +
+    `${withCapMarker(nFilesMatched)} indexed file(s) — but none of them contain the pattern. The same query WITHOUT ` +
+    `the path filter has ${withCapMarker(nWithout)}, so those matches live in OTHER files; this is NOT a filter-shape ` +
+    'problem. The pattern is most likely just absent from the filtered files — check naming/casing ' +
+    '(e.g. snake_case "my_symbol" vs PascalCase "MySymbol") or whether the symbol really lives in that ' +
+    'filetype. Widen or drop the filter if you expected a match here.'
   );
 }
 
@@ -84,8 +126,15 @@ export interface EmptyDiagnosisInput {
 /**
  * Diagnose a still-empty project-scoped FTS result. Two cheap probes, most
  * specific first:
- *   1. **Path filter dropped everything** — only when `pathGlob`/`pathExclude`
- *      is set and the unfiltered scope has hits.
+ *   1. **A path filter is responsible** — only when `pathGlob`/`pathExclude` is
+ *      set and the unfiltered scope has hits. This splits into two verdicts by a
+ *      second probe (does the filter select any indexed file?):
+ *        1a. filter selects NO file → its shape excluded everything (malformed
+ *            / too restrictive) → {@link pathFilterExcludedAllMessage}.
+ *        1b. filter selects real files but none contain the pattern → the
+ *            pattern is absent from the filtered files, the glob is fine →
+ *            {@link patternAbsentUnderPathFilterMessage}. Avoids falsely blaming
+ *            a valid glob (e.g. `*.proto`) when the literal just isn't there.
  *   2. **Branch has no indexed content** — only for a concrete branch with a
  *      reader available.
  * Returns `undefined` when neither applies. Best-effort: any probe error is
@@ -94,12 +143,20 @@ export interface EmptyDiagnosisInput {
 export async function diagnoseEmptyResult(input: EmptyDiagnosisInput): Promise<string | undefined> {
   const { tenantId, branch, pathGlob, pathExclude, searchDbReader, countWithoutPathFilter } = input;
 
-  // (1) Did a path filter exclude everything?
+  // (1) Is a path filter responsible for the empty result?
   if (pathGlob || pathExclude) {
     try {
       const nWithout = await countWithoutPathFilter();
       if (nWithout > 0) {
-        return pathFilterExcludedAllMessage(nWithout, pathGlob, pathExclude);
+        // The pattern exists in the unfiltered scope. Distinguish a filter that
+        // selects nothing (shape problem) from one that selects real files the
+        // pattern simply isn't in (naming/casing, not a broken glob).
+        const nFilesMatched = searchDbReader
+          ? tryCountFilesMatchingPathFilters(searchDbReader, tenantId, pathGlob, pathExclude)
+          : 0;
+        return nFilesMatched > 0
+          ? patternAbsentUnderPathFilterMessage(nWithout, nFilesMatched, pathGlob, pathExclude)
+          : pathFilterExcludedAllMessage(nWithout, pathGlob, pathExclude);
       }
     } catch {
       // fall through to the branch probe
@@ -126,4 +183,28 @@ export async function diagnoseEmptyResult(input: EmptyDiagnosisInput): Promise<s
   }
 
   return undefined;
+}
+
+/**
+ * Best-effort count of indexed files matching the path filter, capped at the
+ * probe limit. Swallows any reader error (or a reader mock lacking the method)
+ * and returns 0, so a failure degrades to the shape-oriented message rather than
+ * breaking diagnosis.
+ */
+function tryCountFilesMatchingPathFilters(
+  searchDbReader: SearchDbReader,
+  tenantId: string,
+  pathGlob: string | undefined,
+  pathExclude: string | undefined
+): number {
+  try {
+    return searchDbReader.countFilesMatchingPathFilters({
+      tenantId,
+      pathGlob,
+      pathExclude,
+      limit: EMPTY_DIAGNOSIS_PROBE_LIMIT,
+    });
+  } catch {
+    return 0;
+  }
 }

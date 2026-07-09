@@ -54,13 +54,19 @@ function makeQdrant(): QdrantClient {
   return { scroll: vi.fn().mockResolvedValue({ points: [] }) } as unknown as QdrantClient;
 }
 
-function makeReader(rows: Array<{ branch: string; files: number }>): SearchDbReader {
+function makeReader(
+  rows: Array<{ branch: string; files: number }>,
+  filesMatchingPathFilters = 0
+): SearchDbReader {
   return {
     listBranchCounts: vi
       .fn()
       .mockReturnValue(
         rows.map((r) => ({ tenant_id: 'p-a', branch: r.branch, files: r.files, total_bytes: 0 }))
       ),
+    // Second path-filter probe: 0 → glob shape excluded everything; > 0 → glob
+    // is well-formed and the pattern is simply absent from those files.
+    countFilesMatchingPathFilters: vi.fn().mockReturnValue(filesMatchingPathFilters),
   } as unknown as SearchDbReader;
 }
 
@@ -80,7 +86,7 @@ function opts(o: Partial<SearchOptions>): SearchOptions {
 }
 
 describe('searchExact — empty-result diagnosis', () => {
-  it('reports when a pathGlob excluded everything', async () => {
+  it('blames the glob SHAPE only when it selects no indexed file', async () => {
     const daemon = makeDaemon((req) =>
       req.path_glob
         ? Promise.resolve({ matches: [], total_matches: 0, truncated: false })
@@ -93,10 +99,35 @@ describe('searchExact — empty-result diagnosis', () => {
       makeProjectDetector('p-a'),
       opts({ pathGlob: 'management/test/**/*.dart' }),
       'evt-1',
-      makeReader([{ branch: 'main', files: 5 }])
+      makeReader([{ branch: 'main', files: 5 }], 0) // glob selects 0 files
     );
     expect(res.results).toHaveLength(0);
-    expect(res.hint).toMatch(/path filter excluded everything/i);
+    expect(res.hint).toMatch(/matches NO indexed file/i);
+    expect(res.hint).toMatch(/ADJACENT/);
+  });
+
+  it('does NOT blame a well-formed glob when the pattern is just absent from those files', async () => {
+    // Parity with grep: `reference_schedule` under `**/*.proto` — the glob selects
+    // real .proto files, the same query without it has hits elsewhere, but the
+    // literal isn't in the .proto files. Must NOT accuse the glob of malformation.
+    const daemon = makeDaemon((req) =>
+      req.path_glob
+        ? Promise.resolve({ matches: [], total_matches: 0, truncated: false })
+        : Promise.resolve({ matches: [MATCH], total_matches: 1, truncated: false })
+    );
+    const res = await searchExact(
+      makeQdrant(),
+      daemon,
+      makeStateManager(),
+      makeProjectDetector('p-a'),
+      opts({ query: 'reference_schedule', pathGlob: '**/*.proto' }),
+      'evt-1b',
+      makeReader([{ branch: 'main', files: 5 }], 12) // glob selects 12 real files
+    );
+    expect(res.results).toHaveLength(0);
+    expect(res.hint).toMatch(/well-formed/i);
+    expect(res.hint).toMatch(/naming\/casing/i);
+    expect(res.hint).not.toMatch(/ADJACENT/);
   });
 
   it('reports when the requested branch has no indexed content', async () => {
