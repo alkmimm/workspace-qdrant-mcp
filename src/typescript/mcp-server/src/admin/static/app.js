@@ -301,6 +301,7 @@ function renderRegistered(snap) {
   lastRegisteredPaths = new Set(registered.map((r) => r.path));
   lastRegistered = registered;
   populateRulesProjects();
+  populatePlaygroundProjects();
   els.registeredMeta.textContent = `${registered.length} registered`;
   if (registered.length === 0) {
     els.registeredTable.hidden = true;
@@ -451,7 +452,9 @@ function showLogin() {
 
 function showApp() {
   els.loginPanel.hidden = true;
+  initTabs(); // tag sections + activate a tab while appView is still hidden (no flash)
   els.appView.hidden = false;
+  initPlayground();
   loadGlobalIgnore();
   loadLargestFiles();
   loadBranchCoverage();
@@ -968,6 +971,11 @@ function summarizeQueue(queue) {
   return parts.length ? parts.join(' · ') : '0';
 }
 
+// Collapsed branch-coverage groups, keyed by tenant id. Kept in a module var
+// (not the DOM) so the 5s poll re-render preserves each group's open/closed
+// state — the render bakes `hidden` into the branch rows from this set.
+const bcCollapsed = new Set();
+
 function renderBranchCoverage(data) {
   if (!els.branchCoverageTable) return;
   if (!data?.ok) {
@@ -979,17 +987,72 @@ function renderBranchCoverage(data) {
     return;
   }
 
-  const rows = [];
-  for (const project of data.projects || []) {
-    const branches = project.branches || [];
-    if (branches.length === 0) {
-      rows.push({ project, branch: { branch: '(none)' } });
-    } else {
-      for (const branch of branches) rows.push({ project, branch });
-    }
-  }
+  const projects = data.projects || [];
+  let branchRowCount = 0;
+  const html = [];
 
-  if (rows.length === 0) {
+  projects.forEach((project, i) => {
+    const key = project.tenantId || `p${i}`;
+    const branches = (project.branches || []).length ? project.branches : [{ branch: '(none)' }];
+    branchRowCount += branches.length;
+    const collapsed = bcCollapsed.has(key);
+
+    const projectLabel = project.path || project.tenantId || 'unknown';
+    const shortProject = projectLabel.length > 72 ? '…' + projectLabel.slice(-70) : projectLabel;
+    const current = project.currentBranch || '—';
+    const warnings = project.warnings || [];
+    const offBranch = branches.filter((b) => {
+      const n = b.branch || '(none)';
+      return project.currentBranch && n !== project.currentBranch && n !== '(none)';
+    }).length;
+
+    // ── Project group header (colspan across all 5 columns) ──
+    const meta =
+      `· current <code>${escapeHtml(current)}</code> · ${branches.length} branch${branches.length !== 1 ? 'es' : ''}` +
+      (offBranch ? ` · ${offBranch} off-branch` : '');
+    const warnPill = warnings.length
+      ? `<span title="${escapeHtml(warnings.join(' · '))}">${pill(`${warnings.length} warning${warnings.length > 1 ? 's' : ''}`, 'warn')}</span>`
+      : '';
+    html.push(
+      `<tr class="bc-group${warnings.length ? ' bc-group-warn' : ''}" data-bc-key="${escapeHtml(key)}" role="button" aria-expanded="${collapsed ? 'false' : 'true'}">
+        <td colspan="5">
+          <span class="bc-caret">${collapsed ? '▸' : '▾'}</span>
+          <span class="path" title="${escapeHtml(projectLabel)}">${escapeHtml(shortProject)}</span>
+          <code class="bc-tenant">${escapeHtml(project.tenantId || '')}</code>
+          <span class="dim small">${meta}</span>
+          ${warnPill}
+        </td>
+      </tr>`
+    );
+
+    // ── Branch rows (nested under the group; project/current not repeated) ──
+    for (const branch of branches) {
+      const branchName = branch.branch || '(none)';
+      const isCurrent = project.currentBranch && branchName === project.currentBranch;
+      const nonCurrent =
+        project.currentBranch && branchName !== project.currentBranch && branchName !== '(none)';
+      const trackedFiles = Number(branch.trackedFiles || 0);
+      const trackedChunks = Number(branch.trackedChunks || 0);
+      const ftsFiles = Number(branch.ftsFiles || 0);
+      const ftsBytes = Number(branch.ftsBytes || 0);
+      const signal = nonCurrent
+        ? pill('non-current', 'warn')
+        : isCurrent
+          ? pill('current', 'ok')
+          : pill('other', 'muted');
+      html.push(
+        `<tr class="bc-branch${nonCurrent ? ' branch-warn-row' : ''}${isCurrent ? ' bc-current' : ''}" data-bc-parent="${escapeHtml(key)}"${collapsed ? ' hidden' : ''}>
+          <td class="bc-branch-name"><code>${escapeHtml(branchName)}</code></td>
+          <td class="num">${escapeHtml(summarizeQueue(branch.queue))}</td>
+          <td class="num">${trackedFiles.toLocaleString()} files · ${trackedChunks.toLocaleString()} chunks</td>
+          <td class="num">${ftsFiles.toLocaleString()} files · ${formatBytes(ftsBytes)}</td>
+          <td>${signal}</td>
+        </tr>`
+      );
+    }
+  });
+
+  if (branchRowCount === 0) {
     els.branchCoverageEmpty.textContent = 'No branch coverage data yet.';
     els.branchCoverageEmpty.hidden = false;
     els.branchCoverageTable.hidden = true;
@@ -999,42 +1062,30 @@ function renderBranchCoverage(data) {
 
   els.branchCoverageEmpty.hidden = true;
   els.branchCoverageTable.hidden = false;
-  els.branchCoverageBody.innerHTML = rows.map(({ project, branch }) => {
-    const current = project.currentBranch || '—';
-    const branchName = branch.branch || '(none)';
-    const isCurrent = project.currentBranch && branchName === project.currentBranch;
-    const nonCurrent = project.currentBranch && branchName !== project.currentBranch && branchName !== '(none)';
-    const warnings = project.warnings || [];
-    const projectLabel = project.path || project.tenantId || 'unknown';
-    const shortProject = projectLabel.length > 72 ? '…' + projectLabel.slice(-70) : projectLabel;
-    const trackedFiles = Number(branch.trackedFiles || 0);
-    const trackedChunks = Number(branch.trackedChunks || 0);
-    const ftsFiles = Number(branch.ftsFiles || 0);
-    const ftsBytes = Number(branch.ftsBytes || 0);
-    const signal = nonCurrent
-      ? pill('non-current rows', 'warn')
-      : isCurrent
-        ? pill('current', 'ok')
-        : pill('other', 'muted');
-    const warningText = warnings.length
-      ? `<span class="sub">${escapeHtml(warnings.join(' · '))}</span>`
-      : '';
-    return `<tr class="${nonCurrent ? 'branch-warn-row' : ''}">
-      <td><span class="path" title="${escapeHtml(projectLabel)}">${escapeHtml(shortProject)}</span>
-          <span class="sub"><code>${escapeHtml(project.tenantId || '')}</code></span></td>
-      <td><code>${escapeHtml(current)}</code></td>
-      <td><code>${escapeHtml(branchName)}</code></td>
-      <td class="num">${escapeHtml(summarizeQueue(branch.queue))}</td>
-      <td class="num">${trackedFiles.toLocaleString()} files · ${trackedChunks.toLocaleString()} chunks</td>
-      <td class="num">${ftsFiles.toLocaleString()} files · ${formatBytes(ftsBytes)}</td>
-      <td>${signal}${warningText}</td>
-    </tr>`;
-  }).join('');
+  els.branchCoverageBody.innerHTML = html.join('');
 
-  const warningCount = (data.projects || []).reduce((n, p) => n + ((p.warnings || []).length ? 1 : 0), 0);
+  const warningCount = projects.reduce((n, p) => n + ((p.warnings || []).length ? 1 : 0), 0);
   const source = data.source?.searchDb ? ` · search.db: ${data.source.searchDb}` : '';
-  els.branchCoverageMeta.textContent = `· ${rows.length} branch row(s) · ${warningCount} project warning(s)${source}`;
+  els.branchCoverageMeta.textContent = `· ${projects.length} project(s) · ${branchRowCount} branch row(s) · ${warningCount} warning(s)${source}`;
 }
+
+// Collapse/expand a project group (delegated; survives the 5s re-render via bcCollapsed).
+els.branchCoverageBody?.addEventListener('click', (e) => {
+  const group = e.target.closest('.bc-group');
+  if (!group) return;
+  const key = group.dataset.bcKey;
+  const collapsed = !bcCollapsed.has(key);
+  if (collapsed) bcCollapsed.add(key);
+  else bcCollapsed.delete(key);
+  group.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  const caret = group.querySelector('.bc-caret');
+  if (caret) caret.textContent = collapsed ? '▸' : '▾';
+  els.branchCoverageBody
+    .querySelectorAll(`.bc-branch[data-bc-parent="${key}"]`)
+    .forEach((r) => {
+      r.hidden = collapsed;
+    });
+});
 
 async function loadBranchCoverage() {
   if (!els.branchCoverageTable) return;
@@ -1309,6 +1360,590 @@ async function tryAutoInit() {
     return false;
   }
 }
+
+// ══ Tabs ═════════════════════════════════════════════════════════════
+//
+// The admin used to be one long scroll (14 sections). They're grouped into
+// 5 tabs; the health KPI row stays pinned above the tab bar (untagged →
+// visible on every tab). Section → tab is assigned here by heading so the
+// HTML markup stays declarative, and the active tab deep-links via the URL
+// hash (#playground) and is remembered across reloads.
+
+els.tabNav = document.getElementById('tabNav');
+
+const TAB_ORDER = ['overview', 'playground', 'projects', 'indexing', 'config'];
+const TAB_OF = {
+  'Host integrations': 'overview',
+  'Stack actions': 'overview',
+  'Discovery settings': 'projects',
+  'Discovered candidates': 'projects',
+  'Registered projects': 'projects',
+  'Branch coverage': 'projects',
+  'Failed indexing items': 'indexing',
+  'Largest indexed files': 'indexing',
+  'Global index exclusions': 'config',
+  'Behavioral rules': 'config',
+  'Client configuration': 'config',
+  Logs: 'config',
+};
+
+function tagSectionsWithTabs() {
+  els.appView.querySelectorAll(':scope > section').forEach((sec) => {
+    if (sec.dataset.tab) return;
+    if (sec.id === 'playgroundCard') {
+      sec.dataset.tab = 'playground';
+      return;
+    }
+    const h2 = sec.querySelector('.card-head h2, h2');
+    const key = h2 ? h2.textContent.trim() : '';
+    if (TAB_OF[key]) {
+      sec.dataset.tab = TAB_OF[key];
+      return;
+    }
+    if (sec.querySelector('#debugRaw')) {
+      sec.dataset.tab = 'overview';
+      return;
+    }
+    // Untagged (the health stat grid) stays visible on every tab.
+  });
+}
+
+function readStoredTab() {
+  try {
+    return sessionStorage.getItem('wqm.admin.tab');
+  } catch {
+    return null;
+  }
+}
+
+function showTab(name) {
+  if (!TAB_ORDER.includes(name)) name = 'overview';
+  els.appView.querySelectorAll('[data-tab]').forEach((sec) => {
+    sec.hidden = sec.dataset.tab !== name;
+  });
+  els.tabNav.querySelectorAll('[data-tab-btn]').forEach((btn) => {
+    const on = btn.dataset.tabBtn === name;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  try {
+    sessionStorage.setItem('wqm.admin.tab', name);
+  } catch {
+    /* ignore */
+  }
+  if (location.hash.slice(1) !== name) history.replaceState(null, '', '#' + name);
+}
+
+function initTabs() {
+  tagSectionsWithTabs();
+  const fromHash = location.hash.slice(1);
+  const fromStore = readStoredTab();
+  const initial = TAB_ORDER.includes(fromHash)
+    ? fromHash
+    : fromStore && TAB_ORDER.includes(fromStore)
+      ? fromStore
+      : 'overview';
+  showTab(initial);
+}
+
+els.tabNav.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-tab-btn]');
+  if (btn) showTab(btn.dataset.tabBtn);
+});
+window.addEventListener('hashchange', () => {
+  const h = location.hash.slice(1);
+  if (TAB_ORDER.includes(h)) showTab(h);
+});
+
+// ══ Tools playground ═════════════════════════════════════════════════
+//
+// Invoke any of the 12 MCP tools through the SAME server-side routeTool
+// path the MCP client uses (POST /admin/api/tools/invoke) and render the
+// raw result — so what you see here is byte-for-byte what an agent gets.
+// Forms are generated from PG_TOOLS: one typed field per tool parameter,
+// with the less-common ones tucked under an "Advanced" disclosure.
+//   type: text | textarea | number | bool | enum | tags | json
+//   req: required · adv: goes under Advanced · ph: placeholder
+
+els.pgTool = document.getElementById('pgTool');
+els.pgProject = document.getElementById('pgProject');
+els.pgToolHint = document.getElementById('pgToolHint');
+els.pgForm = document.getElementById('pgForm');
+els.pgRunBtn = document.getElementById('pgRunBtn');
+els.pgClearBtn = document.getElementById('pgClearBtn');
+els.pgStatus = document.getElementById('pgStatus');
+els.pgResult = document.getElementById('pgResult');
+els.pgResultHead = document.getElementById('pgResultHead');
+els.pgHits = document.getElementById('pgHits');
+els.pgRaw = document.getElementById('pgRaw');
+els.pgPresetRow = document.getElementById('pgPresetRow');
+els.pgPresets = document.getElementById('pgPresets');
+
+const F = (k, type, opts = {}) => ({ k, type, ...opts });
+
+const PG_TOOLS = [
+  { name: 'search', mutates: false, note: 'semantic / hybrid ranked search', fields: [
+    F('query', 'textarea', { req: true, ph: 'search text — write it in English' }),
+    F('cwd', 'text', { ph: '/abs/repo — scopes to a project' }),
+    F('mode', 'enum', { enum: ['semantic', 'hybrid'] }),
+    F('exact', 'bool'),
+    F('fileType', 'enum', { enum: ['code', 'text', 'config', 'data', 'docs', 'web', 'slides', 'build'] }),
+    F('pathGlob', 'text', { ph: '**/*.rs' }),
+    F('pathExclude', 'text', { ph: 'old_project/**' }),
+    F('limit', 'number'),
+    F('scope', 'enum', { enum: ['project', 'global', 'all'] }),
+    F('branch', 'text'),
+    F('collection', 'enum', { enum: ['projects', 'libraries', 'rules', 'scratchpad'], adv: true }),
+    F('component', 'text', { adv: true }),
+    F('tag', 'text', { adv: true }),
+    F('tags', 'tags', { adv: true }),
+    F('includeLibraries', 'bool', { adv: true }),
+    F('includeScratchpad', 'bool', { adv: true }),
+    F('includeGraphContext', 'bool', { adv: true }),
+    F('scoreThreshold', 'number', { adv: true }),
+    F('responseFormat', 'enum', { enum: ['concise', 'detailed', 'packed'], adv: true }),
+    F('summary', 'bool', { adv: true }),
+    F('offset', 'number', { adv: true }),
+    F('maxBytesPerHit', 'number', { adv: true }),
+    F('maxResponseBytes', 'number', { adv: true }),
+    F('contextLines', 'number', { adv: true }),
+    F('libraryName', 'text', { adv: true }),
+    F('projectId', 'text', { adv: true }),
+  ] },
+  { name: 'grep', mutates: false, note: 'exact / regex FTS substring search', fields: [
+    F('pattern', 'text', { req: true, ph: 'literal or regex' }),
+    F('cwd', 'text'),
+    F('regex', 'bool'),
+    F('caseSensitive', 'bool'),
+    F('contextLines', 'number'),
+    F('pathGlob', 'text'),
+    F('pathExclude', 'text'),
+    F('branch', 'text'),
+    F('scope', 'enum', { enum: ['project', 'all'] }),
+    F('maxResults', 'number'),
+    F('maxBytesPerLine', 'number', { adv: true }),
+    F('maxResponseBytes', 'number', { adv: true }),
+    F('projectId', 'text', { adv: true }),
+  ] },
+  { name: 'list', mutates: false, note: 'indexed file/folder structure', fields: [
+    F('cwd', 'text'),
+    F('path', 'text', { ph: 'subfolder relative to root' }),
+    F('format', 'enum', { enum: ['tree', 'summary', 'flat'] }),
+    F('depth', 'number'),
+    F('pattern', 'text', { ph: '**/*.ts (floats)' }),
+    F('pathExclude', 'text'),
+    F('extension', 'text', { ph: 'rs' }),
+    F('fileType', 'enum', { enum: ['code', 'text', 'data', 'config', 'build', 'web'] }),
+    F('language', 'text'),
+    F('component', 'text', { adv: true }),
+    F('branch', 'text'),
+    F('includeTests', 'bool', { adv: true }),
+    F('limit', 'number', { adv: true }),
+    F('pageSize', 'number', { adv: true }),
+    F('cursor', 'text', { adv: true }),
+    F('projectId', 'text', { adv: true }),
+  ] },
+  { name: 'retrieve', mutates: false, note: 'fetch documents by id / locator / filter', fields: [
+    F('documentId', 'text', { ph: 'point id from a search/list hit' }),
+    F('filePath', 'text'),
+    F('lineNumber', 'number'),
+    F('collection', 'enum', { enum: ['projects', 'libraries', 'rules', 'scratchpad'] }),
+    F('branch', 'text'),
+    F('cwd', 'text'),
+    F('filter', 'json', { adv: true, ph: '{ "document_id": "..." }' }),
+    F('libraryName', 'text', { adv: true }),
+    F('limit', 'number', { adv: true }),
+    F('offset', 'number', { adv: true }),
+    F('projectId', 'text', { adv: true }),
+  ] },
+  { name: 'graph', mutates: false, note: 'code-relationship graph', fields: [
+    F('action', 'enum', { req: true, enum: ['stats', 'relations', 'impact', 'usages', 'hotspots', 'bridges', 'modules'] }),
+    F('symbol', 'text', { ph: 'required for relations/impact/usages' }),
+    F('filePath', 'text', { ph: 'required for relations' }),
+    F('symbolType', 'enum', { enum: ['function', 'async_function', 'method', 'struct', 'class', 'enum', 'interface', 'trait', 'type_alias', 'constant', 'module', 'macro', 'impl'] }),
+    F('cwd', 'text'),
+    F('edgeTypes', 'tags', { adv: true, ph: 'CALLS,IMPORTS,CONTAINS' }),
+    F('maxHops', 'number', { adv: true }),
+    F('minConfidence', 'number', { adv: true }),
+    F('topK', 'number', { adv: true }),
+    F('memberLimit', 'number', { adv: true }),
+    F('minSize', 'number', { adv: true }),
+    F('maxSamples', 'number', { adv: true }),
+    F('projectId', 'text', { adv: true }),
+  ] },
+  { name: 'store', mutates: true, note: 'create note / library / project / url', fields: [
+    F('type', 'enum', { enum: ['scratchpad', 'library', 'url', 'project'] }),
+    F('content', 'textarea'),
+    F('cwd', 'text'),
+    F('projectId', 'text'),
+    F('libraryName', 'text'),
+    F('forProject', 'bool'),
+    F('path', 'text', { ph: 'for type=project' }),
+    F('name', 'text'),
+    F('title', 'text'),
+    F('url', 'text', { ph: 'for type=url' }),
+    F('filePath', 'text', { adv: true }),
+    F('tags', 'tags', { adv: true }),
+    F('sourceType', 'enum', { enum: ['user_input', 'web', 'file', 'scratchbook', 'note'], adv: true }),
+    F('metadata', 'json', { adv: true, ph: '{ "k": "v" }' }),
+  ] },
+  { name: 'scratchpad', mutates: true, note: 'list / update / delete notes', fields: [
+    F('action', 'enum', { req: true, enum: ['list', 'update', 'delete'] }),
+    F('content', 'textarea', { ph: 'VERBATIM current note text (update/delete)' }),
+    F('newContent', 'textarea', { ph: 'replacement text (update)' }),
+    F('title', 'text'),
+    F('tags', 'tags'),
+    F('projectId', 'text'),
+    F('cwd', 'text'),
+    F('limit', 'number', { adv: true }),
+  ] },
+  { name: 'rules', mutates: true, note: 'behavioral rules CRUD', fields: [
+    F('action', 'enum', { req: true, enum: ['list', 'add', 'update', 'remove'] }),
+    F('label', 'text', { ph: 'word-word-word, max 15' }),
+    F('content', 'textarea'),
+    F('scope', 'enum', { enum: ['project', 'global'] }),
+    F('projectId', 'text'),
+    F('cwd', 'text'),
+    F('title', 'text'),
+    F('priority', 'number'),
+    F('tags', 'tags', { adv: true }),
+    F('limit', 'number', { adv: true }),
+  ] },
+  { name: 'workspace_index', mutates: true, note: 'indexing registry & agent branches (mutating actions need allowMutation + env)', fields: [
+    F('action', 'enum', { req: true, enum: ['indexing_status', 'list_projects', 'project_status', 'status_all', 'list_branches', 'agent_branch_status', 'observe_project', 'observe_all', 'incremental_check', 'incremental_check_all', 'init', 'add_project', 'start_agent_branch', 'finish_agent_branch', 'abandon_agent_branch', 'register_wqm', 'register_all_wqm', 'cleanup_orphans', 'sync_current_branch'] }),
+    F('cwd', 'text'),
+    F('projectId', 'text'),
+    F('projectPath', 'text'),
+    F('allowMutation', 'bool'),
+    F('projectName', 'text', { adv: true }),
+    F('branchName', 'text', { adv: true }),
+    F('branch', 'text', { adv: true }),
+    F('baseBranch', 'text', { adv: true }),
+    F('returnBranch', 'text', { adv: true }),
+    F('worktreePath', 'text', { adv: true }),
+    F('worktreeRoot', 'text', { adv: true }),
+    F('useWorktree', 'bool', { adv: true }),
+    F('purpose', 'text', { adv: true }),
+    F('createdBy', 'text', { adv: true }),
+    F('repoDir', 'text', { adv: true }),
+    F('currentBranch', 'text', { adv: true }),
+    F('commitHash', 'text', { adv: true }),
+    F('isWorktree', 'bool', { adv: true }),
+    F('gitRemote', 'text', { adv: true }),
+    F('hookName', 'text', { adv: true }),
+    F('payload', 'json', { adv: true }),
+  ] },
+  { name: 'embedding', mutates: false, note: 'report active embedding provider (no parameters)', fields: [] },
+  { name: 'search_eval', mutates: false, note: 'benchmark search quality (hit@k / recall / MRR)', fields: [
+    F('cwd', 'text'),
+    F('projectId', 'text'),
+    F('scope', 'enum', { enum: ['project', 'global', 'all'] }),
+    F('limit', 'number'),
+    F('topK', 'number'),
+    F('rerank', 'bool'),
+    F('rerankWeight', 'number'),
+    F('includeTopPaths', 'bool'),
+    F('summary', 'bool'),
+    F('cases', 'json', { adv: true, ph: '[{ "query": "...", "expectedFiles": ["src/x.ts"] }]' }),
+  ] },
+];
+
+// One-click example arg sets per tool — project-agnostic (the project picker
+// supplies cwd), using real symbols/paths from THIS repo so graph/relations
+// presets resolve when run against the workspace-qdrant project. Applying a
+// preset resets the form, then fills the named fields.
+const PG_PRESETS = {
+  search: [
+    { label: 'Semantic · code', args: { query: 'recover stale queue leases', mode: 'semantic', fileType: 'code' } },
+    { label: 'Hybrid', args: { query: 'idempotency key sha256', mode: 'hybrid', fileType: 'code' } },
+    { label: 'Drop legacy dir', args: { query: 'reference schedule template', fileType: 'code', pathExclude: 'old_project/**' } },
+    { label: 'Packed read', args: { query: 'branch dedup base_point', fileType: 'code', responseFormat: 'packed' } },
+  ],
+  grep: [
+    { label: 'Literal', args: { pattern: 'routeTool' } },
+    { label: 'Regex alternation', args: { pattern: 'search|grep|graph', regex: true } },
+    { label: 'In a filetype', args: { pattern: 'service', pathGlob: '**/*.proto' } },
+    { label: 'Exclude tests', args: { pattern: 'TODO', pathExclude: '**/test/**' } },
+  ],
+  list: [
+    { label: 'Summary', args: { format: 'summary' } },
+    { label: 'Rust files', args: { format: 'flat', extension: 'rs', limit: 100 } },
+    { label: 'Migrations (any depth)', args: { pattern: 'V*.sql' } },
+    { label: 'Tree of src', args: { path: 'src', format: 'tree', depth: 2 } },
+  ],
+  retrieve: [
+    { label: 'By file + line', args: { filePath: 'src/typescript/mcp-server/src/tool-dispatcher.ts', lineNumber: 87 } },
+    { label: 'By filter (document_id)', args: { collection: 'projects', filter: { document_id: 'PASTE_HASH' } } },
+  ],
+  graph: [
+    { label: 'Stats', args: { action: 'stats' } },
+    { label: 'Impact', args: { action: 'impact', symbol: 'routeTool' } },
+    { label: 'Callers (usages)', args: { action: 'usages', symbol: 'routeTool' } },
+    { label: 'Relations (precise)', args: { action: 'relations', symbol: 'diagnoseEmptyResult', filePath: 'src/typescript/mcp-server/src/tools/empty-diagnosis.ts', minConfidence: 0.5 } },
+    { label: 'Hotspots', args: { action: 'hotspots', topK: 20 } },
+  ],
+  store: [
+    { label: 'Scratchpad note', args: { type: 'scratchpad', content: 'playground test note', title: 'test' } },
+    { label: 'Library doc', args: { type: 'library', libraryName: 'tokio', title: 'Tokio', content: 'Async runtime for Rust.' } },
+    { label: 'Register project', args: { type: 'project', path: '/home/alkmimm/respositorios/<repo>' } },
+  ],
+  scratchpad: [
+    { label: 'List', args: { action: 'list' } },
+    { label: 'Update', args: { action: 'update', content: '<verbatim old text>', newContent: '<new text>' } },
+    { label: 'Delete', args: { action: 'delete', content: '<verbatim note text>' } },
+  ],
+  rules: [
+    { label: 'List', args: { action: 'list' } },
+    { label: 'Add (project)', args: { action: 'add', label: 'prefer-uv', title: 'Use uv', content: 'Use uv for Python deps.', scope: 'project' } },
+    { label: 'Remove', args: { action: 'remove', label: 'prefer-uv' } },
+  ],
+  workspace_index: [
+    { label: 'Indexing status', args: { action: 'indexing_status' } },
+    { label: 'List projects', args: { action: 'list_projects' } },
+    { label: 'Observe all', args: { action: 'observe_all' } },
+  ],
+  search_eval: [
+    { label: 'Bundled dataset', args: { limit: 10, topK: 10 } },
+    { label: 'Rerank off (A/B)', args: { rerank: false } },
+    { label: 'Ad-hoc cases', args: { cases: [{ query: 'where is the tool dispatcher', expectedFiles: ['src/typescript/mcp-server/src/tool-dispatcher.ts'] }] } },
+  ],
+  // embedding: no parameters → no presets
+};
+
+function pgSpec() {
+  return PG_TOOLS.find((t) => t.name === els.pgTool.value);
+}
+
+function pgPresetsFor(name) {
+  return PG_PRESETS[name] || [];
+}
+
+function pgRenderPresets() {
+  const spec = pgSpec();
+  const presets = spec ? pgPresetsFor(spec.name) : [];
+  if (!presets.length) {
+    els.pgPresetRow.hidden = true;
+    els.pgPresets.innerHTML = '';
+    return;
+  }
+  els.pgPresetRow.hidden = false;
+  els.pgPresets.innerHTML = presets
+    .map((p, i) => `<button type="button" class="secondary small" data-preset="${i}">${escapeHtml(p.label)}</button>`)
+    .join('');
+}
+
+// Inverse of pgCollect: write an args object back into the rendered controls.
+function pgApplyArgs(spec, args) {
+  let touchedAdv = false;
+  for (const f of spec.fields) {
+    if (!(f.k in args)) continue;
+    const el = document.getElementById(`pg_${f.k}`);
+    if (!el) continue;
+    const v = args[f.k];
+    if (f.type === 'bool') el.value = v === true ? 'true' : v === false ? 'false' : '';
+    else if (f.type === 'tags') el.value = Array.isArray(v) ? v.join(', ') : String(v);
+    else if (f.type === 'json') el.value = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+    else el.value = String(v);
+    if (f.adv) touchedAdv = true;
+  }
+  if (touchedAdv) {
+    const d = els.pgForm.querySelector('details');
+    if (d) d.open = true;
+  }
+}
+
+function pgApplyPreset(preset) {
+  const spec = pgSpec();
+  if (!spec) return;
+  pgRenderForm(); // clean slate + project cwd/projectId
+  pgApplyArgs(spec, preset.args || {});
+  els.pgStatus.textContent = `preset: ${preset.label}`;
+  els.pgStatus.className = 'dim small';
+}
+
+function pgControl(f) {
+  const id = `pg_${f.k}`;
+  const attrs = `id="${id}" data-k="${f.k}" data-type="${f.type}"`;
+  const ph = escapeHtml(f.ph || '');
+  if (f.type === 'textarea') return `<textarea ${attrs} rows="3" placeholder="${ph}"></textarea>`;
+  if (f.type === 'json') return `<textarea ${attrs} rows="3" placeholder="${ph}" style="font-family:ui-monospace,monospace;font-size:var(--text-xs)"></textarea>`;
+  if (f.type === 'number') return `<input ${attrs} type="number" placeholder="${ph}" />`;
+  if (f.type === 'bool') return `<select ${attrs}><option value="">(default)</option><option value="true">true</option><option value="false">false</option></select>`;
+  if (f.type === 'enum') {
+    const head = f.req ? '' : '<option value="">(default)</option>';
+    const opts = f.enum.map((e) => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join('');
+    return `<select ${attrs}>${head}${opts}</select>`;
+  }
+  return `<input ${attrs} type="text" placeholder="${ph}" />`;
+}
+
+function pgFieldRow(f) {
+  const label = escapeHtml(f.label || f.k) + (f.req ? ' <span class="error">*</span>' : '');
+  // Textareas / JSON editors take their own full-width row so they never sit in
+  // a flex row beside short inputs — that mismatch bottom-aligned the short
+  // inputs against the tall textarea and misaligned every label in the row.
+  const isFull = f.type === 'textarea' || f.type === 'json';
+  const style = isFull ? 'flex-basis:100%; min-width:100%' : 'min-width:220px';
+  return `<div class="field grow" style="${style}"><label for="pg_${f.k}">${label}</label>${pgControl(f)}</div>`;
+}
+
+function pgRenderForm() {
+  const spec = pgSpec();
+  if (!spec) { els.pgForm.innerHTML = ''; return; }
+  els.pgToolHint.textContent = (spec.mutates ? '⚠ mutates data · ' : '') + (spec.note || '');
+  els.pgToolHint.className = spec.mutates ? 'error small' : 'dim small';
+  const primary = spec.fields.filter((f) => !f.adv);
+  const adv = spec.fields.filter((f) => f.adv);
+  let html = '';
+  if (!spec.fields.length) html += '<p class="dim small">No parameters — just Run.</p>';
+  if (primary.length) html += `<div class="row" style="flex-wrap:wrap; gap:var(--space-4); align-items:flex-start">${primary.map(pgFieldRow).join('')}</div>`;
+  if (adv.length) {
+    html += `<details style="margin-top:var(--space-4)"><summary class="dim small">Advanced (${adv.length})</summary>` +
+      `<div class="row" style="flex-wrap:wrap; gap:var(--space-4); align-items:flex-start; margin-top:var(--space-3)">${adv.map(pgFieldRow).join('')}</div></details>`;
+  }
+  els.pgForm.innerHTML = html;
+  pgApplyProject(false);
+  pgRenderPresets();
+}
+
+function pgCollect(spec) {
+  const args = {};
+  for (const f of spec.fields) {
+    const el = document.getElementById(`pg_${f.k}`);
+    if (!el) continue;
+    const raw = el.value;
+    if (f.type === 'bool') { if (raw !== '') args[f.k] = raw === 'true'; continue; }
+    if (f.type === 'enum') { if (raw !== '') args[f.k] = raw; continue; }
+    const v = raw.trim();
+    if (v === '') continue;
+    if (f.type === 'number') {
+      const n = Number(v);
+      if (Number.isNaN(n)) throw new Error(`${f.k}: "${v}" is not a number`);
+      args[f.k] = n;
+    } else if (f.type === 'tags') {
+      const arr = v.split(',').map((s) => s.trim()).filter(Boolean);
+      if (arr.length) args[f.k] = arr;
+    } else if (f.type === 'json') {
+      try { args[f.k] = JSON.parse(v); } catch (e) { throw new Error(`${f.k}: invalid JSON — ${e.message}`); }
+    } else {
+      args[f.k] = v;
+    }
+  }
+  for (const f of spec.fields) {
+    if (f.req && !(f.k in args)) throw new Error(`${f.k} is required`);
+  }
+  return args;
+}
+
+function pgHitsTable(tool, result) {
+  if (!result || typeof result !== 'object') return '';
+  if (tool === 'search' && Array.isArray(result.results)) {
+    if (!result.results.length) return '<p class="dim small">0 hits.</p>';
+    const rows = result.results.slice(0, 25).map((r) => {
+      const loc = r.location || (r.metadata && r.metadata.relative_path) || '';
+      const score = r.rerankScore != null ? `r ${Number(r.rerankScore).toFixed(3)}`
+        : (r.score != null ? Number(r.score).toFixed(3) : '');
+      const snip = String(r.content || '').replace(/\s+/g, ' ').slice(0, 160);
+      return `<tr><td><span class="path">${escapeHtml(loc)}</span></td><td class="num">${escapeHtml(score)}</td><td class="dim small">${escapeHtml(snip)}</td></tr>`;
+    }).join('');
+    return `<table class="data"><thead><tr><th>Location</th><th class="num">Score</th><th>Snippet</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  if (tool === 'grep' && Array.isArray(result.matches)) {
+    if (!result.matches.length) return '<p class="dim small">0 matches.</p>';
+    const rows = result.matches.slice(0, 40).map((m) => {
+      const loc = `${m.file || m.relative_path || m.file_path || ''}:${m.line != null ? m.line : (m.line_number != null ? m.line_number : '')}`;
+      return `<tr><td><span class="path">${escapeHtml(loc)}</span></td><td class="dim small">${escapeHtml(String(m.content || '').slice(0, 200))}</td></tr>`;
+    }).join('');
+    return `<table class="data"><thead><tr><th>File:Line</th><th>Match</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  return '';
+}
+
+function pgRenderResult(resp) {
+  els.pgResult.hidden = false;
+  const verdict = resp.ok ? pill('ok', 'ok') : pill('error', 'warn');
+  const ms = resp.latencyMs != null ? `${resp.latencyMs} ms` : '';
+  els.pgResultHead.innerHTML = `<code>${escapeHtml(resp.tool || '')}</code> ${verdict} <span class="dim small">${escapeHtml(ms)}</span>`;
+  els.pgHits.innerHTML = resp.ok
+    ? pgHitsTable(resp.tool, resp.result)
+    : `<pre class="debug error" style="white-space:pre-wrap">${escapeHtml(resp.error || 'error')}</pre>`;
+  els.pgRaw.textContent = JSON.stringify(resp.ok ? resp.result : resp, null, 2);
+}
+
+async function pgRun() {
+  const spec = pgSpec();
+  if (!spec) return;
+  let args;
+  try {
+    args = pgCollect(spec);
+  } catch (e) {
+    els.pgStatus.textContent = e.message;
+    els.pgStatus.className = 'error small';
+    return;
+  }
+  if (spec.mutates && !window.confirm(`"${spec.name}" can MUTATE indexed state. Run it?`)) return;
+  els.pgStatus.textContent = 'running…';
+  els.pgStatus.className = 'dim small';
+  els.pgRunBtn.disabled = true;
+  try {
+    const resp = await api('/admin/api/tools/invoke', { method: 'POST', body: { tool: spec.name, args } });
+    pgRenderResult(resp);
+    els.pgStatus.textContent = '';
+  } catch (e) {
+    // Malformed request (4xx) — api() throws. Render it in the results pane.
+    pgRenderResult({ ok: false, tool: spec.name, error: e.message });
+    els.pgStatus.textContent = '';
+  } finally {
+    els.pgRunBtn.disabled = false;
+  }
+}
+
+function populatePlaygroundProjects() {
+  if (!els.pgProject) return;
+  const cur = els.pgProject.value;
+  const opts = ['<option value="">— none —</option>'].concat(
+    (lastRegistered || []).map((r) =>
+      `<option value="${escapeHtml(r.path)}" data-tenant="${escapeHtml(r.tenantId || '')}">${escapeHtml(r.path)}</option>`)
+  );
+  els.pgProject.innerHTML = opts.join('');
+  if (cur) els.pgProject.value = cur;
+}
+
+function pgApplyProject(force) {
+  const sel = els.pgProject;
+  if (!sel || !sel.value) return;
+  const tenant = (sel.selectedOptions[0] && sel.selectedOptions[0].dataset.tenant) || '';
+  const cwdEl = document.getElementById('pg_cwd');
+  if (cwdEl && (force || !cwdEl.value)) cwdEl.value = sel.value;
+  const pidEl = document.getElementById('pg_projectId');
+  if (pidEl && tenant && (force || !pidEl.value)) pidEl.value = tenant;
+}
+
+function initPlayground() {
+  if (els.pgTool.options.length === 0) {
+    els.pgTool.innerHTML = PG_TOOLS.map((t) =>
+      `<option value="${t.name}">${t.name}${t.mutates ? ' ⚠' : ''}</option>`).join('');
+  }
+  populatePlaygroundProjects();
+  pgRenderForm();
+}
+
+els.pgTool.addEventListener('change', pgRenderForm);
+els.pgProject.addEventListener('change', () => pgApplyProject(true));
+els.pgPresets.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-preset]');
+  if (!btn) return;
+  const spec = pgSpec();
+  const preset = spec && pgPresetsFor(spec.name)[Number(btn.dataset.preset)];
+  if (preset) pgApplyPreset(preset);
+});
+els.pgRunBtn.addEventListener('click', pgRun);
+els.pgForm.addEventListener('submit', (e) => { e.preventDefault(); pgRun(); });
+els.pgClearBtn.addEventListener('click', () => {
+  pgRenderForm();
+  els.pgResult.hidden = true;
+  els.pgStatus.textContent = '';
+});
 
 (async () => {
   if (!token) {

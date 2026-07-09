@@ -17,6 +17,10 @@ import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { RulesTool, RuleScope } from '../tools/rules.js';
+import type { ServerComponents } from '../server-factory.js';
+import type { SessionState } from '../server-types.js';
+import { KNOWN_TOOLS, routeTool } from '../tool-dispatcher.js';
+import { runWithRequestContext } from '../utils/request-context.js';
 import mcpPublicConfig from '../constants/mcp-public-config.json' with { type: 'json' };
 import { DEFAULT_HTTP_PORT } from '../server-types.js';
 import { getCurrentBranch } from '../utils/git-utils.js';
@@ -39,6 +43,13 @@ export interface AdminDeps {
   /** Behavioral-rules CRUD; backs the rules-management view. */
   rulesTool: RulesTool;
   authConfig: AuthConfig;
+  /**
+   * Full tool component bundle — backs the "tools playground" view, which
+   * invokes MCP tools through the same {@link routeTool} path the MCP client
+   * uses. Superset of the flat fields above (which existing handlers keep
+   * using); the playground is the only consumer of `components`.
+   */
+  components: ServerComponents;
 }
 
 interface RouteHandler {
@@ -1313,6 +1324,74 @@ const handleQueueCancel: RouteHandler = async (req, res, { daemonClient }) => {
   }
 };
 
+// ── /api/tools/invoke — run any MCP tool through the real routeTool path ──────
+
+/**
+ * Build a throwaway SessionState for a playground invocation. The read tools
+ * resolve their project from the `cwd` in args (bound into the request context
+ * below), so a session with null project fields is sufficient; write tools see
+ * the same cwd-only context an MCP client gets when it passes just `cwd`.
+ */
+function makePlaygroundSession(cwd: string | undefined): SessionState {
+  return {
+    sessionId: 'admin-playground',
+    projectId: null,
+    projectPath: cwd ?? null,
+    lastHostCwd: cwd ?? null,
+    watchPath: null,
+    isWorktree: false,
+    selfRepoProjectId: null,
+    currentBranch: null,
+    lastBranchRefreshAt: 0,
+    heartbeatInterval: null,
+    daemonConnected: true,
+    cleaned: false,
+  };
+}
+
+const handleToolsInvoke: RouteHandler = async (req, res, { components }) => {
+  const body = await readJsonBody(req);
+  const tool = typeof body['tool'] === 'string' ? body['tool'] : '';
+  const rawArgs = body['args'];
+  const args =
+    rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+      ? (rawArgs as Record<string, unknown>)
+      : {};
+
+  if (!tool) {
+    writeError(res, 400, 'tool required');
+    return;
+  }
+  if (!KNOWN_TOOLS.includes(tool)) {
+    writeError(res, 400, `unknown tool: ${tool}`);
+    return;
+  }
+
+  const cwdRaw = args['cwd'];
+  const cwd = typeof cwdRaw === 'string' && cwdRaw ? cwdRaw : undefined;
+  const session = makePlaygroundSession(cwd);
+  const started = Date.now();
+  try {
+    const invoke = (): Promise<unknown> => routeTool(tool, args, components, session);
+    // Bind the cwd into the request context so tools that read host cwd from
+    // AsyncLocalStorage (not just args) resolve the project identically to a
+    // real MCP call. No cwd → run without a bound context.
+    const result = cwd ? await runWithRequestContext({ hostCwd: cwd }, invoke) : await invoke();
+    writeJson(res, 200, { ok: true, tool, latencyMs: Date.now() - started, result });
+  } catch (error) {
+    // Tool-level failure (bad args, not-found, daemon error): return 200 with
+    // ok:false so the UI renders the message in the results pane instead of the
+    // generic HTTP-error toast. Only malformed REQUESTS get a 4xx above.
+    logError('admin tools playground invoke failed', error, { tool });
+    writeJson(res, 200, {
+      ok: false,
+      tool,
+      latencyMs: Date.now() - started,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
+
 // ── Route table ──────────────────────────────────────────────────────────────
 
 type Route = { method: string; path: string; handler: RouteHandler };
@@ -1346,6 +1425,7 @@ const ROUTES: ReadonlyArray<Route> = [
   { method: 'GET', path: '/admin/api/queue/failed', handler: handleQueueFailed },
   { method: 'POST', path: '/admin/api/queue/retry', handler: handleQueueRetry },
   { method: 'POST', path: '/admin/api/queue/cancel', handler: handleQueueCancel },
+  { method: 'POST', path: '/admin/api/tools/invoke', handler: handleToolsInvoke },
 ];
 
 /**

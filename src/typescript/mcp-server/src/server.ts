@@ -288,6 +288,8 @@ export class WorkspaceQdrantMcpServer {
             searchDbReader: this.components.searchDbReader,
             rulesTool: this.components.rulesTool,
             authConfig: this.authConfig,
+            // Full bundle for the tools playground (invokes tools via routeTool).
+            components: this.components,
           }
         );
         logInfo('MCP server started', {

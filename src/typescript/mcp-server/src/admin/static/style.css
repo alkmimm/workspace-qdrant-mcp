@@ -126,6 +126,8 @@ code, pre, .mono {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
   margin-bottom: var(--space-6);
 }
 .card-head h2 {
@@ -397,3 +399,75 @@ details summary:hover { color: var(--link); }
   font-size: var(--text-xs);
   letter-spacing: 0.02em;
 }
+
+/* ── Tabs ─────────────────────────────────────────────────────────── */
+.tabs {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: var(--space-7) 0 var(--space-6);
+  border-bottom: 1px solid var(--border);
+}
+.tabs .tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--fg-muted);
+  padding: var(--space-4) var(--space-6);
+  font-size: var(--text-base);
+  font-weight: 500;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+.tabs .tab:hover { color: var(--fg); background: transparent; }
+.tabs .tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.tabs .tab:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: -2px;
+}
+
+/* ── Tools playground ─────────────────────────────────────────────── */
+/* Let fields shrink below their content's intrinsic width — the project
+   <select>'s long path options otherwise pin the field to ~343px and overflow
+   the card on mobile. (pgForm fields keep their inline min-width, which wins.) */
+#playgroundCard .field { min-width: 0; }
+/* Normalize input vs select height (select renders ~2px shorter). */
+#pgForm input,
+#pgForm select { min-height: 34px; }
+/* Example-syntax placeholders carry useful hints — lift to AA contrast. */
+#pgForm input::placeholder,
+#pgForm textarea::placeholder { color: #7d8590; opacity: 1; }
+/* Results table: scroll horizontally instead of char-breaking paths or
+   overflowing the card (the raw-JSON <pre> already scrolls the same way). */
+#pgHits { overflow-x: auto; }
+#pgHits .path { white-space: nowrap; word-break: normal; }
+/* Comfortable touch targets for preset chips and the action buttons. */
+@media (pointer: coarse) {
+  #pgPresets button,
+  #pgRunBtn,
+  #pgClearBtn,
+  .tabs .tab { min-height: 40px; }
+}
+
+/* ── Branch coverage grouping ─────────────────────────────────────── */
+.bc-group td {
+  background: var(--bg-3);
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+}
+.bc-group:hover td { background: var(--border); }
+.bc-group-warn td { box-shadow: inset 3px 0 0 var(--warn); }
+.bc-caret {
+  display: inline-block;
+  width: 1.1em;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+.bc-tenant { margin-left: var(--space-4); color: var(--fg-muted); }
+#branchCoverageBody .bc-branch-name { padding-left: 30px; }
+.bc-current .bc-branch-name code { color: var(--accent); font-weight: 600; }

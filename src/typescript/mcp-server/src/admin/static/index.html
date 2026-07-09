@@ -58,6 +58,52 @@
         </div>
       </section>
 
+      <!-- Tab navigation -->
+      <nav class="tabs" id="tabNav" role="tablist" aria-label="Admin sections">
+        <button class="tab" type="button" data-tab-btn="overview" role="tab" aria-selected="true">Overview</button>
+        <button class="tab" type="button" data-tab-btn="playground" role="tab" aria-selected="false">Playground</button>
+        <button class="tab" type="button" data-tab-btn="projects" role="tab" aria-selected="false">Projects</button>
+        <button class="tab" type="button" data-tab-btn="indexing" role="tab" aria-selected="false">Indexing</button>
+        <button class="tab" type="button" data-tab-btn="config" role="tab" aria-selected="false">Config</button>
+      </nav>
+
+      <!-- Tools playground -->
+      <section class="card" id="playgroundCard">
+        <div class="card-head">
+          <h2>Tools playground</h2>
+          <span class="dim small">invoke any MCP tool through the real dispatch path — the exact result an agent gets</span>
+        </div>
+        <div class="row" style="gap:var(--space-4); align-items:flex-end; flex-wrap:wrap">
+          <div class="field">
+            <label for="pgTool">Tool</label>
+            <select id="pgTool"></select>
+          </div>
+          <div class="field grow">
+            <label for="pgProject">Project (fills cwd / projectId)</label>
+            <select id="pgProject"><option value="">— none —</option></select>
+          </div>
+          <span id="pgToolHint" class="dim small"></span>
+        </div>
+        <div class="row" id="pgPresetRow" style="gap:var(--space-2); align-items:center; flex-wrap:wrap; margin-top:var(--space-3)" hidden>
+          <span class="dim small">Presets:</span>
+          <span id="pgPresets" class="row" style="gap:var(--space-2); flex-wrap:wrap"></span>
+        </div>
+        <form id="pgForm" autocomplete="off" spellcheck="false" style="margin-top:var(--space-4)"></form>
+        <div class="row" style="margin-top:var(--space-4); align-items:center; gap:var(--space-4)">
+          <button type="button" id="pgRunBtn" class="primary">Run</button>
+          <button type="button" id="pgClearBtn" class="secondary">Reset form</button>
+          <span id="pgStatus" class="dim small"></span>
+        </div>
+        <div id="pgResult" hidden style="margin-top:var(--space-5)">
+          <div id="pgResultHead" class="row" style="align-items:center; gap:var(--space-4); margin-bottom:var(--space-3)"></div>
+          <div id="pgHits"></div>
+          <details id="pgRawWrap" open>
+            <summary class="dim small">Raw result JSON</summary>
+            <pre id="pgRaw" class="debug"></pre>
+          </details>
+        </div>
+      </section>
+
       <!-- Host integrations health -->
       <section class="card">
         <div class="card-head">
@@ -334,7 +380,7 @@
         </div>
         <div class="row" style="margin-bottom:var(--space-4); align-items:center">
           <span class="dim small">
-            queue, tracked files and FTS rows grouped by tenant and branch; rows outside the current Git branch are highlighted
+            grouped by project — click a project row to collapse its branches; queue, tracked files and FTS shown per branch, rows outside the current Git branch are highlighted
           </span>
           <span id="branchCoverageMeta" class="dim small"></span>
         </div>
@@ -342,8 +388,6 @@
         <table id="branchCoverageTable" class="data" aria-label="Branch coverage by project" hidden>
           <thead>
             <tr>
-              <th>Project</th>
-              <th>Current</th>
               <th>Branch</th>
               <th class="num">Queue</th>
               <th class="num">Tracked</th>
