@@ -582,6 +582,49 @@ async fn test_reingest_file_clears_ghost_and_stale_nodes() {
     );
 }
 
+/// A node that is the TARGET of ANOTHER file's edge must still be deletable when
+/// its file is removed — the delete clears the referencing (now dangling) edge
+/// first, satisfying the `graph_edges -> graph_nodes` foreign key. This is the
+/// exact cross-file case the live #245 sweep hit as `FOREIGN KEY constraint
+/// failed`; a same-file edge (removed by `delete_edges_by_file`) never exposed it.
+#[tokio::test]
+async fn test_delete_file_nodes_clears_incoming_cross_file_edge() {
+    let dir = tempdir().unwrap();
+    let store = create_factory_store(dir.path()).await;
+
+    // File A defines `foo`; file B defines `bar` and calls A::foo (bar -> foo).
+    let foo = GraphNode::new(TENANT, "src/a.rs", "foo", NodeType::Function);
+    let bar = GraphNode::new(TENANT, "src/b.rs", "bar", NodeType::Function);
+    store
+        .reingest_file(TENANT, "src/a.rs", &[foo.clone()], &[])
+        .await
+        .unwrap();
+    store
+        .reingest_file(
+            TENANT,
+            "src/b.rs",
+            &[bar.clone()],
+            &[GraphEdge::new(
+                TENANT,
+                &bar.node_id,
+                &foo.node_id,
+                EdgeType::Calls,
+                "src/b.rs",
+            )],
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.stats(Some(TENANT)).await.unwrap().total_nodes, 2);
+
+    // Delete file A: foo is an incoming-edge target from B. Must succeed (no FK
+    // error), removing foo AND the now-dangling bar -> foo edge; bar survives.
+    let deleted = store.delete_nodes_by_file(TENANT, "src/a.rs").await.unwrap();
+    assert_eq!(deleted, 1, "foo removed despite being a cross-file edge target");
+    let stats = store.stats(Some(TENANT)).await.unwrap();
+    assert_eq!(stats.total_nodes, 1, "only bar remains");
+    assert_eq!(stats.total_edges, 0, "the dangling bar -> foo edge is gone");
+}
+
 /// The file-less tree-sitter stub nodes (`file_path = ''`) must never be wiped
 /// by a per-file node delete — they belong to no file and are pruned elsewhere.
 #[tokio::test]

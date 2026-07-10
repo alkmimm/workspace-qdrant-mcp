@@ -114,14 +114,15 @@ impl<S: GraphStore> SharedGraphStore<S> {
     /// the new nodes and edges. Holds the write lock for the entire operation so
     /// readers never see a partially-updated file.
     ///
-    /// Deleting the file's nodes first (not just its edges) makes the node set
-    /// authoritative per re-ingest: dropped symbols no longer linger as stale
-    /// generations, and a delete (`nodes`/`edges` empty) leaves no "ghost" nodes
-    /// for a path that no longer exists (issue #245). Node ids are deterministic
-    /// (`hash(tenant|file|symbol|type)`), so unchanged symbols keep the same id
-    /// across the swap and incoming cross-file edges re-resolve to them; only
-    /// genuinely-removed symbols' nodes disappear. The file-less stub nodes
-    /// (`file_path = ''`) are never a `file_path` here, so they are untouched.
+    /// Pruning the file's STALE nodes (those not in the new extraction) — not
+    /// just its edges — makes the node set authoritative per re-ingest: dropped
+    /// symbols no longer linger as stale generations, and a delete (`nodes` empty)
+    /// leaves no "ghost" nodes for a path that no longer exists (issue #245).
+    /// Node ids are deterministic (`hash(tenant|file|symbol|type)`), so unchanged
+    /// symbols are in `keep` and are NOT deleted — their incoming cross-file edges
+    /// stay valid; only genuinely-removed symbols' nodes (and their now-dangling
+    /// incoming edges) go. The file-less stub nodes (`file_path = ''`) are never a
+    /// `file_path` here, so they are untouched.
     pub async fn reingest_file(
         &self,
         tenant_id: &str,
@@ -129,24 +130,30 @@ impl<S: GraphStore> SharedGraphStore<S> {
         nodes: &[GraphNode],
         edges: &[GraphEdge],
     ) -> GraphDbResult<()> {
+        let keep: Vec<String> = nodes.iter().map(|n| n.node_id.clone()).collect();
         let guard = self.inner.write().await;
         guard.delete_edges_by_file(tenant_id, file_path).await?;
-        guard.delete_nodes_by_file(tenant_id, file_path).await?;
+        guard
+            .delete_file_nodes_except(tenant_id, file_path, &keep)
+            .await?;
         guard.upsert_nodes(nodes).await?;
         guard.insert_edges(edges).await?;
         Ok(())
     }
 
-    /// Delete all NODES anchored to a file (exclusive lock). Used by the
-    /// ghost-node sweep (issue #245) to clear nodes for paths that no longer
-    /// exist. A no-op for an empty path (the file-less stub nodes are spared).
+    /// Delete ALL nodes anchored to a file, plus the edges referencing them
+    /// (exclusive lock). Used by the ghost-node sweep (issue #245) to clear a gone
+    /// file's nodes and their now-dangling incoming edges. A no-op for an empty
+    /// path (the file-less stub nodes are spared).
     pub async fn delete_nodes_by_file(
         &self,
         tenant_id: &str,
         file_path: &str,
     ) -> GraphDbResult<u64> {
         let guard = self.inner.write().await;
-        guard.delete_nodes_by_file(tenant_id, file_path).await
+        guard
+            .delete_file_nodes_except(tenant_id, file_path, &[])
+            .await
     }
 
     /// Delete all data for a tenant (exclusive lock).

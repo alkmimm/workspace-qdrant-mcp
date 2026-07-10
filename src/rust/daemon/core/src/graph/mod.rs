@@ -331,17 +331,25 @@ pub trait GraphStore: Send + Sync {
     /// Delete all edges owned by a specific file.
     async fn delete_edges_by_file(&self, tenant_id: &str, file_path: &str) -> GraphDbResult<u64>;
 
-    /// Delete all NODES anchored to a specific file (`graph_nodes.file_path`).
+    /// Delete this file's NODES whose id is NOT in `keep`, plus the edges that
+    /// reference those deleted (stale) nodes.
     ///
-    /// Nodes are only ever upserted, so before this a re-ingest (or delete) that
-    /// dropped symbols left stale node generations behind, and a file deletion
-    /// left "ghost" nodes for a path that no longer exists (issue #245).
-    /// `reingest_file` now calls this so the node set is authoritative per
-    /// re-ingest — same granularity as the edge wipe. Never touches the
-    /// file-less tree-sitter stub nodes (`file_path = ''`); pass a real path.
-    /// Returns the number of nodes deleted. Default no-op for backends without
-    /// per-file node deletion.
-    async fn delete_nodes_by_file(&self, _tenant_id: &str, _file_path: &str) -> GraphDbResult<u64> {
+    /// Nodes are only ever upserted, so a re-ingest that dropped symbols left
+    /// stale node generations behind and a file deletion left "ghost" nodes for a
+    /// path that no longer exists (issue #245). `reingest_file` passes the current
+    /// extraction's node ids as `keep`, so only genuinely-removed symbols' nodes
+    /// go; the ghost sweep and file-delete path pass an empty `keep` to remove all
+    /// of a gone file's nodes. Deleting the referencing edges first satisfies the
+    /// `graph_edges -> graph_nodes` foreign key (a stale node cannot be deleted
+    /// while an edge still points at it) and clears the now-dangling incoming
+    /// edges. Never touches the file-less stub nodes (`file_path = ''`); pass a
+    /// real path. Returns the number of nodes deleted. Default no-op.
+    async fn delete_file_nodes_except(
+        &self,
+        _tenant_id: &str,
+        _file_path: &str,
+        _keep: &[String],
+    ) -> GraphDbResult<u64> {
         Ok(0)
     }
 

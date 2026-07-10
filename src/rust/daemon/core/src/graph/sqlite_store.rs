@@ -296,22 +296,68 @@ impl GraphStore for SqliteGraphStore {
         Ok(count)
     }
 
-    async fn delete_nodes_by_file(&self, tenant_id: &str, file_path: &str) -> GraphDbResult<u64> {
+    async fn delete_file_nodes_except(
+        &self,
+        tenant_id: &str,
+        file_path: &str,
+        keep: &[String],
+    ) -> GraphDbResult<u64> {
         // Guard against wiping the file-less stub nodes if ever called with an
         // empty path — those belong to no file and are pruned elsewhere.
         if file_path.is_empty() {
             return Ok(0);
         }
-        let result =
-            sqlx::query("DELETE FROM graph_nodes WHERE tenant_id = ?1 AND file_path = ?2")
+        // The stale set = this file's nodes whose id is NOT in `keep` (the current
+        // extraction). Compute it in Rust so the FK-satisfying edge delete and the
+        // node delete bind the same bounded id list.
+        let keep_set: std::collections::HashSet<&str> =
+            keep.iter().map(|s| s.as_str()).collect();
+        let all_ids: Vec<String> =
+            sqlx::query_scalar("SELECT node_id FROM graph_nodes WHERE tenant_id = ?1 AND file_path = ?2")
                 .bind(tenant_id)
                 .bind(file_path)
-                .execute(&self.pool)
+                .fetch_all(&self.pool)
                 .await?;
+        let stale: Vec<&String> = all_ids
+            .iter()
+            .filter(|id| !keep_set.contains(id.as_str()))
+            .collect();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+
+        let ph = vec!["?"; stale.len()].join(",");
+        let mut tx = self.pool.begin().await?;
+
+        // FK (graph_edges.{source,target}_node_id -> graph_nodes.node_id): a stale
+        // node cannot be deleted while an edge references it. This file's OUTGOING
+        // edges are already gone (delete_edges_by_file ran first in reingest_file);
+        // this clears the INCOMING edges from other files that pointed at a symbol
+        // this file no longer defines — those are now dangling and must go too.
+        let del_edges = format!(
+            "DELETE FROM graph_edges WHERE tenant_id = ? \
+             AND (source_node_id IN ({ph}) OR target_node_id IN ({ph}))"
+        );
+        let mut eq = sqlx::query(&del_edges).bind(tenant_id);
+        for id in &stale {
+            eq = eq.bind(*id);
+        }
+        for id in &stale {
+            eq = eq.bind(*id);
+        }
+        eq.execute(&mut *tx).await?;
+
+        let del_nodes = format!("DELETE FROM graph_nodes WHERE tenant_id = ? AND node_id IN ({ph})");
+        let mut nq = sqlx::query(&del_nodes).bind(tenant_id);
+        for id in &stale {
+            nq = nq.bind(*id);
+        }
+        let result = nq.execute(&mut *tx).await?;
+        tx.commit().await?;
 
         let count = result.rows_affected();
         debug!(
-            "Deleted {} graph nodes for file {} in tenant {}",
+            "Deleted {} stale graph nodes for file {} in tenant {}",
             count, file_path, tenant_id
         );
         Ok(count)
