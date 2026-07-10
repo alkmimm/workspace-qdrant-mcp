@@ -12,7 +12,7 @@ use crate::unified_queue_schema::QueueOperation;
 use crate::watching_queue::get_current_branch;
 
 use super::db::{
-    fetch_paths_missing_branch, fetch_unchanged_relative_paths, fetch_watch_folder,
+    fetch_paths_missing_branch, fetch_unchanged_paths_with_chunker, fetch_watch_folder,
     update_last_commit_hash,
 };
 use super::queue::{
@@ -164,6 +164,15 @@ async fn handle_branch_switch(
 /// (each draining individually and flooding `pending`), we enqueue a handful of
 /// `(Tenant, Scan)` ops carrying the verified path list, and the processor appends
 /// the branch to all three stores in batches without re-embedding.
+///
+/// Exception (issue #246): a file whose stored chunker fingerprint is STALE for
+/// its language must be RE-CHUNKED, not merely re-keyed — the bulk append never
+/// runs the fingerprint gate, so a chunker/registry upgrade would otherwise never
+/// reach content that only lives on non-current branches. Such files are routed
+/// to the per-file `Add` path (`enqueue_unchanged_file`), where the branch-dedup
+/// fast-path's own stale-fingerprint guard falls back to a full ingest that
+/// re-chunks. Only the (usually few) stale files pay that cost; the current
+/// majority still take the cheap bulk append.
 #[allow(clippy::too_many_arguments)]
 async fn enqueue_unchanged_files(
     pool: &SqlitePool,
@@ -178,7 +187,9 @@ async fn enqueue_unchanged_files(
     stats: &mut BranchSwitchStats,
 ) {
     let unchanged =
-        match fetch_unchanged_relative_paths(pool, watch_folder_id, old_branch, new_branch).await {
+        match fetch_unchanged_paths_with_chunker(pool, watch_folder_id, old_branch, new_branch)
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 warn!("Failed to fetch unchanged paths for branch switch: {}", e);
@@ -187,12 +198,21 @@ async fn enqueue_unchanged_files(
             }
         };
 
-    // Drop paths that genuinely changed (they take the full-ingest path); what
-    // remains is byte-identical on both branches and safe to re-key by path.
-    let to_rekey: Vec<String> = unchanged
-        .into_iter()
-        .filter(|rel| !changed_paths.contains(rel))
-        .collect();
+    // Drop paths that genuinely changed (they take the full-ingest path); split
+    // the rest into cheap bulk re-key (current fingerprint) vs per-file re-chunk
+    // (stale fingerprint — see issue #246).
+    let mut to_rekey: Vec<String> = Vec::new();
+    let mut to_rechunk: Vec<String> = Vec::new();
+    for (rel, chunker_version) in unchanged {
+        if changed_paths.contains(&rel) {
+            continue;
+        }
+        if crate::tree_sitter::chunker::stored_fingerprint_is_stale(chunker_version.as_deref()) {
+            to_rechunk.push(rel);
+        } else {
+            to_rekey.push(rel);
+        }
+    }
 
     match enqueue_branch_membership_bulk(
         queue_manager,
@@ -215,10 +235,22 @@ async fn enqueue_unchanged_files(
         }
     }
 
-    if stats.enqueued_unchanged > 0 {
+    // Stale-chunker files: per-file Add so the branch-dedup guard re-chunks them.
+    let stale_count = to_rechunk.len();
+    for rel in to_rechunk {
+        match enqueue_unchanged_file(queue_manager, tenant_id, collection, &rel, new_branch).await {
+            Ok(()) => stats.enqueued_changed += 1,
+            Err(e) => {
+                warn!("Failed to enqueue stale-chunker re-chunk for {}: {}", rel, e);
+                stats.errors += 1;
+            }
+        }
+    }
+
+    if stats.enqueued_unchanged > 0 || stale_count > 0 {
         info!(
-            "Enqueued {} unchanged files for BULK dedup re-key: branch {} -> {}",
-            stats.enqueued_unchanged, old_branch, new_branch
+            "Branch re-key {} -> {}: {} unchanged bulk-appended, {} stale-chunker re-chunked",
+            old_branch, new_branch, stats.enqueued_unchanged, stale_count
         );
     }
 }

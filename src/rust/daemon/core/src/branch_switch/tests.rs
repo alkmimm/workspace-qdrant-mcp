@@ -15,7 +15,8 @@ use crate::unified_queue_schema::{
 use crate::watch_folders_schema;
 
 use super::db::{
-    fetch_paths_missing_branch, fetch_unchanged_relative_paths, update_last_commit_hash,
+    fetch_paths_missing_branch, fetch_unchanged_paths_with_chunker, fetch_unchanged_relative_paths,
+    update_last_commit_hash,
 };
 use super::queue::{enqueue_branch_membership_bulk, enqueue_file_op, enqueue_unchanged_file};
 use super::reconcile_branch_membership;
@@ -88,6 +89,30 @@ async fn insert_tracked_file(
     .execute(pool).await.unwrap();
 }
 
+async fn insert_tracked_file_with_chunker(
+    pool: &SqlitePool,
+    watch_id: &str,
+    branches_list: &[&str],
+    file_hash: &str,
+    relative_path: &str,
+    chunker_version: Option<&str>,
+) {
+    let base_point = wqm_common::hashing::compute_base_point("t1", relative_path, file_hash);
+    let branches = serde_json::to_string(branches_list).unwrap();
+    sqlx::query(
+        "INSERT INTO tracked_files (watch_folder_id, relative_path, branches, file_mtime, file_hash,
+         collection, base_point, chunker_version, created_at, updated_at)
+         VALUES (?1, ?2, ?3, '2025-01-01T00:00:00Z', ?4, 'projects', ?5, ?6, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
+    )
+    .bind(watch_id)
+    .bind(relative_path)
+    .bind(&branches)
+    .bind(file_hash)
+    .bind(base_point)
+    .bind(chunker_version)
+    .execute(pool).await.unwrap();
+}
+
 #[test]
 fn test_branch_switch_stats_default() {
     let stats = BranchSwitchStats::default();
@@ -146,6 +171,47 @@ async fn test_fetch_unchanged_excludes_paths_already_on_new_branch() {
         paths,
         vec!["src/b.rs".to_string(), "src/c.rs".to_string()]
     );
+}
+
+/// The chunker-aware variant (issue #246) returns each unchanged file's stored
+/// `chunker_version` so the handler can route STALE files to a re-chunk. Rows
+/// with a fresh fingerprint, a stale one, and NULL must all come back with their
+/// value; `stored_fingerprint_is_stale` then classifies them.
+#[tokio::test]
+async fn test_fetch_unchanged_with_chunker_returns_versions() {
+    use crate::tree_sitter::chunker::{chunking_fingerprint, stored_fingerprint_is_stale};
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
+
+    let fresh = chunking_fingerprint(Some("rust"));
+    insert_tracked_file_with_chunker(&pool, "w1", &["main"], "h_fresh", "src/fresh.rs", Some(&fresh))
+        .await;
+    insert_tracked_file_with_chunker(
+        &pool,
+        "w1",
+        &["main"],
+        "h_stale",
+        "src/stale.rs",
+        Some("0:rust:deadbeef0000"),
+    )
+    .await;
+    insert_tracked_file_with_chunker(&pool, "w1", &["main"], "h_null", "src/null.rs", None).await;
+
+    let mut rows = fetch_unchanged_paths_with_chunker(&pool, "w1", "main", "feature")
+        .await
+        .unwrap();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(rows.len(), 3);
+
+    // Classify with the same predicate the handler uses.
+    let stale: Vec<&str> = rows
+        .iter()
+        .filter(|(_, cv)| stored_fingerprint_is_stale(cv.as_deref()))
+        .map(|(p, _)| p.as_str())
+        .collect();
+    assert_eq!(stale, vec!["src/stale.rs"], "only the old-version row is stale");
 }
 
 #[tokio::test]

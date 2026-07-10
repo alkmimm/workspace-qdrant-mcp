@@ -51,6 +51,40 @@ pub async fn fetch_unchanged_relative_paths(
     Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
+/// Like [`fetch_unchanged_relative_paths`] but also returns each file's stored
+/// chunker fingerprint, so the branch-switch handler can route files whose
+/// chunking is STALE to the re-chunk path instead of a plain branch-membership
+/// append (issue #246). The bulk append never runs the fingerprint gate, so a
+/// chunker/registry upgrade otherwise never reaches content held only on a
+/// non-current branch until its content happens to change.
+pub async fn fetch_unchanged_paths_with_chunker(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    old_branch: &str,
+    new_branch: &str,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT t.relative_path, t.chunker_version
+         FROM tracked_files t
+         WHERE t.watch_folder_id = ?1
+           AND EXISTS (SELECT 1 FROM json_each(t.branches) WHERE value = ?2)
+           AND NOT EXISTS (
+               SELECT 1 FROM tracked_files n, json_each(n.branches) nb
+               WHERE n.watch_folder_id = t.watch_folder_id
+                 AND n.relative_path = t.relative_path
+                 AND nb.value = ?3
+           )",
+    )
+    .bind(watch_folder_id)
+    .bind(old_branch)
+    .bind(new_branch)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch unchanged paths with chunker: {}", e))?;
+
+    Ok(rows)
+}
+
 /// Relative paths tracked under SOME branch for this watch folder but NOT yet
 /// under `branch` — the branch-membership reconcile candidates.
 ///

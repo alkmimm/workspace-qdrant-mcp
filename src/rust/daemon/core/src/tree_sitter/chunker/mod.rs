@@ -22,7 +22,9 @@ use crate::tree_sitter::parser::LanguageProvider;
 use crate::tree_sitter::types::SemanticChunk;
 
 // Re-export public items for consumers
-pub use fingerprint::{chunking_fingerprint, stored_fingerprint_is_current};
+pub use fingerprint::{
+    chunking_fingerprint, stored_fingerprint_is_current, stored_fingerprint_is_stale,
+};
 pub use generic_extractor::GenericExtractor;
 pub use helpers::{extract_function_calls, find_child_by_kind, find_children_by_kind, node_text};
 pub use splitting::text_chunk_fallback;
