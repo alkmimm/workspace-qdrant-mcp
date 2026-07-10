@@ -15,9 +15,25 @@ use crate::unified_queue_schema::{
 use crate::watch_folders_schema;
 
 use super::db::{
-    fetch_paths_missing_branch, fetch_unchanged_paths_with_chunker, fetch_unchanged_relative_paths,
-    update_last_commit_hash,
+    fetch_paths_missing_branch, fetch_unchanged_paths_with_chunker, update_last_commit_hash,
 };
+
+/// Test helper: the unchanged paths (dropping the chunker_version the handler
+/// uses to route stale files) so the membership-focused assertions read cleanly.
+async fn fetch_unchanged_paths(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    old_branch: &str,
+    new_branch: &str,
+) -> Result<Vec<String>, String> {
+    Ok(
+        fetch_unchanged_paths_with_chunker(pool, watch_folder_id, old_branch, new_branch)
+            .await?
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect(),
+    )
+}
 use super::queue::{enqueue_branch_membership_bulk, enqueue_file_op, enqueue_unchanged_file};
 use super::reconcile_branch_membership;
 use super::types::BranchSwitchStats;
@@ -135,7 +151,7 @@ async fn test_fetch_unchanged_returns_all_when_new_branch_empty() {
     insert_tracked_file(&pool, "w1", &["main"], "hash_b", "src/b.rs").await;
     insert_tracked_file(&pool, "w1", &["main"], "hash_c", "src/c.rs").await;
 
-    let mut paths = fetch_unchanged_relative_paths(&pool, "w1", "main", "feature")
+    let mut paths = fetch_unchanged_paths(&pool, "w1", "main", "feature")
         .await
         .unwrap();
     paths.sort();
@@ -163,7 +179,7 @@ async fn test_fetch_unchanged_excludes_paths_already_on_new_branch() {
     // both branches in its set.
     insert_tracked_file(&pool, "w1", &["main", "feature"], "hash_a", "src/a.rs").await;
 
-    let mut paths = fetch_unchanged_relative_paths(&pool, "w1", "main", "feature")
+    let mut paths = fetch_unchanged_paths(&pool, "w1", "main", "feature")
         .await
         .unwrap();
     paths.sort();
@@ -220,7 +236,7 @@ async fn test_fetch_unchanged_empty_when_old_branch_has_no_files() {
     setup_tables(&pool).await;
     insert_watch_folder(&pool, "w1", "t1", "/tmp/empty").await;
 
-    let paths = fetch_unchanged_relative_paths(&pool, "w1", "main", "dev")
+    let paths = fetch_unchanged_paths(&pool, "w1", "main", "dev")
         .await
         .unwrap();
     assert!(paths.is_empty());
