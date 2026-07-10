@@ -96,6 +96,34 @@ pub fn stored_fingerprint_is_current(stored: Option<&str>, current: &str) -> boo
     }
 }
 
+/// Whether a stored fingerprint is STALE **for its own language** — i.e. the
+/// current chunker would produce a different fingerprint for the language
+/// encoded in the stored value.
+///
+/// Unlike [`stored_fingerprint_is_current`] (which needs the caller to detect
+/// the language and compute `current`), this recovers the language FROM the
+/// stored value's `<ver>:<lang>:<digest>` shape and recomputes. That lets the
+/// branch-switch re-key (issue #246) decide, without a `ProcessingContext` or a
+/// filesystem read, whether an unchanged file on the newly-current branch must
+/// be re-chunked rather than merely branch-membership-appended — the bulk append
+/// path otherwise never runs the fingerprint gate, so a chunker/registry upgrade
+/// never reached content held only on non-current branches. `None` (grandfathered)
+/// or an unparseable value is treated as CURRENT, so it never spuriously
+/// re-chunks.
+pub fn stored_fingerprint_is_stale(stored: Option<&str>) -> bool {
+    let Some(s) = stored else {
+        return false;
+    };
+    // "<ver>:text" | "<ver>:<lang>:<digest|nopat>".
+    let parts: Vec<&str> = s.splitn(3, ':').collect();
+    let current = match parts.as_slice() {
+        [_ver, "text"] => chunking_fingerprint(None),
+        [_ver, lang, _rest] => chunking_fingerprint(Some(lang)),
+        _ => return false, // unparseable → grandfather, never spuriously re-chunk
+    };
+    s != current
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +192,24 @@ mod tests {
             Some("0:rust:deadbeef0000"),
             &current
         ));
+    }
+
+    #[test]
+    fn stale_check_recovers_language_from_stored_value() {
+        // A current fingerprint for its own language is NOT stale.
+        let rust_now = chunking_fingerprint(Some("rust"));
+        assert!(!stored_fingerprint_is_stale(Some(&rust_now)));
+        let text_now = chunking_fingerprint(None);
+        assert!(!stored_fingerprint_is_stale(Some(&text_now)));
+
+        // An old logic version for a real language IS stale (digest recomputed
+        // for the recovered "rust").
+        assert!(stored_fingerprint_is_stale(Some("0:rust:deadbeef0000")));
+        // Old text fingerprint is stale once the logic version moved on.
+        assert!(stored_fingerprint_is_stale(Some("0:text")));
+
+        // NULL (grandfathered) and unparseable are treated as current.
+        assert!(!stored_fingerprint_is_stale(None));
+        assert!(!stored_fingerprint_is_stale(Some("garbage")));
     }
 }
