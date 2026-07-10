@@ -147,6 +147,12 @@ async fn run_daemon(
         .graph_store
         .as_ref()
         .map(|gs| background::start_graph_stub_resolver(gs.clone()));
+    // Periodic graph ghost-node sweep (issue #245): clears nodes left behind for
+    // paths that no longer exist (renames/refactors). Conservative — long
+    // interval, guarded by both "untracked" and "absent on disk". Fire-and-forget.
+    let _graph_ghost_sweep = db_handles.graph_store.as_ref().map(|gs| {
+        background::start_graph_ghost_sweep(gs.clone(), db_handles.queue_pool.clone())
+    });
     // Periodic graph metrics exporter: refreshes the per-tenant node/edge/stub
     // gauges from graph.db for the Grafana "Code Graph" dashboard. Fire-and-forget.
     let _graph_metrics = db_handles

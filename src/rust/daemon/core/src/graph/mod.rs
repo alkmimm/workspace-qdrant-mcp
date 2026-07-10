@@ -331,6 +331,28 @@ pub trait GraphStore: Send + Sync {
     /// Delete all edges owned by a specific file.
     async fn delete_edges_by_file(&self, tenant_id: &str, file_path: &str) -> GraphDbResult<u64>;
 
+    /// Delete this file's NODES whose id is NOT in `keep`, plus the edges that
+    /// reference those deleted (stale) nodes.
+    ///
+    /// Nodes are only ever upserted, so a re-ingest that dropped symbols left
+    /// stale node generations behind and a file deletion left "ghost" nodes for a
+    /// path that no longer exists (issue #245). `reingest_file` passes the current
+    /// extraction's node ids as `keep`, so only genuinely-removed symbols' nodes
+    /// go; the ghost sweep and file-delete path pass an empty `keep` to remove all
+    /// of a gone file's nodes. Deleting the referencing edges first satisfies the
+    /// `graph_edges -> graph_nodes` foreign key (a stale node cannot be deleted
+    /// while an edge still points at it) and clears the now-dangling incoming
+    /// edges. Never touches the file-less stub nodes (`file_path = ''`); pass a
+    /// real path. Returns the number of nodes deleted. Default no-op.
+    async fn delete_file_nodes_except(
+        &self,
+        _tenant_id: &str,
+        _file_path: &str,
+        _keep: &[String],
+    ) -> GraphDbResult<u64> {
+        Ok(0)
+    }
+
     /// Whether any edge is owned by `file_path` (source_file). One indexed
     /// probe (`idx_edges_source_file`); the branch-dedup fast-path uses it to
     /// detect a file whose edges were wiped by the update preamble's
