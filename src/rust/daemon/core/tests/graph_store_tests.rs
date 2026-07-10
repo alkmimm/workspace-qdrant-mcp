@@ -446,8 +446,7 @@ async fn test_query_related_edge_type_filter() {
 // 8. file_has_edges probe (issue #235 — dedup-path graph heal)
 // ────────────────────────────────────────────────────────────────────────────
 
-/// The probe must track the exact wipe the update preamble performs (edges
-/// deleted by source_file, nodes untouched): true after ingest, false after a
+/// The probe must track the wipe: true after ingest, false after a
 /// `reingest_file` with empty edges — the #235 state the dedup heal detects —
 /// and true again once edges are rewritten.
 #[tokio::test]
@@ -482,16 +481,13 @@ async fn test_file_has_edges_tracks_wipe_and_rebuild() {
         "probe must be tenant-scoped"
     );
 
-    // The #235 wipe: content-row GC deletes edges by path, keeps nodes.
+    // reingest_file with empty nodes/edges (the delete path). Since #245 this
+    // also drops the file's NODES (no ghost left behind), so file_has_edges
+    // reports the gap and the #235 dedup heal still detects it and rebuilds.
     store
         .reingest_file(TENANT, "src/processor.rs", &[], &[])
         .await
         .unwrap();
-    let stats = store.stats(Some(TENANT)).await.unwrap();
-    assert!(
-        stats.total_nodes > 0,
-        "wipe leaves nodes behind (the zero-edge symptom)"
-    );
     assert!(
         !store
             .file_has_edges(TENANT, "src/processor.rs")
@@ -515,4 +511,102 @@ async fn test_file_has_edges_tracks_wipe_and_rebuild() {
             .unwrap(),
         "rebuild must restore the probe to true"
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 9. Node lifecycle: no ghost / stale-generation nodes (issue #245)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// `reingest_file` must make the node set authoritative per re-ingest: a file
+/// deletion (empty nodes) leaves NO nodes for the path (no ghost), and a
+/// re-ingest that drops symbols removes their stale node generations. Node ids
+/// are deterministic, so unchanged symbols survive the swap.
+#[tokio::test]
+async fn test_reingest_file_clears_ghost_and_stale_nodes() {
+    use workspace_qdrant_core::graph::compute_node_id;
+
+    let dir = tempdir().unwrap();
+    let store = create_factory_store(dir.path()).await;
+
+    // Generation 1: two functions in the file, plus one edge between them.
+    let foo = GraphNode::new(TENANT, "src/m.rs", "foo", NodeType::Function);
+    let bar = GraphNode::new(TENANT, "src/m.rs", "bar", NodeType::Function);
+    store
+        .reingest_file(
+            TENANT,
+            "src/m.rs",
+            &[foo.clone(), bar.clone()],
+            &[GraphEdge::new(
+                TENANT,
+                &foo.node_id,
+                &bar.node_id,
+                EdgeType::Calls,
+                "src/m.rs",
+            )],
+        )
+        .await
+        .unwrap();
+
+    let n_after_gen1 = store.stats(Some(TENANT)).await.unwrap().total_nodes;
+    assert_eq!(n_after_gen1, 2, "both symbols present after gen 1");
+
+    // Generation 2: `bar` was removed (renamed away); only `foo` remains. The
+    // stale `bar` node must NOT linger.
+    store
+        .reingest_file(TENANT, "src/m.rs", &[foo.clone()], &[])
+        .await
+        .unwrap();
+    let n_after_gen2 = store.stats(Some(TENANT)).await.unwrap().total_nodes;
+    assert_eq!(n_after_gen2, 1, "dropped symbol's stale node must be gone");
+    // `foo` kept its deterministic id across the swap.
+    let foo_related = store
+        .query_related_by_symbol(TENANT, "foo", Some("src/m.rs"), 1, None)
+        .await
+        .unwrap();
+    let _ = foo_related; // presence, not traversal, is the point here
+    assert_eq!(
+        foo.node_id,
+        compute_node_id(TENANT, "src/m.rs", "foo", NodeType::Function),
+        "unchanged symbol id is stable across re-ingest"
+    );
+
+    // File deletion (empty): no ghost node for the now-absent path.
+    store
+        .reingest_file(TENANT, "src/m.rs", &[], &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.stats(Some(TENANT)).await.unwrap().total_nodes,
+        0,
+        "deleting a file must leave NO ghost nodes (issue #245)"
+    );
+}
+
+/// The file-less tree-sitter stub nodes (`file_path = ''`) must never be wiped
+/// by a per-file node delete — they belong to no file and are pruned elsewhere.
+#[tokio::test]
+async fn test_delete_nodes_by_file_spares_stub_nodes() {
+    let dir = tempdir().unwrap();
+    let store = create_factory_store(dir.path()).await;
+
+    let real = GraphNode::new(TENANT, "src/m.rs", "foo", NodeType::Function);
+    let stub = GraphNode::new(TENANT, "", "unresolved_callee", NodeType::Function);
+    store
+        .upsert_nodes(&[real.clone(), stub.clone()])
+        .await
+        .unwrap();
+
+    // Delete by the real file: the stub (empty file_path) survives.
+    let deleted = store.delete_nodes_by_file(TENANT, "src/m.rs").await.unwrap();
+    assert_eq!(deleted, 1, "only the file's own node is deleted");
+    assert_eq!(
+        store.stats(Some(TENANT)).await.unwrap().total_nodes,
+        1,
+        "the file-less stub node must remain"
+    );
+
+    // An empty-path delete is a guarded no-op (never mass-wipes stubs).
+    let deleted_empty = store.delete_nodes_by_file(TENANT, "").await.unwrap();
+    assert_eq!(deleted_empty, 0, "empty path is a no-op");
+    assert_eq!(store.stats(Some(TENANT)).await.unwrap().total_nodes, 1);
 }

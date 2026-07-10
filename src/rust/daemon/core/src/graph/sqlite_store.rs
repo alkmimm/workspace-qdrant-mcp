@@ -296,6 +296,27 @@ impl GraphStore for SqliteGraphStore {
         Ok(count)
     }
 
+    async fn delete_nodes_by_file(&self, tenant_id: &str, file_path: &str) -> GraphDbResult<u64> {
+        // Guard against wiping the file-less stub nodes if ever called with an
+        // empty path — those belong to no file and are pruned elsewhere.
+        if file_path.is_empty() {
+            return Ok(0);
+        }
+        let result =
+            sqlx::query("DELETE FROM graph_nodes WHERE tenant_id = ?1 AND file_path = ?2")
+                .bind(tenant_id)
+                .bind(file_path)
+                .execute(&self.pool)
+                .await?;
+
+        let count = result.rows_affected();
+        debug!(
+            "Deleted {} graph nodes for file {} in tenant {}",
+            count, file_path, tenant_id
+        );
+        Ok(count)
+    }
+
     async fn file_has_edges(&self, tenant_id: &str, file_path: &str) -> GraphDbResult<bool> {
         let row: Option<(i64,)> = sqlx::query_as(
             "SELECT 1 FROM graph_edges WHERE tenant_id = ?1 AND source_file = ?2 LIMIT 1",

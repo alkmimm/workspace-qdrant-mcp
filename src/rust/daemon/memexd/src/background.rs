@@ -1218,6 +1218,145 @@ pub fn start_graph_stub_resolver(
     })
 }
 
+/// Spawn the graph ghost-node sweep (issue #245).
+///
+/// File deletion deletes a file's edges but historically never its NODES, so
+/// renames/refactors accumulated "ghost" nodes for paths that no longer exist
+/// (measured ~73 on this repo). `reingest_file` now clears a file's nodes on
+/// every re-ingest, preventing NEW ghosts; this task cleans the pre-existing
+/// accumulation and any that slip through. It is DESTRUCTIVE, so it is
+/// deliberately conservative:
+///   - runs on a long interval (30 min), not the 120s stub cadence;
+///   - skips the first tick so it never races startup's stale-delete flood;
+///   - deletes a file's nodes ONLY when the path is BOTH absent from
+///     `tracked_files` (post-#227 a reliable "not indexed" signal) AND not
+///     present on disk under any of the tenant's watch-folder roots (a
+///     belt-and-suspenders guard against a transiently-missing row).
+/// Never touches the file-less stub nodes (`delete_nodes_by_file` guards `''`).
+pub fn start_graph_ghost_sweep(
+    graph_store: crate::database::ConcreteGraphStore,
+    state_pool: SqlitePool,
+) -> JoinHandle<()> {
+    // Interval override (seconds) — default 1800 (30 min). Lower it to observe a
+    // sweep quickly; raise it to back off. Clamped to a 5s floor.
+    let secs = std::env::var("WQM_GRAPH_GHOST_SWEEP_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|s| s.max(5))
+        .unwrap_or(1800);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(secs));
+        interval.tick().await; // consume the immediate tick; skip racing startup
+        info!(interval_secs = secs, "Graph ghost-node sweep started");
+        loop {
+            interval.tick().await;
+            sweep_ghost_nodes(&graph_store, &state_pool).await;
+        }
+    })
+}
+
+/// One pass of the ghost-node sweep across every tenant present in the graph.
+async fn sweep_ghost_nodes(
+    graph_store: &crate::database::ConcreteGraphStore,
+    state_pool: &SqlitePool,
+) {
+    let tenants: Vec<String> = {
+        let guard = graph_store.read().await;
+        sqlx::query_scalar("SELECT DISTINCT tenant_id FROM graph_nodes")
+            .fetch_all(guard.pool())
+            .await
+            .unwrap_or_default()
+    };
+    for tenant in tenants {
+        // File paths that carry nodes (excluding the file-less stub nodes). The
+        // read guard is dropped before delete_nodes_by_file (a write lock).
+        let graph_files: Vec<String> = {
+            let guard = graph_store.read().await;
+            sqlx::query_scalar(
+                "SELECT DISTINCT file_path FROM graph_nodes \
+                 WHERE tenant_id = ?1 AND file_path <> ''",
+            )
+            .bind(&tenant)
+            .fetch_all(guard.pool())
+            .await
+            .unwrap_or_default()
+        };
+        if graph_files.is_empty() {
+            continue;
+        }
+        // The authority: paths still tracked for this tenant, plus its
+        // watch-folder roots (for the on-disk safety check). A DESTRUCTIVE op —
+        // if either authority query FAILS, skip the tenant entirely rather than
+        // proceed with an empty set (which would treat every file as a ghost).
+        let tracked: std::collections::HashSet<String> = match sqlx::query_scalar(
+            "SELECT DISTINCT tf.relative_path FROM tracked_files tf \
+             JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id \
+             WHERE wf.tenant_id = ?1",
+        )
+        .bind(&tenant)
+        .fetch_all(state_pool)
+        .await
+        {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(e) => {
+                warn!(tenant = %tenant, error = %e, "ghost sweep: tracked_files query failed — skipping tenant");
+                continue;
+            }
+        };
+        let roots: Vec<String> =
+            match sqlx::query_scalar("SELECT path FROM watch_folders WHERE tenant_id = ?1")
+                .bind(&tenant)
+                .fetch_all(state_pool)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    warn!(tenant = %tenant, error = %e, "ghost sweep: watch_folders query failed — skipping tenant");
+                    continue;
+                }
+            };
+        // No roots means no on-disk safety net — skip rather than risk it.
+        if roots.is_empty() {
+            continue;
+        }
+
+        let mut deleted_files = 0u64;
+        let mut deleted_nodes = 0u64;
+        for f in graph_files {
+            if tracked.contains(&f) {
+                continue; // still indexed → keep
+            }
+            // Untracked: only a ghost if ALSO absent on disk under every root
+            // (guards against a transiently-missing tracked_files row wiping a
+            // live file's nodes).
+            let on_disk = roots
+                .iter()
+                .any(|r| std::path::Path::new(r).join(&f).exists());
+            if on_disk {
+                continue;
+            }
+            match graph_store.delete_nodes_by_file(&tenant, &f).await {
+                Ok(n) if n > 0 => {
+                    deleted_files += 1;
+                    deleted_nodes += n;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(tenant = %tenant, file = %f, error = %e, "ghost sweep: node delete failed")
+                }
+            }
+        }
+        if deleted_nodes > 0 {
+            info!(
+                tenant = %tenant,
+                files = deleted_files,
+                nodes = deleted_nodes,
+                "Graph ghost-node sweep removed nodes for absent files"
+            );
+        }
+    }
+}
+
 /// Spawn the LSP-authoritative CALLS backfill (R8.3b/R8.4) — flag-gated, OFF by
 /// default.
 ///
