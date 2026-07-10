@@ -90,6 +90,12 @@ impl<S: GraphStore> SharedGraphStore<S> {
         guard.stats(tenant_id).await
     }
 
+    /// Whether any edge is owned by a file (indexed probe, shared lock).
+    pub async fn file_has_edges(&self, tenant_id: &str, file_path: &str) -> GraphDbResult<bool> {
+        let guard = self.inner.read().await;
+        guard.file_has_edges(tenant_id, file_path).await
+    }
+
     // ── Write operations (exclusive lock) ────────────────────────────
 
     /// Upsert a batch of nodes (exclusive lock).

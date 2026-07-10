@@ -331,6 +331,17 @@ pub trait GraphStore: Send + Sync {
     /// Delete all edges owned by a specific file.
     async fn delete_edges_by_file(&self, tenant_id: &str, file_path: &str) -> GraphDbResult<u64>;
 
+    /// Whether any edge is owned by `file_path` (source_file). One indexed
+    /// probe (`idx_edges_source_file`); the branch-dedup fast-path uses it to
+    /// detect a file whose edges were wiped by the update preamble's
+    /// content-row GC with nothing left to rewrite them (issue #235).
+    ///
+    /// Default `true` means "assume present": backends without a probe keep
+    /// the pre-#235 behavior of never triggering the dedup-path graph heal.
+    async fn file_has_edges(&self, _tenant_id: &str, _file_path: &str) -> GraphDbResult<bool> {
+        Ok(true)
+    }
+
     /// Delete all nodes and edges for a tenant.
     async fn delete_tenant(&self, tenant_id: &str) -> GraphDbResult<u64>;
 
