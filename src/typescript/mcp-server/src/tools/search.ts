@@ -55,6 +55,7 @@ import {
 } from './branch-scope.js';
 
 import { determineCollections } from './search-filters.js';
+import { diagnoseEmptyResult, EMPTY_DIAGNOSIS_PROBE_LIMIT } from './empty-diagnosis.js';
 import { retrieveParent, collectionExists } from './search-qdrant.js';
 import { searchExact } from './search-exact.js';
 import { expandSparseWithTags } from './search-expansion.js';
@@ -373,6 +374,32 @@ export class SearchTool {
         widened.hint = widened.hint ? `${widened.hint} ${note}` : note;
         return widened;
       }
+    }
+
+    // Still empty (any branch-widen also came back empty): diagnose WHY, with the
+    // same shared probes grep/exact use (CLAUDE.md shared-behavior rule) — in
+    // 'semantic' mode so a well-formed pathGlob over relevant-less files is NOT
+    // falsely blamed as malformed (the 1b fork), and a not-yet-indexed branch is
+    // named. Only for a project-scoped miss with a tenant resolved; the probe
+    // re-runs the SAME scope sans path filter, REUSING the embeddings (no
+    // re-embed) via runFinalize.
+    if (codeHits(primary) === 0 && scope === 'project' && currentProjectId) {
+      const diagnosis = await diagnoseEmptyResult({
+        tenantId: currentProjectId,
+        branch: concreteEffective,
+        pathGlob: options.pathGlob,
+        pathExclude: options.pathExclude,
+        searchDbReader: this.searchDbReader,
+        mode: 'semantic',
+        countWithoutPathFilter: async () => {
+          const probeOptions: SearchOptions = { ...effectiveOptions };
+          delete probeOptions.pathGlob;
+          delete probeOptions.pathExclude;
+          const probe = await runFinalize(probeOptions, fallbackBranch);
+          return Math.min(codeHits(probe), EMPTY_DIAGNOSIS_PROBE_LIMIT);
+        },
+      });
+      if (diagnosis) primary.hint = primary.hint ? `${primary.hint} ${diagnosis}` : diagnosis;
     }
     return primary;
   }

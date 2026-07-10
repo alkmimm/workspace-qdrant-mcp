@@ -7,10 +7,15 @@
  * a well-formed path filter over files that merely don't contain the pattern, or
  * a requested branch with no indexed content yet. Distinguishing them turns a
  * dead-end 0 into an actionable message — and, critically, stops a valid glob
- * from being falsely accused of being malformed. Both FTS tools funnel through
- * here so the behavior can't drift (CLAUDE.md shared-behavior rule) — grep and
- * search-exact each supply a `countWithoutPathFilter` closure appropriate to
- * their own request shape.
+ * from being falsely accused of being malformed. All three read tools funnel
+ * through here so the behavior can't drift (CLAUDE.md shared-behavior rule) —
+ * grep, search-exact, and semantic `search` each supply a
+ * `countWithoutPathFilter` closure appropriate to their own request shape.
+ *
+ * The two FTS tools (grep, exact) match a literal `pattern`; semantic `search`
+ * has none — an empty result under a well-formed glob means "nothing was
+ * relevant enough", not "pattern absent". `mode` selects the wording for that
+ * one sub-verdict (1b); the shape (1a) and branch (2) probes are mode-agnostic.
  */
 
 import { concreteBranchFilter } from './branch-scope.js';
@@ -87,6 +92,28 @@ export function patternAbsentUnderPathFilterMessage(
 }
 
 /**
+ * Semantic-search analogue of {@link patternAbsentUnderPathFilterMessage}: the
+ * path filter is WELL-FORMED (selects real indexed files), the query has hits
+ * elsewhere, but nothing under the filter cleared the score threshold. There is
+ * no literal "pattern" to be miscased here — the emptiness is a relevance/scope
+ * miss, so the message points at the threshold and phrasing instead of casing.
+ */
+export function noSemanticMatchUnderPathFilterMessage(
+  nWithout: number,
+  nFilesMatched: number,
+  pathGlob: string | undefined,
+  pathExclude: string | undefined
+): string {
+  return (
+    `No semantic matches under ${describePathFilters(pathGlob, pathExclude)}. The path filter is well-formed — it ` +
+    `selects ${withCapMarker(nFilesMatched)} indexed file(s) — but none of their content cleared the score threshold ` +
+    `under it, while the same query WITHOUT the path filter has ${withCapMarker(nWithout)}. This is NOT a filter-shape ` +
+    'problem: the relevant content lives in OTHER files. Widen or drop the filter, lower scoreThreshold, or rephrase ' +
+    'the query with vocabulary closer to the target code (identifiers/comments are mostly English).'
+  );
+}
+
+/**
  * The requested branch has 0 files listed under its own name in the index. This
  * is a soft signal, not a verdict: it usually means a freshly created /
  * not-yet-indexed branch, but a file UNCHANGED across a checkout can stay tagged
@@ -121,6 +148,13 @@ export interface EmptyDiagnosisInput {
    * {@link EMPTY_DIAGNOSIS_PROBE_LIMIT}. Only called when a path filter is set.
    */
   countWithoutPathFilter: () => Promise<number>;
+  /**
+   * Which read tool is diagnosing. `'literal'` (default — grep/exact) blames an
+   * absent literal pattern under a well-formed filter; `'semantic'` blames a
+   * relevance/score-threshold miss instead (no literal to miscase). Only affects
+   * probe (1b); (1a) shape and (2) branch are identical either way.
+   */
+  mode?: 'literal' | 'semantic';
 }
 
 /**
@@ -131,10 +165,11 @@ export interface EmptyDiagnosisInput {
  *      second probe (does the filter select any indexed file?):
  *        1a. filter selects NO file → its shape excluded everything (malformed
  *            / too restrictive) → {@link pathFilterExcludedAllMessage}.
- *        1b. filter selects real files but none contain the pattern → the
- *            pattern is absent from the filtered files, the glob is fine →
- *            {@link patternAbsentUnderPathFilterMessage}. Avoids falsely blaming
- *            a valid glob (e.g. `*.proto`) when the literal just isn't there.
+ *        1b. filter selects real files but the result isn't in them → the glob
+ *            is fine. Literal mode → {@link patternAbsentUnderPathFilterMessage}
+ *            (pattern absent, check casing); semantic mode →
+ *            {@link noSemanticMatchUnderPathFilterMessage} (relevance/threshold
+ *            miss). Avoids falsely blaming a valid glob (e.g. `*.proto`).
  *   2. **Branch has no indexed content** — only for a concrete branch with a
  *      reader available.
  * Returns `undefined` when neither applies. Best-effort: any probe error is
@@ -142,21 +177,27 @@ export interface EmptyDiagnosisInput {
  */
 export async function diagnoseEmptyResult(input: EmptyDiagnosisInput): Promise<string | undefined> {
   const { tenantId, branch, pathGlob, pathExclude, searchDbReader, countWithoutPathFilter } = input;
+  const mode = input.mode ?? 'literal';
 
   // (1) Is a path filter responsible for the empty result?
   if (pathGlob || pathExclude) {
     try {
       const nWithout = await countWithoutPathFilter();
       if (nWithout > 0) {
-        // The pattern exists in the unfiltered scope. Distinguish a filter that
+        // The query has hits in the unfiltered scope. Distinguish a filter that
         // selects nothing (shape problem) from one that selects real files the
-        // pattern simply isn't in (naming/casing, not a broken glob).
+        // result simply isn't in. For 1b the wording forks by mode: a literal
+        // pattern absent from those files (naming/casing) vs a semantic relevance
+        // miss (nothing cleared the score threshold there).
         const nFilesMatched = searchDbReader
           ? tryCountFilesMatchingPathFilters(searchDbReader, tenantId, pathGlob, pathExclude)
           : 0;
-        return nFilesMatched > 0
-          ? patternAbsentUnderPathFilterMessage(nWithout, nFilesMatched, pathGlob, pathExclude)
-          : pathFilterExcludedAllMessage(nWithout, pathGlob, pathExclude);
+        if (nFilesMatched === 0) {
+          return pathFilterExcludedAllMessage(nWithout, pathGlob, pathExclude);
+        }
+        return mode === 'semantic'
+          ? noSemanticMatchUnderPathFilterMessage(nWithout, nFilesMatched, pathGlob, pathExclude)
+          : patternAbsentUnderPathFilterMessage(nWithout, nFilesMatched, pathGlob, pathExclude);
       }
     } catch {
       // fall through to the branch probe
