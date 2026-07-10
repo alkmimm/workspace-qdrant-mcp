@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::context::ProcessingContext;
 use crate::graph::extractor::{
@@ -221,6 +221,84 @@ fn suppress_fuzzy_calls(
             && e.source_node_id == caller_id
             && stub_ids.contains(&e.target_node_id))
     });
+}
+
+/// Rebuild a file's graph edges after a branch-dedup hit left them wiped
+/// (issue #235).
+///
+/// When an update changes a file's hash, the preamble GCs the old content-row,
+/// and that delete wipes the file's edges by path. If the NEW content then
+/// dedups against an existing content-row (revert, branch switch, merge
+/// restoring a known hash), `try_branch_dedup` returns before the graph phase,
+/// so nothing rewrites them. One indexed probe detects the gap; the rebuild
+/// re-parses with tree-sitter only — the embed skip that makes dedup cheap is
+/// preserved. Files wiped before this fix heal on their next dedup touch.
+///
+/// Best-effort like all graph work: errors are logged, never failing the
+/// pipeline.
+pub(super) async fn heal_edges_after_dedup(
+    ctx: &ProcessingContext,
+    item: &crate::unified_queue_schema::UnifiedQueueItem,
+    file_path: &Path,
+    relative_path: &str,
+    abs_file_path: &str,
+    base_path: &str,
+) {
+    let Some(ref graph_store) = ctx.graph_store else {
+        return;
+    };
+
+    // Only code files produce graph data — text chunking carries no symbols.
+    let overrides = super::component::get_gitattributes(ctx, base_path).await;
+    if crate::tree_sitter::detect_language_with_overrides(file_path, relative_path, &overrides)
+        .is_none()
+    {
+        return;
+    }
+
+    match graph_store
+        .file_has_edges(&item.tenant_id, relative_path)
+        .await
+    {
+        Ok(true) => return, // edges intact — the common dedup hit
+        Ok(false) => {}
+        Err(e) => {
+            warn!(
+                "graph heal: edge probe failed for {} (tenant {}): {} — skipping",
+                relative_path, item.tenant_id, e
+            );
+            return;
+        }
+    }
+
+    let provider =
+        super::grammar::ensure_grammar_available(ctx, file_path, relative_path, &overrides).await;
+    let content = match ctx
+        .document_processor
+        .process_file_content_with_provider(file_path, &item.collection, provider)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                "graph heal: re-parse failed for {} ({}): {}",
+                relative_path, abs_file_path, e
+            );
+            return;
+        }
+    };
+    info!(
+        "graph heal: rebuilding edges for {} — dedup hit found none (#235)",
+        relative_path
+    );
+    ingest_graph_edges(
+        ctx,
+        &item.tenant_id,
+        relative_path,
+        abs_file_path,
+        &content.chunks,
+    )
+    .await;
 }
 
 /// Delete graph edges for a file (called during file deletion).

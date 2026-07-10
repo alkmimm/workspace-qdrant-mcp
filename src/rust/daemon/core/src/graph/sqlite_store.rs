@@ -296,6 +296,17 @@ impl GraphStore for SqliteGraphStore {
         Ok(count)
     }
 
+    async fn file_has_edges(&self, tenant_id: &str, file_path: &str) -> GraphDbResult<bool> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM graph_edges WHERE tenant_id = ?1 AND source_file = ?2 LIMIT 1",
+        )
+        .bind(tenant_id)
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     async fn make_calls_authoritative(
         &self,
         tenant_id: &str,

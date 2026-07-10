@@ -76,7 +76,21 @@ pub(crate) async fn ingest_file_content(
     )
     .await
     {
-        Ok(Some(_hit)) => return Ok(()),
+        Ok(Some(_hit)) => {
+            // Issue #235: the update preamble's content-row GC may have wiped
+            // this file's graph edges, and the dedup return skips the phase
+            // that rewrites them. Probe-and-rebuild (tree-sitter only).
+            graph_ingest::heal_edges_after_dedup(
+                ctx,
+                item,
+                file_path,
+                relative_path,
+                abs_file_path,
+                base_path,
+            )
+            .await;
+            return Ok(());
+        }
         Ok(None) => { /* novel content — fall through to full ingest */ }
         Err(e) => {
             // Dedup failure is not fatal — log and proceed with the full

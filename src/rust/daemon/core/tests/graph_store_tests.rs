@@ -441,3 +441,78 @@ async fn test_query_related_edge_type_filter() {
         .unwrap();
     assert_eq!(all.len(), 2, "no filter should return all relationships");
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// 8. file_has_edges probe (issue #235 — dedup-path graph heal)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// The probe must track the exact wipe the update preamble performs (edges
+/// deleted by source_file, nodes untouched): true after ingest, false after a
+/// `reingest_file` with empty edges — the #235 state the dedup heal detects —
+/// and true again once edges are rewritten.
+#[tokio::test]
+async fn test_file_has_edges_tracks_wipe_and_rebuild() {
+    let dir = tempdir().unwrap();
+    let store = create_factory_store(dir.path()).await;
+
+    ingest_file_chunks(
+        &store,
+        &build_rust_file_chunks(),
+        TENANT,
+        "src/processor.rs",
+    )
+    .await;
+
+    assert!(
+        store
+            .file_has_edges(TENANT, "src/processor.rs")
+            .await
+            .unwrap(),
+        "ingested file must report edges"
+    );
+    assert!(
+        !store.file_has_edges(TENANT, "src/never.rs").await.unwrap(),
+        "un-ingested file must report no edges"
+    );
+    assert!(
+        !store
+            .file_has_edges("other-tenant", "src/processor.rs")
+            .await
+            .unwrap(),
+        "probe must be tenant-scoped"
+    );
+
+    // The #235 wipe: content-row GC deletes edges by path, keeps nodes.
+    store
+        .reingest_file(TENANT, "src/processor.rs", &[], &[])
+        .await
+        .unwrap();
+    let stats = store.stats(Some(TENANT)).await.unwrap();
+    assert!(
+        stats.total_nodes > 0,
+        "wipe leaves nodes behind (the zero-edge symptom)"
+    );
+    assert!(
+        !store
+            .file_has_edges(TENANT, "src/processor.rs")
+            .await
+            .unwrap(),
+        "post-wipe the probe must report the gap"
+    );
+
+    // The heal path rewrites via the same atomic swap.
+    ingest_file_chunks(
+        &store,
+        &build_rust_file_chunks(),
+        TENANT,
+        "src/processor.rs",
+    )
+    .await;
+    assert!(
+        store
+            .file_has_edges(TENANT, "src/processor.rs")
+            .await
+            .unwrap(),
+        "rebuild must restore the probe to true"
+    );
+}
