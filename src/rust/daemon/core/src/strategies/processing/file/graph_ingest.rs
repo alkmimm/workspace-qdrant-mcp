@@ -137,7 +137,17 @@ async fn resolve_calls_via_lsp(
     // Open the file so the server answers call-hierarchy for it (didOpen; most
     // servers only serve open documents). One open per file, closed after.
     let _ = mgr.open_document(abs_path).await;
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Wait for the server to finish (re)analyzing the just-opened document
+    // instead of a fixed short sleep. Dart's analysis server answers
+    // `callHierarchy/outgoingCalls` with an EMPTY result while a freshly opened
+    // document is still being analyzed, so the old fixed 300ms sleep resolved 0
+    // Dart edges on this incremental ingestion path — the exact gap the backfill
+    // pass already closed with this same wait (see `lsp_backfill.rs`). For
+    // servers whose only progress is background indexing (typescript-language-
+    // server, pyright, rust-analyzer/gopls once indexed) this returns right after
+    // the short settle, so the common path keeps its low latency. Shared-behavior
+    // alignment: the incremental and backfill LSP passes now wait the same way.
+    mgr.wait_for_analysis_idle(abs_path).await;
 
     for chunk in chunks {
         let meta = &chunk.metadata;
