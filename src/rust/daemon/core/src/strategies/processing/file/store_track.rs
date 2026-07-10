@@ -53,6 +53,21 @@ pub(super) async fn upsert_and_track(
     payload_file_type: Option<&str>,
     component: Option<String>,
 ) -> Result<i64, UnifiedProcessorError> {
+    // #224: snapshot the branch set that OTHER branches may have tagged on this
+    // shared base_point BEFORE the upsert overwrites each point's `branch`
+    // payload with only the current branch. Restored right after so Qdrant keeps
+    // the union and stays in sync with the tracked_files authority. One indexed
+    // scroll; empty (so free) for a brand-new base_point — the common new-file
+    // case. Skipped when there are no points to upsert.
+    let prior_branches = if points.is_empty() {
+        Vec::new()
+    } else {
+        ctx.storage_client
+            .read_branch_set(&item.collection, base_point)
+            .await
+            .unwrap_or_default()
+    };
+
     upsert_to_qdrant(
         ctx,
         item,
@@ -63,6 +78,27 @@ pub(super) async fn upsert_and_track(
         relative_path,
     )
     .await?;
+
+    // Restore the branches the upsert dropped (everything but the current branch,
+    // which the upsert already wrote as the sole tag). Best-effort: a failure
+    // leaves the shared point tagged only with the current branch until the next
+    // reconcile/reembed, never blocking ingestion.
+    let to_restore: Vec<String> = prior_branches
+        .into_iter()
+        .filter(|b| b != &item.branch)
+        .collect();
+    if !to_restore.is_empty() {
+        if let Err(e) = ctx
+            .storage_client
+            .merge_branches_into_base_point(&item.collection, base_point, &to_restore)
+            .await
+        {
+            warn!(
+                "branch-preserve merge failed for {} (base_point {}): {} — Qdrant may drop prior branches until reconcile",
+                relative_path, base_point, e
+            );
+        }
+    }
 
     let existing = tracked_files_schema::lookup_tracked_file(
         pool,

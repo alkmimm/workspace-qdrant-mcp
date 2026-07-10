@@ -165,7 +165,10 @@ impl StorageClient {
     /// branches via an array in the `branch` payload field. Tolerates a legacy
     /// scalar `branch` (decoded as a one-element set) for mixed data during the
     /// reembed window. Empty when no point matches.
-    async fn read_branch_set(
+    ///
+    /// `pub` so the full-ingest path can snapshot the shared branch set BEFORE
+    /// its upsert overwrites it, then restore the union afterwards (issue #224).
+    pub async fn read_branch_set(
         &self,
         collection_name: &str,
         base_point: &str,
@@ -243,5 +246,95 @@ impl StorageClient {
                 .await?;
         }
         Ok(set.len())
+    }
+
+    /// Merge `extra_branches` into the shared `branch` array of a base_point,
+    /// preserving whatever is already there.
+    ///
+    /// Issue #224: a full-ingest upsert (`insert_points_batch` in `store_track`)
+    /// overwrites each point's payload — including `branch` — with only the
+    /// CURRENT branch. A base_point that OTHER branches had tagged therefore
+    /// loses those tags (Qdrant drifts below the `tracked_files` authority, so a
+    /// branch-scoped search on the dropped branch silently misses the file). The
+    /// full-ingest path snapshots the prior set BEFORE its upsert and calls this
+    /// right AFTER to restore the union. Idempotent; no-op when `extra_branches`
+    /// are all already present or the base_point has no points.
+    pub async fn merge_branches_into_base_point(
+        &self,
+        collection_name: &str,
+        base_point: &str,
+        extra_branches: &[String],
+    ) -> Result<(), StorageError> {
+        use qdrant_client::qdrant::{Condition, Filter};
+        if extra_branches.is_empty() {
+            return Ok(());
+        }
+        let mut set = self.read_branch_set(collection_name, base_point).await?;
+        if set.is_empty() {
+            return Ok(()); // no points under this base_point — nothing to merge onto
+        }
+        if merge_branch_set(&mut set, extra_branches) {
+            let filter = Filter::must([Condition::matches("base_point", base_point.to_string())]);
+            let mut payload = std::collections::HashMap::new();
+            payload.insert("branch".to_string(), serde_json::json!(set));
+            self.set_payload_by_filter(collection_name, filter, payload)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Append each of `extra` to `set` when absent, preserving order and skipping
+/// duplicates. Returns `true` if anything was newly added. Pure — the union
+/// rule for the shared `branch` array, unit-tested without a live Qdrant.
+pub(crate) fn merge_branch_set(set: &mut Vec<String>, extra: &[String]) -> bool {
+    let mut changed = false;
+    for b in extra {
+        if !set.iter().any(|x| x == b) {
+            set.push(b.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_branch_set;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn merges_new_branches_and_reports_change() {
+        // The #224 case: the upsert left only [main]; restore the prior tags.
+        let mut set = v(&["main"]);
+        let changed = merge_branch_set(&mut set, &v(&["feature-a", "feature-b"]));
+        assert!(changed);
+        assert_eq!(set, v(&["main", "feature-a", "feature-b"]));
+    }
+
+    #[test]
+    fn skips_duplicates_and_reports_no_change() {
+        let mut set = v(&["main", "feature-a"]);
+        let changed = merge_branch_set(&mut set, &v(&["main", "feature-a"]));
+        assert!(!changed);
+        assert_eq!(set, v(&["main", "feature-a"]));
+    }
+
+    #[test]
+    fn partial_overlap_adds_only_the_missing() {
+        let mut set = v(&["main"]);
+        let changed = merge_branch_set(&mut set, &v(&["main", "feature-a"]));
+        assert!(changed);
+        assert_eq!(set, v(&["main", "feature-a"]));
+    }
+
+    #[test]
+    fn empty_extra_is_a_noop() {
+        let mut set = v(&["main"]);
+        assert!(!merge_branch_set(&mut set, &[]));
+        assert_eq!(set, v(&["main"]));
     }
 }
