@@ -62,6 +62,10 @@ impl LoopState {
         maintenance_scheduler.register(Box::new(
             crate::idle::tasks::StaleProjectDeactivationTask::new(),
         ));
+        // #224 inverse sub-case: sync the Qdrant `branch` payload up to the
+        // tracked_files authority for base_points it has fallen behind.
+        maintenance_scheduler
+            .register(Box::new(crate::idle::tasks::BranchReconcileTask::new()));
 
         Self {
             last_metrics_log: chrono::Utc::now(),
