@@ -53,19 +53,40 @@ pub(super) async fn upsert_and_track(
     payload_file_type: Option<&str>,
     component: Option<String>,
 ) -> Result<i64, UnifiedProcessorError> {
-    // #224: snapshot the branch set that OTHER branches may have tagged on this
-    // shared base_point BEFORE the upsert overwrites each point's `branch`
-    // payload with only the current branch. Restored right after so Qdrant keeps
-    // the union and stays in sync with the tracked_files authority. One indexed
-    // scroll; empty (so free) for a brand-new base_point — the common new-file
-    // case. Skipped when there are no points to upsert.
+    // #224: snapshot the branch set that OTHER branches tagged on this shared
+    // base_point BEFORE the upsert overwrites each point's `branch` payload with
+    // only the current branch, then restore it right after so Qdrant keeps the
+    // union. Sourced from the UNION of what Qdrant currently holds AND the
+    // `tracked_files` authority for this base_point: reading Qdrant alone only
+    // prevents NEW drift — a base_point whose payload had already fallen behind
+    // the authority (e.g. lost `main`) would preserve its own drift forever. The
+    // authority leg makes a re-ingest re-SYNC Qdrant up to the source of truth
+    // (so it self-heals, and a reembed restores `main` regardless of which branch
+    // it runs on). Additive: only branches the authority holds are added, none
+    // removed. Both legs are cheap (one indexed scroll + one indexed SQLite
+    // query, both empty for a brand-new base_point). Skipped when no points.
     let prior_branches = if points.is_empty() {
         Vec::new()
     } else {
-        ctx.storage_client
+        let mut set = ctx
+            .storage_client
             .read_branch_set(&item.collection, base_point)
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+        match read_authority_branches(pool, base_point).await {
+            Ok(authority) => {
+                for b in authority {
+                    if !set.contains(&b) {
+                        set.push(b);
+                    }
+                }
+            }
+            Err(e) => warn!(
+                "#224: authority branch read failed for base_point {}: {} — preserve falls back to Qdrant tags only",
+                base_point, e
+            ),
+        }
+        set
     };
 
     upsert_to_qdrant(
@@ -150,6 +171,31 @@ pub(super) async fn upsert_and_track(
     }
 
     tx_result
+}
+
+/// Union of every branch the `tracked_files` authority holds for `base_point`,
+/// across all its rows (Layer 2 shares one base_point across branches and clones,
+/// so the full membership set is spread over several rows). This is the source of
+/// truth the shared Qdrant point's `branch` array must match — used to restore
+/// tags the current-branch full-ingest upsert overwrites, INCLUDING any the
+/// Qdrant payload had already drifted below the authority (#224). Uses the
+/// `idx_tracked_files_bp` index; `json_each` iterates each row's branches array
+/// (same idiom as `branch_held_by_other`).
+async fn read_authority_branches(
+    pool: &SqlitePool,
+    base_point: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT je.value
+        FROM tracked_files AS tf, json_each(tf.branches) AS je
+        WHERE tf.base_point = ?1
+        "#,
+    )
+    .bind(base_point)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(b,)| b).collect())
 }
 
 /// Upsert document points to Qdrant. On failure, cleans up stale SQLite state
@@ -439,4 +485,58 @@ async fn insert_new_tracked_file(
     .map_err(|e| {
         UnifiedProcessorError::QueueOperation(format!("tracked_files insert failed: {}", e))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn mem_pool() -> SqlitePool {
+        // Single connection so every query hits the same in-memory database.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite");
+        sqlx::query(
+            "CREATE TABLE tracked_files (file_id INTEGER PRIMARY KEY, base_point TEXT, branches TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create tracked_files");
+        pool
+    }
+
+    #[tokio::test]
+    async fn read_authority_branches_unions_across_rows_for_a_base_point() {
+        let pool = mem_pool().await;
+        for (bp, branches) in [
+            ("bp1", r#"["main","featA"]"#),
+            ("bp1", r#"["featB","main"]"#), // another row (branch/clone) shares bp1
+            ("bp2", r#"["dev"]"#),          // unrelated base_point
+        ] {
+            sqlx::query("INSERT INTO tracked_files (base_point, branches) VALUES (?1, ?2)")
+                .bind(bp)
+                .bind(branches)
+                .execute(&pool)
+                .await
+                .expect("insert row");
+        }
+
+        // Deduplicated union of every bp1 row's branches — this is the authority
+        // set the Qdrant `branch` array must be restored up to (#224).
+        let mut got = read_authority_branches(&pool, "bp1").await.expect("read bp1");
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["featA".to_string(), "featB".to_string(), "main".to_string()]
+        );
+
+        // A base_point with no rows → empty (brand-new file, the common case).
+        assert!(read_authority_branches(&pool, "bp_absent")
+            .await
+            .expect("read absent")
+            .is_empty());
+    }
 }
