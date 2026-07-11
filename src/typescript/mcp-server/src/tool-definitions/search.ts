@@ -127,13 +127,13 @@ export const searchToolDefinition = {
       summary: {
         type: 'boolean',
         description:
-          'When true, drop chunk text bodies and return only metadata (id, score, collection, title, path/symbol). Use for pure discovery before a follow-up retrieve() call. Default: false.',
+          'When true, drop chunk text bodies and return only metadata (id, score, collection, title, path/symbol). Use for pure discovery before a follow-up retrieve() call. Equivalent to responseFormat:"summary" (either spelling works). Default: false.',
       },
       responseFormat: {
         type: 'string',
-        enum: ['concise', 'detailed', 'packed'],
+        enum: ['concise', 'detailed', 'packed', 'summary'],
         description:
-          'Response verbosity (default: concise). "concise" truncates each hit body with a retrieve() marker; "detailed" returns full bodies (per-hit cap off); "packed" returns ONE ranked, deduplicated context bundle (packed_bundle.text: per-hit "location · symbol" header + capped body) assembled under maxResponseBytes, with metadata-only entries in results — the most token-efficient way to READ several hits at once. Prefer concise for discovery; packed when you intend to read the top hits; `summary` (metadata-only) is stronger than all.',
+          'Response verbosity (default: concise). "concise" truncates each hit body with a retrieve() marker; "detailed" returns full bodies (per-hit cap off); "packed" returns ONE ranked, deduplicated context bundle (packed_bundle.text: per-hit "location · symbol" header + capped body) assembled under maxResponseBytes, with metadata-only entries in results — the most token-efficient way to READ several hits at once; "summary" drops every body and returns metadata only — the strongest, most token-efficient format, identical to the summary:true boolean (either spelling works). Prefer concise for discovery, packed when you intend to read the top hits, summary to just locate files.',
       },
       maxResponseBytes: {
         type: 'number',

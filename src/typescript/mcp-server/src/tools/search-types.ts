@@ -115,8 +115,10 @@ export interface SearchOptions {
    *  `packed` assembles ONE ranked, deduplicated context bundle under the
    *  response byte budget (see {@link SearchResponse.packed_bundle}) with
    *  metadata-only entries in `results`. An explicit `maxBytesPerHit`
-   *  overrides the per-hit cap in concise/packed; `summary` is stronger
-   *  than all three. */
+   *  overrides the per-hit cap in concise/packed; the `summary` flag is
+   *  stronger than all three. At the tool boundary `responseFormat:"summary"`
+   *  is accepted and aliased to that flag (this field stays the three
+   *  body-verbosity modes). */
   responseFormat?: 'concise' | 'detailed' | 'packed';
   /** Global cap (chars) on the summed hit bodies of the whole response; trailing
    *  hits beyond it are dropped (>=1 kept) and reported via

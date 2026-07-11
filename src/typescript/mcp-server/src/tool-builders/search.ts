@@ -115,7 +115,17 @@ function extractOutputOptions(
   if (summary !== undefined) options.summary = summary;
 
   const responseFormat = args?.['responseFormat'] as string | undefined;
-  if (responseFormat === 'concise' || responseFormat === 'detailed' || responseFormat === 'packed') {
+  if (responseFormat === 'summary') {
+    // `summary` is the strongest response format (metadata-only). Accept it as a
+    // responseFormat value — the natural spelling agents reach for — by aliasing
+    // it to the `summary: true` boolean, so `responseFormat:"summary"` is not
+    // rejected by the enum. The two knobs are otherwise easy to confuse.
+    options.summary = true;
+  } else if (
+    responseFormat === 'concise' ||
+    responseFormat === 'detailed' ||
+    responseFormat === 'packed'
+  ) {
     options.responseFormat = responseFormat;
   }
 
