@@ -255,7 +255,8 @@ fn lsp_language_id(file: &Path) -> &'static str {
 
 /// Relativize an absolute path returned by the LSP server against the project
 /// root, so the result matches the project-relative `file_path` the graph uses
-/// to key nodes. Returns `None` for paths outside the project (stdlib/deps),
+/// to key nodes. Returns `None` for paths outside the project (stdlib/deps) and
+/// for in-tree dependency directories (`node_modules/`, `site-packages/`),
 /// which have no node in this tenant's graph. Separator-agnostic for
 /// cross-platform/URI path encodings.
 pub(crate) fn relativize_to_project(abs_file: &str, project_root: &str) -> Option<String> {
@@ -263,11 +264,25 @@ pub(crate) fn relativize_to_project(abs_file: &str, project_root: &str) -> Optio
     let norm_root = project_root.replace('\\', "/");
     let norm_root = norm_root.trim_end_matches('/');
     let stripped = norm_file.strip_prefix(norm_root)?.trim_start_matches('/');
-    if stripped.is_empty() {
+    if stripped.is_empty() || is_dependency_path(stripped) {
         None
     } else {
         Some(stripped.to_string())
     }
+}
+
+/// A project-relative path under a dependency directory is external code, not a
+/// project symbol. The LSP server can resolve a call into a bundled package or
+/// `.d.ts` that lives physically *under* the project root (so `strip_prefix`
+/// keeps it), and the callee URI is often percent-encoded (`@types` →
+/// `%40types`) so it never matches an on-disk node anyway. Skipping keeps the
+/// graph project-scoped. This extends the out-of-project stdlib/deps skip this
+/// function already performs (paths that fail `strip_prefix`, e.g. `/usr/lib`)
+/// to deps that live inside the tree; the dependency-dir markers mirror the
+/// external-dep paths recognized by `imports.rs::is_stdlib`
+/// (`/node_modules/@types/`, `/site-packages/`, …). See issue #253.
+fn is_dependency_path(rel: &str) -> bool {
+    rel.contains("node_modules/") || rel.contains("site-packages/")
 }
 
 /// Build resolved `CALLS` graph edges from call-hierarchy results.
@@ -375,6 +390,28 @@ mod tests {
     }
 
     #[test]
+    fn relativize_skips_in_tree_dependency_dirs() {
+        // node_modules lives physically under the project root, so strip_prefix
+        // keeps it — but it is external code, not a project symbol (#253). The
+        // '@' in @types arrives percent-encoded (%40) from the LSP URI.
+        assert_eq!(
+            relativize_to_project(
+                "/home/u/proj/src/ts/node_modules/%40types/node/fs.d.ts",
+                "/home/u/proj"
+            ),
+            None
+        );
+        // Python deps under an in-tree virtualenv are external too.
+        assert_eq!(
+            relativize_to_project(
+                "/home/u/proj/.venv/lib/python3.12/site-packages/pkg/mod.py",
+                "/home/u/proj"
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn resolved_call_edges_target_real_callee_node() {
         use crate::graph::{compute_node_id, NodeType};
 
@@ -408,6 +445,22 @@ mod tests {
         }];
         let (nodes, edges) =
             resolved_call_edges("t1", "caller", "src/lib.rs", "/home/u/proj", &calls);
+        assert!(nodes.is_empty());
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn resolved_call_edges_skip_node_modules_callees() {
+        // The TS server resolved a call into a bundled type-def under
+        // node_modules, with the '@' percent-encoded — it must NOT become a
+        // graph node or the graph accumulates external-dep cruft (#253).
+        let calls = vec![ResolvedCall {
+            name: "readFileSync".to_string(),
+            file: "/home/u/proj/src/ts/node_modules/%40types/node/fs.d.ts".to_string(),
+            line: 1,
+        }];
+        let (nodes, edges) =
+            resolved_call_edges("t1", "caller", "src/ts/app.ts", "/home/u/proj", &calls);
         assert!(nodes.is_empty());
         assert!(edges.is_empty());
     }
