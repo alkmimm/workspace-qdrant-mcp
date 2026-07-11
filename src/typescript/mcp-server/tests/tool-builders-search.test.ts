@@ -51,3 +51,32 @@ describe('buildSearchOptions — previously-dropped output options', () => {
     expect(buildSearchOptions({ query: 'x' }).rerankWeight).toBeUndefined();
   });
 });
+
+describe('buildSearchOptions — responseFormat', () => {
+  it.each(['concise', 'detailed', 'packed'] as const)(
+    'maps responseFormat: %s through to options',
+    (format) => {
+      const opts = buildSearchOptions({ query: 'x', responseFormat: format });
+      expect(opts.responseFormat).toBe(format);
+      expect(opts.summary).toBeUndefined();
+    }
+  );
+
+  it('aliases responseFormat:"summary" to the summary flag (the footgun fix)', () => {
+    const opts = buildSearchOptions({ query: 'x', responseFormat: 'summary' });
+    // "summary" is not a body-verbosity mode; it maps to summary:true so the
+    // natural spelling is not rejected by the enum.
+    expect(opts.summary).toBe(true);
+    expect(opts.responseFormat).toBeUndefined();
+  });
+
+  it('ignores an unknown responseFormat value (no throw, nothing set)', () => {
+    const opts = buildSearchOptions({ query: 'x', responseFormat: 'bogus' });
+    expect(opts.responseFormat).toBeUndefined();
+    expect(opts.summary).toBeUndefined();
+  });
+
+  it('leaves responseFormat undefined when omitted', () => {
+    expect(buildSearchOptions({ query: 'x' }).responseFormat).toBeUndefined();
+  });
+});
