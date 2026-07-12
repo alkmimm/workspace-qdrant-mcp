@@ -26,6 +26,16 @@ interface MatchCond {
 interface ScrollReq {
   filter?: { must?: MatchCond[] };
 }
+interface RetrieveReq {
+  ids?: Array<string | number>;
+}
+
+/** Points resolvable by id (the `retrieve` path used by id-addressed ops). */
+const POINTS_BY_ID: Record<string, { content: string; tenant_id: string }> = {
+  'pt-1': { content: 'a note', tenant_id: 't1' },
+  'pt-old': { content: 'old text', tenant_id: 't1' },
+  'pt-foreign': { content: 'someone else note', tenant_id: 't-other' },
+};
 
 vi.mock('@qdrant/js-client-rest', () => ({
   QdrantClient: vi.fn().mockImplementation(() => ({
@@ -49,6 +59,11 @@ vi.mock('@qdrant/js-client-rest', () => ({
       }
       // Tenant-only filter (list) → always return the default point.
       return Promise.resolve({ points: [defaultPoint] });
+    }),
+    retrieve: vi.fn().mockImplementation((_coll: string, req: RetrieveReq) => {
+      const id = String(req.ids?.[0] ?? '');
+      const payload = POINTS_BY_ID[id];
+      return Promise.resolve(payload ? [{ id, payload }] : []);
     }),
   })),
 }));
@@ -169,5 +184,60 @@ describe('ScratchpadTool', () => {
     await tool.execute({ action: 'delete', content: 'x' });
     expect(detector.getProjectInfo).toHaveBeenCalled();
     expect(enqueueCall(sm)[2]).toBe('detected');
+  });
+
+  it('delete by point id resolves the content and enqueues the same flow', async () => {
+    const res = await tool.execute({ action: 'delete', id: 'pt-1', projectId: 't1' });
+
+    expect(res.success).toBe(true);
+    const call = enqueueCall(sm);
+    expect(call[1]).toBe('delete');
+    expect(call[4]).toMatchObject({ content: 'a note', source_type: 'scratchpad' });
+  });
+
+  it('delete by id refuses a point belonging to another tenant (no cross-tenant leak)', async () => {
+    const res = await tool.execute({ action: 'delete', id: 'pt-foreign', projectId: 't1' });
+
+    expect(res.success).toBe(false);
+    expect(res.message).toMatch(/point id/i);
+    expect(sm.enqueueUnified).not.toHaveBeenCalled();
+  });
+
+  it('delete by unknown id fails loudly', async () => {
+    const res = await tool.execute({ action: 'delete', id: 'pt-nope', projectId: 't1' });
+
+    expect(res.success).toBe(false);
+    expect(res.message).toMatch(/point id/i);
+    expect(sm.enqueueUnified).not.toHaveBeenCalled();
+  });
+
+  it('update by point id enqueues new content + resolved old_content', async () => {
+    const res = await tool.execute({
+      action: 'update',
+      id: 'pt-old',
+      newContent: 'new text',
+      projectId: 't1',
+    });
+
+    expect(res.success).toBe(true);
+    const call = enqueueCall(sm);
+    expect(call[1]).toBe('update');
+    expect(call[4]).toMatchObject({
+      content: 'new text',
+      old_content: 'old text',
+      source_type: 'scratchpad',
+    });
+  });
+
+  it('verbatim content wins over id when both are given', async () => {
+    const res = await tool.execute({
+      action: 'delete',
+      content: 'a note',
+      id: 'pt-old',
+      projectId: 't1',
+    });
+
+    expect(res.success).toBe(true);
+    expect(enqueueCall(sm)[4]).toMatchObject({ content: 'a note' });
   });
 });

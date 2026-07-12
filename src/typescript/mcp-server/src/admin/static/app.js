@@ -1689,8 +1689,10 @@ const PG_PRESETS = {
   ],
   scratchpad: [
     { label: 'List', args: { action: 'list' } },
-    { label: 'Update', args: { action: 'update', content: '<verbatim old text>', newContent: '<new text>' } },
-    { label: 'Delete', args: { action: 'delete', content: '<verbatim note text>' } },
+    { label: 'Update (by id)', args: { action: 'update', id: '<point id from list>', newContent: '<new text>' } },
+    { label: 'Update (by content)', args: { action: 'update', content: '<verbatim old text>', newContent: '<new text>' } },
+    { label: 'Delete (by id)', args: { action: 'delete', id: '<point id from list>' } },
+    { label: 'Delete (by content)', args: { action: 'delete', content: '<verbatim note text>' } },
   ],
   rules: [
     { label: 'List', args: { action: 'list' } },

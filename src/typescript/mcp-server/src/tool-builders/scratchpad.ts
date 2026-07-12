@@ -16,6 +16,9 @@ export function buildScratchpadOptions(
   const content = args?.['content'] as string | undefined;
   if (content !== undefined) options.content = content;
 
+  const id = args?.['id'] as string | undefined;
+  if (id !== undefined) options.id = id;
+
   const newContent = args?.['newContent'] as string | undefined;
   if (newContent !== undefined) options.newContent = newContent;
 

@@ -39,6 +39,18 @@ pub struct ScratchpadPayload {
     /// identified by `hash(tenant, old_content)`. Ignored for add/delete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_content: Option<String>,
+    /// Write-time provenance (attribution only, never a read filter): the
+    /// branch checked out where the note was written. The queue item's
+    /// `branch` stays "main" because the point id derives from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_branch: Option<String>,
+    /// Client working directory the write came from (a worktree path
+    /// identifies the worktree).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_cwd: Option<String>,
+    /// Whether the writing checkout was a linked git worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_worktree: Option<bool>,
 }
 
 /// Deserialize tags from either a JSON array or a stringified JSON array.
@@ -213,16 +225,45 @@ mod tests {
             tags: vec!["architecture".to_string(), "search".to_string()],
             source_type: "scratchpad".to_string(),
             old_content: None,
+            origin_branch: None,
+            origin_cwd: None,
+            origin_worktree: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("design decision"));
         assert!(json.contains("Search Architecture"));
         assert!(json.contains("architecture"));
+        // Absent provenance must not serialize (older producers stay valid).
+        assert!(!json.contains("origin_branch"));
 
         let back: ScratchpadPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(back.content, "design decision: use RRF for fusion");
         assert_eq!(back.title, Some("Search Architecture".to_string()));
         assert_eq!(back.tags, vec!["architecture", "search"]);
+    }
+
+    #[test]
+    fn test_scratchpad_payload_origin_serde() {
+        // As sent by the MCP server / CLI when provenance is detectable
+        let json = r#"{
+            "content": "worker note",
+            "source_type": "scratchpad",
+            "origin_branch": "feat/thing",
+            "origin_cwd": "/home/user/repos/app-wt-thing",
+            "origin_worktree": true
+        }"#;
+        let payload: ScratchpadPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.origin_branch, Some("feat/thing".to_string()));
+        assert_eq!(
+            payload.origin_cwd,
+            Some("/home/user/repos/app-wt-thing".to_string())
+        );
+        assert_eq!(payload.origin_worktree, Some(true));
+
+        let round = serde_json::to_string(&payload).unwrap();
+        assert!(round.contains("origin_branch"));
+        assert!(round.contains("feat/thing"));
+        assert!(round.contains("origin_worktree"));
     }
 
     #[test]

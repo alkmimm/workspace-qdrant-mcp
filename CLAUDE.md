@@ -232,7 +232,7 @@ Workflow `agent()`), prepend this preamble to its prompt verbatim:
 
 > This project's codebase is indexed and exposed via the `workspace-qdrant` MCP.
 > Before any codebase discovery, load the tools: `ToolSearch` with query
-> `select:mcp__workspace-qdrant__search,mcp__workspace-qdrant__grep,mcp__workspace-qdrant__list,mcp__workspace-qdrant__retrieve,mcp__workspace-qdrant__graph`.
+> `select:mcp__workspace-qdrant__search,mcp__workspace-qdrant__grep,mcp__workspace-qdrant__list,mcp__workspace-qdrant__retrieve,mcp__workspace-qdrant__graph,mcp__workspace-qdrant__store`.
 > Then prefer `search` (semantic/concept queries — write them in ENGLISH; add
 > `fileType:"code"` or a `pathGlob` to bias toward implementation, or `pathExclude`
 > like `"old_project/**"` to drop a noisy legacy/vendored tree), `grep`
@@ -240,6 +240,11 @@ Workflow `agent()`), prepend this preamble to its prompt verbatim:
 > `format:"summary"`) over native Grep/Glob for discovery. For structural questions
 > ("what calls X", change-impact before a refactor) use the `graph` tool instead of
 > guessing. Use native Read only to pull exact bytes once the MCP located the file.
+> Persist findings other agents or a later session will need (task state, partial
+> results, decisions) with `store` `{type:"scratchpad", content:"...", cwd:"<abs repo path>"}`
+> — notes are stamped with write-time provenance (`origin_branch`/`origin_cwd`/
+> `origin_worktree`; pass `branch` explicitly when working in a git worktree) and
+> resurface automatically in project-scoped `search`.
 
 ## Critical Development Rules
 

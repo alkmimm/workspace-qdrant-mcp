@@ -5,10 +5,12 @@
  *
  * Identity is content-addressed: a note's Qdrant point id derives from
  * `hash(tenant_id, content)`, so an entry is identified by its current
- * `content` (obtained from a prior `search`/`scratchpad list`). Mutations are
- * enqueued to the unified queue (daemon-owned writes); the daemon removes the
- * point + its mirror row (delete) or upserts the new content and evicts the
- * superseded point (update). Reads (list) scroll Qdrant directly.
+ * `content` (obtained from a prior `search`/`scratchpad list`) — or by its
+ * point `id`, which the tool resolves back to the content via a tenant-checked
+ * Qdrant lookup before following the same content-addressed flow. Mutations
+ * are enqueued to the unified queue (daemon-owned writes); the daemon removes
+ * the point + its mirror row (delete) or upserts the new content and evicts
+ * the superseded point (update). Reads (list) scroll Qdrant directly.
  */
 
 import type { QdrantClient } from '@qdrant/js-client-rest';
@@ -26,6 +28,7 @@ import {
 } from '../common/native-bridge.js';
 import { TENANT_GLOBAL } from '../constants/tenants.js';
 import { resolveProjectIdentity } from './branch-scope.js';
+import { resolveScratchpadOrigin } from './scratchpad-origin.js';
 
 export type ScratchpadAction = 'list' | 'update' | 'delete';
 
@@ -33,6 +36,12 @@ export interface ScratchpadOptions {
   action: ScratchpadAction;
   /** Current text of the target note — its identity for update/delete. */
   content?: string;
+  /**
+   * Point id of the target note (from `scratchpad list` / a search hit) —
+   * alternative identity for update/delete when `content` is omitted. Ids are
+   * content-derived, so an update changes the note's id.
+   */
+  id?: string;
   /** Replacement text (update only). */
   newContent?: string;
   /** New title (update only). */
@@ -112,7 +121,7 @@ export class ScratchpadTool {
       case 'list':
         return this.list(tenantId, options.limit ?? 50);
       case 'delete':
-        return this.delete(tenantId, options.content);
+        return this.delete(tenantId, options);
       case 'update':
         return this.update(tenantId, options);
       default:
@@ -194,20 +203,77 @@ export class ScratchpadTool {
       `No scratchpad entry with that exact content was found for ${tenantId}. ` +
       'Entries are content-addressed, so the text must match the note VERBATIM — ' +
       'get it from `scratchpad list` (which returns full, untruncated content), ' +
-      'not from a `search` hit (whose content may be truncated).'
+      'not from a `search` hit (whose content may be truncated). Alternatively, ' +
+      'pass the note\'s point `id` from `scratchpad list` instead of content.'
     );
   }
 
-  private async delete(tenantId: string, content: string | undefined): Promise<ScratchpadResponse> {
-    if (!content?.trim()) {
+  /**
+   * Resolve a note's current content from its Qdrant point id (the `id` from
+   * `scratchpad list` / a search hit). Tenant-checked: a point belonging to a
+   * different tenant resolves as not-found rather than leaking a cross-project
+   * mutation. Returns undefined when the point is missing or unreadable.
+   */
+  private async contentById(tenantId: string, id: string): Promise<string | undefined> {
+    try {
+      const points = await this.qdrantClient.retrieve(COLLECTION_SCRATCHPAD, {
+        ids: [id],
+        with_payload: true,
+      });
+      const payload = points[0]?.payload as Record<string, unknown> | undefined;
+      if (!payload) return undefined;
+      if ((payload[FIELD_TENANT_ID] as string | undefined) !== tenantId) return undefined;
+      const content = payload[FIELD_CONTENT] as string | undefined;
+      return content?.trim() ? content.trim() : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Resolve the target note's current content for update/delete: verbatim
+   * `content` wins; otherwise the point `id` is looked up (tenant-checked).
+   * Returns a ready error response when neither identifies a note.
+   */
+  private async resolveTarget(
+    tenantId: string,
+    options: ScratchpadOptions,
+    action: 'update' | 'delete'
+  ): Promise<{ content: string } | { response: ScratchpadResponse }> {
+    const verbatim = options.content?.trim();
+    if (verbatim) return { content: verbatim };
+    const id = options.id?.trim();
+    if (id) {
+      const content = await this.contentById(tenantId, id);
+      if (content !== undefined) return { content };
       return {
-        success: false,
-        action: 'delete',
-        message:
-          'content is required for delete — the current text of the note to remove (from `scratchpad list`).',
+        response: {
+          success: false,
+          action,
+          message:
+            `No scratchpad entry with point id "${id}" was found for ${tenantId}. ` +
+            'Get the id from `scratchpad list` — note that ids are content-derived, ' +
+            'so a prior update changes the note\'s id.',
+          tenant_id: tenantId,
+        },
       };
     }
-    if (!(await this.noteExists(tenantId, content.trim()))) {
+    return {
+      response: {
+        success: false,
+        action,
+        message:
+          `content or id is required for ${action} — the current text of the note ` +
+          'or its point id (both from `scratchpad list`).',
+      },
+    };
+  }
+
+  private async delete(tenantId: string, options: ScratchpadOptions): Promise<ScratchpadResponse> {
+    const target = await this.resolveTarget(tenantId, options, 'delete');
+    if ('response' in target) return target.response;
+    const content = target.content;
+    if (!(await this.noteExists(tenantId, content))) {
       return {
         success: false,
         action: 'delete',
@@ -220,7 +286,7 @@ export class ScratchpadTool {
       'delete',
       tenantId,
       COLLECTION_SCRATCHPAD,
-      { content: content.trim(), source_type: 'scratchpad' },
+      { content, source_type: 'scratchpad' },
       PRIORITY_HIGH,
       'main',
       { source: 'mcp_scratchpad_tool' }
@@ -242,16 +308,7 @@ export class ScratchpadTool {
   }
 
   private async update(tenantId: string, options: ScratchpadOptions): Promise<ScratchpadResponse> {
-    const oldContent = options.content;
     const newContent = options.newContent;
-    if (!oldContent?.trim()) {
-      return {
-        success: false,
-        action: 'update',
-        message:
-          'content is required for update — the CURRENT text of the note to edit (from a search/list result).',
-      };
-    }
     if (!newContent?.trim()) {
       return {
         success: false,
@@ -259,7 +316,10 @@ export class ScratchpadTool {
         message: 'newContent is required for update — the replacement text.',
       };
     }
-    if (!(await this.noteExists(tenantId, oldContent.trim()))) {
+    const target = await this.resolveTarget(tenantId, options, 'update');
+    if ('response' in target) return target.response;
+    const oldContent = target.content;
+    if (!(await this.noteExists(tenantId, oldContent))) {
       return {
         success: false,
         action: 'update',
@@ -268,10 +328,14 @@ export class ScratchpadTool {
       };
     }
 
+    // Re-stamp provenance on update: origin_* records the last write's
+    // context (this tool is stateless, so detection runs from the cwd).
+    const origin = await resolveScratchpadOrigin({ projectDetector: this.projectDetector });
     const payload: Record<string, unknown> = {
       content: newContent.trim(),
-      old_content: oldContent.trim(),
+      old_content: oldContent,
       source_type: 'scratchpad',
+      ...origin,
     };
     if (options.title?.trim()) payload['title'] = options.title.trim();
     if (options.tags && options.tags.length > 0) payload['tags'] = options.tags;
