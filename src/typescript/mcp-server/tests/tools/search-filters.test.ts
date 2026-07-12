@@ -9,7 +9,11 @@ import {
   determineCollections,
 } from '../../src/tools/search-filters.js';
 import type { FilterParams } from '../../src/tools/search-types.js';
-import { PROJECTS_COLLECTION, LIBRARIES_COLLECTION } from '../../src/tools/search-types.js';
+import {
+  PROJECTS_COLLECTION,
+  LIBRARIES_COLLECTION,
+  SCRATCHPAD_COLLECTION,
+} from '../../src/tools/search-types.js';
 
 /** Build a minimal FilterParams with sensible defaults */
 function makeParams(overrides: Partial<FilterParams> = {}): FilterParams {
@@ -110,6 +114,42 @@ describe('buildFilter — component filter', () => {
   it('does not add a branch filter for branch="*" even when fallbackBranch is present', () => {
     const filter = buildFilter(makeParams({ branch: '*', fallbackBranch: 'main' }));
     expect(filter).toBeNull();
+  });
+});
+
+describe('buildFilter — branch scoping is projects-only', () => {
+  it('drops the branch filter for the scratchpad collection (notes are pinned to "main")', () => {
+    const filter = buildFilter(
+      makeParams({
+        collection: SCRATCHPAD_COLLECTION,
+        projectId: 'proj-123',
+        branch: 'feature/current',
+      })
+    );
+    expect(filter).not.toBeNull();
+    const must = filter!.must as Record<string, unknown>[];
+    // Tenant scoping stays; the session-branch condition must NOT be applied —
+    // it silently emptied every off-main semantic scratchpad search.
+    expect(must).toContainEqual({ key: 'tenant_id', match: { value: 'proj-123' } });
+    expect(JSON.stringify(must)).not.toContain('"branch"');
+  });
+
+  it('drops the branch filter (and its fallback widening) for libraries', () => {
+    const filter = buildFilter(
+      makeParams({
+        collection: LIBRARIES_COLLECTION,
+        branch: 'feature/current',
+        fallbackBranch: 'main',
+      })
+    );
+    expect(JSON.stringify(filter)).not.toContain('"branch"');
+  });
+
+  it('keeps the branch filter for the projects collection', () => {
+    const filter = buildFilter(makeParams({ branch: 'feature/current' }));
+    expect(filter).not.toBeNull();
+    const must = filter!.must as Record<string, unknown>[];
+    expect(must).toContainEqual({ key: 'branch', match: { value: 'feature/current' } });
   });
 });
 
