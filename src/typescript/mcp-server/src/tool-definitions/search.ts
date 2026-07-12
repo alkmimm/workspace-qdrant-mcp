@@ -62,7 +62,8 @@ export const searchToolDefinition = {
       },
       branch: {
         type: 'string',
-        description: 'Filter by branch name',
+        description:
+          'Filter by branch name (projects collection only — scratchpad/libraries/rules are branch-agnostic and ignore it)',
       },
       fileType: {
         type: 'string',

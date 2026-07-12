@@ -98,6 +98,14 @@ export function branchFilterClause(
 }
 
 function buildBranchCondition(params: FilterParams): Record<string, unknown> | null {
+  // Branch scoping is a projects-collection concept. Scratchpad, libraries,
+  // and rules points are branch-agnostic (their write path pins the queue
+  // item's branch to "main" regardless of the writer's checkout), so scoping
+  // them to the session's git branch silently empties every off-main read —
+  // a semantic search with collection:"scratchpad" returned [] from any
+  // feature branch. Same carve-out the exact path (search-exact.ts) and the
+  // scratchpad recall lane (search-helpers.ts) already apply by hand.
+  if (params.collection !== PROJECTS_COLLECTION) return null;
   return branchFilterClause(params.branch, params.fallbackBranch);
 }
 

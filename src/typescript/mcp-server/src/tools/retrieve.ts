@@ -40,10 +40,11 @@ import {
 import { branchFilterClause } from './search-filters.js';
 
 /**
- * Branch scope for project/scratchpad scroll paths. `branch` is the caller's
- * effective branch (their current Git branch, or an explicit value / `"*"`);
+ * Branch scope for projects scroll paths. `branch` is the caller's effective
+ * branch (their current Git branch, or an explicit value / `"*"`);
  * `fallbackBranch` is the base branch the daemon tags unchanged files under.
  * Both feed {@link branchFilterClause}, the same clause `search` uses.
+ * Scratchpad reads stay branch-agnostic (notes are pinned to "main").
  */
 interface BranchScope {
   branch?: string;
@@ -380,17 +381,23 @@ export class RetrieveTool {
 
     // F-002 / F-011: resolve the tenant context up front so that BOTH
     // by-id verification AND by-filter scoping share the same answer. For
-    // project/scratchpad reads also resolve the branch scope now, so the
-    // scroll paths (document_id fallback, path locator, metadata filter) are
-    // scoped to the caller's branch instead of leaking stale chunks tagged on
-    // other branches — the same default-to-current-branch rule search / grep /
+    // projects reads also resolve the branch scope now, so the scroll paths
+    // (document_id fallback, path locator, metadata filter) are scoped to the
+    // caller's branch instead of leaking stale chunks tagged on other
+    // branches — the same default-to-current-branch rule search / grep /
     // search_exact already apply.
     let resolvedProjectId: string | undefined;
     let branchScope: BranchScope = {};
     if (collection === 'projects' || collection === 'scratchpad') {
       const identity = await resolveProjectIdentity(this.projectDetector, projectId);
       resolvedProjectId = identity.projectId;
-      branchScope = this.resolveBranchScope(options.branch, identity);
+      // Branch scoping applies to project chunks only. Scratchpad notes are
+      // branch-agnostic (pinned to "main" at write time), so scoping them to
+      // the session's branch — or its base-branch widening — empties reads on
+      // any repo whose base branch is not literally "main".
+      if (collection === 'projects') {
+        branchScope = this.resolveBranchScope(options.branch, identity);
+      }
     }
 
     if (filePath) {
@@ -803,7 +810,7 @@ export class RetrieveTool {
   }
 
   /**
-   * Resolve the branch scope for a project/scratchpad read. Mirrors search /
+   * Resolve the branch scope for a projects-collection read. Mirrors search /
    * grep / search_exact: default to the caller's current Git branch, widened to
    * the base branch the daemon tags unchanged files under. An explicit `branch`
    * (including `"*"` for cross-branch) is honored verbatim. Without a
