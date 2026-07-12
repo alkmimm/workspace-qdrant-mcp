@@ -236,6 +236,8 @@ Stores content to the `scratchpad` collection. Supports both global and project-
 
 Each write is stamped with best-effort **write-time provenance** in dedicated payload fields: `origin_branch` (explicit `branch` arg → session's current branch), `origin_cwd` (the client cwd the write came from; a worktree path identifies the worktree), and `origin_worktree` (whether that checkout is a linked git worktree). Undetectable fields are omitted, never fabricated. Provenance is **attribution only** — scratchpad reads stay branch-agnostic, and the queue item's `branch` stays `main` because the point id derives from `(tenant, branch, document_id)`.
 
+**Timestamps:** `created_at` marks the first write of the note's lineage and **survives updates and idempotent re-adds** — the daemon carries it forward from the superseded point (an update re-keys the point under the new content's `document_id`, so without preservation every write would reset it). `updated_at` advances on every write.
+
 **Type: `"project"` — Register a project directory:**
 
 Registers a new project with the daemon for file watching and ingestion. Uses `register_if_new: true` so the daemon will create the project in `watch_folders` if it doesn't already exist. The server can also activate and keep-active existing projects. Returns `{ success, project_id, created, is_active, message }`.

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use qdrant_client::qdrant::{value::Kind, Condition, Filter};
 use tracing::{info, warn};
 
 use crate::context::ProcessingContext;
@@ -205,6 +206,16 @@ impl TextStrategy {
         // Generate document ID from content hash (for idempotent updates)
         let content_doc_id = crate::generate_content_document_id(&item.tenant_id, &payload.content);
 
+        // created_at must survive re-writes of the same note lineage: an
+        // update re-keys the point under the new content's document_id and an
+        // idempotent re-add overwrites the same point, so stamping `now`
+        // unconditionally would reset the creation time on every write —
+        // leaving updated_at forever equal to created_at. Carry forward the
+        // superseded point's created_at; `now` only for a genuinely new note.
+        let created_at = Self::preserved_created_at(ctx, item, &content_doc_id, &payload)
+            .await
+            .unwrap_or_else(|| now.clone());
+
         // Generate embedding (semaphore-gated)
         let embed_result = crate::shared::embedding_pipeline::embed_with_sparse(
             &ctx.embedding_generator,
@@ -222,7 +233,7 @@ impl TextStrategy {
         point_payload.insert("source_type".to_string(), serde_json::json!("scratchpad"));
         point_payload.insert("item_type".to_string(), serde_json::json!("content"));
         point_payload.insert("branch".to_string(), serde_json::json!([item.branch]));
-        point_payload.insert("created_at".to_string(), serde_json::json!(&now));
+        point_payload.insert("created_at".to_string(), serde_json::json!(&created_at));
         point_payload.insert("updated_at".to_string(), serde_json::json!(&now));
 
         if let Some(ref title) = payload.title {
@@ -418,6 +429,53 @@ impl TextStrategy {
         Self::delete_scratchpad_mirror_by_content(ctx, &item.tenant_id, &payload.content).await;
 
         Ok(())
+    }
+
+    /// `created_at` of the point this write supersedes, if any: the same
+    /// `document_id` (idempotent re-add / metadata-only update), or — for an
+    /// update that changed the content — the old content's `document_id`.
+    /// Best-effort: any lookup failure yields `None` and the caller falls
+    /// back to `now` (the pre-preservation behavior).
+    async fn preserved_created_at(
+        ctx: &ProcessingContext,
+        item: &UnifiedQueueItem,
+        content_doc_id: &str,
+        payload: &ScratchpadPayload,
+    ) -> Option<String> {
+        let mut doc_ids = vec![content_doc_id.to_string()];
+        if item.op == QueueOperation::Update {
+            if let Some(old_content) = &payload.old_content {
+                let old_doc_id =
+                    crate::generate_content_document_id(&item.tenant_id, old_content);
+                if old_doc_id != content_doc_id {
+                    doc_ids.push(old_doc_id);
+                }
+            }
+        }
+        for doc_id in doc_ids {
+            let filter = Filter::must([
+                Condition::matches("tenant_id", item.tenant_id.clone()),
+                Condition::matches("document_id", doc_id),
+            ]);
+            let points = ctx
+                .storage_client
+                .scroll_with_filter(&item.collection, filter, 1, None)
+                .await
+                .ok()?;
+            let created = points.first().and_then(|point| {
+                point
+                    .payload
+                    .get("created_at")
+                    .and_then(|value| match value.kind.as_ref() {
+                        Some(Kind::StringValue(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+            });
+            if created.is_some() {
+                return created;
+            }
+        }
+        None
     }
 
     /// Best-effort removal of `scratchpad_mirror` row(s) for a note, matched by
