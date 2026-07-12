@@ -34,5 +34,14 @@ export function buildScratchpadOptions(
   const limit = args?.['limit'] as number | undefined;
   if (limit !== undefined) options.limit = limit;
 
+  const summary = args?.['summary'] as boolean | undefined;
+  if (summary !== undefined) options.summary = summary;
+
+  const maxResponseBytes = args?.['maxResponseBytes'] as number | undefined;
+  if (maxResponseBytes !== undefined) options.maxResponseBytes = maxResponseBytes;
+
+  const cursor = args?.['cursor'] as string | undefined;
+  if (cursor !== undefined) options.cursor = cursor;
+
   return options;
 }

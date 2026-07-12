@@ -10,7 +10,10 @@
  * Qdrant lookup before following the same content-addressed flow. Mutations
  * are enqueued to the unified queue (daemon-owned writes); the daemon removes
  * the point + its mirror row (delete) or upserts the new content and evicts
- * the superseded point (update). Reads (list) scroll Qdrant directly.
+ * the superseded point (update). Reads (list) scroll Qdrant directly and are
+ * shaped like every other read surface: summary entries by default (preview +
+ * content_length), the shared search/grep response byte budget, and cursor
+ * pagination over Qdrant's scroll offset.
  */
 
 import type { QdrantClient } from '@qdrant/js-client-rest';
@@ -29,6 +32,11 @@ import {
 import { TENANT_GLOBAL } from '../constants/tenants.js';
 import { resolveProjectIdentity } from './branch-scope.js';
 import { resolveScratchpadOrigin } from './scratchpad-origin.js';
+import { applyByteBudget } from './response-budget.js';
+import { DEFAULT_MAX_RESPONSE_BYTES } from './search-types.js';
+
+/** Preview length (chars) for summary-mode list entries. */
+const LIST_PREVIEW_CHARS = 200;
 
 export type ScratchpadAction = 'list' | 'update' | 'delete';
 
@@ -52,11 +60,34 @@ export interface ScratchpadOptions {
   projectId?: string;
   /** Max entries for list (default 50). */
   limit?: number;
+  /**
+   * For list: return summary entries (preview + content_length) instead of
+   * full note bodies. Default true — pass false for full bodies (the response
+   * byte budget still applies).
+   */
+  summary?: boolean;
+  /**
+   * For list: cap on total response chars (default: the shared search/grep
+   * budget, ~24k). Trailing entries are dropped (>=1 kept), reported via
+   * `budget_truncated`, and `next_cursor` resumes at the first dropped entry.
+   * 0 disables.
+   */
+  maxResponseBytes?: number;
+  /**
+   * For list: opaque pagination cursor — pass the `next_cursor` from a
+   * previous list response to fetch the next page.
+   */
+  cursor?: string;
 }
 
 export interface ScratchpadEntry {
   id: string;
-  content: string;
+  /** Full note text — present only with summary:false. */
+  content?: string;
+  /** Leading slice of the note (summary mode). */
+  preview?: string;
+  /** Total note length in chars (summary mode). */
+  content_length?: number;
   title?: string;
   tags?: string[];
   created_at?: string;
@@ -69,6 +100,16 @@ export interface ScratchpadResponse {
   message?: string;
   entries?: ScratchpadEntry[];
   count?: number;
+  /** Total notes for the tenant (best-effort; omitted if the count fails). */
+  total?: number;
+  /**
+   * Pagination cursor — pass back as `cursor` for the next page. Present when
+   * more entries remain (a further scroll page, or a budget-dropped tail).
+   */
+  next_cursor?: string;
+  /** Entries dropped by the response byte budget (resume via next_cursor). */
+  budget_truncated?: { dropped: number };
+  hint?: string;
   queue_id?: string;
   tenant_id?: string;
 }
@@ -119,7 +160,7 @@ export class ScratchpadTool {
     const tenantId = await this.resolveTenant(options.projectId);
     switch (options.action) {
       case 'list':
-        return this.list(tenantId, options.limit ?? 50);
+        return this.list(tenantId, options);
       case 'delete':
         return this.delete(tenantId, options);
       case 'update':
@@ -133,19 +174,27 @@ export class ScratchpadTool {
     }
   }
 
-  private async list(tenantId: string, limit: number): Promise<ScratchpadResponse> {
+  private async list(tenantId: string, options: ScratchpadOptions): Promise<ScratchpadResponse> {
+    const limit = options.limit ?? 50;
+    const summary = options.summary ?? true;
+    const budget = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
     try {
       const result = await this.qdrantClient.scroll(COLLECTION_SCRATCHPAD, {
         filter: { must: [{ key: FIELD_TENANT_ID, match: { value: tenantId } }] },
         limit,
         with_payload: true,
+        ...(options.cursor ? { offset: options.cursor } : {}),
       });
       const entries: ScratchpadEntry[] = result.points.map((p) => {
         const payload = (p.payload ?? {}) as Record<string, unknown>;
-        const entry: ScratchpadEntry = {
-          id: String(p.id),
-          content: (payload[FIELD_CONTENT] as string) ?? '',
-        };
+        const content = (payload[FIELD_CONTENT] as string) ?? '';
+        const entry: ScratchpadEntry = { id: String(p.id) };
+        if (summary) {
+          entry.preview = content.slice(0, LIST_PREVIEW_CHARS);
+          entry.content_length = content.length;
+        } else {
+          entry.content = content;
+        }
         const title = payload[FIELD_TITLE] as string | undefined;
         if (title) entry.title = title;
         const tags = payload['tags'] as string[] | undefined;
@@ -156,20 +205,56 @@ export class ScratchpadTool {
         if (updatedAt) entry.updated_at = updatedAt;
         return entry;
       });
-      return {
+      // Shared response budget (same semantics as search/grep): trailing
+      // entries are dropped (>=1 kept). Qdrant scroll offsets are inclusive
+      // point ids, so resuming at the first dropped entry loses nothing.
+      const { kept, dropped } = applyByteBudget(entries, (e) => JSON.stringify(e).length, budget);
+      const response: ScratchpadResponse = {
         success: true,
         action: 'list',
-        entries,
-        count: entries.length,
+        entries: kept,
+        count: kept.length,
         tenant_id: tenantId,
-        message: `Found ${entries.length} scratchpad entr${entries.length === 1 ? 'y' : 'ies'} for ${tenantId}`,
+        message: `Found ${kept.length} scratchpad entr${kept.length === 1 ? 'y' : 'ies'} for ${tenantId}`,
       };
+      const firstDropped = entries[kept.length];
+      if (dropped > 0 && firstDropped) {
+        response.budget_truncated = { dropped };
+        response.next_cursor = firstDropped.id;
+      } else if (result.next_page_offset !== null && result.next_page_offset !== undefined) {
+        response.next_cursor = String(result.next_page_offset);
+      }
+      const total = await this.countNotes(tenantId);
+      if (total !== undefined) response.total = total;
+      if (summary) {
+        response.hint =
+          'Entries are summaries (preview + content_length). For one note\'s full ' +
+          'text use retrieve (collection:"scratchpad", documentId:<id>) or pass ' +
+          'summary:false; to find notes by content use search (collection:"scratchpad").';
+      }
+      return response;
     } catch (error) {
       return {
         success: false,
         action: 'list',
         message: `Failed to list scratchpad entries: ${error instanceof Error ? error.message : 'unknown error'}`,
       };
+    }
+  }
+
+  /**
+   * Tenant note count via the Qdrant count API — best-effort so a count
+   * failure never fails the list (the `total` field is simply omitted).
+   */
+  private async countNotes(tenantId: string): Promise<number | undefined> {
+    try {
+      const res = await this.qdrantClient.count(COLLECTION_SCRATCHPAD, {
+        filter: { must: [{ key: FIELD_TENANT_ID, match: { value: tenantId } }] },
+        exact: true,
+      });
+      return res.count;
+    } catch {
+      return undefined;
     }
   }
 
@@ -201,10 +286,11 @@ export class ScratchpadTool {
   private notFoundMessage(tenantId: string): string {
     return (
       `No scratchpad entry with that exact content was found for ${tenantId}. ` +
-      'Entries are content-addressed, so the text must match the note VERBATIM — ' +
-      'get it from `scratchpad list` (which returns full, untruncated content), ' +
-      'not from a `search` hit (whose content may be truncated). Alternatively, ' +
-      'pass the note\'s point `id` from `scratchpad list` instead of content.'
+      'Entries are content-addressed, so the text must match the note VERBATIM. ' +
+      'Prefer targeting by point `id` (from `scratchpad list`) instead; for the ' +
+      'verbatim text, retrieve the single note by its point id (`retrieve` with ' +
+      'collection:"scratchpad") or use `scratchpad list` with summary:false — ' +
+      'a `search` hit body may be truncated.'
     );
   }
 
