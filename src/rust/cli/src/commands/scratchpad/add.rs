@@ -2,6 +2,35 @@
 
 use anyhow::Result;
 
+/// Best-effort write-time provenance: `(branch, cwd, is_worktree)`. Each field
+/// is `None` when undetectable — never fabricated (a "main" fallback here
+/// would misattribute notes written outside a repo).
+fn detect_origin() -> (Option<String>, Option<String>, Option<bool>) {
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    let branch =
+        git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD");
+    // A linked worktree's git dir lives under <main>/.git/worktrees/<name>.
+    let worktree = git_stdout(&["rev-parse", "--git-dir"]).map(|dir| dir.contains("/worktrees/"));
+    (branch, cwd, worktree)
+}
+
+/// Trimmed stdout of a `git` invocation, or `None` on any failure.
+fn git_stdout(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 use crate::grpc::ensure_daemon_available;
 use crate::grpc::proto::{EnqueueItemRequest, QueueType, RefreshSignalRequest};
 use crate::output;
@@ -25,13 +54,29 @@ pub(super) async fn add_entry(
         })
         .unwrap_or_default();
 
-    let payload_json = serde_json::json!({
+    let mut payload = serde_json::json!({
         "content": content,
         "title": title,
         "tags": tag_vec,
         "source_type": "scratchpad",
-    })
-    .to_string();
+    });
+    // Write-time provenance: the CLI runs inside the user's checkout, so
+    // branch/cwd/worktree are directly observable here (unlike the container
+    // MCP server). Attribution only — reads stay branch-agnostic.
+    {
+        let obj = payload.as_object_mut().expect("payload is a JSON object");
+        let (origin_branch, origin_cwd, origin_worktree) = detect_origin();
+        if let Some(branch) = origin_branch {
+            obj.insert("origin_branch".to_string(), serde_json::json!(branch));
+        }
+        if let Some(cwd) = origin_cwd {
+            obj.insert("origin_cwd".to_string(), serde_json::json!(cwd));
+        }
+        if let Some(worktree) = origin_worktree {
+            obj.insert("origin_worktree".to_string(), serde_json::json!(worktree));
+        }
+    }
+    let payload_json = payload.to_string();
 
     let mut client = ensure_daemon_available().await?;
 

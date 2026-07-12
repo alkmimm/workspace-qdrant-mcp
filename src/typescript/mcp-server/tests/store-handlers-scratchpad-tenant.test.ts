@@ -26,6 +26,11 @@ function mockDetector(projectId: string | null): ProjectDetector {
   } as unknown as ProjectDetector;
 }
 
+/** Minimal session slice storeScratchpad consumes (tenant + git provenance). */
+function session(projectId: string | undefined) {
+  return { projectId: projectId ?? null, currentBranch: null, isWorktree: false };
+}
+
 /** The tenant_id is the 3rd positional arg of enqueueUnified. */
 function tenantOf(sm: SqliteStateManager): unknown {
   return (sm.enqueueUnified as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
@@ -36,9 +41,7 @@ describe('storeScratchpad — tenant resolution', () => {
     const sm = mockStateManager();
     const detector = mockDetector('detected-xyz');
 
-    const res = await storeScratchpad({ content: 'note', projectId: 'explicit-123' }, sm, detector, {
-      projectId: 'session-abc',
-    });
+    const res = await storeScratchpad({ content: 'note', projectId: 'explicit-123' }, sm, detector, session('session-abc'));
 
     expect(res.success).toBe(true);
     expect(detector.getProjectInfo).not.toHaveBeenCalled();
@@ -49,9 +52,7 @@ describe('storeScratchpad — tenant resolution', () => {
     const sm = mockStateManager();
     const detector = mockDetector('detected-xyz');
 
-    const res = await storeScratchpad({ content: 'note' }, sm, detector, {
-      projectId: 'session-abc',
-    });
+    const res = await storeScratchpad({ content: 'note' }, sm, detector, session('session-abc'));
 
     expect(res.success).toBe(true);
     expect(detector.getProjectInfo).not.toHaveBeenCalled();
@@ -62,7 +63,7 @@ describe('storeScratchpad — tenant resolution', () => {
     const sm = mockStateManager();
     const detector = mockDetector('detected-xyz');
 
-    await storeScratchpad({ content: 'note' }, sm, detector, { projectId: undefined });
+    await storeScratchpad({ content: 'note' }, sm, detector, session(undefined));
 
     expect(detector.getProjectInfo).toHaveBeenCalled();
     expect(tenantOf(sm)).toBe('detected-xyz');
@@ -72,7 +73,7 @@ describe('storeScratchpad — tenant resolution', () => {
     const sm = mockStateManager();
     const detector = mockDetector(null);
 
-    await storeScratchpad({ content: 'note' }, sm, detector, { projectId: undefined });
+    await storeScratchpad({ content: 'note' }, sm, detector, session(undefined));
 
     expect(tenantOf(sm)).toBe(TENANT_GLOBAL);
   });
@@ -83,7 +84,7 @@ describe('storeScratchpad — tenant resolution', () => {
       getProjectInfo: vi.fn().mockRejectedValue(new Error('boom')),
     } as unknown as ProjectDetector;
 
-    await storeScratchpad({ content: 'note' }, sm, detector, { projectId: undefined });
+    await storeScratchpad({ content: 'note' }, sm, detector, session(undefined));
 
     expect(tenantOf(sm)).toBe(TENANT_GLOBAL);
   });

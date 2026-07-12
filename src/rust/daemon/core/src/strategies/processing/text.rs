@@ -231,6 +231,19 @@ impl TextStrategy {
         if !payload.tags.is_empty() {
             point_payload.insert("tags".to_string(), serde_json::json!(payload.tags));
         }
+        // Write-time provenance (attribution only — reads stay branch-agnostic).
+        if let Some(ref origin_branch) = payload.origin_branch {
+            point_payload.insert("origin_branch".to_string(), serde_json::json!(origin_branch));
+        }
+        if let Some(ref origin_cwd) = payload.origin_cwd {
+            point_payload.insert("origin_cwd".to_string(), serde_json::json!(origin_cwd));
+        }
+        if let Some(origin_worktree) = payload.origin_worktree {
+            point_payload.insert(
+                "origin_worktree".to_string(),
+                serde_json::json!(origin_worktree),
+            );
+        }
 
         let point = DocumentPoint {
             id: crate::generate_point_id(&item.tenant_id, &item.branch, &content_doc_id, 0),

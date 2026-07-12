@@ -213,6 +213,7 @@ store({
     sourceType?: "user_input" | "web" | "file" | "scratchbook" | "note", // Source type (default: "user_input")
     // Scratchpad-specific parameters
     tags?: string[],                   // Tags for scratchpad entries
+    branch?: string,                   // Provenance override: recorded as origin_branch (attribution only)
     // Project-specific parameters
     path?: string,                     // Absolute path to project directory (required for type "project")
     name?: string,                     // Display name (defaults to directory name, for type "project")
@@ -232,6 +233,8 @@ Queues a URL for daemon-side fetch and ingestion. The destination collection dep
 **Type: `"scratchpad"` — Persistent notes/scratch space:**
 
 Stores content to the `scratchpad` collection. Supports both global and project-scoped entries. Global entries can be further segregated by user-defined themes or keywords. This is the **preferred destination** for ad-hoc content ingestion by the server (strings, files, URLs). Supports `tags` for categorization.
+
+Each write is stamped with best-effort **write-time provenance** in dedicated payload fields: `origin_branch` (explicit `branch` arg → session's current branch), `origin_cwd` (the client cwd the write came from; a worktree path identifies the worktree), and `origin_worktree` (whether that checkout is a linked git worktree). Undetectable fields are omitted, never fabricated. Provenance is **attribution only** — scratchpad reads stay branch-agnostic, and the queue item's `branch` stays `main` because the point id derives from `(tenant, branch, document_id)`.
 
 **Type: `"project"` — Register a project directory:**
 

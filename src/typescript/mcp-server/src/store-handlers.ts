@@ -11,6 +11,7 @@ import { COLLECTION_SCRATCHPAD, PRIORITY_HIGH } from './common/native-bridge.js'
 import { TENANT_GLOBAL } from './constants/tenants.js';
 import { utcNow } from './utils/timestamps.js';
 import { resolveProjectIdentity } from './tools/branch-scope.js';
+import { resolveScratchpadOrigin, type ScratchpadOrigin } from './tools/scratchpad-origin.js';
 
 type StoreResult = {
   success: boolean;
@@ -152,12 +153,13 @@ function writeScratchpadMirror(
 function buildScratchpadPayload(
   content: string,
   title: string | undefined,
-  tags: string[]
+  tags: string[],
+  origin: ScratchpadOrigin
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = { content: content.trim(), source_type: 'scratchpad' };
   if (title?.trim()) payload['title'] = title.trim();
   if (tags.length > 0) payload['tags'] = tags;
-  return payload;
+  return { ...payload, ...origin };
 }
 
 /**
@@ -197,7 +199,7 @@ export async function storeScratchpad(
   args: Record<string, unknown> | undefined,
   stateManager: SqliteStateManager,
   projectDetector: ProjectDetector,
-  sessionState: Pick<SessionState, 'projectId'>
+  sessionState: Pick<SessionState, 'projectId' | 'currentBranch' | 'isWorktree'>
 ): Promise<StoreResult> {
   const content = args?.['content'] as string;
   if (!content?.trim())
@@ -210,7 +212,11 @@ export async function storeScratchpad(
   const title = args?.['title'] as string | undefined;
   const tags = (args?.['tags'] as string[] | undefined) ?? [];
   const tenantId = await resolveScratchpadTenant(args, projectDetector, sessionState);
-  const payload = buildScratchpadPayload(content, title, tags);
+  const origin = await resolveScratchpadOrigin({
+    explicitBranch: args?.['branch'] as string | undefined,
+    sessionState,
+  });
+  const payload = buildScratchpadPayload(content, title, tags, origin);
 
   return enqueueScratchpadEntry(stateManager, payload, tenantId, content, title, tags);
 }
@@ -224,6 +230,10 @@ async function enqueueScratchpadEntry(
   tags: string[]
 ): Promise<StoreResult> {
   try {
+    // branch stays "main" by design: the scratchpad point id derives from
+    // (tenant, branch, document_id), so a real-branch value would fork a
+    // note's identity per branch. Provenance travels in origin_* payload
+    // fields instead (see scratchpad-origin.ts).
     const result = await stateManager.enqueueUnified(
       'text',
       'add',
