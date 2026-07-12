@@ -180,6 +180,15 @@ const SUMMARY_METADATA_KEYS: readonly string[] = [
   'chunk_start_line',
   'chunk_end_line',
   'chunk_chunk_type',
+  // Scratchpad/rules-only fields (absent on code chunks, so no noise there):
+  // timestamps + write-time provenance let an agent pick the right note
+  // without a follow-up retrieve.
+  'created_at',
+  'updated_at',
+  'tags',
+  'origin_branch',
+  'origin_cwd',
+  'origin_worktree',
 ];
 
 function pickSummaryMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
