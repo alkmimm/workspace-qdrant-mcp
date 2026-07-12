@@ -12,6 +12,7 @@ import type { SqliteStateManager } from '../../src/clients/sqlite-state-manager.
 import type { ProjectDetector } from '../../src/utils/project-detector.js';
 
 let lastScrollFilter: unknown;
+let lastScrollRequest: ScrollReq | undefined;
 
 /**
  * Contents that "exist" in the mock store. The noteExists() pre-check scrolls
@@ -25,6 +26,8 @@ interface MatchCond {
 }
 interface ScrollReq {
   filter?: { must?: MatchCond[] };
+  limit?: number;
+  offset?: unknown;
 }
 interface RetrieveReq {
   ids?: Array<string | number>;
@@ -37,34 +40,48 @@ const POINTS_BY_ID: Record<string, { content: string; tenant_id: string }> = {
   'pt-foreign': { content: 'someone else note', tenant_id: 't-other' },
 };
 
+const DEFAULT_POINT = {
+  id: 'pt-1',
+  payload: {
+    content: 'a project note',
+    title: 'T',
+    tags: ['x'],
+    created_at: '2026-06-04T00:00:00Z',
+  },
+};
+
+/** Points a tenant-only (list) scroll returns — tests override per case. */
+let listPoints: Array<{ id: string; payload: Record<string, unknown> }> = [DEFAULT_POINT];
+/** next_page_offset the list scroll returns (null = no further page). */
+let listNextPageOffset: unknown = null;
+/** count() result; undefined makes count() reject (best-effort `total` path). */
+let countResult: number | undefined = undefined;
+
 vi.mock('@qdrant/js-client-rest', () => ({
   QdrantClient: vi.fn().mockImplementation(() => ({
     scroll: vi.fn().mockImplementation((_coll: string, req: ScrollReq) => {
       lastScrollFilter = req.filter;
+      lastScrollRequest = req;
       const must = req.filter?.must ?? [];
-      const defaultPoint = {
-        id: 'pt-1',
-        payload: {
-          content: 'a project note',
-          title: 'T',
-          tags: ['x'],
-          created_at: '2026-06-04T00:00:00Z',
-        },
-      };
       // Existence pre-check (tenant + content) → 2 must entries. Echo a point
       // only when one of the matched values is a known-existing content.
       if (must.length >= 2) {
         const hit = must.some((c) => EXISTING_CONTENTS.has(c.match?.value as string));
-        return Promise.resolve({ points: hit ? [defaultPoint] : [] });
+        return Promise.resolve({ points: hit ? [DEFAULT_POINT] : [] });
       }
-      // Tenant-only filter (list) → always return the default point.
-      return Promise.resolve({ points: [defaultPoint] });
+      // Tenant-only filter (list) → the configured page.
+      return Promise.resolve({ points: listPoints, next_page_offset: listNextPageOffset });
     }),
     retrieve: vi.fn().mockImplementation((_coll: string, req: RetrieveReq) => {
       const id = String(req.ids?.[0] ?? '');
       const payload = POINTS_BY_ID[id];
       return Promise.resolve(payload ? [{ id, payload }] : []);
     }),
+    count: vi.fn().mockImplementation(() =>
+      countResult === undefined
+        ? Promise.reject(new Error('count unavailable'))
+        : Promise.resolve({ count: countResult })
+    ),
   })),
 }));
 
@@ -92,6 +109,10 @@ describe('ScratchpadTool', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    lastScrollRequest = undefined;
+    listPoints = [DEFAULT_POINT];
+    listNextPageOffset = null;
+    countResult = undefined;
     sm = mockStateManager();
     detector = mockProjectDetector();
     tool = new ScratchpadTool({ qdrantUrl: 'http://localhost:6333' }, sm, detector);
@@ -175,9 +196,117 @@ describe('ScratchpadTool', () => {
 
     expect(res.success).toBe(true);
     expect(res.count).toBe(1);
-    expect(res.entries?.[0]).toMatchObject({ id: 'pt-1', content: 'a project note', title: 'T' });
+    // Summary is the default: preview + content_length instead of a full body.
+    expect(res.entries?.[0]).toMatchObject({
+      id: 'pt-1',
+      preview: 'a project note',
+      content_length: 'a project note'.length,
+      title: 'T',
+    });
+    expect(res.entries?.[0]?.content).toBeUndefined();
+    expect(res.hint).toMatch(/summary:false/);
     // tenant filter applied
     expect(JSON.stringify(lastScrollFilter)).toContain('t1');
+  });
+
+  it('list summary:false returns full note bodies (no preview fields)', async () => {
+    const res = await tool.execute({ action: 'list', projectId: 't1', summary: false });
+
+    expect(res.success).toBe(true);
+    expect(res.entries?.[0]).toMatchObject({ id: 'pt-1', content: 'a project note' });
+    expect(res.entries?.[0]?.preview).toBeUndefined();
+    expect(res.hint).toBeUndefined();
+  });
+
+  it('list caps summary previews at 200 chars while reporting the full length', async () => {
+    const bigContent = 'y'.repeat(5000);
+    listPoints = [{ id: 'pt-big', payload: { content: bigContent } }];
+
+    const res = await tool.execute({ action: 'list', projectId: 't1' });
+
+    expect(res.entries?.[0]?.preview).toHaveLength(200);
+    expect(res.entries?.[0]?.content_length).toBe(5000);
+  });
+
+  it('default summary list of many large notes stays under the response budget (66k-chars regression)', async () => {
+    listPoints = Array.from({ length: 30 }, (_, i) => ({
+      id: `pt-${i}`,
+      payload: { content: `note ${i} `.padEnd(3000, 'z'), title: `Note ${i}` },
+    }));
+
+    const res = await tool.execute({ action: 'list', projectId: 't1', limit: 30 });
+
+    expect(res.success).toBe(true);
+    expect(res.count).toBe(30); // nothing dropped — summaries fit
+    expect(res.budget_truncated).toBeUndefined();
+    expect(JSON.stringify(res.entries).length).toBeLessThan(24000);
+  });
+
+  it('list enforces the byte budget on full bodies: drops the tail, reports it, resumes at the first dropped id', async () => {
+    listPoints = Array.from({ length: 3 }, (_, i) => ({
+      id: `pt-${i}`,
+      payload: { content: 'x'.repeat(300) },
+    }));
+
+    const res = await tool.execute({
+      action: 'list',
+      projectId: 't1',
+      summary: false,
+      maxResponseBytes: 400,
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.count).toBe(1); // >=1 always kept
+    expect(res.budget_truncated).toEqual({ dropped: 2 });
+    // Cursor resumes AT the first dropped entry — budget pagination is lossless.
+    expect(res.next_cursor).toBe('pt-1');
+  });
+
+  it('list passes the cursor as scroll offset and surfaces next_page_offset as next_cursor', async () => {
+    listNextPageOffset = 'pt-9';
+
+    const res = await tool.execute({ action: 'list', projectId: 't1', cursor: 'pt-5' });
+
+    expect(lastScrollRequest?.offset).toBe('pt-5');
+    expect(res.next_cursor).toBe('pt-9');
+  });
+
+  it('list surfaces write-time provenance fields when stamped, and omits them when absent', async () => {
+    listPoints = [
+      {
+        id: 'pt-prov',
+        payload: {
+          content: 'note with provenance',
+          origin_branch: 'feat/x',
+          origin_cwd: '/home/u/repos/proj',
+          origin_worktree: false,
+        },
+      },
+      { id: 'pt-legacy', payload: { content: 'pre-provenance note' } },
+    ];
+
+    const res = await tool.execute({ action: 'list', projectId: 't1' });
+
+    expect(res.entries?.[0]).toMatchObject({
+      id: 'pt-prov',
+      origin_branch: 'feat/x',
+      origin_cwd: '/home/u/repos/proj',
+      origin_worktree: false,
+    });
+    // Absent provenance means "unknown", not fabricated fields.
+    expect(res.entries?.[1]?.origin_branch).toBeUndefined();
+    expect(res.entries?.[1]?.origin_worktree).toBeUndefined();
+  });
+
+  it('list reports the tenant total when the count API is available, and omits it when not', async () => {
+    countResult = 7;
+    const withCount = await tool.execute({ action: 'list', projectId: 't1' });
+    expect(withCount.total).toBe(7);
+
+    countResult = undefined; // count() rejects → best-effort omission, list still succeeds
+    const withoutCount = await tool.execute({ action: 'list', projectId: 't1' });
+    expect(withoutCount.success).toBe(true);
+    expect(withoutCount.total).toBeUndefined();
   });
 
   it('resolves the tenant from the project detector when no projectId is given', async () => {

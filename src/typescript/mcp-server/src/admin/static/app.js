@@ -1596,6 +1596,9 @@ const PG_TOOLS = [
     F('projectId', 'text'),
     F('cwd', 'text'),
     F('limit', 'number', { adv: true }),
+    F('summary', 'bool', { adv: true }),
+    F('maxResponseBytes', 'number', { adv: true }),
+    F('cursor', 'text', { adv: true, ph: 'next_cursor from a previous list' }),
   ] },
   { name: 'rules', mutates: true, note: 'behavioral rules CRUD', fields: [
     F('action', 'enum', { req: true, enum: ['list', 'add', 'update', 'remove'] }),
@@ -1689,6 +1692,7 @@ const PG_PRESETS = {
   ],
   scratchpad: [
     { label: 'List', args: { action: 'list' } },
+    { label: 'List (full bodies)', args: { action: 'list', summary: false } },
     { label: 'Update (by id)', args: { action: 'update', id: '<point id from list>', newContent: '<new text>' } },
     { label: 'Update (by content)', args: { action: 'update', content: '<verbatim old text>', newContent: '<new text>' } },
     { label: 'Delete (by id)', args: { action: 'delete', id: '<point id from list>' } },
