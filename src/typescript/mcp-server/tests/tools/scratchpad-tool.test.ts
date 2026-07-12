@@ -271,6 +271,33 @@ describe('ScratchpadTool', () => {
     expect(res.next_cursor).toBe('pt-9');
   });
 
+  it('list surfaces write-time provenance fields when stamped, and omits them when absent', async () => {
+    listPoints = [
+      {
+        id: 'pt-prov',
+        payload: {
+          content: 'note with provenance',
+          origin_branch: 'feat/x',
+          origin_cwd: '/home/u/repos/proj',
+          origin_worktree: false,
+        },
+      },
+      { id: 'pt-legacy', payload: { content: 'pre-provenance note' } },
+    ];
+
+    const res = await tool.execute({ action: 'list', projectId: 't1' });
+
+    expect(res.entries?.[0]).toMatchObject({
+      id: 'pt-prov',
+      origin_branch: 'feat/x',
+      origin_cwd: '/home/u/repos/proj',
+      origin_worktree: false,
+    });
+    // Absent provenance means "unknown", not fabricated fields.
+    expect(res.entries?.[1]?.origin_branch).toBeUndefined();
+    expect(res.entries?.[1]?.origin_worktree).toBeUndefined();
+  });
+
   it('list reports the tenant total when the count API is available, and omits it when not', async () => {
     countResult = 7;
     const withCount = await tool.execute({ action: 'list', projectId: 't1' });

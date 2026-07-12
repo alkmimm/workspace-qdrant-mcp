@@ -92,6 +92,15 @@ export interface ScratchpadEntry {
   tags?: string[];
   created_at?: string;
   updated_at?: string;
+  /**
+   * Write-time provenance (stamped since the provenance work, absent on older
+   * notes — absence means "unknown", not stale). Staleness signals for note
+   * reviews: a deleted origin branch or a dead origin cwd usually marks a
+   * note whose work has finished.
+   */
+  origin_branch?: string;
+  origin_cwd?: string;
+  origin_worktree?: boolean;
 }
 
 export interface ScratchpadResponse {
@@ -203,6 +212,12 @@ export class ScratchpadTool {
         if (createdAt) entry.created_at = createdAt;
         const updatedAt = payload['updated_at'] as string | undefined;
         if (updatedAt) entry.updated_at = updatedAt;
+        const originBranch = payload['origin_branch'] as string | undefined;
+        if (originBranch) entry.origin_branch = originBranch;
+        const originCwd = payload['origin_cwd'] as string | undefined;
+        if (originCwd) entry.origin_cwd = originCwd;
+        const originWorktree = payload['origin_worktree'];
+        if (typeof originWorktree === 'boolean') entry.origin_worktree = originWorktree;
         return entry;
       });
       // Shared response budget (same semantics as search/grep): trailing
