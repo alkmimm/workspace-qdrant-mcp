@@ -28,6 +28,7 @@ import {
 } from './branch-scope.js';
 import { diagnoseEmptyResult, EMPTY_DIAGNOSIS_PROBE_LIMIT } from './empty-diagnosis.js';
 import { whitespaceSensitivityHint } from './exact-hints.js';
+import { lookupTestFlags } from './test-flag.js';
 
 /**
  * Resolution outcome for exact-search tenant scoping.
@@ -421,6 +422,22 @@ async function executeAndLogSearch(
     // the deduped result list; set next_offset below when more remain.
     const offset = Math.max(0, options.offset ?? 0);
     const results = dedupedResults.slice(offset, offset + limit);
+    // is_test parity with the semantic path (which reads the Qdrant ingest
+    // tags): FTS hits carry none, so read the daemon's verdict back from
+    // tracked_files by absolute path. Best-effort, project scope only.
+    if (tenantId) {
+      const testFlags = lookupTestFlags(
+        stateManager,
+        tenantId,
+        results
+          .map((r) => r.metadata['file_path'] as string | undefined)
+          .filter((p): p is string => typeof p === 'string' && p !== '')
+      );
+      for (const r of results) {
+        const fp = r.metadata['file_path'] as string | undefined;
+        if (fp && testFlags.get(fp) === true) r.is_test = true;
+      }
+    }
     const totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
     const total = responses.some((response) => response.truncated)
       ? Math.max(results.length, totalMatches - duplicatesDropped)

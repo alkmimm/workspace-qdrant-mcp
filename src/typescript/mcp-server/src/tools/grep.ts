@@ -30,6 +30,7 @@ import {
 } from './branch-scope.js';
 import { diagnoseEmptyResult, EMPTY_DIAGNOSIS_PROBE_LIMIT } from './empty-diagnosis.js';
 import { whitespaceSensitivityHint } from './exact-hints.js';
+import { lookupTestFlags } from './test-flag.js';
 
 /**
  * Conservative proxy for the size of the files that contain a grep match.
@@ -138,6 +139,13 @@ export interface GrepMatch {
    * docs/specs/20-token-economy-instrumentation.md §3.2.
    */
   file_size?: number;
+  /**
+   * Present (always `true`) when the daemon classified this match's file as a
+   * TEST file (`tracked_files.is_test` — same classifier behind the search
+   * tool's is_test flag). Best-effort, project scope only; absent means
+   * "not a test, or unknown" — never false.
+   */
+  is_test?: boolean;
 }
 
 export interface GrepResponse {
@@ -585,6 +593,19 @@ export class GrepTool {
       // one-liners and high maxResults × contextLines sweeps still explode
       // without a bound — the same budget semantics as the search tool.
       const shaped = shapeGrepMatches(matches, shaping);
+      // is_test parity with the semantic path (which reads the Qdrant ingest
+      // tags): FTS rows carry no tags, so read the daemon's verdict back from
+      // tracked_files by absolute path. Best-effort and project-scope only.
+      if (tenantId && this.stateManager) {
+        const testFlags = lookupTestFlags(
+          this.stateManager,
+          tenantId,
+          shaped.matches.map((m) => m.file)
+        );
+        for (const m of shaped.matches) {
+          if (testFlags.get(m.file) === true) m.is_test = true;
+        }
+      }
       const economy = computeGrepEconomy(shaped.matches);
       // Effectiveness signals (spec 20 §1.2): a retrieve() of one of these
       // files within the escalation window links back via parent_event_id.

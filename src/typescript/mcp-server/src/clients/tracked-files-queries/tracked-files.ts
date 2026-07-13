@@ -366,6 +366,43 @@ export function countTrackedFiles(
 }
 
 /**
+ * Map absolute file paths to the daemon's `is_test` classification for one
+ * watch folder. Best-effort annotation source for the FTS-backed read
+ * surfaces (grep matches, exact-search hits), whose rows carry no ingest
+ * tags — reading the verdict back from `tracked_files.is_test` keeps the
+ * daemon's `is_test_file()` classifier the single source of truth instead of
+ * re-deriving it from client-side path heuristics that could drift. Chunked
+ * to stay under SQLite's bound-parameter limit. Paths with no row are simply
+ * absent from the map (absent = unknown, never false).
+ */
+export function getIsTestByFilePaths(
+  db: DatabaseType | null,
+  watchFolderId: string,
+  filePaths: readonly string[]
+): Map<string, boolean> {
+  const out = new Map<string, boolean>();
+  if (!db || filePaths.length === 0) return out;
+  try {
+    const CHUNK = 400; // SQLite's default max bound parameters is 999
+    for (let i = 0; i < filePaths.length; i += CHUNK) {
+      const chunk = filePaths.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = db
+        .prepare(
+          `SELECT file_path, MAX(is_test) AS is_test FROM tracked_files
+           WHERE watch_folder_id = ? AND file_path IN (${placeholders})
+           GROUP BY file_path`
+        )
+        .all(watchFolderId, ...chunk) as Array<{ file_path: string; is_test: number | null }>;
+      for (const row of rows) out.set(row.file_path, row.is_test === 1);
+    }
+  } catch {
+    out.clear(); // annotation is best-effort — never fail the read
+  }
+  return out;
+}
+
+/**
  * Resolve the de-facto base branch for a project: the branch under which the
  * most files are tracked, excluding `excludeBranch`. This matches whatever
  * branch the daemon tagged the bulk of (unchanged) files under — the daemon
