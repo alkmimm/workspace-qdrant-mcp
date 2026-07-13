@@ -36,7 +36,11 @@ import type {
   SearchResult,
   ShapingMetrics,
 } from './search-types.js';
-import { DEFAULT_MAX_BYTES_PER_HIT, DEFAULT_MAX_RESPONSE_BYTES } from './search-types.js';
+import {
+  DEFAULT_MAX_BYTES_PER_HIT,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  PROJECTS_COLLECTION,
+} from './search-types.js';
 
 /** Minimum trimmed-body length for cross-hit identical-content collapse.
  *  Below this, identical bodies are more likely legitimately-common short
@@ -111,6 +115,27 @@ function deriveLocation(metadata: Record<string, unknown>): string | undefined {
   const line =
     metadataNumber(metadata['line_number']) ?? metadataNumber(metadata['chunk_start_line']);
   return line !== undefined ? `${path}:${line}` : path;
+}
+
+/** True when the daemon's ingest classifier tagged this projects-collection
+ *  chunk as coming from a TEST file — the payload `tags` array carries "test",
+ *  written by `is_test_file()` during metadata enrichment (single source of
+ *  truth; no client-side path heuristic that could drift from it). Scoped to
+ *  the projects collection: scratchpad/rules tags are USER-authored, so a note
+ *  tagged "test" must not be flagged. Field-feedback: test files often outrank
+ *  the implementation in semantic results, and the classifier's verdict was
+ *  buried in the metadata bag where agents never saw it. */
+function deriveIsTest(r: SearchResult): boolean {
+  if (r.collection !== PROJECTS_COLLECTION) return false;
+  const tags = r.metadata['tags'];
+  return Array.isArray(tags) && tags.includes('test');
+}
+
+/** Stamp `is_test: true` on test-classified hits (absent otherwise — never
+ *  false). Applied once at the shaping entry so every response format
+ *  (truncate / detailed / summary / packed) carries the flag uniformly. */
+function stampIsTest(r: SearchResult): SearchResult {
+  return deriveIsTest(r) ? { ...r, is_test: true } : r;
 }
 
 /** One-line hint that teaches the `graph` tool in-band. Emitted only when at
@@ -214,6 +239,8 @@ function shapeAsSummary(r: SearchResult): SearchResult {
   // Carry the rerank ordering signal through the summary allowlist (the
   // truncate path keeps it via spread; summary rebuilds, so add it explicitly).
   if (r.rerankScore !== undefined) out.rerankScore = r.rerankScore;
+  // Same for the test-file flag: the spread-based branches keep it for free.
+  if (r.is_test === true) out.is_test = true;
   const location = deriveLocation(r.metadata);
   if (location !== undefined) out.location = location;
   return out;
@@ -350,6 +377,10 @@ export function shapeHitPayloads(
   response: SearchResponse,
   options: SearchOptions
 ): { response: SearchResponse; metrics: ShapingMetrics } {
+  // Stamp the test-file flag BEFORE branching so every format carries it:
+  // the spread-based branches (truncate / detailed) inherit it via `...r`,
+  // and the rebuild branches (summary / packed) copy it explicitly.
+  response = { ...response, results: response.results.map(stampIsTest) };
   // Computed from the ORIGINAL hits so it is independent of which shaping
   // branch runs (every branch preserves chunk_symbol_name). Folded into the
   // response by `finalize` below.

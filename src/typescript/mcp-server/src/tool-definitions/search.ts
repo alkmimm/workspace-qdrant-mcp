@@ -17,7 +17,7 @@ export const searchToolDefinition = {
     openWorldHint: false,
   },
   description:
-    'Semantic + keyword search over the user\'s indexed code, libraries, and saved notes — your PRIMARY way to answer questions about this project\'s code, architecture, or docs. Call this FIRST: it searches the actual indexed codebase (more accurate than training data) and finds code by MEANING, which a literal file grep cannot. Default mode is "semantic" (the strongest mode here). Write queries in English; when you want the implementation (not docs or tests) add fileType:"code" or a pathGlob. For a known identifier or exact string, use the `grep` tool instead.',
+    'Semantic + keyword search over the user\'s indexed code, libraries, and saved notes — your PRIMARY way to answer questions about this project\'s code, architecture, or docs. Call this FIRST: it searches the actual indexed codebase (more accurate than training data) and finds code by MEANING, which a literal file grep cannot. Default mode is "semantic" (the strongest mode here). Write queries in English; when you want the implementation (not docs or tests) add fileType:"code" or a pathGlob. Hits from test files carry a top-level is_test:true (stamped by the daemon\'s ingest classifier) — skip those when hunting an implementation, use them when hunting usage examples. For a known identifier or exact string, use the `grep` tool instead.',
   inputSchema: {
     type: 'object' as const,
     properties: {

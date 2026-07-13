@@ -1521,6 +1521,7 @@ const PG_TOOLS = [
     F('branch', 'text'),
     F('scope', 'enum', { enum: ['project', 'all'] }),
     F('maxResults', 'number'),
+    F('offset', 'number', { adv: true, ph: 'next_offset from previous page' }),
     F('maxBytesPerLine', 'number', { adv: true }),
     F('maxResponseBytes', 'number', { adv: true }),
     F('projectId', 'text', { adv: true }),

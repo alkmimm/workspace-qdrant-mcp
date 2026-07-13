@@ -107,6 +107,12 @@ export interface GrepOptions {
   scope?: 'project' | 'all';
   contextLines?: number;
   maxResults?: number;
+  /** Pagination offset into the deduped match list (default 0). Stable:
+   *  the daemon orders matches deterministically (file, then line), so the
+   *  window `[offset, offset + maxResults)` never skips or duplicates across
+   *  calls with the same pattern/filters. When more matches remain the
+   *  response sets `next_offset` — pass it back here for the next page. */
+  offset?: number;
   branch?: string;
   projectId?: string;
   /** Per-line cap (chars) on match content and each context line. Longer
@@ -143,8 +149,14 @@ export interface GrepResponse {
   message?: string;
   /** Attached only when the response byte budget dropped trailing matches:
    *  `dropped` is how many were cut (the kept set always has >=1). Narrow
-   *  with pathGlob, lower contextLines, or raise `maxResponseBytes`. */
+   *  with pathGlob, lower contextLines, or raise `maxResponseBytes` — or
+   *  continue from `next_offset`. */
   budget_truncated?: { dropped: number };
+  /** Present when matches remain beyond this page (window end, daemon cap,
+   *  or budget drop): pass it back as `offset` — with the same pattern and
+   *  filters — to fetch the next page starting at the first unreturned
+   *  match. Absent when the page reached the end of the match list. */
+  next_offset?: number;
 }
 
 /** Build the text search request object for the daemon. */
@@ -327,11 +339,13 @@ export class GrepTool {
       scope = 'project',
       contextLines = 0,
       maxResults = 1000,
+      offset = 0,
       branch,
       projectId,
       maxBytesPerLine,
       maxResponseBytes,
     } = options;
+    const pageOffset = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
     const shaping: GrepShapingOptions = { maxBytesPerLine, maxResponseBytes };
 
     if (!pattern) return grepError('Search pattern is required', 0);
@@ -389,6 +403,7 @@ export class GrepTool {
       caseSensitive,
       contextLines,
       maxResults,
+      pageOffset,
       tenantId,
       effectiveBranch,
       pathGlob,
@@ -431,6 +446,7 @@ export class GrepTool {
     caseSensitive: boolean,
     contextLines: number,
     maxResults: number,
+    offset: number,
     tenantId: string | undefined,
     branch: string | undefined,
     pathGlob: string | undefined,
@@ -441,12 +457,16 @@ export class GrepTool {
     fallbackBranch?: string
   ): Promise<GrepResponse> {
     try {
+      // Paging is a client-side slice over the daemon's deterministic order
+      // (file, then line — the FTS request has no offset field), so fetch
+      // deep enough to cover the requested window.
+      const fetchDepth = maxResults + offset;
       const request = buildGrepRequest(
         pattern,
         regex,
         caseSensitive,
         contextLines,
-        maxResults,
+        fetchDepth,
         tenantId,
         branch,
         pathGlob
@@ -460,7 +480,7 @@ export class GrepTool {
               regex,
               caseSensitive,
               contextLines,
-              maxResults,
+              fetchDepth,
               tenantId,
               fallbackBranch,
               pathGlob
@@ -473,12 +493,14 @@ export class GrepTool {
         pathExclude
       );
       const dedupedMatches = dedupGrepMatches(rawMatches);
-      let matches = dedupedMatches.slice(0, maxResults);
+      let matches = dedupedMatches.slice(offset, offset + maxResults);
       let duplicatesDropped = rawMatches.length - dedupedMatches.length;
       let truncated =
-        responses.some((response) => response.truncated) || dedupedMatches.length > matches.length;
+        responses.some((response) => response.truncated) ||
+        dedupedMatches.length > offset + matches.length;
       let totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
       let message: string | undefined;
+      let widenedFired = false;
       // Auto-widen on empty: a branch-scoped grep that finds nothing may simply
       // be missing content the daemon tagged under another branch — the daemon
       // only tags CHANGED files under a feature branch, so a file UNCHANGED on
@@ -487,7 +509,11 @@ export class GrepTool {
       // base-branch fallback can be absent for ad-hoc branches). Re-run across
       // ALL branches. Fires ONLY when the scoped result is empty, so it never
       // dilutes good branch-scoped results (no cross-branch leak in that case).
-      if (matches.length === 0) {
+      // Gate on offset === 0: an empty PAGE (offset at/past the end of the
+      // match list) is a pagination boundary, not a scoping problem — widening
+      // there would restart the search cross-branch and return page-1 hits
+      // under a stale offset.
+      if (matches.length === 0 && offset === 0) {
         const widened = await this.widenGrepToAllBranches(
           pattern,
           regex,
@@ -500,6 +526,7 @@ export class GrepTool {
           pathExclude
         );
         if (widened) {
+          widenedFired = true;
           matches = widened.matches;
           duplicatesDropped = widened.duplicatesDropped;
           truncated = widened.truncated;
@@ -514,6 +541,14 @@ export class GrepTool {
       // unrelated project's session). Offer scope:"all" as an explicit opt-in
       // instead of fetching cross-project data. When the search was already
       // cross-project (scope:"all" → no tenantId), it's a genuine total miss.
+      if (matches.length === 0 && offset > 0 && message === undefined) {
+        // Empty PAGE, not an empty result: say so instead of running the
+        // empty-result diagnosis (which would wrongly report "pattern absent").
+        message =
+          `Offset ${offset} is at or beyond the end of the match list ` +
+          `(${dedupedMatches.length} deduped match(es) total). Restart from offset 0 ` +
+          `or lower the offset.`;
+      }
       if (matches.length === 0 && message === undefined) {
         // Before the generic hints, try to explain the emptiness SPECIFICALLY:
         // a path filter that dropped everything, or a branch with no index.
@@ -578,22 +613,36 @@ export class GrepTool {
       if (shaped.dropped > 0) {
         const budgetNote =
           `Response byte budget dropped ${shaped.dropped} trailing match(es) — ` +
-          `narrow with pathGlob, lower contextLines, or raise maxResponseBytes.`;
+          `continue from next_offset, narrow with pathGlob, lower contextLines, ` +
+          `or raise maxResponseBytes.`;
         message = message ? `${message} ${budgetNote}` : budgetNote;
       }
+      // More matches remain past this page when the pre-widen `truncated`
+      // already said so (daemon cap or window end) or the byte budget cut the
+      // tail. Suppressed after an auto-widen: paging re-runs the SCOPED query,
+      // so a widened next_offset would dangle — page the widened set by
+      // passing branch:"*" explicitly instead.
+      const moreRemain = !widenedFired && (truncated || shaped.dropped > 0);
       return {
         success: true,
         matches: shaped.matches,
         // Report the deduped count. When the daemon truncated, its
         // total_matches is an upper bound over the (duplicated) full set —
-        // discount the duplicates seen on this page as a best effort.
+        // discount the duplicates seen on this page as a best effort. An
+        // untruncated paged read knows the exact full count (the deduped set);
+        // a widened result only knows its own page.
         total_matches: truncated
-          ? Math.max(matches.length, totalMatches - duplicatesDropped)
-          : matches.length,
+          ? Math.max(offset + matches.length, totalMatches - duplicatesDropped)
+          : widenedFired
+            ? matches.length
+            : dedupedMatches.length,
         truncated,
         latency_ms: latencyMs,
         ...(message ? { message } : {}),
         ...(shaped.dropped > 0 ? { budget_truncated: { dropped: shaped.dropped } } : {}),
+        ...(shaped.matches.length > 0 && moreRemain
+          ? { next_offset: offset + shaped.matches.length }
+          : {}),
       };
     } catch (error) {
       const latencyMs = Date.now() - startTime;
