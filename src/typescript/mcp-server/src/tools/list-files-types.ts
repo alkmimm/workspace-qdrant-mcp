@@ -40,6 +40,11 @@ export interface ListOptions {
   cursor?: string;
   /** Page size for cursor-based pagination (falls back to limit) */
   pageSize?: number;
+  /** Cap on the rendered listing chars (default: the shared search/grep
+   *  budget, ~24k). Trailing page entries are dropped (>=1 kept), reported
+   *  via `budget_truncated`, and next_token resumes at the first dropped
+   *  entry — lossless. 0 disables. */
+  maxResponseBytes?: number;
 }
 
 // ── Internal tree types ──────────────────────────────────────────────────
@@ -93,4 +98,8 @@ export interface ListResponse {
   message?: string;
   /** Opaque cursor for fetching the next page; absent when no more pages */
   next_token?: string;
+  /** Attached only when the response byte budget dropped trailing page
+   *  entries: `dropped` is how many were cut (>=1 always kept). next_token
+   *  resumes at the first dropped entry, so nothing is skipped. */
+  budget_truncated?: { dropped: number };
 }

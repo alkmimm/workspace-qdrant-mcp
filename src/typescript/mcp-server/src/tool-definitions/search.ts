@@ -70,6 +70,11 @@ export const searchToolDefinition = {
         description:
           'Filter by content classification: "code", "text", "config", "data", "docs", "web", "slides", "build". Prose documentation and Markdown are classified "text"; "docs" is for binary document formats (PDF, Office), so to bias toward project docs use "text", not "docs". Use "code" when seeking an implementation so documentation and test-adjacent files do not crowd out source files.',
       },
+      excludeTests: {
+        type: 'boolean',
+        description:
+          'Exclude test-classified files from results (default: false). Server-side filter on the daemon\'s ingest classifier (projects collection, semantic/hybrid modes) — stronger than skipping is_test:true hits, because the result limit is spent on implementation only. Combine with fileType:"code" for pure implementation hunts.',
+      },
       scoreThreshold: {
         type: 'number',
         description:

@@ -59,6 +59,9 @@ function extractIdentifierOptions(
   const fileType = args?.['fileType'] as string | undefined;
   if (fileType) options.fileType = fileType;
 
+  const excludeTests = args?.['excludeTests'] as boolean | undefined;
+  if (excludeTests !== undefined) options.excludeTests = excludeTests;
+
   const includeLibraries = args?.['includeLibraries'] as boolean | undefined;
   if (includeLibraries !== undefined) options.includeLibraries = includeLibraries;
 

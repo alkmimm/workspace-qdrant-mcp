@@ -553,6 +553,7 @@ function buildCollectionSearchParams(
     pathGlob: params.options.pathGlob,
     component: params.options.component,
     basePoints: coll === PROJECTS_COLLECTION ? params.basePoints : undefined,
+    excludeTests: params.options.excludeTests,
   };
   return {
     collection: coll,

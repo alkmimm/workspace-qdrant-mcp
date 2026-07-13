@@ -1497,6 +1497,7 @@ const PG_TOOLS = [
     F('component', 'text', { adv: true }),
     F('tag', 'text', { adv: true }),
     F('tags', 'tags', { adv: true }),
+    F('excludeTests', 'bool', { adv: true }),
     F('includeLibraries', 'bool', { adv: true }),
     F('includeScratchpad', 'bool', { adv: true }),
     F('includeGraphContext', 'bool', { adv: true }),
@@ -1539,6 +1540,7 @@ const PG_TOOLS = [
     F('component', 'text', { adv: true }),
     F('branch', 'text'),
     F('includeTests', 'bool', { adv: true }),
+    F('maxResponseBytes', 'number', { adv: true }),
     F('limit', 'number', { adv: true }),
     F('pageSize', 'number', { adv: true }),
     F('cursor', 'text', { adv: true }),
@@ -1659,12 +1661,14 @@ const PG_TOOLS = [
 const PG_PRESETS = {
   search: [
     { label: 'Semantic · code', args: { query: 'recover stale queue leases', mode: 'semantic', fileType: 'code' } },
+    { label: 'Implementation only', args: { query: 'recover stale queue leases', fileType: 'code', excludeTests: true } },
     { label: 'Hybrid', args: { query: 'idempotency key sha256', mode: 'hybrid', fileType: 'code' } },
     { label: 'Drop legacy dir', args: { query: 'reference schedule template', fileType: 'code', pathExclude: 'old_project/**' } },
     { label: 'Packed read', args: { query: 'branch dedup base_point', fileType: 'code', responseFormat: 'packed' } },
   ],
   grep: [
     { label: 'Literal', args: { pattern: 'routeTool' } },
+    { label: 'Page 2 (offset)', args: { pattern: 'routeTool', maxResults: 5, offset: 5 } },
     { label: 'Regex alternation', args: { pattern: 'search|grep|graph', regex: true } },
     { label: 'In a filetype', args: { pattern: 'service', pathGlob: '**/*.proto' } },
     { label: 'Exclude tests', args: { pattern: 'TODO', pathExclude: '**/test/**' } },
