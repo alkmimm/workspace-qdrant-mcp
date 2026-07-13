@@ -46,9 +46,10 @@ export const LIST_BYTES_IN_PER_FILE_PROXY = 96;
  * `bytes_in` approximates the cost of an unshaped `ls -R` over the
  * matching file set.
  *
- * list is intentionally budget-free (unlike search/grep shaping): its
- * `listing` is a single pre-formatted, already-bounded string, so there is
- * no per-item body for a byte budget to trim.
+ * The economy is computed from the FINAL listing — i.e. after the response
+ * byte budget in assembleResponse trimmed the page (the "list is bounded by
+ * its limit alone" assumption didn't hold: a max-limit page renders past the
+ * shared ~24k budget), so bytes_out reflects what actually ships.
  */
 export function computeListEconomy(
   listing: string,
