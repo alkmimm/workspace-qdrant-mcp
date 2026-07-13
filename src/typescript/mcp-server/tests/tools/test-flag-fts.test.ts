@@ -17,50 +17,69 @@ import type { DaemonClient } from '../../src/clients/daemon-client.js';
 import type { SqliteStateManager } from '../../src/clients/sqlite-state-manager.js';
 import type { ProjectDetector } from '../../src/utils/project-detector.js';
 
+/**
+ * Fixture mirrors the LIVE daemon schema: `tracked_files` has NO absolute-path
+ * column — only `relative_path` (+ is_test), with the watch folder root living
+ * in `watch_folders.path`. The first cut of this fixture invented a
+ * `file_path` column; these unit tests passed while the production query
+ * failed silently against the real schema. Keep this table shape in sync with
+ * the daemon's migrations, not with what the query would like to exist.
+ */
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
   db.exec(
-    `CREATE TABLE tracked_files (
+    `CREATE TABLE watch_folders (
+       watch_id TEXT PRIMARY KEY,
+       path TEXT NOT NULL
+     );
+     CREATE TABLE tracked_files (
        watch_folder_id TEXT NOT NULL,
-       file_path TEXT NOT NULL,
        relative_path TEXT NOT NULL,
        is_test INTEGER NOT NULL DEFAULT 0
      )`
   );
-  const ins = db.prepare(
-    'INSERT INTO tracked_files (watch_folder_id, file_path, relative_path, is_test) VALUES (?, ?, ?, ?)'
+  db.prepare('INSERT INTO watch_folders (watch_id, path) VALUES (?, ?)').run('w1', '/proj');
+  db.prepare('INSERT INTO watch_folders (watch_id, path) VALUES (?, ?)').run(
+    'w-other',
+    '/other-proj'
   );
-  ins.run('w1', '/proj/src/a.ts', 'src/a.ts', 0);
-  ins.run('w1', '/proj/tests/a.test.ts', 'tests/a.test.ts', 1);
-  ins.run('w-other', '/proj/src/a.ts', 'src/a.ts', 1); // other watch folder must not leak
+  const ins = db.prepare(
+    'INSERT INTO tracked_files (watch_folder_id, relative_path, is_test) VALUES (?, ?, ?)'
+  );
+  ins.run('w1', 'src/a.ts', 0);
+  ins.run('w1', 'tests/a.test.ts', 1);
+  ins.run('w1', 'tests/a.test.ts', 0); // older generation — MAX() must keep the verdict
+  ins.run('w-other', 'src/a.ts', 1); // other watch folder must not leak
   return db;
 }
 
 describe('getIsTestByFilePaths (SQL lookup)', () => {
-  it('maps absolute paths to the daemon verdict, scoped to the watch folder', () => {
+  it('relativizes absolute paths against the watch root and maps the verdict back', () => {
     const db = makeDb();
     const flags = getIsTestByFilePaths(db as never, 'w1', [
       '/proj/src/a.ts',
       '/proj/tests/a.test.ts',
       '/proj/not-tracked.ts',
+      '/elsewhere/outside-root.ts',
     ]);
     expect(flags.get('/proj/src/a.ts')).toBe(false);
+    // Multiple generations of the same path: MAX(is_test) keeps the verdict.
     expect(flags.get('/proj/tests/a.test.ts')).toBe(true);
-    // Untracked path: absent from the map (unknown), never fabricated.
+    // Untracked / outside-root paths: absent (unknown), never fabricated.
     expect(flags.has('/proj/not-tracked.ts')).toBe(false);
+    expect(flags.has('/elsewhere/outside-root.ts')).toBe(false);
     db.close();
   });
 
   it('chunks past the SQLite bound-parameter limit', () => {
     const db = makeDb();
     const ins = db.prepare(
-      'INSERT INTO tracked_files (watch_folder_id, file_path, relative_path, is_test) VALUES (?, ?, ?, ?)'
+      'INSERT INTO tracked_files (watch_folder_id, relative_path, is_test) VALUES (?, ?, ?)'
     );
     const paths: string[] = [];
     for (let i = 0; i < 950; i++) {
-      const p = `/proj/gen/f${i}.ts`;
-      ins.run('w1', p, `gen/f${i}.ts`, i % 2);
-      paths.push(p);
+      ins.run('w1', `gen/f${i}.ts`, i % 2);
+      paths.push(`/proj/gen/f${i}.ts`);
     }
     const flags = getIsTestByFilePaths(db as never, 'w1', paths);
     expect(flags.size).toBe(950);
@@ -69,10 +88,11 @@ describe('getIsTestByFilePaths (SQL lookup)', () => {
     db.close();
   });
 
-  it('returns an empty map on a null db or empty input', () => {
+  it('returns an empty map on a null db, empty input, or unknown watch folder', () => {
     expect(getIsTestByFilePaths(null, 'w1', ['/x']).size).toBe(0);
     const db = makeDb();
     expect(getIsTestByFilePaths(db as never, 'w1', []).size).toBe(0);
+    expect(getIsTestByFilePaths(db as never, 'w-unknown', ['/proj/src/a.ts']).size).toBe(0);
     db.close();
   });
 });
