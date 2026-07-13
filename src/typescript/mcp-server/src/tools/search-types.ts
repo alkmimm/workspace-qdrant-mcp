@@ -62,6 +62,11 @@ export interface SearchOptions {
   scope?: SearchScope;
   branch?: string;
   fileType?: string;
+  /** Exclude test-classified files from results — a server-side must_not on
+   *  the daemon's ingest tags (projects collection, semantic/hybrid path), so
+   *  the result limit is spent on implementation hits instead of tests the
+   *  agent would skip via `is_test`. Default: false. */
+  excludeTests?: boolean;
   projectId?: string;
   libraryName?: string;
   includeLibraries?: boolean;
@@ -348,6 +353,9 @@ export interface FilterParams {
   basePoints: string[] | undefined;
   /** Base branch to include for files unchanged on a feature branch. */
   fallbackBranch: string | undefined;
+  /** Exclude test-classified chunks at the vector store (projects collection,
+   *  semantic/hybrid path). See buildMustNotConditions. */
+  excludeTests?: boolean | undefined;
 }
 
 export interface SearchCollectionParams {

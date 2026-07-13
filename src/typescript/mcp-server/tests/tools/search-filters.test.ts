@@ -153,6 +153,37 @@ describe('buildFilter — branch scoping is projects-only', () => {
   });
 });
 
+describe('buildFilter — excludeTests (server-side test-file filter)', () => {
+  it('adds a must_not on the ingest tags for the projects collection', () => {
+    const filter = buildFilter(makeParams({ excludeTests: true, projectId: 'proj-123' }));
+    expect(filter).not.toBeNull();
+    const mustNot = filter!.must_not as Record<string, unknown>[];
+    expect(mustNot).toContainEqual({ key: 'tags', match: { value: 'test' } });
+  });
+
+  it('does NOT filter non-projects collections — scratchpad/rules tags are user-authored', () => {
+    const filter = buildFilter(
+      makeParams({ collection: SCRATCHPAD_COLLECTION, excludeTests: true, projectId: 'proj-123' })
+    );
+    expect(JSON.stringify(filter?.must_not ?? [])).not.toContain('test');
+  });
+
+  it('is off by default (no must_not for projects without the flag)', () => {
+    const filter = buildFilter(makeParams({ projectId: 'proj-123' }));
+    expect(filter?.must_not).toBeUndefined();
+  });
+
+  it('composes with the libraries deleted-filter without clobbering it', () => {
+    const filter = buildFilter(
+      makeParams({ collection: LIBRARIES_COLLECTION, excludeTests: true })
+    );
+    const mustNot = filter!.must_not as Record<string, unknown>[];
+    // libraries keep their deleted guard; the test filter stays projects-only
+    expect(mustNot).toContainEqual({ key: 'deleted', match: { value: true } });
+    expect(JSON.stringify(mustNot)).not.toContain('"test"');
+  });
+});
+
 describe('buildFilter — existing filters preserved', () => {
   it('should match fileType against both legacy file_type and document_type payloads', () => {
     const filter = buildFilter(makeParams({ fileType: 'code' }));

@@ -198,9 +198,28 @@ function buildMustConditions(params: FilterParams): Record<string, unknown>[] {
   return conditions;
 }
 
+/** Payload field holding the daemon's ingest tags (e.g. ["typescript","ts",
+ *  "test"]) — where `is_test_file()` writes the "test" marker during metadata
+ *  enrichment, and the same field `deriveIsTest` (search-shaping.ts) reads.
+ *  Distinct from {@link FIELD_CONCEPT_TAGS} ("concept_tags"), which belongs to
+ *  the tag-expansion subsystem the `tag`/`tags` filter params target. */
+const FIELD_INGEST_TAGS = 'tags';
+
 function buildMustNotConditions(params: FilterParams): Record<string, unknown>[] {
-  if (params.collection !== LIBRARIES_COLLECTION) return [];
-  return [{ key: FIELD_DELETED, match: { value: true } }];
+  const conditions: Record<string, unknown>[] = [];
+  if (params.collection === LIBRARIES_COLLECTION) {
+    conditions.push({ key: FIELD_DELETED, match: { value: true } });
+  }
+  // excludeTests filters test-classified chunks AT the vector store, so the
+  // result limit and byte budget are spent on implementation hits — the
+  // is_test flag only gives visibility after the slots are already consumed.
+  // Projects-only (scratchpad/rules tags are user-authored) and semantic/
+  // hybrid-only by construction: the exact/FTS path does not go through
+  // buildFilter and its rows carry no tags.
+  if (params.excludeTests && params.collection === PROJECTS_COLLECTION) {
+    conditions.push({ key: FIELD_INGEST_TAGS, match: { value: 'test' } });
+  }
+  return conditions;
 }
 
 /**

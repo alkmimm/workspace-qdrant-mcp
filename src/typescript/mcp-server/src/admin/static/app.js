@@ -1497,6 +1497,7 @@ const PG_TOOLS = [
     F('component', 'text', { adv: true }),
     F('tag', 'text', { adv: true }),
     F('tags', 'tags', { adv: true }),
+    F('excludeTests', 'bool', { adv: true }),
     F('includeLibraries', 'bool', { adv: true }),
     F('includeScratchpad', 'bool', { adv: true }),
     F('includeGraphContext', 'bool', { adv: true }),
