@@ -1661,12 +1661,14 @@ const PG_TOOLS = [
 const PG_PRESETS = {
   search: [
     { label: 'Semantic · code', args: { query: 'recover stale queue leases', mode: 'semantic', fileType: 'code' } },
+    { label: 'Implementation only', args: { query: 'recover stale queue leases', fileType: 'code', excludeTests: true } },
     { label: 'Hybrid', args: { query: 'idempotency key sha256', mode: 'hybrid', fileType: 'code' } },
     { label: 'Drop legacy dir', args: { query: 'reference schedule template', fileType: 'code', pathExclude: 'old_project/**' } },
     { label: 'Packed read', args: { query: 'branch dedup base_point', fileType: 'code', responseFormat: 'packed' } },
   ],
   grep: [
     { label: 'Literal', args: { pattern: 'routeTool' } },
+    { label: 'Page 2 (offset)', args: { pattern: 'routeTool', maxResults: 5, offset: 5 } },
     { label: 'Regex alternation', args: { pattern: 'search|grep|graph', regex: true } },
     { label: 'In a filetype', args: { pattern: 'service', pathGlob: '**/*.proto' } },
     { label: 'Exclude tests', args: { pattern: 'TODO', pathExclude: '**/test/**' } },
