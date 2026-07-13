@@ -383,6 +383,11 @@ export class SqliteStateManager {
     return trackedFilesQueries.getBaseBranch(this.db, watchFolderId, excludeBranch);
   }
 
+  /** Absolute path → daemon is_test verdict (best-effort; see the query docs). */
+  getIsTestByFilePaths(watchFolderId: string, filePaths: readonly string[]): Map<string, boolean> {
+    return trackedFilesQueries.getIsTestByFilePaths(this.db, watchFolderId, filePaths);
+  }
+
   listChunkCandidates(options: trackedFilesQueries.ListChunkCandidatesOptions) {
     return trackedFilesQueries.listChunkCandidates(this.db, options);
   }
