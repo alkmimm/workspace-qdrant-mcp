@@ -371,9 +371,16 @@ export function countTrackedFiles(
  * surfaces (grep matches, exact-search hits), whose rows carry no ingest
  * tags — reading the verdict back from `tracked_files.is_test` keeps the
  * daemon's `is_test_file()` classifier the single source of truth instead of
- * re-deriving it from client-side path heuristics that could drift. Chunked
- * to stay under SQLite's bound-parameter limit. Paths with no row are simply
- * absent from the map (absent = unknown, never false).
+ * re-deriving it from client-side path heuristics that could drift.
+ *
+ * `tracked_files` stores only `relative_path` (no absolute-path column in the
+ * live schema — the first cut of this query assumed one and silently returned
+ * nothing in production), so the callers' absolute FTS paths are relativized
+ * against the watch folder's root (`watch_folders.path`) before the lookup and
+ * mapped back to absolute keys after. `MAX(is_test)` collapses the multiple
+ * generations a path can have. Chunked to stay under SQLite's bound-parameter
+ * limit. Paths with no row (or outside the root) are simply absent from the
+ * map (absent = unknown, never false).
  */
 export function getIsTestByFilePaths(
   db: DatabaseType | null,
@@ -383,18 +390,40 @@ export function getIsTestByFilePaths(
   const out = new Map<string, boolean>();
   if (!db || filePaths.length === 0) return out;
   try {
+    const wf = db
+      .prepare('SELECT path FROM watch_folders WHERE watch_id = ?')
+      .get(watchFolderId) as { path?: string } | undefined;
+    const root = wf?.path;
+    if (!root) return out;
+    const prefix = root.endsWith('/') ? root : `${root}/`;
+    const absByRel = new Map<string, string[]>();
+    for (const abs of filePaths) {
+      if (!abs.startsWith(prefix)) continue;
+      const rel = abs.slice(prefix.length);
+      const list = absByRel.get(rel);
+      if (list) list.push(abs);
+      else absByRel.set(rel, [abs]);
+    }
+    const relPaths = [...absByRel.keys()];
     const CHUNK = 400; // SQLite's default max bound parameters is 999
-    for (let i = 0; i < filePaths.length; i += CHUNK) {
-      const chunk = filePaths.slice(i, i + CHUNK);
+    for (let i = 0; i < relPaths.length; i += CHUNK) {
+      const chunk = relPaths.slice(i, i + CHUNK);
       const placeholders = chunk.map(() => '?').join(',');
       const rows = db
         .prepare(
-          `SELECT file_path, MAX(is_test) AS is_test FROM tracked_files
-           WHERE watch_folder_id = ? AND file_path IN (${placeholders})
-           GROUP BY file_path`
+          `SELECT relative_path, MAX(is_test) AS is_test FROM tracked_files
+           WHERE watch_folder_id = ? AND relative_path IN (${placeholders})
+           GROUP BY relative_path`
         )
-        .all(watchFolderId, ...chunk) as Array<{ file_path: string; is_test: number | null }>;
-      for (const row of rows) out.set(row.file_path, row.is_test === 1);
+        .all(watchFolderId, ...chunk) as Array<{
+        relative_path: string;
+        is_test: number | null;
+      }>;
+      for (const row of rows) {
+        for (const abs of absByRel.get(row.relative_path) ?? []) {
+          out.set(abs, row.is_test === 1);
+        }
+      }
     }
   } catch {
     out.clear(); // annotation is best-effort — never fail the read
