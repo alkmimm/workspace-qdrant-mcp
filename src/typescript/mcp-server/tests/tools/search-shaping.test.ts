@@ -619,3 +619,53 @@ describe('responseFormat "packed"', () => {
     expect(response.packed_bundle).toBeUndefined();
   });
 });
+
+describe('is_test flag (field-feedback: test hits outrank implementation unseen)', () => {
+  const testHit = (): SearchResult =>
+    makeResult({
+      metadata: { file_path: 'tests/foo.test.ts', tags: ['typescript', 'ts', 'test'] },
+    });
+
+  it('stamps is_test:true on a projects hit whose ingest tags contain "test" (default truncate mode)', () => {
+    const { response } = shapeHitPayloads(makeResponse([testHit()]), baseOptions());
+    expect(response.results[0].is_test).toBe(true);
+  });
+
+  it('omits the flag entirely on non-test hits (absent, never false)', () => {
+    const r = makeResult({ metadata: { file_path: 'src/foo.ts', tags: ['typescript', 'ts'] } });
+    const { response } = shapeHitPayloads(makeResponse([r]), baseOptions());
+    expect(response.results[0].is_test).toBeUndefined();
+    expect('is_test' in response.results[0]).toBe(false);
+  });
+
+  it('does NOT flag scratchpad/rules hits — their tags are user-authored', () => {
+    const note = makeResult({
+      collection: 'scratchpad',
+      metadata: { tags: ['test', 'workflow'] },
+    });
+    const { response } = shapeHitPayloads(makeResponse([note]), baseOptions());
+    expect(response.results[0].is_test).toBeUndefined();
+  });
+
+  it('survives summary mode (rebuild branch must carry it explicitly)', () => {
+    const { response } = shapeHitPayloads(
+      makeResponse([testHit()]),
+      baseOptions({ summary: true })
+    );
+    expect(response.results[0].is_test).toBe(true);
+  });
+
+  it('survives detailed mode (cap disabled) and packed metadata entries', () => {
+    const detailed = shapeHitPayloads(
+      makeResponse([testHit()]),
+      baseOptions({ responseFormat: 'detailed' })
+    );
+    expect(detailed.response.results[0].is_test).toBe(true);
+
+    const packed = shapeHitPayloads(
+      makeResponse([testHit()]),
+      baseOptions({ responseFormat: 'packed' })
+    );
+    expect(packed.response.results[0].is_test).toBe(true);
+  });
+});

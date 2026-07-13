@@ -222,6 +222,12 @@ export interface SearchResult {
    *  line without digging into the metadata bag. Absent when the hit has no
    *  path. Item 4 of the agent-ergonomics work. */
   location?: string;
+  /** Present (always `true`) when the daemon's ingest classifier marked this
+   *  projects-collection chunk as coming from a TEST file (payload `tags`
+   *  contains "test"). Lifted to the top level so an implementation-seeking
+   *  agent can skip test hits without digging into metadata. Absent means
+   *  "not a test, or unknown" — never false. */
+  is_test?: boolean;
   content: string;
   title?: string;
   metadata: Record<string, unknown>;
