@@ -48,7 +48,12 @@ export const grepToolDefinition = {
       maxResults: {
         type: 'number',
         description:
-          'Maximum matches to return (default: 100). Raise it for an exhaustive sweep — when the cap is hit the response sets truncated:true and reports total_matches, so you can narrow with pathGlob or request more.',
+          'Maximum matches per page (default: 100). When the cap is hit the response sets truncated:true, reports total_matches, and sets next_offset — page with offset, narrow with pathGlob, or raise this cap.',
+      },
+      offset: {
+        type: 'number',
+        description:
+          'Pagination offset into the deduped match list (default 0). Windows are stable — the daemon orders matches by file then line — so pages never skip or duplicate. When more matches remain the response sets next_offset: pass it back here (same pattern and filters) for the next page.',
       },
       branch: {
         type: 'string',

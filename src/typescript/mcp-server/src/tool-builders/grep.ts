@@ -51,6 +51,9 @@ export function buildGrepOptions(args: Record<string, unknown> | undefined): Gre
   const maxResults = args?.['maxResults'] as number | undefined;
   options.maxResults = maxResults ?? DEFAULT_GREP_MAX_RESULTS;
 
+  const offset = args?.['offset'] as number | undefined;
+  if (offset !== undefined) options.offset = offset;
+
   const branch = args?.['branch'] as string | undefined;
   if (branch) options.branch = branch;
 
