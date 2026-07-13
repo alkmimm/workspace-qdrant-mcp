@@ -49,6 +49,9 @@ export function buildListOptions(args: Record<string, unknown> | undefined): Lis
   const pageSize = args?.['pageSize'] as number | undefined;
   if (pageSize !== undefined) options.pageSize = pageSize;
 
+  const maxResponseBytes = args?.['maxResponseBytes'] as number | undefined;
+  if (maxResponseBytes !== undefined) options.maxResponseBytes = maxResponseBytes;
+
   const projectId = args?.['projectId'] as string | undefined;
   if (projectId) options.projectId = projectId;
 

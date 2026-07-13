@@ -1540,6 +1540,7 @@ const PG_TOOLS = [
     F('component', 'text', { adv: true }),
     F('branch', 'text'),
     F('includeTests', 'bool', { adv: true }),
+    F('maxResponseBytes', 'number', { adv: true }),
     F('limit', 'number', { adv: true }),
     F('pageSize', 'number', { adv: true }),
     F('cursor', 'text', { adv: true }),

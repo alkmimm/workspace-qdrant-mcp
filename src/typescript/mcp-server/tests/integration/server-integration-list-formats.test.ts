@@ -242,6 +242,48 @@ describe('Server Integration Tests', () => {
       expect(data.stats.truncated).toBe(true);
     });
 
+    it('enforces the response byte budget with a lossless cursor (pages tile, nothing skipped)', async () => {
+      const mcpServer = server.getMcpServer();
+      const callHandler = vi.mocked(mcpServer.setRequestHandler).mock.calls[1][1];
+      const callList = async (extra: Record<string, unknown>): Promise<Record<string, any>> => {
+        const result = await callHandler({
+          method: 'tools/call',
+          params: {
+            name: 'list',
+            arguments: { format: 'flat', projectId: LIST_TENANT, maxResponseBytes: 80, ...extra },
+          },
+        });
+        return JSON.parse(result.content[0].text);
+      };
+
+      const page1 = await callList({});
+      expect(page1.success).toBe(true);
+      expect(page1.budget_truncated).toBeDefined();
+      expect(page1.budget_truncated.dropped).toBeGreaterThan(0);
+      expect(page1.next_token).toBeDefined();
+      expect(page1.message).toMatch(/byte budget/i);
+
+      // Follow the cursor until exhaustion — pages must tile the full set.
+      const listings: string[] = [page1.listing];
+      let cursor: string | undefined = page1.next_token;
+      for (let i = 0; cursor && i < 10; i++) {
+        const page = await callList({ cursor });
+        expect(page.success).toBe(true);
+        listings.push(page.listing);
+        cursor = page.next_token;
+      }
+      expect(cursor).toBeUndefined(); // terminated, not capped by the loop guard
+      expect(listings.length).toBeGreaterThan(1);
+
+      const combined = listings.join('\n');
+      // Nothing skipped: every seeded file surfaces somewhere across the pages…
+      for (const p of ['Cargo.toml', 'README.md', 'main.rs', 'helpers.rs', 'test_main.rs']) {
+        expect(combined).toContain(p);
+      }
+      // …and nothing duplicated: a uniquely-named file appears exactly once.
+      expect(combined.split('helpers.rs').length - 1).toBe(1);
+    });
+
     it('should handle empty project gracefully', async () => {
       const db = new Database(join(tempDir, 'state.db'));
       db.prepare('DELETE FROM tracked_files').run();

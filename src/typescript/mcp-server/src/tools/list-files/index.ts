@@ -18,6 +18,7 @@ import type {
   ComponentSummary,
 } from '../list-files-types.js';
 import { DEFAULT_DEPTH, MAX_DEPTH, DEFAULT_LIMIT, MAX_LIMIT } from '../list-files-types.js';
+import { DEFAULT_MAX_RESPONSE_BYTES } from '../search-types.js';
 import { SERVER_VERSION as MCP_SERVER_VERSION } from '../../server-types.js';
 import {
   applyEffectiveBranch,
@@ -277,22 +278,55 @@ export class ListFilesTool {
     componentSummaries: ComponentSummary[] | undefined,
     options: ListOptions
   ): ListResponse {
-    const { listing, renderedCount } = renderFiles(
-      pageFiles,
+    let effectiveFiles = pageFiles;
+    let budgetDropped = 0;
+    let { listing, renderedCount } = renderFiles(
+      effectiveFiles,
       submodules,
       basePath,
       format,
       depth,
       limit
     );
+    // Response byte budget (shared semantics with search/grep/scratchpad —
+    // list was the last read surface without one; a max-limit page can render
+    // well past the ~24k budget). Files arrive in relativePath order (the
+    // keyset-cursor order), so bisect the largest PREFIX whose rendering fits
+    // and resume the cursor at the first dropped entry: budget pagination is
+    // lossless. Bisection re-renders in memory over <=MAX_LIMIT entries
+    // (~9 probes worst case) — cheap.
+    const budget = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+    if (budget > 0 && listing.length > budget && pageFiles.length > 1) {
+      let lo = 1; // always keep at least one entry
+      let hi = pageFiles.length - 1;
+      let best = 1;
+      let bestRender = renderFiles(pageFiles.slice(0, 1), submodules, basePath, format, depth, limit);
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const probe = renderFiles(pageFiles.slice(0, mid), submodules, basePath, format, depth, limit);
+        if (probe.listing.length <= budget) {
+          best = mid;
+          bestRender = probe;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      effectiveFiles = pageFiles.slice(0, best);
+      budgetDropped = pageFiles.length - best;
+      listing = bestRender.listing;
+      renderedCount = bestRender.renderedCount;
+    }
     // truncated: rendered fewer than the page (render limit hit within page)
-    const truncated = renderedCount < pageFiles.length;
-    // next_token: present when there are more pages beyond the current fetch window
+    const truncated = renderedCount < effectiveFiles.length;
+    // next_token: more pages beyond the fetch window, or a budget-dropped tail
+    // (the cursor is the last INCLUDED path — keyset "after" — so the next
+    // page starts exactly at the first dropped entry).
     const pageSize = options.pageSize ?? limit;
     const hasNextPage = pageFiles.length >= pageSize;
-    const lastFile = pageFiles.at(-1);
+    const lastFile = effectiveFiles.at(-1);
     const nextToken =
-      hasNextPage && lastFile !== undefined
+      (hasNextPage || budgetDropped > 0) && lastFile !== undefined
         ? Buffer.from(lastFile.relativePath).toString('base64')
         : undefined;
     const finalListing =
@@ -307,7 +341,7 @@ export class ListFilesTool {
       format,
       listing: finalListing,
       stats: this.buildListStats(
-        pageFiles,
+        effectiveFiles,
         submodules,
         basePath,
         truncated || !!nextToken,
@@ -316,6 +350,13 @@ export class ListFilesTool {
       ),
     };
     if (nextToken) response.next_token = nextToken;
+    if (budgetDropped > 0) {
+      response.budget_truncated = { dropped: budgetDropped };
+      response.message =
+        `Response byte budget dropped ${budgetDropped} trailing entr${budgetDropped === 1 ? 'y' : 'ies'} ` +
+        `from this page — continue with cursor (next_token resumes at the first dropped entry), ` +
+        `narrow with path/pattern, or raise maxResponseBytes.`;
+    }
     return response;
   }
 

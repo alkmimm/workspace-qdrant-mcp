@@ -86,6 +86,11 @@ export const listToolDefinition = {
         description:
           'Filter by component (dot-separated ID or prefix, e.g. "daemon" or "daemon.core"). Auto-detected from Cargo.toml/package.json workspaces.',
       },
+      maxResponseBytes: {
+        type: 'number',
+        description:
+          'Cap on the rendered listing chars (default ~24000, the same budget as search/grep). Trailing page entries beyond it are dropped (>=1 kept), budget_truncated.dropped reports how many, and next_token resumes at the first dropped entry — lossless. 0 disables.',
+      },
     },
   },
 };
