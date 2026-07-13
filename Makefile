@@ -33,6 +33,11 @@ COMPOSE_ENV_FILE ?= $(REPO)/docker/.env
 MCP_HTTP_PORT ?= 6335
 QDRANT_HTTP_PORT ?= 6333
 MEMEXD_GRPC_PORT ?= 50051
+CODEX_HOME ?= $(HOME)/.codex
+CODEX_BIN ?= codex
+CODEX_MCP_NAME ?= workspace-qdrant
+CODEX_MCP_URL ?= http://localhost:$(MCP_HTTP_PORT)/mcp
+CODEX_BEARER_TOKEN_ENV_VAR ?= MCP_HTTP_TOKEN
 LOG_TAIL ?= 50
 MARKER ?=
 
@@ -56,6 +61,7 @@ MEMEXD_DB_VOLUME ?= workspace-qdrant-mcp_memexd_db
 .PHONY: help check-env first-time redeploy \
 	stack-up stack-down stack-restart stack-status stack-logs verify-deploy \
 	build-images mcp-rebuild memexd-recreate \
+	codex-register \
 	health-quick scan register-all watch reindex reindex-status hooks-install clean \
 	mem-watch-start mem-watch mem-watch-stop
 
@@ -78,6 +84,10 @@ help:
 	@echo "  build-images     docker compose build mcp memexd"
 	@echo "  mcp-rebuild      rebuild + recreate ONLY the mcp container"
 	@echo "  memexd-recreate  recreate memexd (picks up env changes from docker/.env)"
+	@echo "------------------------------------------------------------"
+	@echo "Codex integration:"
+	@echo "  codex-register   create/update the workspace-qdrant HTTP MCP in Codex"
+	@echo "                   (config: $(CODEX_HOME)/config.toml)"
 	@echo "------------------------------------------------------------"
 	@echo "Observability / indexing:"
 	@echo "  health-quick     curl the MCP /admin/api/health endpoint"
@@ -180,6 +190,19 @@ mcp-rebuild: check-env
 memexd-recreate: check-env
 	@echo "Recreating memexd container (picks up env changes from docker/.env)..."
 	@cd "$(REPO)" && $(COMPOSE) up -d --force-recreate memexd
+
+# Register the containerized Streamable HTTP server in the Linux/WSL Codex
+# config. The helper delegates creation/update to the installed Codex CLI, then
+# restores this fork's canonical timeouts and enabled-tools allowlist (the CLI's
+# `mcp add` command does not expose those fields).
+codex-register:
+	@python3 "$(REPO)/scripts/linux/register-codex-mcp.py" \
+		--repo "$(REPO)" \
+		--codex-home "$(CODEX_HOME)" \
+		--codex-bin "$(CODEX_BIN)" \
+		--server-name "$(CODEX_MCP_NAME)" \
+		--url "$(CODEX_MCP_URL)" \
+		--bearer-token-env-var "$(CODEX_BEARER_TOKEN_ENV_VAR)"
 
 # ── Observability / indexing ─────────────────────────────────────────────────
 #
