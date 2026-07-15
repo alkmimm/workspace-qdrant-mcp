@@ -299,6 +299,29 @@ function grepScopeOptInHint(pattern: string): string {
   );
 }
 
+/**
+ * Guard against the truncated-alternation absence trap (field feedback
+ * 2026-07-15): a regex like `a|b|c|d` under `truncated:true` (or a budget
+ * drop) splits the visible page among the branches, so a branch with zero
+ * hits ON THIS PAGE may still match in the unreturned tail — an agent read
+ * such a page and published "term X has zero references", twice wrong.
+ * Returns the warning to append when the pattern is a regex containing
+ * alternation AND part of the match set is hidden; `undefined` otherwise.
+ */
+export function alternationTruncationHint(
+  regex: boolean,
+  pattern: string,
+  hiddenTail: boolean
+): string | undefined {
+  if (!regex || !hiddenTail || !pattern.includes('|')) return undefined;
+  return (
+    'Pattern contains alternation (|) and the match set is TRUNCATED: this page does NOT ' +
+    'guarantee coverage of every branch — a term with zero hits here may still match in the ' +
+    'unreturned tail, so do NOT use this result to conclude a term is absent. To prove absence, ' +
+    'page through next_offset to the end, or re-run each term ALONE (one term per query).'
+  );
+}
+
 function grepEmptyRecoveryHint(pattern: string): string {
   return (
     `No matches for "${pattern}" in any indexed project. ` +
@@ -642,6 +665,16 @@ export class GrepTool {
           `continue from next_offset, narrow with pathGlob, lower contextLines, ` +
           `or raise maxResponseBytes.`;
         message = message ? `${message} ${budgetNote}` : budgetNote;
+      }
+      // Alternation absence-trap guard: any hidden tail (daemon cap OR budget
+      // drop) makes per-branch coverage of an alternation regex unprovable.
+      const alternationNote = alternationTruncationHint(
+        regex,
+        pattern,
+        truncated || shaped.dropped > 0
+      );
+      if (alternationNote) {
+        message = message ? `${message} ${alternationNote}` : alternationNote;
       }
       // More matches remain past this page when the pre-widen `truncated`
       // already said so (daemon cap or window end) or the byte budget cut the
