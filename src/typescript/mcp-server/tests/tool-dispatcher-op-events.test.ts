@@ -58,7 +58,10 @@ describe('routeTool — rules/scratchpad search_events telemetry', () => {
     const finished = daemon.updateSearchEvent.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(finished['event_id']).toBe(started['id']);
     expect(finished['result_count']).toBe(3); // rules array length
-    expect(daemon.updateSearchEventEconomy).toHaveBeenCalledTimes(1);
+    // NO token-economy sidecar for op events: token_savings filters on
+    // bytes_in IS NOT NULL, so writing bytes here would inject
+    // savings_ratio=0 rows and dilute the TCC dashboards.
+    expect(daemon.updateSearchEventEconomy).not.toHaveBeenCalled();
   });
 
   it('logs an error outcome when the tool throws, and rethrows', async () => {
@@ -85,6 +88,41 @@ describe('routeTool — rules/scratchpad search_events telemetry', () => {
     expect(started['op']).toBe('scratchpad');
     const finished = daemon.updateSearchEvent.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(finished['result_count']).toBe(1); // entries array length
+  });
+
+  it('wraps the graph tool too (telemetry-census sweep)', async () => {
+    // The graph handler will fail fast against these bare mocks — what this
+    // test pins is the WRAPPER: op='graph' start record + a finish record,
+    // regardless of the tool outcome.
+    const daemon = makeDaemon();
+    const components = {
+      daemonClient: daemon,
+      projectDetector: { getProjectInfo: vi.fn().mockResolvedValue(null) },
+    } as unknown as ServerComponents;
+
+    await routeTool('graph', { action: 'stats' }, components, session).catch(() => undefined);
+
+    expect(daemon.logSearchEvent).toHaveBeenCalledTimes(1);
+    const started = daemon.logSearchEvent.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(started['op']).toBe('graph');
+    expect(started['query_text']).toBe('stats');
+    expect(daemon.updateSearchEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it('wraps store with query_text from the type arg', async () => {
+    const daemon = makeDaemon();
+    const components = {
+      daemonClient: daemon,
+    } as unknown as ServerComponents;
+
+    // No type and no inferable signal → dispatchStore throws; the wrapper
+    // must still log the start record and finish with outcome 'error'.
+    await expect(routeTool('store', {}, components, session)).rejects.toThrow(/store needs/);
+
+    const started = daemon.logSearchEvent.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(started['op']).toBe('store');
+    const finished = daemon.updateSearchEvent.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(finished['outcome']).toBe('error');
   });
 });
 

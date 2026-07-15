@@ -49,15 +49,23 @@ async fn log_search_event_inserts_record() {
     assert_eq!(actor, "claude");
 }
 
-/// Regression for the v47 silent loss: `op = 'rules'` / `'scratchpad'`
-/// (PR #267 telemetry) must INSERT — pre-v47 the CHECK rejected them and the
+/// Regression for the v47/v48 silent loss: every dispatcher-instrumented op
+/// must INSERT — pre-widening the CHECK rejected new op names and the
 /// fire-and-forget write path swallowed the error, so the events vanished
 /// with zero trace. Runs against the production DDL (see common.rs fixture).
 #[tokio::test]
 async fn log_search_event_accepts_rules_and_scratchpad_ops() {
     let (pool, handle) = setup_test_db().await;
 
-    for op in ["rules", "scratchpad"] {
+    for op in [
+        "rules",
+        "scratchpad",
+        "graph",
+        "store",
+        "embedding",
+        "workspace_index",
+        "search_eval",
+    ] {
         handle
             .log_search_event(LogSearchEventData {
                 id: format!("evt-{op}"),
@@ -80,12 +88,12 @@ async fn log_search_event_accepts_rules_and_scratchpad_ops() {
     }
 
     let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM search_events WHERE op IN ('rules','scratchpad')",
+        "SELECT COUNT(*) FROM search_events WHERE id LIKE 'evt-%'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(count, 2);
+    assert_eq!(count, 7);
 }
 
 /// A logged search event refreshes `last_activity_at` for the target project
