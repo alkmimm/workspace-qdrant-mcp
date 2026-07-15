@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 use crate::queue_operations::QueueManager;
 
-use super::super::branch_prune::prune_orphaned_branches;
+use super::super::branch_prune::{covered_by_other_live_generation, prune_orphaned_branches};
 use super::{create_test_pool, setup_schema};
 
 /// Initialise a git repo with one commit, then create the named local branches.
@@ -82,6 +82,19 @@ async fn file_delete_count(pool: &sqlx::SqlitePool) -> i64 {
     .unwrap()
 }
 
+/// `metadata` of the enqueued `file|delete` for a given path (stage 3 stamping).
+async fn delete_metadata_for(pool: &sqlx::SqlitePool, relative_path: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT metadata FROM unified_queue \
+         WHERE item_type = 'file' AND op = 'delete' AND file_path = ?1",
+    )
+    .bind(relative_path)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+    .flatten()
+}
+
 #[tokio::test]
 async fn prunes_genuine_orphan_feature_branch() {
     let pool = create_test_pool().await;
@@ -112,6 +125,79 @@ async fn prunes_genuine_orphan_feature_branch() {
         file_delete_count(&pool).await,
         2,
         "exactly the 2 'feature/gone' files enqueued; live branches untouched"
+    );
+    // Stage 3 (#224): of those two, only `src/a.rs` is also held by the live
+    // keep-a/keep-b generations — it is covered, so its stale generation can be
+    // removed. `src/d.rs` exists ONLY on the dead branch: deleting it would drop
+    // the file's last index entry, so it stays uncovered (preserved).
+    assert_eq!(stats.files_covered, 1, "only src/a.rs is covered");
+    assert!(
+        delete_metadata_for(&pool, "src/a.rs")
+            .await
+            .expect("a.rs delete enqueued")
+            .contains(r#""covered_by_live_generation":true"#),
+        "covered generation must carry the stage-3 flag"
+    );
+    let d_meta = delete_metadata_for(&pool, "src/d.rs")
+        .await
+        .expect("d.rs delete enqueued");
+    assert!(
+        !d_meta.contains("covered_by_live_generation"),
+        "uncovered generation must keep the plain marker (preserve guard intact), got {d_meta}"
+    );
+}
+
+/// The pure stage-3 predicate: a generation is covered only when a DIFFERENT
+/// generation of the same path carries a live branch.
+#[test]
+fn covered_by_other_live_generation_ignores_the_row_itself() {
+    // Another generation (7) is live → this stale one (42) is covered.
+    assert!(covered_by_other_live_generation(Some(&vec![7]), 42));
+    assert!(covered_by_other_live_generation(Some(&vec![7, 42]), 42));
+    // The ONLY live generation is this row itself → not covered by another.
+    // (Cannot happen for a single-dead-tag row, but the predicate must not
+    // count a row as its own cover.)
+    assert!(!covered_by_other_live_generation(Some(&vec![42]), 42));
+    // No live generation at all for the path → the mislabeled-corpus case.
+    assert!(!covered_by_other_live_generation(Some(&vec![]), 42));
+    assert!(!covered_by_other_live_generation(None, 42));
+}
+
+/// A path whose ONLY generations sit on dead branches must never be reported as
+/// covered — the corpus-wipe protection the preserve guard exists for.
+#[tokio::test]
+async fn dead_only_path_is_never_covered() {
+    let pool = create_test_pool().await;
+    setup_schema(&pool).await;
+    let qm = Arc::new(QueueManager::new(pool.clone()));
+
+    let repo_dir = TempDir::new().unwrap();
+    init_repo(repo_dir.path(), &["live-main"]);
+    let repo_path = repo_dir.path().to_str().unwrap();
+
+    insert_watch_folder(&pool, "w1", "t1", repo_path).await;
+    // Corpus on a live branch (also the largest → the primary guard protects it).
+    for f in ["a", "b", "c"] {
+        insert_tracked_file(&pool, "w1", "live-main", &format!("src/{f}.rs")).await;
+    }
+    // Two dead-branch generations of a path that NO live generation holds.
+    insert_tracked_file(&pool, "w1", "dead-1", "src/only-here.rs").await;
+    insert_tracked_file(&pool, "w1", "dead-2", "src/only-here.rs").await;
+
+    let stats = prune_orphaned_branches(&pool, &qm).await.expect("prune");
+
+    assert_eq!(stats.branches_pruned, 2, "both dead branches pruned");
+    assert_eq!(stats.files_enqueued, 2);
+    assert_eq!(
+        stats.files_covered, 0,
+        "no live generation serves src/only-here.rs — must not be marked covered"
+    );
+    assert!(
+        !delete_metadata_for(&pool, "src/only-here.rs")
+            .await
+            .expect("delete enqueued")
+            .contains("covered_by_live_generation"),
+        "a dead-only path must keep the preserve guard"
     );
 }
 

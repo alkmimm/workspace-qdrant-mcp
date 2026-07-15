@@ -38,6 +38,25 @@
 //!
 //! Only a branch that is absent from git AND passes all guards is pruned.
 //!
+//! ## Live-generation coverage (issue #224 stage 3)
+//!
+//! Guard 5 lives on the DELETE side (`file/delete.rs`): when the pruned branch
+//! is a row's ONLY tag and the file is still on disk, the delete is preserved
+//! ("mislabeled, not deleted"). That guard was written for a mislabeled CORPUS
+//! (guards 1-4's failure mode) but misfires on the Layer-2 multi-generation
+//! model, where one path legitimately has several content rows (one per distinct
+//! cross-branch content) and the on-disk file is served by the generation tagged
+//! with a LIVE branch. Measured 2026-07-15: 1,034 preserves per startup, ~1.7k
+//! stale generations kept alive forever while their deletes were re-enqueued
+//! every boot.
+//!
+//! This module computes the missing fact — is this path served by ANOTHER
+//! generation carrying a live branch? — while the live set is in hand, and
+//! stamps it on the delete (`covered_by_live_generation`). The delete side then
+//! preserves ONLY the genuinely-uncovered case (the corpus this guard exists to
+//! protect). Deletion of covered generations is gated by
+//! `WQM_BRANCH_PRUNE_COVERED_DELETE` (default `dry` — observe, mutate nothing).
+//!
 //! ## Delete-side contract (this module only enqueues; `file/delete.rs` executes)
 //!
 //! Each pruned file is enqueued as `file|delete` stamped with
@@ -52,7 +71,7 @@
 //! present-but-mislabeled file, left for reconciliation to re-tag.
 //! See `docs/specs/21-cross-branch-dedup.md` §C.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
@@ -79,6 +98,19 @@ pub(crate) const BRANCH_PRUNE_REASON: &str = "branch_prune";
 /// (defeating the whole purpose of this reconciler and clogging the queue).
 pub(crate) const BRANCH_PRUNE_DELETE_METADATA: &str = r#"{"reason":"branch_prune"}"#;
 
+/// `metadata` for a prune delete whose path IS served by another generation
+/// carrying a live branch (issue #224 stage 3). Adds
+/// `covered_by_live_generation` to the marker above so the delete side can tell
+/// a stale Layer-2 generation (safe to remove — the on-disk file stays indexed
+/// via the live generation) from a mislabeled corpus (must be preserved).
+///
+/// Computed here, at enqueue time, because this is where the git live set is
+/// available; the queue processor has no repo access. The flag stays valid
+/// until processing: a covering generation carries a live tag, so branch
+/// pruning never enqueues a delete for it.
+pub(crate) const BRANCH_PRUNE_COVERED_DELETE_METADATA: &str =
+    r#"{"reason":"branch_prune","covered_by_live_generation":true}"#;
+
 /// Totals returned by [`prune_orphaned_branches`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BranchPruneStats {
@@ -86,6 +118,12 @@ pub struct BranchPruneStats {
     pub branches_pruned: u64,
     /// Number of `file|delete` items enqueued across all pruned branches.
     pub files_enqueued: u64,
+    /// Of `files_enqueued`, how many are stale Layer-2 generations whose path is
+    /// still served by another generation carrying a live branch (issue #224
+    /// stage 3). These are the deletes the on-disk preserve guard has been
+    /// no-op'ing forever; they only execute under
+    /// `WQM_BRANCH_PRUNE_COVERED_DELETE=on`.
+    pub files_covered: u64,
 }
 
 impl BranchPruneStats {
@@ -93,6 +131,23 @@ impl BranchPruneStats {
     pub fn has_changes(&self) -> bool {
         self.branches_pruned > 0 || self.files_enqueued > 0
     }
+}
+
+/// Does another generation of this path carry a live branch?
+///
+/// `live_generations` are the `file_id`s whose branch set intersects the repo's
+/// live branches, for the path being pruned; `this_file_id` is the generation
+/// the delete targets. Pure — the whole stage-3 decision in one predicate.
+///
+/// `true`  → the on-disk file stays indexed via that other generation, so this
+///           stale one can go.
+/// `false` → nothing else serves the path: preserving is correct (the
+///           mislabeled-corpus case guards 1-4 exist for).
+pub(crate) fn covered_by_other_live_generation(
+    live_generations: Option<&Vec<i64>>,
+    this_file_id: i64,
+) -> bool {
+    live_generations.is_some_and(|gens| gens.iter().any(|&f| f != this_file_id))
 }
 
 /// Prune orphaned-branch documents for all active projects.
@@ -119,6 +174,7 @@ pub async fn prune_orphaned_branches(
             Ok(stats) => {
                 totals.branches_pruned += stats.branches_pruned;
                 totals.files_enqueued += stats.files_enqueued;
+                totals.files_covered += stats.files_covered;
             }
             Err(e) => warn!("[branch_prune] reconciliation failed for {tenant_id}: {e}"),
         }
@@ -126,8 +182,12 @@ pub async fn prune_orphaned_branches(
 
     if totals.has_changes() {
         info!(
-            "[branch_prune] Pruned {} orphaned branch(es), enqueued {} file delete(s)",
-            totals.branches_pruned, totals.files_enqueued
+            "[branch_prune] Pruned {} orphaned branch(es), enqueued {} file delete(s) \
+             ({} covered by a live generation — stage 3 candidates, policy={})",
+            totals.branches_pruned,
+            totals.files_enqueued,
+            totals.files_covered,
+            std::env::var("WQM_BRANCH_PRUNE_COVERED_DELETE").unwrap_or_else(|_| "dry".into()),
         );
     }
     Ok(totals)
@@ -201,6 +261,11 @@ async fn prune_project_branches(
         .max_by_key(|(_, n)| *n)
         .map(|(b, _)| b.as_str());
 
+    // Which paths are still served by a generation on a LIVE branch (stage 3).
+    // Computed once per project, here, because this is the only place holding
+    // the git live set.
+    let live_generations = live_generations_by_path(pool, watch_id, &live).await?;
+
     let mut stats = BranchPruneStats::default();
     for (branch, _count) in &counts {
         if live.contains(branch) {
@@ -224,19 +289,68 @@ async fn prune_project_branches(
             continue;
         }
 
-        let enqueued =
-            enqueue_branch_deletes(pool, queue_manager, watch_id, tenant_id, branch.as_str())
-                .await?;
-        if enqueued > 0 {
+        let enqueued = enqueue_branch_deletes(
+            pool,
+            queue_manager,
+            watch_id,
+            tenant_id,
+            branch.as_str(),
+            &live_generations,
+        )
+        .await?;
+        if enqueued.total > 0 {
             info!(
                 "[branch_prune] {tenant_id} — branch '{branch}' no longer in git; \
-                 enqueued {enqueued} file delete(s)"
+                 enqueued {} file delete(s) ({} covered by a live generation)",
+                enqueued.total, enqueued.covered
             );
             stats.branches_pruned += 1;
-            stats.files_enqueued += enqueued;
+            stats.files_enqueued += enqueued.total;
+            stats.files_covered += enqueued.covered;
         }
     }
     Ok(stats)
+}
+
+/// For each `relative_path` in this watch folder, the `file_id`s of the
+/// generations that carry at least one LIVE branch tag.
+///
+/// One query per project at startup (a few thousand rows on a large repo) —
+/// the map answers "is this path still served by another generation?" for every
+/// delete this module enqueues, without a per-file query. Rows with an
+/// unparsable `branches` value are treated as carrying nothing: they can never
+/// COVER another generation (a fail-closed default — the worst case is
+/// preserving a stale row, never deleting a live one).
+async fn live_generations_by_path(
+    pool: &SqlitePool,
+    watch_id: &str,
+    live: &HashSet<String>,
+) -> Result<HashMap<String, Vec<i64>>, String> {
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT file_id, relative_path, branches FROM tracked_files WHERE watch_folder_id = ?1",
+    )
+    .bind(watch_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("query generations: {e}"))?;
+
+    let mut map: HashMap<String, Vec<i64>> = HashMap::new();
+    for (file_id, relative_path, branches_json) in rows {
+        let branches: Vec<String> = serde_json::from_str(&branches_json).unwrap_or_default();
+        if branches.iter().any(|b| live.contains(b.as_str())) {
+            map.entry(relative_path).or_default().push(file_id);
+        }
+    }
+    Ok(map)
+}
+
+/// Enqueue tally for one pruned branch.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct EnqueueTally {
+    /// All `file|delete` items enqueued for the branch.
+    total: u64,
+    /// Of those, the ones stamped `covered_by_live_generation` (stage 3).
+    covered: u64,
 }
 
 /// Enqueue a `file|delete` for every tracked file on `branch`.
@@ -251,9 +365,10 @@ async fn enqueue_branch_deletes(
     watch_id: &str,
     tenant_id: &str,
     branch: &str,
-) -> Result<u64, String> {
-    let paths: Vec<String> = sqlx::query_scalar(
-        "SELECT relative_path FROM tracked_files \
+    live_generations: &HashMap<String, Vec<i64>>,
+) -> Result<EnqueueTally, String> {
+    let files: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT file_id, relative_path FROM tracked_files \
          WHERE watch_folder_id = ?1 \
            AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?2)",
     )
@@ -263,8 +378,8 @@ async fn enqueue_branch_deletes(
     .await
     .map_err(|e| format!("query branch files: {e}"))?;
 
-    let mut count = 0u64;
-    for rel in paths {
+    let mut tally = EnqueueTally::default();
+    for (file_id, rel) in files {
         let rel_path = match RelativePath::from_user_input(&rel) {
             Ok(r) => r,
             Err(e) => {
@@ -282,6 +397,18 @@ async fn enqueue_branch_deletes(
         let payload_json =
             serde_json::to_string(&payload).map_err(|e| format!("serialize FilePayload: {e}"))?;
 
+        // Stage 3: tell the delete side whether another generation on a live
+        // branch still serves this path. Only that fact distinguishes a stale
+        // Layer-2 generation from the mislabeled corpus the preserve guard
+        // protects. The `branches`-set arithmetic itself stays on the delete
+        // side (it re-reads the row under its own transaction).
+        let covered = covered_by_other_live_generation(live_generations.get(&rel), file_id);
+        let metadata = if covered {
+            BRANCH_PRUNE_COVERED_DELETE_METADATA
+        } else {
+            BRANCH_PRUNE_DELETE_METADATA
+        };
+
         match queue_manager
             .enqueue_unified(
                 ItemType::File,
@@ -290,13 +417,18 @@ async fn enqueue_branch_deletes(
                 "projects",
                 &payload_json,
                 Some(branch),
-                Some(BRANCH_PRUNE_DELETE_METADATA),
+                Some(metadata),
             )
             .await
         {
-            Ok(_) => count += 1,
+            Ok(_) => {
+                tally.total += 1;
+                if covered {
+                    tally.covered += 1;
+                }
+            }
             Err(e) => warn!("[branch_prune] enqueue delete failed for {rel}: {e}"),
         }
     }
-    Ok(count)
+    Ok(tally)
 }
