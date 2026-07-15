@@ -31,12 +31,15 @@
 //!
 //! ## What it does
 //!
-//! For each base_point the authority marks with 2+ branches (single-branch files
-//! were ingested on that branch and already carry it — filtering to 2+ targets
-//! the cross-branch/shared base_points where inverse-drift lives, and keeps the
-//! per-base_point Qdrant read off the common case), it reads the live Qdrant
-//! `branch` set and, if the authority holds branches Qdrant lacks, merges them in
-//! via the daemon-owned `merge_branches_into_base_point`. ADDITIVE ONLY — it
+//! For EVERY tracked file with a usable authority it merges missing branches
+//! into search.db `file_metadata.branches` (one cheap indexed SELECT each —
+//! including single-branch files, which is what heals a corrupt/`[]` set).
+//! For base_points the authority marks with 2+ branches — the only shape where
+//! Qdrant-side inverse drift can exist, since a single-branch file was ingested
+//! on that branch and already carries the tag — it additionally reads the live
+//! Qdrant `branch` set and, if the authority holds branches Qdrant lacks,
+//! merges them in via the daemon-owned `merge_branches_into_base_point`.
+//! ADDITIVE ONLY — it
 //! never removes a tag (the forward-drift #224 direction, Qdrant-tagged-but-no-
 //! row, is untouched) — and idempotent (a synced base_point is a no-op). A
 //! base_point with zero live points is skipped: that is a missing-points /
@@ -152,10 +155,16 @@ impl MaintenanceTask for BranchReconcileTask {
             };
             // search.db side first: keyed directly by file_id, independent of
             // Qdrant state (a base_point with zero live points still deserves
-            // a correct FTS branch filter).
+            // a correct FTS branch filter). Runs for EVERY candidate, including
+            // single-branch files (heals corrupt/`[]` branch sets).
             self.reconcile_file_metadata(ctx, *file_id, &authority).await;
-            self.reconcile_base_point(ctx, base_point, &authority, collection)
-                .await;
+            // The Qdrant read is the expensive half — only 2+-branch
+            // authorities can hold inverse drift there (a single-branch file
+            // was ingested on that branch and already carries the tag).
+            if authority.len() >= 2 {
+                self.reconcile_base_point(ctx, base_point, &authority, collection)
+                    .await;
+            }
         }
 
         self.cursor = next_cursor;
@@ -304,11 +313,16 @@ fn missing_branches(authority: &[String], qdrant: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Fetch the next batch of base_points whose authority marks them with 2+
-/// branches, strictly after `after_file_id` (keyset pagination — same rationale
-/// as [`super::orphan_cleanup::fetch_cleanup_batch`]). Single-branch files are
-/// excluded: they were ingested on that branch and already carry it, so they are
-/// not inverse-drift candidates and would only cost a redundant Qdrant read.
+/// Fetch the next batch of tracked files with a usable authority, strictly
+/// after `after_file_id` (keyset pagination — same rationale as
+/// [`super::orphan_cleanup::fetch_cleanup_batch`]).
+///
+/// Includes single-branch files: the search.db `file_metadata` repair covers
+/// them too (one cheap indexed SELECT each — this is what heals a corrupt/`[]`
+/// branches set on a file that only ever lived on one branch). The EXPENSIVE
+/// per-base_point Qdrant read stays gated to 2+-branch authorities in
+/// `run_batch` — a single-branch file was ingested on that branch and its
+/// Qdrant payload already carries it, so the read would be redundant.
 async fn fetch_candidate_batch(
     pool: &sqlx::SqlitePool,
     after_file_id: i64,
@@ -321,7 +335,6 @@ async fn fetch_candidate_batch(
            AND base_point IS NOT NULL
            AND branches IS NOT NULL
            AND collection IS NOT NULL
-           AND json_array_length(branches) >= 2
          ORDER BY file_id
          LIMIT ?2",
     )
@@ -435,11 +448,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn candidate_batch_only_returns_multi_branch_files() {
+    async fn candidate_batch_includes_single_branch_files() {
         let pool = test_pool().await;
-        // A single-branch file (branches=["main"]) — NOT a candidate.
-        seed_file(&pool, 1, true, true).await;
-        // A file the authority marks on two branches — the candidate.
+        // Single-branch file: a candidate for the search.db file_metadata
+        // repair (the Qdrant read is gated separately in run_batch on 2+).
+        let single = seed_file(&pool, 1, true, true).await;
+        // Multi-branch file: candidate for BOTH repairs.
         let multi = seed_file(&pool, 2, true, true).await;
         sqlx::query("UPDATE tracked_files SET branches = ?1 WHERE file_id = ?2")
             .bind(r#"["main","fix/x"]"#)
@@ -450,8 +464,12 @@ mod tests {
 
         let batch = fetch_candidate_batch(&pool, 0, 100).await.unwrap();
         let ids: Vec<i64> = batch.iter().map(|r| r.0).collect();
-        assert_eq!(ids, vec![multi], "only the 2+-branch file is a candidate");
-        // And the returned branches JSON is the multi-branch one.
-        assert_eq!(batch[0].2, r#"["main","fix/x"]"#);
+        assert_eq!(
+            ids,
+            vec![single, multi],
+            "single-branch files are candidates too (fm-side repair)"
+        );
+        let multi_row = batch.iter().find(|r| r.0 == multi).unwrap();
+        assert_eq!(multi_row.2, r#"["main","fix/x"]"#);
     }
 }

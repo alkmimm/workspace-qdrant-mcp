@@ -5,8 +5,13 @@
  * within the 300-line file-size limit.
  */
 
+import { randomUUID } from 'node:crypto';
+
 import type { SessionState } from './server-types.js';
 import { logToolCall } from './utils/logger.js';
+import { SERVER_VERSION as MCP_SERVER_VERSION } from './server-types.js';
+import type { DaemonClient } from './clients/daemon-client.js';
+import { finishToolEvent, logSearchEvent } from './clients/search-event-queries.js';
 import type { ServerComponents } from './server-factory.js';
 import {
   buildSearchOptions,
@@ -48,6 +53,76 @@ export const KNOWN_TOOLS = [
   ...mcpPublicConfig.publicTools,
   ...mcpPublicConfig.internalTools,
 ] as const;
+
+/**
+ * Best-effort result_count for a rules/scratchpad response: the length of the
+ * first list-shaped field, else 1 for a successful mutation, else 0.
+ */
+export function countOpResults(result: unknown): number {
+  if (result !== null && typeof result === 'object') {
+    const r = result as Record<string, unknown>;
+    for (const key of ['rules', 'entries', 'results']) {
+      const v = r[key];
+      if (Array.isArray(v)) return v.length;
+    }
+    if (r['success'] === true) return 1;
+  }
+  return 0;
+}
+
+/**
+ * Instrument a rules/scratchpad call with the same `search_events` records the
+ * read tools emit (`op` = tool name, `query_text` = the action).
+ *
+ * Field feedback 2026-07-15: reported "rules timeouts" were invisible in
+ * telemetry because these tools logged NO events at all — the investigation
+ * only closed thanks to the JSONL tool-call logs. Latency, outcome and
+ * result_count now land in the same queryable store as search/grep/exact/list
+ * (CLAUDE.md shared-behavior rule). Fire-and-forget on both sides; an
+ * instrumentation failure never breaks the tool call.
+ */
+async function withOpEvent(
+  daemonClient: DaemonClient,
+  op: 'rules' | 'scratchpad',
+  args: Record<string, unknown> | undefined,
+  run: () => Promise<unknown>
+): Promise<unknown> {
+  const eventId = randomUUID();
+  const startTime = Date.now();
+  logSearchEvent(daemonClient, {
+    id: eventId,
+    actor: 'claude',
+    tool: 'mcp_qdrant',
+    op,
+    queryText: typeof args?.['action'] === 'string' ? (args['action'] as string) : undefined,
+    projectId: typeof args?.['projectId'] === 'string' ? (args['projectId'] as string) : undefined,
+  });
+  try {
+    const result = await run();
+    const bytesOut = JSON.stringify(result)?.length ?? 0;
+    finishToolEvent(daemonClient, eventId, {
+      resultCount: countOpResults(result),
+      latencyMs: Date.now() - startTime,
+      // No "what the agent would have paid instead" notion for these ops —
+      // floor bytesIn at bytesOut so the token_savings view never counts
+      // fabricated savings (same floor rule as computeGrepEconomy).
+      bytesIn: bytesOut,
+      bytesOut,
+      toolVersion: MCP_SERVER_VERSION,
+    });
+    return result;
+  } catch (error) {
+    finishToolEvent(daemonClient, eventId, {
+      resultCount: 0,
+      latencyMs: Date.now() - startTime,
+      bytesIn: 0,
+      bytesOut: 0,
+      toolVersion: MCP_SERVER_VERSION,
+      outcome: 'error',
+    });
+    throw error;
+  }
+}
 
 /** Dispatch the 'store' tool subtypes. */
 async function dispatchStore(
@@ -118,11 +193,15 @@ export async function routeTool(
     case 'retrieve':
       return retrieveTool.retrieve(buildRetrieveOptions(args));
     case 'rules':
-      return rulesTool.execute(buildRuleOptions(args));
+      return withOpEvent(daemonClient, 'rules', args, () =>
+        rulesTool.execute(buildRuleOptions(args))
+      );
     case 'store':
       return dispatchStore(args, components, sessionState);
     case 'scratchpad':
-      return components.scratchpadTool.execute(buildScratchpadOptions(args));
+      return withOpEvent(daemonClient, 'scratchpad', args, () =>
+        components.scratchpadTool.execute(buildScratchpadOptions(args))
+      );
     case 'grep':
       return grepTool.grep(buildGrepOptions(args));
     case 'list':
