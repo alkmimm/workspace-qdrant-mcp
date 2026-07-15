@@ -5,6 +5,7 @@
 //! reconciliation.
 
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use sqlx::SqlitePool;
@@ -17,6 +18,44 @@ use crate::tracked_files_schema;
 use crate::tree_sitter::detect_language;
 use crate::unified_queue_processor::{UnifiedProcessorError, UnifiedProcessorResult};
 use crate::unified_queue_schema::UnifiedQueueItem;
+
+/// What to do with a branch-prune delete whose target generation is COVERED by
+/// another generation on a live branch (issue #224 stage 3).
+///
+/// Set via `WQM_BRANCH_PRUNE_COVERED_DELETE`:
+/// * `off` — never delete a covered generation (pre-stage-3 behaviour).
+/// * `dry` — **default**: log what WOULD be deleted, mutate nothing.
+/// * `on`  — delete covered stale generations.
+///
+/// Default `dry` because this is the only deletion-capable half of #224: the
+/// numbers get reviewed on a live cycle before anything is removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoveredDeletePolicy {
+    Off,
+    Dry,
+    On,
+}
+
+/// Parse the policy from the env value. Pure (unit-tested); unknown/absent
+/// values fall back to `Dry` — an unreadable knob must never start deleting.
+pub(crate) fn parse_covered_delete_policy(raw: Option<&str>) -> CoveredDeletePolicy {
+    match raw.map(str::trim) {
+        Some("on") => CoveredDeletePolicy::On,
+        Some("off") => CoveredDeletePolicy::Off,
+        _ => CoveredDeletePolicy::Dry,
+    }
+}
+
+/// Cached read of `WQM_BRANCH_PRUNE_COVERED_DELETE` (env is process-stable).
+fn covered_delete_policy() -> CoveredDeletePolicy {
+    static POLICY: OnceLock<CoveredDeletePolicy> = OnceLock::new();
+    *POLICY.get_or_init(|| {
+        let raw = std::env::var("WQM_BRANCH_PRUNE_COVERED_DELETE").ok();
+        let policy = parse_covered_delete_policy(raw.as_deref());
+        info!("[stage3] covered-generation delete policy: {:?}", policy);
+        policy
+    })
+}
 
 /// Process file delete operation with tracked_files awareness (Task 506 + Task 519).
 ///
@@ -150,16 +189,36 @@ pub(super) async fn delete_tracked_file(
     // an ignore-rule exclusion (`is_ignore_excluded_delete`) wants the now-ignored
     // file gone from the index entirely, so it must fall through and delete even
     // its last tag.
+    // Stage 3 (#224) refines this guard with the fact it always lacked: is the
+    // on-disk file served by ANOTHER generation on a live branch? The Layer-2
+    // model keeps one row per distinct cross-branch content, so a path routinely
+    // has several generations and only the live-tagged one answers reads. When
+    // `covered_by_live_generation` is stamped, this row is stale debris — the
+    // file stays indexed via the covering generation, so preserving it just
+    // keeps dead weight AND re-enqueues the same no-op delete every startup
+    // (measured 2026-07-15: 1,034 preserves per boot). Without the flag the
+    // original protection stands unchanged.
+    let covered = is_covered_by_live_generation(item);
     if r_new_empty
         && delete_target_still_exists(Path::new(abs_file_path))
         && is_branch_prune_delete(item)
+        && !(covered && covered_delete_policy() == CoveredDeletePolicy::On)
     {
-        info!(
-            "Preserving index for '{}': pruned branch '{}' is its only tag but the \
-             file is still on disk (mislabeled, not deleted) — leaving entry for \
-             reconciliation to re-tag",
-            relative_path, item.branch
-        );
+        if covered && covered_delete_policy() == CoveredDeletePolicy::Dry {
+            debug!(
+                "[stage3-dry] WOULD delete stale generation of '{}' (file_id={}, pruned \
+                 branch '{}' is its only tag; another live generation serves the file) — \
+                 set WQM_BRANCH_PRUNE_COVERED_DELETE=on to enable",
+                relative_path, existing.file_id, item.branch
+            );
+        } else {
+            info!(
+                "Preserving index for '{}': pruned branch '{}' is its only tag but the \
+                 file is still on disk (mislabeled, not deleted) — leaving entry for \
+                 reconciliation to re-tag",
+                relative_path, item.branch
+            );
+        }
         return Ok(());
     }
 
@@ -242,16 +301,32 @@ pub(super) async fn delete_tracked_file(
     }
 
     if row_deleted {
-        // Content fully gone for this watch folder — purge FTS5, graph, keywords.
+        // Content fully gone for this ROW — purge FTS5 (keyed by file_id, so it
+        // only touches this generation's code_lines).
         let t0 = Instant::now();
         cleanup_fts5(ctx, existing).await;
         timings.push(PhaseTiming {
             phase: "fts5_cleanup",
             duration_ms: t0.elapsed().as_millis() as u64,
         });
-        super::graph_ingest::delete_graph_edges(ctx, &item.tenant_id, relative_path).await;
-        let doc_id = crate::generate_document_id(&item.tenant_id, abs_file_path);
-        super::keyword_persist::delete_extraction(pool, &doc_id).await;
+        // Graph edges and keyword extractions are keyed by (tenant, PATH), not by
+        // file_id — they describe the file, not one content generation. When
+        // another live generation still serves this path (stage 3 covered
+        // delete), purging them here would wipe the graph/keywords of a file that
+        // remains fully indexed — the #235/#245 "edges wiped, never rebuilt"
+        // failure mode, self-inflicted. Only the last generation of a path may
+        // clear them.
+        if covered {
+            debug!(
+                "[stage3] '{}' — keeping graph edges + keyword extraction: path still \
+                 served by another live generation (path-keyed, not per-generation)",
+                relative_path
+            );
+        } else {
+            super::graph_ingest::delete_graph_edges(ctx, &item.tenant_id, relative_path).await;
+            let doc_id = crate::generate_document_id(&item.tenant_id, abs_file_path);
+            super::keyword_persist::delete_extraction(pool, &doc_id).await;
+        }
     } else {
         // Branch removed but content remains — drop the branch from FTS5 metadata
         // so `grep` on this branch no longer matches, keeping code_lines for the
@@ -435,6 +510,30 @@ fn is_branch_prune_delete(item: &UnifiedQueueItem) -> bool {
     value.get("reason").and_then(|r| r.as_str()) == Some(BRANCH_PRUNE_REASON)
 }
 
+/// True when branch pruning stamped `covered_by_live_generation` on this delete
+/// (issue #224 stage 3): another generation of the same path carries a live
+/// branch, so this row is stale Layer-2 debris rather than a mislabeled corpus.
+///
+/// Computed at enqueue time (only the reconciler holds the git live set) — see
+/// `branch_prune::BRANCH_PRUNE_COVERED_DELETE_METADATA`. Absent, malformed, or
+/// non-prune metadata → `false`: every unknown shape keeps the conservative
+/// preserve behaviour, including deletes queued before this flag existed.
+fn is_covered_by_live_generation(item: &UnifiedQueueItem) -> bool {
+    if !is_branch_prune_delete(item) {
+        return false;
+    }
+    let Some(meta) = item.metadata.as_deref() else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(meta) else {
+        return false;
+    };
+    value
+        .get("covered_by_live_generation")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// True when this `file|delete` was enqueued by ignore-rule reconciliation
 /// (`ignore_sync`) because the file is now excluded by a `.wqmignore` rule yet is
 /// still on disk. Identified by the `reason` field in the **payload** (where
@@ -562,7 +661,8 @@ pub(super) async fn handle_qdrant_failure(
 mod tests {
     use super::{
         bypasses_on_disk_skip, delete_target_still_exists, is_branch_prune_delete,
-        is_ignore_excluded_delete, would_remove_last_tag,
+        is_covered_by_live_generation, is_ignore_excluded_delete, parse_covered_delete_policy,
+        would_remove_last_tag, CoveredDeletePolicy,
     };
     use crate::unified_queue_schema::{ItemType, QueueOperation, QueueStatus, UnifiedQueueItem};
 
@@ -669,5 +769,69 @@ mod tests {
         other.payload_json =
             r#"{"file_path":"src/a.ts","reason":"something_else"}"#.to_string();
         assert!(!is_ignore_excluded_delete(&other));
+    }
+
+    // ── Stage 3 (#224): covered-generation deletes ────────────────────────
+
+    #[test]
+    fn covered_flag_read_only_from_a_prune_delete_with_the_flag_set() {
+        use crate::startup::reconciliation::branch_prune::{
+            BRANCH_PRUNE_COVERED_DELETE_METADATA, BRANCH_PRUNE_DELETE_METADATA,
+        };
+
+        // The exact marker branch_prune stamps for a covered generation.
+        assert!(is_covered_by_live_generation(&delete_item_with_metadata(
+            Some(BRANCH_PRUNE_COVERED_DELETE_METADATA)
+        )));
+
+        // A plain prune delete (uncovered) keeps the preserve behaviour.
+        assert!(!is_covered_by_live_generation(&delete_item_with_metadata(
+            Some(BRANCH_PRUNE_DELETE_METADATA)
+        )));
+        // Explicit false is honoured.
+        assert!(!is_covered_by_live_generation(&delete_item_with_metadata(
+            Some(r#"{"reason":"branch_prune","covered_by_live_generation":false}"#)
+        )));
+        // The flag must NOT be honoured on a non-prune delete — a watcher event
+        // carrying it (or a forged one) must never bypass the guard.
+        assert!(!is_covered_by_live_generation(&delete_item_with_metadata(
+            Some(r#"{"reason":"watcher","covered_by_live_generation":true}"#)
+        )));
+        // Absent / malformed / wrong-typed metadata → conservative false.
+        assert!(!is_covered_by_live_generation(&delete_item_with_metadata(
+            None
+        )));
+        assert!(!is_covered_by_live_generation(&delete_item_with_metadata(
+            Some("not json")
+        )));
+        assert!(!is_covered_by_live_generation(&delete_item_with_metadata(
+            Some(r#"{"reason":"branch_prune","covered_by_live_generation":"yes"}"#)
+        )));
+    }
+
+    #[test]
+    fn covered_delete_policy_defaults_to_dry_for_anything_unknown() {
+        assert_eq!(parse_covered_delete_policy(Some("on")), CoveredDeletePolicy::On);
+        assert_eq!(
+            parse_covered_delete_policy(Some("off")),
+            CoveredDeletePolicy::Off
+        );
+        assert_eq!(
+            parse_covered_delete_policy(Some(" on ")),
+            CoveredDeletePolicy::On,
+            "surrounding whitespace from a .env line must not silently disable the knob"
+        );
+        // Unset, empty, typo'd, or wrong-cased → dry. Deleting data must require
+        // an exact, deliberate opt-in.
+        assert_eq!(parse_covered_delete_policy(None), CoveredDeletePolicy::Dry);
+        assert_eq!(parse_covered_delete_policy(Some("")), CoveredDeletePolicy::Dry);
+        assert_eq!(
+            parse_covered_delete_policy(Some("ON")),
+            CoveredDeletePolicy::Dry
+        );
+        assert_eq!(
+            parse_covered_delete_policy(Some("true")),
+            CoveredDeletePolicy::Dry
+        );
     }
 }
