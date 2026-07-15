@@ -8,7 +8,16 @@
 //! CHECK once to every tool that logs (or self-logs) an event, so adding
 //! telemetry never needs another rebuild unless a genuinely NEW tool ships.
 //!
-//! Same rebuild recipe as v47 (SQLite cannot ALTER a CHECK in place).
+//! Same rebuild recipe as v47 (SQLite cannot ALTER a CHECK in place) — plus
+//! the lesson v47 taught in production: `ALTER TABLE ... RENAME` REWRITES
+//! view definitions to follow the renamed table (`PRAGMA legacy_alter_table`
+//! is per-connection and the pool ran the ALTER on a different connection),
+//! so v47 left `search_behavior` dangling on `search_events_v47_old` and the
+//! first v48 attempt crashed the daemon at startup (and, being
+//! non-transactional, dropped `token_savings` before failing). EVERY view
+//! over search_events must therefore be dropped BEFORE the rename and
+//! recreated from its canonical constant after — this migration handles both
+//! the healthy and the half-broken (dangling/missing views) starting states.
 //! Idempotent via the `'workspace_index'` literal, which appears only in the
 //! widened CHECK.
 
@@ -47,7 +56,15 @@ impl Migration for V48Migration {
             return Ok(());
         }
 
+        // Drop EVERY view over search_events before touching the table — the
+        // rename would rewrite their definitions to the temp name and leave
+        // them dangling once it is dropped (the v47 production incident).
+        // IF EXISTS keeps this tolerant of the half-broken state that
+        // incident left behind (token_savings already gone).
         sqlx::query("DROP VIEW IF EXISTS token_savings")
+            .execute(pool)
+            .await?;
+        sqlx::query("DROP VIEW IF EXISTS search_behavior")
             .execute(pool)
             .await?;
         sqlx::query("PRAGMA foreign_keys = OFF")
@@ -122,6 +139,7 @@ impl Migration for V48Migration {
         }
         use crate::schema_version::v38::CREATE_SESSION_TOOL_TS_INDEX_SQL;
         use crate::schema_version::v44::CREATE_PARENT_EVENT_ID_INDEX_SQL;
+        use crate::schema_version::v45::CREATE_SEARCH_BEHAVIOR_VIEW_V45_SQL;
         use crate::schema_version::v46::CREATE_TOKEN_SAVINGS_VIEW_V46_SQL;
         sqlx::query(CREATE_SESSION_TOOL_TS_INDEX_SQL)
             .execute(pool)
@@ -130,6 +148,9 @@ impl Migration for V48Migration {
             .execute(pool)
             .await?;
         sqlx::query(CREATE_TOKEN_SAVINGS_VIEW_V46_SQL)
+            .execute(pool)
+            .await?;
+        sqlx::query(CREATE_SEARCH_BEHAVIOR_VIEW_V45_SQL)
             .execute(pool)
             .await?;
 
@@ -239,6 +260,50 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("post-v48 should accept op='{}': {}", op, e));
         }
+    }
+
+    /// The exact production starting state the first v48 attempt crashed on:
+    /// `search_behavior` dangling on `search_events_v47_old` (v47's rename
+    /// rewrote it) and `token_savings` already dropped (the failed attempt
+    /// was non-transactional). v48 must complete and recreate BOTH views.
+    #[tokio::test]
+    async fn v48_heals_the_dangling_view_state_from_the_v47_incident() {
+        let pool = fresh_pool().await;
+        setup_pre_v48(&pool).await;
+        // Dangling view: references a table that does not exist.
+        sqlx::query(
+            "CREATE VIEW search_behavior AS SELECT session_id FROM search_events_v47_old",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // (no token_savings view — dropped by the failed first attempt)
+
+        V48Migration.up(&pool).await.unwrap();
+
+        for view in ["token_savings", "search_behavior"] {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='view' AND name=?1)",
+            )
+            .bind(view)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(exists, "v48 must recreate view {}", view);
+        }
+        // The recreated search_behavior must be QUERYABLE (not dangling).
+        sqlx::query("SELECT * FROM search_behavior LIMIT 1")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+        // And the widened CHECK is in place.
+        sqlx::query(
+            "INSERT INTO search_events (id, actor, tool, op, ts) \
+             VALUES ('g', 'claude', 'mcp_qdrant', 'graph', '2026-07-15T00:00:00.000Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

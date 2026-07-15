@@ -54,7 +54,18 @@ impl Migration for V47Migration {
 
         // Same pool-per-statement rebuild as v39 (avoids the in-memory-DB
         // stale-schema quirk with a separately acquired connection).
+        //
+        // EVERY view over search_events must be dropped before the rename:
+        // `ALTER TABLE ... RENAME` rewrites view definitions to follow the
+        // renamed table (`PRAGMA legacy_alter_table` is per-connection, and
+        // the pool may run the ALTER elsewhere). The first cut dropped only
+        // token_savings and left `search_behavior` dangling on the temp name
+        // — which crashed the daemon at the NEXT schema touch (v48, in
+        // production). Recreated from the canonical v45 constant below.
         sqlx::query("DROP VIEW IF EXISTS token_savings")
+            .execute(pool)
+            .await?;
+        sqlx::query("DROP VIEW IF EXISTS search_behavior")
             .execute(pool)
             .await?;
         sqlx::query("PRAGMA foreign_keys = OFF")
@@ -136,6 +147,7 @@ impl Migration for V47Migration {
         }
         use crate::schema_version::v38::CREATE_SESSION_TOOL_TS_INDEX_SQL;
         use crate::schema_version::v44::CREATE_PARENT_EVENT_ID_INDEX_SQL;
+        use crate::schema_version::v45::CREATE_SEARCH_BEHAVIOR_VIEW_V45_SQL;
         use crate::schema_version::v46::CREATE_TOKEN_SAVINGS_VIEW_V46_SQL;
         sqlx::query(CREATE_SESSION_TOOL_TS_INDEX_SQL)
             .execute(pool)
@@ -144,6 +156,9 @@ impl Migration for V47Migration {
             .execute(pool)
             .await?;
         sqlx::query(CREATE_TOKEN_SAVINGS_VIEW_V46_SQL)
+            .execute(pool)
+            .await?;
+        sqlx::query(CREATE_SEARCH_BEHAVIOR_VIEW_V45_SQL)
             .execute(pool)
             .await?;
 
