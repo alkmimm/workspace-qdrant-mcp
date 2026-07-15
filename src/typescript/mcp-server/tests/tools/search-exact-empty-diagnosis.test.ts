@@ -39,7 +39,7 @@ function makeProjectDetector(projectId: string | undefined): ProjectDetector {
 }
 
 function makeDaemon(
-  impl: (req: { branch?: string; path_glob?: string }) => Promise<unknown>
+  impl: (req: { branch?: string; path_glob?: string; case_sensitive?: boolean }) => Promise<unknown>
 ): DaemonClient {
   return {
     textSearch: vi.fn().mockImplementation(impl),
@@ -167,6 +167,30 @@ describe('searchExact — empty-result diagnosis', () => {
     expect(res.results).toHaveLength(0);
     expect(res.hint).not.toMatch(/0 files indexed under its own name/i);
     expect(res.hint).toMatch(/scope:"all"/i);
+  });
+
+  it('surfaces case-INSENSITIVE matches and points at grep (exact has no case knob)', async () => {
+    // Parity with grep's camelCase-trap probe: "declineReason" is absent
+    // case-sensitively but lives inside `getDeclineReason`.
+    const CAMEL = { ...MATCH, content: 'public String getDeclineReason() {' };
+    const daemon = makeDaemon((req) =>
+      req.case_sensitive === false
+        ? Promise.resolve({ matches: [CAMEL], total_matches: 1, truncated: false })
+        : Promise.resolve({ matches: [], total_matches: 0, truncated: false })
+    );
+    const res = await searchExact(
+      makeQdrant(),
+      daemon,
+      makeStateManager(),
+      makeProjectDetector('p-a'),
+      opts({ query: 'declineReason', branch: 'main' }),
+      'evt-case',
+      makeReader([{ branch: 'main', files: 99 }])
+    );
+    expect(res.results).toHaveLength(0);
+    expect(res.hint).toMatch(/case-INSENSITIVE match/);
+    expect(res.hint).toContain('getDeclineReason');
+    expect(res.hint).toMatch(/grep tool with caseSensitive:false/);
   });
 
   it('does NOT claim "results may be from another branch" when pathExclude emptied the widened set', async () => {

@@ -113,6 +113,41 @@ export function noSemanticMatchUnderPathFilterMessage(
   );
 }
 
+/** Result of the case-insensitivity probe (see {@link EmptyDiagnosisInput}). */
+export interface CaseProbeResult {
+  /** Case-insensitive match count, capped at {@link EMPTY_DIAGNOSIS_PROBE_LIMIT}. */
+  count: number;
+  /** One example hit, so the message can SHOW the casing that was missed. */
+  sample?: { file: string; content: string } | undefined;
+}
+
+/** Cap for the sample line embedded in the case-probe message. */
+const CASE_SAMPLE_MAX_CHARS = 120;
+
+/**
+ * The pattern is absent case-SENSITIVELY but present case-INSENSITIVELY — the
+ * classic camelCase trap: `declineReason` cannot match `getDeclineReason`, so
+ * a case-sensitive zero must not be read as "the symbol does not exist".
+ * Emitted only when the original query ran case-sensitively; shows a sample
+ * hit so the agent sees the actual casing, plus the tool-specific retry knob.
+ */
+export function caseSensitivityMessage(probe: CaseProbeResult, retryHint: string): string {
+  const sampleLine = probe.sample?.content.trim() ?? '';
+  const truncatedSample =
+    sampleLine.length > CASE_SAMPLE_MAX_CHARS
+      ? `${sampleLine.slice(0, CASE_SAMPLE_MAX_CHARS)}…`
+      : sampleLine;
+  const example = probe.sample
+    ? ` — e.g. \`${truncatedSample}\` in ${probe.sample.file}`
+    : '';
+  return (
+    `No case-sensitive matches, but ${withCapMarker(probe.count)} case-INSENSITIVE match(es) ` +
+    `exist (any branch)${example}. CamelCase hides identifiers inside wrappers ` +
+    `(a case-sensitive "declineReason" cannot see "getDeclineReason"), so this zero does NOT ` +
+    `prove the symbol is absent. ${retryHint}`
+  );
+}
+
 /**
  * The requested branch has 0 files listed under its own name in the index. This
  * is a soft signal, not a verdict: it usually means a freshly created /
@@ -155,10 +190,26 @@ export interface EmptyDiagnosisInput {
    * probe (1b); (1a) shape and (2) branch are identical either way.
    */
   mode?: 'literal' | 'semantic';
+  /**
+   * Case probe: re-run the SAME pattern and path filters case-INSENSITIVELY
+   * across ALL branches (the callers' auto-widen already proved the
+   * case-sensitive form is absent everywhere, so flipping only case isolates
+   * it as the cause) and return the count plus a sample hit. Supply it ONLY
+   * when the original query ran case-sensitively (grep's default / exact
+   * always); omit for `caseSensitive:false` calls and for semantic mode,
+   * where there is no case dimension.
+   */
+  probeCaseInsensitive?: () => Promise<CaseProbeResult>;
+  /**
+   * Tool-specific remedy appended to the case-probe message (e.g. grep:
+   * "Retry with caseSensitive:false."; exact search has no case knob and
+   * points at grep instead).
+   */
+  caseRetryHint?: string;
 }
 
 /**
- * Diagnose a still-empty project-scoped FTS result. Two cheap probes, most
+ * Diagnose a still-empty project-scoped FTS result. Three cheap probes, most
  * specific first:
  *   1. **A path filter is responsible** — only when `pathGlob`/`pathExclude` is
  *      set and the unfiltered scope has hits. This splits into two verdicts by a
@@ -170,9 +221,15 @@ export interface EmptyDiagnosisInput {
  *            (pattern absent, check casing); semantic mode →
  *            {@link noSemanticMatchUnderPathFilterMessage} (relevance/threshold
  *            miss). Avoids falsely blaming a valid glob (e.g. `*.proto`).
- *   2. **Branch has no indexed content** — only for a concrete branch with a
+ *   2. **Case sensitivity is responsible** — only when the caller supplies the
+ *      case probe (i.e. the query ran case-sensitively) and the same query
+ *      matches case-insensitively → {@link caseSensitivityMessage}. Runs after
+ *      the path probes (a filter that excluded everything is the more specific
+ *      verdict) and before the branch probe (a concrete casing fix beats a
+ *      coverage hint).
+ *   3. **Branch has no indexed content** — only for a concrete branch with a
  *      reader available.
- * Returns `undefined` when neither applies. Best-effort: any probe error is
+ * Returns `undefined` when none applies. Best-effort: any probe error is
  * swallowed so diagnosis never breaks the response.
  */
 export async function diagnoseEmptyResult(input: EmptyDiagnosisInput): Promise<string | undefined> {
@@ -204,7 +261,20 @@ export async function diagnoseEmptyResult(input: EmptyDiagnosisInput): Promise<s
     }
   }
 
-  // (2) Does the requested branch have any indexed content?
+  // (2) Is case sensitivity responsible? Only probed when the caller ran
+  // case-sensitively (the probe closure is absent otherwise).
+  if (input.probeCaseInsensitive) {
+    try {
+      const probe = await input.probeCaseInsensitive();
+      if (probe.count > 0) {
+        return caseSensitivityMessage(probe, input.caseRetryHint ?? 'Retry case-insensitively.');
+      }
+    } catch {
+      // fall through to the branch probe
+    }
+  }
+
+  // (3) Does the requested branch have any indexed content?
   const concreteBranch = concreteBranchFilter(branch);
   if (concreteBranch && searchDbReader) {
     try {

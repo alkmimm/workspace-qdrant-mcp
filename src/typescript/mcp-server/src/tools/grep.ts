@@ -364,7 +364,12 @@ export class GrepTool {
     let tenantId: string | undefined;
     let projectPath: string | undefined;
     if (scope === 'project') {
-      const identity = await resolveProjectIdentity(this.projectDetector, projectId);
+      const identity = await resolveProjectIdentity(
+        this.projectDetector,
+        projectId,
+        true,
+        this.stateManager
+      );
       tenantId = identity.projectId;
       projectPath = identity.projectPath;
       if (!tenantId) {
@@ -744,9 +749,15 @@ export class GrepTool {
   /**
    * Explain a still-empty project-scoped result before falling back to the
    * generic hints, via the shared {@link diagnoseEmptyResult} probes (path
-   * filter excluded everything → branch has no indexed content). The
-   * `countWithoutPathFilter` closure re-runs the same branch scope with NO path
-   * filter (no `pathGlob` sent, no `pathExclude` post-filter).
+   * filter excluded everything → case sensitivity hid it → branch has no
+   * indexed content). The `countWithoutPathFilter` closure re-runs the same
+   * branch scope with NO path filter (no `pathGlob` sent, no `pathExclude`
+   * post-filter). The case probe — supplied only when this grep ran
+   * case-sensitively — re-runs the same pattern and path filters
+   * case-INSENSITIVELY across all branches (the auto-widen already proved the
+   * case-sensitive form absent everywhere), so a camelCase-hidden identifier
+   * (`declineReason` inside `getDeclineReason`) is surfaced instead of read
+   * as "does not exist".
    */
   private async diagnoseEmptyGrep(
     pattern: string,
@@ -779,6 +790,33 @@ export class GrepTool {
         );
         return dedupGrepMatches(mapGrepMatches(resp.matches)).length;
       },
+      ...(caseSensitive
+        ? {
+            probeCaseInsensitive: async () => {
+              const resp = await this.daemonClient.textSearch(
+                buildGrepRequest(
+                  pattern,
+                  regex,
+                  false, // the only knob flipped
+                  0,
+                  EMPTY_DIAGNOSIS_PROBE_LIMIT,
+                  tenantId,
+                  '*', // any branch — case-sensitive was already 0 everywhere
+                  pathGlob
+                )
+              );
+              const matches = dedupGrepMatches(
+                filterGrepMatchesByExclude(mapGrepMatches(resp.matches), pathExclude)
+              );
+              const first = matches[0];
+              return {
+                count: matches.length,
+                ...(first ? { sample: { file: first.file, content: first.content } } : {}),
+              };
+            },
+            caseRetryHint: 'Retry with caseSensitive:false.',
+          }
+        : {}),
     });
   }
 

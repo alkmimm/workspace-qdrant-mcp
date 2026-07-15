@@ -389,7 +389,12 @@ export class RetrieveTool {
     let resolvedProjectId: string | undefined;
     let branchScope: BranchScope = {};
     if (collection === 'projects' || collection === 'scratchpad') {
-      const identity = await resolveProjectIdentity(this.projectDetector, projectId);
+      const identity = await resolveProjectIdentity(
+        this.projectDetector,
+        projectId,
+        true,
+        this.stateManager ?? undefined
+      );
       resolvedProjectId = identity.projectId;
       // Branch scoping applies to project chunks only. Scratchpad notes are
       // branch-agnostic (pinned to "main" at write time), so scoping them to

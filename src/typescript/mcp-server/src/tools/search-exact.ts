@@ -49,13 +49,17 @@ async function resolveExactSearchTenant(
   stateManager: SqliteStateManager
 ): Promise<ExactSearchTenantResolution> {
   if (options.scope === 'all') return { kind: 'unscoped' };
-  const identity = await resolveProjectIdentity(projectDetector, options.projectId);
+  const identity = await resolveProjectIdentity(
+    projectDetector,
+    options.projectId,
+    true,
+    stateManager
+  );
   if (identity.projectId) {
     return {
       kind: 'tenant',
       tenantId: identity.projectId,
-      projectPath:
-        identity.projectPath ?? stateManager.getProjectById(identity.projectId).data?.project_path,
+      projectPath: identity.projectPath,
     };
   }
   return { kind: 'unresolved' };
@@ -112,10 +116,13 @@ function dedupeExactResults(results: SearchResult[]): SearchResult[] {
   return out;
 }
 
-/** Build the text search request from search options. */
+/** Build the text search request from search options. `caseSensitive` is
+ *  always true on the result path (exact search exposes no case knob); the
+ *  empty-result case probe is the only caller that flips it. */
 function buildExactSearchRequest(
   options: SearchOptions,
-  tenantId: string | undefined
+  tenantId: string | undefined,
+  caseSensitive = true
 ): {
   pattern: string;
   regex: boolean;
@@ -138,7 +145,7 @@ function buildExactSearchRequest(
   } = {
     pattern: options.query,
     regex: false,
-    case_sensitive: true,
+    case_sensitive: caseSensitive,
     context_lines: options.contextLines ?? 0,
     max_results: options.limit ?? 100,
   };
@@ -484,6 +491,38 @@ async function executeAndLogSearch(
               // No pathExclude post-filter either — probe the unfiltered scope.
               return dedupeExactResults(mapExactResults(probe.matches, undefined)).length;
             },
+            // Exact search always runs case-sensitively, so the case probe is
+            // always meaningful here: same pattern + path filters, case
+            // flipped, any branch (the auto-widen above already proved the
+            // case-sensitive form absent everywhere).
+            probeCaseInsensitive: async () => {
+              const probeOptions: SearchOptions = {
+                ...options,
+                branch: '*',
+                limit: EMPTY_DIAGNOSIS_PROBE_LIMIT,
+              };
+              const probe = await daemonClient.textSearch(
+                buildExactSearchRequest(probeOptions, tenantId, false)
+              );
+              const deduped = filterResultsByPathExclude(
+                dedupeExactResults(mapExactResults(probe.matches, undefined)),
+                options.pathExclude
+              );
+              const first = deduped[0];
+              return {
+                count: deduped.length,
+                ...(first
+                  ? {
+                      sample: {
+                        file: String(first.metadata['file_path'] ?? first.id),
+                        content: first.content,
+                      },
+                    }
+                  : {}),
+              };
+            },
+            caseRetryHint:
+              'Exact search is always case-sensitive — rerun via the grep tool with caseSensitive:false.',
           })
         : undefined;
     // Branch-widen owns its hint for BOTH sub-cases, so a misleading "results
