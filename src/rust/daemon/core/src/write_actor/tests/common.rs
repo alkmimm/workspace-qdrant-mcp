@@ -80,31 +80,29 @@ async fn setup_project_components_table(pool: &SqlitePool) {
     .unwrap();
 }
 
-/// Create the `search_events` table.
+/// Create the `search_events` table using the PRODUCTION DDL (+ the v38
+/// column ALTERs migrations apply on top).
+///
+/// The first cut of this fixture hand-rolled the columns WITHOUT the
+/// actor/tool/op CHECK constraints — so `exec_log_search_event` tests passed
+/// with op values the LIVE table rejects, and the op='rules' silent
+/// CHECK-violation loss (v47) shipped green. Same trap as the tracked_files
+/// `file_path` fixture (#265): keep this table shaped like the real
+/// migrations, not like what the test would like to exist.
 async fn setup_search_events_table(pool: &SqlitePool) {
-    sqlx::query(
-        "CREATE TABLE search_events (
-            id TEXT PRIMARY KEY,
-            ts TEXT,
-            session_id TEXT,
-            project_id TEXT,
-            actor TEXT,
-            tool TEXT,
-            op TEXT,
-            query_text TEXT,
-            filters TEXT,
-            top_k INTEGER,
-            result_count INTEGER,
-            latency_ms INTEGER,
-            top_result_refs TEXT,
-            outcome TEXT,
-            parent_event_id TEXT,
-            created_at TEXT
-        )",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+    sqlx::query(crate::search_events_schema::CREATE_SEARCH_EVENTS_SQL)
+        .execute(pool)
+        .await
+        .unwrap();
+    for alter in [
+        "ALTER TABLE search_events ADD COLUMN bytes_in INTEGER",
+        "ALTER TABLE search_events ADD COLUMN bytes_out INTEGER",
+        "ALTER TABLE search_events ADD COLUMN hits_truncated INTEGER",
+        "ALTER TABLE search_events ADD COLUMN shape_mode TEXT",
+        "ALTER TABLE search_events ADD COLUMN tool_version TEXT",
+    ] {
+        sqlx::query(alter).execute(pool).await.unwrap();
+    }
 }
 
 /// Create the `rules_mirror` table.
