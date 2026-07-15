@@ -6,8 +6,9 @@
  *   1a. a path filter whose SHAPE selects no indexed file (malformed / too
  *       restrictive),
  *   1b. a well-formed path filter over files that simply don't contain the
- *       pattern (naming/casing, not a broken glob), and
- *   2.  a branch with no indexed content (freshly created / not-yet-indexed).
+ *       pattern (naming/casing, not a broken glob),
+ *   2.  the pattern exists case-INSENSITIVELY (camelCase getter trap), and
+ *   3.  a branch with no indexed content (freshly created / not-yet-indexed).
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -16,6 +17,7 @@ import {
   pathFilterExcludedAllMessage,
   patternAbsentUnderPathFilterMessage,
   branchNotIndexedMessage,
+  caseSensitivityMessage,
 } from '../../src/tools/empty-diagnosis.js';
 import type { DaemonClient } from '../../src/clients/daemon-client.js';
 import type { SqliteStateManager } from '../../src/clients/sqlite-state-manager.js';
@@ -39,7 +41,9 @@ function makeProjectDetector(projectId: string | undefined): ProjectDetector {
 
 /** Daemon whose textSearch is driven by `impl`; all other (instrumentation)
  *  methods resolve to undefined so event logging never throws. */
-function makeDaemon(impl: (req: { branch?: string; path_glob?: string }) => Promise<unknown>): {
+function makeDaemon(
+  impl: (req: { branch?: string; path_glob?: string; case_sensitive?: boolean }) => Promise<unknown>
+): {
   daemon: DaemonClient;
   textSearch: ReturnType<typeof vi.fn>;
 } {
@@ -200,6 +204,76 @@ describe('GrepTool — empty-result diagnosis', () => {
   });
 });
 
+describe('GrepTool — case-insensitivity probe', () => {
+  it('surfaces case-INSENSITIVE matches when the case-sensitive result is empty', async () => {
+    // The field-reported trap: grep "declineReason" (case-sensitive default)
+    // returns 0 because the identifier only exists inside the camelCase getter
+    // `getDeclineReason` — and the zero was then read as "no mapper emits the
+    // field". The diagnosis must surface the case-insensitive hit instead.
+    const CAMEL = {
+      ...MATCH,
+      file_path: '/repo/src/Mapper.java',
+      content: 'public String getDeclineReason() {',
+    };
+    const { daemon, textSearch } = makeDaemon((req) =>
+      req.case_sensitive === false
+        ? Promise.resolve({ matches: [CAMEL], total_matches: 1, truncated: false })
+        : Promise.resolve({ matches: [], total_matches: 0, truncated: false })
+    );
+    const tool = new GrepTool(
+      daemon,
+      makeProjectDetector('project-a'),
+      makeStateManager(),
+      makeReader([{ branch: 'main', files: 145 }])
+    );
+
+    const res = await tool.grep({
+      pattern: 'declineReason',
+      scope: 'project',
+      projectId: 'project-a',
+      branch: 'main',
+    });
+
+    expect(res.matches).toHaveLength(0);
+    expect(res.message).toMatch(/case-INSENSITIVE match/);
+    expect(res.message).toContain('getDeclineReason');
+    expect(res.message).toContain('/repo/src/Mapper.java');
+    expect(res.message).toContain('caseSensitive:false');
+    // Exactly one case-insensitive probe fired, and it dropped the branch
+    // filter (the case-sensitive form was already proven absent everywhere).
+    const probeCalls = textSearch.mock.calls.filter(
+      (c: Array<{ case_sensitive?: boolean; branch?: string }>) => c[0]?.case_sensitive === false
+    );
+    expect(probeCalls).toHaveLength(1);
+    expect(probeCalls[0]?.[0]?.branch).toBeUndefined();
+  });
+
+  it('does not run the case probe when the caller already searched case-insensitively', async () => {
+    const { daemon, textSearch } = makeDaemon(() =>
+      Promise.resolve({ matches: [], total_matches: 0, truncated: false })
+    );
+    const tool = new GrepTool(
+      daemon,
+      makeProjectDetector('project-a'),
+      makeStateManager(),
+      makeReader([{ branch: 'main', files: 145 }])
+    );
+
+    const res = await tool.grep({
+      pattern: 'declinereason',
+      caseSensitive: false,
+      scope: 'project',
+      projectId: 'project-a',
+      branch: 'main',
+    });
+
+    expect(res.matches).toHaveLength(0);
+    expect(res.message).not.toMatch(/case-INSENSITIVE/);
+    // Primary query + auto-widen only — no third probe for case.
+    expect(textSearch.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+});
+
 describe('grep empty-diagnosis message helpers', () => {
   it('pathFilterExcludedAllMessage names both filters and the adjacency rule', () => {
     const msg = pathFilterExcludedAllMessage(50, '**/x.dart', 'old_project/**');
@@ -223,5 +297,18 @@ describe('grep empty-diagnosis message helpers', () => {
   it('branchNotIndexedMessage lists indexed branches (or "(none yet)")', () => {
     expect(branchNotIndexedMessage('feature-x', ['main', 'develop'])).toContain('main, develop');
     expect(branchNotIndexedMessage('feature-x', [])).toContain('(none yet)');
+  });
+
+  it('caseSensitivityMessage embeds count, trimmed sample, file, and the retry knob', () => {
+    const msg = caseSensitivityMessage(
+      { count: 3, sample: { file: '/repo/src/Mapper.java', content: '  getDeclineReason()  ' } },
+      'Retry with caseSensitive:false.'
+    );
+    expect(msg).toContain('3 case-INSENSITIVE match(es)');
+    expect(msg).toContain('`getDeclineReason()`');
+    expect(msg).toContain('/repo/src/Mapper.java');
+    expect(msg).toContain('caseSensitive:false');
+    // Probe-cap marker parity with the other helpers.
+    expect(caseSensitivityMessage({ count: 50 }, 'x')).toContain('50+');
   });
 });

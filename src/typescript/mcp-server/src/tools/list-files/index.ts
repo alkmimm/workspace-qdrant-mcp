@@ -120,7 +120,12 @@ export class ListFilesTool {
 
     const startTime = Date.now();
     const eventId = randomUUID();
-    const identity = await resolveProjectIdentity(this.projectDetector, options.projectId);
+    const identity = await resolveProjectIdentity(
+      this.projectDetector,
+      options.projectId,
+      true,
+      this.stateManager
+    );
     const projectId = identity.projectId;
     if (!projectId) {
       this.logListStart(eventId, basePath, format, limit, options.projectId, options.branch);
@@ -145,8 +150,7 @@ export class ListFilesTool {
       return response;
     }
 
-    const projectPath =
-      this.stateManager.getProjectById(projectId).data?.project_path ?? identity.projectPath ?? null;
+    const projectPath = identity.projectPath ?? null;
     const effectiveBranch = resolveEffectiveBranch({
       explicitBranch: options.branch,
       scope: 'project',

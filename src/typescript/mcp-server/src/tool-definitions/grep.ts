@@ -24,7 +24,8 @@ export const grepToolDefinition = {
       },
       caseSensitive: {
         type: 'boolean',
-        description: 'Case-sensitive matching (default: true)',
+        description:
+          'Case-sensitive matching (default: true). CamelCase hides identifiers inside wrappers — a case-sensitive "declineReason" cannot match "getDeclineReason" — so pass false when hunting an identifier that may appear inside getters/setters (Java/Dart style). A zero-hit case-sensitive search probes case-insensitively and reports in the message when false would have matched.',
       },
       pathGlob: {
         type: 'string',

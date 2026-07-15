@@ -7,6 +7,7 @@
  */
 
 import type { ProjectDetector, ProjectInfo } from '../utils/project-detector.js';
+import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import { getCurrentBranch } from '../utils/git-utils.js';
 import { getEffectiveCwd } from '../utils/request-context.js';
 
@@ -18,9 +19,21 @@ export interface ProjectIdentity {
 export async function resolveProjectIdentity(
   projectDetector: ProjectDetector,
   explicitProjectId: string | undefined,
-  fallbackToSoleProject = true
+  fallbackToSoleProject = true,
+  stateManager?: SqliteStateManager
 ): Promise<ProjectIdentity> {
-  if (explicitProjectId) return { projectId: explicitProjectId, projectPath: undefined };
+  if (explicitProjectId) {
+    // Complete the project path from the registry: with `projectPath`
+    // undefined, resolveEffectiveBranch cannot read the checked-out branch
+    // and the read silently loses branch scoping — a projectId-only caller
+    // then gets cross-branch results, including stale per-branch content
+    // generations. (The exact/semantic paths did this lookup inline before;
+    // it lives here now so every resolveProjectIdentity caller shares it.)
+    return {
+      projectId: explicitProjectId,
+      projectPath: stateManager?.getProjectById(explicitProjectId).data?.project_path,
+    };
+  }
   const projectInfo: ProjectInfo | null = await projectDetector.getProjectInfo(
     getEffectiveCwd(),
     false,

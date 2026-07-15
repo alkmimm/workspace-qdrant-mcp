@@ -168,6 +168,7 @@ describe('GrepTool — matches from test files carry is_test (project scope)', (
     const stateManager = {
       getWatchFolderIdByTenantId: vi.fn().mockReturnValue('w1'),
       getBaseBranch: vi.fn().mockReturnValue(null),
+      getProjectById: vi.fn().mockReturnValue({ data: null }),
       getIsTestByFilePaths: vi
         .fn()
         .mockReturnValue(new Map([['/proj/tests/a.test.ts', true]])),

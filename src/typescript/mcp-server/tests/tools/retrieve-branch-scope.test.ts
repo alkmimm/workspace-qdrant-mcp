@@ -41,6 +41,9 @@ function createMockStateManager(baseBranch: string | null = 'main'): SqliteState
   return {
     getWatchFolderIdByTenantId: vi.fn().mockReturnValue('wf-1'),
     getBaseBranch: vi.fn().mockReturnValue(baseBranch),
+    // resolveProjectIdentity completes projectPath from the registry for an
+    // explicit projectId; no row here keeps the identity path-less.
+    getProjectById: vi.fn().mockReturnValue({ data: null }),
   } as unknown as SqliteStateManager;
 }
 

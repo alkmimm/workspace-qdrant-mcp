@@ -193,13 +193,14 @@ export async function resolveProjectContext(
   let currentProjectId = projectId;
   let projectPath: string | undefined;
   if (scope === 'project') {
-    const identity = await resolveProjectIdentity(projectDetector, currentProjectId);
+    const identity = await resolveProjectIdentity(
+      projectDetector,
+      currentProjectId,
+      true,
+      stateManager
+    );
     currentProjectId = identity.projectId;
-    projectPath =
-      identity.projectPath ??
-      (currentProjectId
-        ? stateManager.getProjectById(currentProjectId).data?.project_path
-        : undefined);
+    projectPath = identity.projectPath;
   }
 
   const currentBranch = resolveEffectiveBranch({
