@@ -118,6 +118,13 @@ async fn run_daemon(
         env!("BUILD_NUMBER")
     );
 
+    // Rehearsal/preflight mode: migrations only, then exit. Deliberately
+    // BEFORE phase 1 — no instance check, control-port lock, or PID file, so
+    // a rehearsal container never fights the live daemon.
+    if args.migrate_only {
+        return run_migrate_only(&daemon_config).await;
+    }
+
     // Phase 1: Startup
     let (config, _cleanup_guard) = run_phase1(&args, &daemon_config)?;
     // Phase 2: Database
@@ -250,6 +257,37 @@ async fn run_daemon(
     shutdown::stop_queue_processor(&mut qc.unified_queue_processor).await;
     shutdown::stop_lsp(lsp_manager).await;
     shutdown::abort_background_tasks(bg_handles, qc.adaptive_shutdown_token, hierarchy_cancel);
+    Ok(())
+}
+
+/// `--migrate-only`: run every schema migration and exit.
+///
+/// Covers all three databases exactly like real startup does — state.db
+/// (versioned SchemaManager migrations), search.db (SearchDbManager), and
+/// graph.db (non-fatal, mirroring startup) — but skips reconciliation and all
+/// services. `make rehearse-migrations` points `WQM_DATABASE_PATH` at a COPY
+/// of the live databases and runs this in a throwaway container, so a
+/// migration that would crash-loop production fails the deploy gate instead
+/// (the v48 incident, mechanized). Prints a stable `MIGRATIONS_OK` marker for
+/// the Makefile to assert on.
+async fn run_migrate_only(
+    daemon_config: &DaemonConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = Config::from(daemon_config.clone());
+    config.resource_limits.resolve_auto_values();
+
+    let queue_pool = database::create_pool_and_migrate(&config).await?;
+    let search_db = database::init_search_db(&queue_pool).await?;
+    let graph_ok = database::init_graph_db(&queue_pool).await.is_some();
+
+    search_db.close().await;
+    queue_pool.close().await;
+
+    info!(
+        "migrate-only: state.db + search.db migrations complete (graph.db: {})",
+        if graph_ok { "ok" } else { "unavailable" }
+    );
+    println!("MIGRATIONS_OK");
     Ok(())
 }
 

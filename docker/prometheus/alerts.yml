@@ -59,6 +59,22 @@ groups:
           summary: "memexd daemon unreachable"
           description: "Prometheus has been unable to scrape memexd for more than 5 minutes."
 
+      - alert: MemexdFlapping
+        # Complements DaemonDown: a crash-loop restarting every few seconds can
+        # briefly answer scrapes, defeating `up == 0 for 5m`. Sub-70% scrape
+        # success over 10m catches both flapping and sustained down faster.
+        # (2026-07-15: a startup-migration failure crash-looped memexd for
+        # ~35 min while DaemonDown fired only in the unwatched Prometheus UI —
+        # `make stack-status` now prints firing alerts.)
+        expr: avg_over_time(up{job="memexd"}[10m]) < 0.7
+        for: 2m
+        labels:
+          severity: critical
+          component: daemon
+        annotations:
+          summary: "memexd flapping or crash-looping"
+          description: "memexd scrape success is below 70% over the last 10 minutes — restart loop or repeated startup crashes (e.g. a failing schema migration). Check `docker logs wqm-memexd`."
+
       - alert: QdrantUnreachable
         expr: up{job="qdrant"} == 0
         for: 5m

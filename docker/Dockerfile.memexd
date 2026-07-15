@@ -227,6 +227,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo clippy --lib --bins --tests -- -D warnings
 
+# Migration-correctness tests DO run here (exception to the no-cargo-test rule
+# above). The 2026-07-15 v48 incident shipped a migration whose unit tests
+# existed but executed in NO gate — this fork has GitHub Actions disabled, so
+# "CI runs the suite" never happens here. The schema_version suite is hermetic
+# (in-memory SQLite / tempdir, no FTS5 trigram or timing dependence), fast,
+# and guards the one class of change that can crash-loop the daemon at startup.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib schema_version -- --test-threads=4
+
 # ─────────────────────────────────────────────
 # Stage 3a: rust-analyzer binary download
 # Ships as a single statically-linked release archive on GitHub. Downloaded
