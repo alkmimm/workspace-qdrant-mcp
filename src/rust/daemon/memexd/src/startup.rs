@@ -51,6 +51,15 @@ pub struct DaemonArgs {
     /// `WQM_CONTROL_PORT` env → `DaemonConfig.control_port` → built-in
     /// default `7799`. `Some(p)` pins the port unconditionally.
     pub control_port: Option<u16>,
+    /// Run all schema migrations (state.db, search.db, graph.db) and exit.
+    ///
+    /// Rehearsal/preflight entry (born from the v48 incident, where a
+    /// migration that passed every static gate crash-looped production):
+    /// `make rehearse-migrations` runs the NEW binary with this flag against
+    /// a COPY of the live databases in a throwaway container. Skips the
+    /// instance check, control-port lock, PID file, reconciliation, Qdrant,
+    /// and every service — migrations only, exit 0/1.
+    pub migrate_only: bool,
 }
 
 impl Default for DaemonArgs {
@@ -67,6 +76,7 @@ impl Default for DaemonArgs {
             bootstrap_reembed: false,
             allow_default: false,
             control_port: None,
+            migrate_only: false,
         }
     }
 }
@@ -178,6 +188,18 @@ fn build_cli(is_daemon: bool) -> Command {
                 )
                 .value_parser(clap::value_parser!(u16)),
         )
+        .arg(
+            Arg::new("migrate-only")
+                .long("migrate-only")
+                .help(
+                    "Run all schema migrations (state.db, search.db, graph.db) \
+                     and exit 0/1 — no lock, PID file, reconciliation, or \
+                     services. Used by `make rehearse-migrations` against a \
+                     copy of the live databases. Combine with --foreground \
+                     to see the migration logs.",
+                )
+                .action(clap::ArgAction::SetTrue),
+        )
 }
 
 /// Parse command-line arguments with graceful error handling.
@@ -226,6 +248,7 @@ pub fn parse_args() -> Result<DaemonArgs, Box<dyn std::error::Error>> {
         bootstrap_reembed: matches.get_flag("bootstrap-reembed"),
         allow_default: matches.get_flag("allow-default"),
         control_port: matches.get_one::<u16>("control-port").copied(),
+        migrate_only: matches.get_flag("migrate-only"),
     })
 }
 

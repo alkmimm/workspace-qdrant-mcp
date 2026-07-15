@@ -57,10 +57,18 @@ export WQM_BUILD_SHA
 MCP_HEALTH_URL ?= http://localhost:$(MCP_HTTP_PORT)/admin/api/health
 MCP_INIT_URL ?= http://localhost:$(MCP_HTTP_PORT)/admin/init
 MEMEXD_DB_VOLUME ?= workspace-qdrant-mcp_memexd_db
+MEMEXD_IMAGE ?= workspace-qdrant-mcp-memexd:local
+PROMETHEUS_PORT ?= 9090
+DB_BACKUP_DIR ?= $(REPO)/state/backups
+# Snapshots are heavy (~7.4 GB live: search.db 4.3G + graph.db 1.8G +
+# memexd.db 1.3G), so the default keeps only the last two. Raise per-call
+# (`make redeploy DB_BACKUP_KEEP=5`) ahead of risky migrations.
+DB_BACKUP_KEEP ?= 2
 
 .PHONY: help check-env first-time redeploy \
 	stack-up stack-down stack-restart stack-status stack-logs verify-deploy \
 	build-images mcp-rebuild memexd-recreate \
+	backup-db rehearse-migrations \
 	codex-register \
 	health-quick scan register-all watch reindex reindex-status hooks-install clean \
 	mem-watch-start mem-watch mem-watch-stop
@@ -78,6 +86,8 @@ help:
 	@echo "  stack-status     compose ps + ping admin/qdrant/daemon"
 	@echo "  stack-logs       tail mcp + memexd logs (LOG_TAIL=$(LOG_TAIL))"
 	@echo "  verify-deploy    confirm running stack == latest build + knobs wired + health"
+	@echo "  backup-db        WAL-safe snapshot of the live SQLite DBs into state/backups/"
+	@echo "  rehearse-migrations  run the new binary's schema migrations against a COPY of the live DBs"
 	@echo "                   (MARKER='<str>' also greps the deployed memexd binary)"
 	@echo "------------------------------------------------------------"
 	@echo "Build / recreate (all builds run INSIDE Docker — no local cargo/npm):"
@@ -132,18 +142,55 @@ first-time: check-env
 
 redeploy: check-env
 	@echo "=== Redeploy after code changes (build runs inside Docker) ==="
-	@echo "Step 1/4: rebuild mcp + memexd images"
+	@echo "Step 1/6: rebuild mcp + memexd images"
 	@docker volume create "$(MEMEXD_DB_VOLUME)" >/dev/null
 	@cd "$(REPO)" && extra=(); if $(COMPOSE) build --help 2>/dev/null | grep -q -- '--builder'; then extra=(--builder "$(COMPOSE_BUILDER)"); fi; $(COMPOSE) build "$${extra[@]}" mcp memexd
-	@echo "Step 2/4: recreate mcp + memexd (env may have changed)"
+	@echo "Step 2/6: snapshot live databases (rollback insurance)"
+	@$(MAKE) -f "$(lastword $(MAKEFILE_LIST))" backup-db
+	@echo "Step 3/6: rehearse pending schema migrations against a copy of the live DBs"
+	@$(MAKE) -f "$(lastword $(MAKEFILE_LIST))" rehearse-migrations
+	@echo "Step 4/6: recreate mcp + memexd (env may have changed)"
 	@cd "$(REPO)" && $(COMPOSE) up -d --force-recreate mcp memexd
-	@echo "Step 3/4: reinstall git hooks (idempotent — lives in the repo, not the image)"
+	@echo "Step 5/6: reinstall git hooks (idempotent — lives in the repo, not the image)"
 	@$(MAKE) -f "$(lastword $(MAKEFILE_LIST))" hooks-install
-	@echo "Step 4/4: status"
+	@echo "Step 6/6: status"
 	@sleep 6
 	@$(MAKE) -f "$(lastword $(MAKEFILE_LIST))" stack-status
 	@echo ""
 	@echo "=== Redeploy complete ==="
+
+# ── Migration safety (born from the 2026-07-15 v48 incident) ────────────────
+# A schema migration that passed clippy + unit gates crash-looped production.
+# Two mechanized guards now run inside `redeploy`, between build and up:
+#   backup-db            WAL-safe snapshot of memexd.db/search.db/graph.db
+#                        into state/backups/ (rotated, keep DB_BACKUP_KEEP).
+#   rehearse-migrations  run the NEWLY BUILT memexd with --migrate-only against
+#                        a copy of the live DBs in a throwaway container; any
+#                        failure aborts the redeploy while the old (working)
+#                        containers keep running.
+
+backup-db: check-env
+	@mkdir -p "$(DB_BACKUP_DIR)"
+	@ts=$$(date -u +%Y%m%dT%H%M%SZ); \
+	docker run --rm --user "$$(id -u):$$(id -g)" \
+	  -v "$(MEMEXD_DB_VOLUME)":/live:ro \
+	  -v "$(DB_BACKUP_DIR)":/backup \
+	  -v "$(REPO)/scripts/migration-rehearsal-copy.py":/copy.py:ro \
+	  --entrypoint python3 "$(MEMEXD_IMAGE)" /copy.py /live "/backup/pre-deploy-$$ts"; \
+	echo "backup: state/backups/pre-deploy-$$ts"; \
+	cd "$(DB_BACKUP_DIR)" && ls -dt pre-deploy-* 2>/dev/null | tail -n +$$(( $(DB_BACKUP_KEEP) + 1 )) | xargs -r rm -rf
+
+rehearse-migrations: check-env
+	@docker run --rm \
+	  -v "$(MEMEXD_DB_VOLUME)":/live:ro \
+	  -v "$(REPO)/scripts/migration-rehearsal-copy.py":/copy.py:ro \
+	  --entrypoint sh "$(MEMEXD_IMAGE)" -c \
+	  'set -e; out=$$(python3 /copy.py /live /tmp/rehearsal); echo "$$out"; \
+	   if echo "$$out" | grep -q "^SKIP:"; then exit 0; fi; \
+	   WQM_DATABASE_PATH=/tmp/rehearsal/memexd.db /usr/local/bin/memexd \
+	     --foreground --migrate-only 2>&1 | tee /tmp/rehearsal.out || true; \
+	   grep -q MIGRATIONS_OK /tmp/rehearsal.out'
+	@echo "rehearse-migrations: OK (new binary migrated a copy of the live DBs)"
 
 stack-up: check-env
 	@cd "$(REPO)" && $(COMPOSE) up -d
@@ -162,6 +209,9 @@ stack-status: check-env
 	@if curl -fsS -o /dev/null -m 3 "$(MCP_INIT_URL)"; then echo "/admin/init     [ok]"; else echo "/admin/init     [fail]"; fi
 	@if curl -fsS -o /dev/null -m 3 "http://localhost:$(QDRANT_HTTP_PORT)/collections"; then echo "qdrant          [ok]"; else echo "qdrant          [fail]"; fi
 	@if (exec 3<>/dev/tcp/localhost/$(MEMEXD_GRPC_PORT)) 2>/dev/null; then echo "memexd gRPC     [ok] localhost:$(MEMEXD_GRPC_PORT)"; else echo "memexd gRPC     [fail]"; fi
+	@echo ""
+	@echo "=== prometheus alerts (firing) ==="
+	@python3 "$(REPO)/scripts/firing-alerts.py" "http://localhost:$(PROMETHEUS_PORT)" || true
 
 stack-logs: check-env
 	@cd "$(REPO)" && $(COMPOSE) logs --tail $(LOG_TAIL) mcp memexd
