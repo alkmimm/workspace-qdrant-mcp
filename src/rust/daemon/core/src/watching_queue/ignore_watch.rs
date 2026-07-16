@@ -25,12 +25,6 @@ impl FileWatcherQueue {
         queue_manager: &Arc<QueueManager>,
         events_processed: &Arc<Mutex<u64>>,
     ) {
-        let file_name = ignore_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
         let mtime_unix = match read_mtime_unix(ignore_path) {
             Some(t) => t,
             None => return,
@@ -43,11 +37,27 @@ impl FileWatcherQueue {
 
         let project_root_str = project_root.to_string_lossy().to_string();
 
-        if !should_reconcile(queue_manager, &project_root_str, &file_name, mtime_unix).await {
+        // Key the mtime slot by the ignore file's path relative to the project
+        // root, never by its basename. A project holds one ignore file per
+        // package plus one per checked-out git worktree (DOC-V2: 360 of them),
+        // and `ignore_file_mtimes` is keyed (project_root, file_path) — so a
+        // basename key collapses every one of them into a single `.gitignore`
+        // row. Whichever file was touched last then owns the slot, and any
+        // OTHER ignore file with a newer mtime looks like a change and re-fires
+        // full reconciliation. Measured on the live stack 2026-07-16: 49
+        // reconciles in 50 minutes against a tree whose `.wqmignore` had not
+        // been modified in three weeks (#224).
+        let ignore_key = ignore_path
+            .strip_prefix(&project_root)
+            .unwrap_or(ignore_path)
+            .to_string_lossy()
+            .to_string();
+
+        if !should_reconcile(queue_manager, &project_root_str, &ignore_key, mtime_unix).await {
             return;
         }
 
-        update_stored_mtime(queue_manager, &project_root_str, &file_name, mtime_unix).await;
+        update_stored_mtime(queue_manager, &project_root_str, &ignore_key, mtime_unix).await;
 
         run_reconciliation(
             &project_root,
