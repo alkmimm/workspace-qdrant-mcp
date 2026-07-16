@@ -341,6 +341,7 @@ async fn test_branch_membership_bulk_collapses_to_one_op() {
         "w1",
         "/tmp/project",
         "feature",
+        "main",
         paths,
     )
     .await
@@ -364,6 +365,11 @@ async fn test_branch_membership_bulk_collapses_to_one_op() {
         rows[0].2.contains("src/c.rs"),
         "payload carries the verified path list"
     );
+    assert!(
+        rows[0].2.contains(r#""from_branch":"main""#),
+        "payload carries the branch the no-diff verification compared against \
+         (scopes the processor's candidate set to that generation, #224)"
+    );
 }
 
 /// A path list larger than `BRANCH_BULK_CHUNK` is split into several BOUNDED ops,
@@ -381,7 +387,7 @@ async fn test_branch_membership_bulk_chunks_large_lists() {
     // 60 paths with BRANCH_BULK_CHUNK = 25 → ceil(60/25) = 3 bounded ops.
     let paths: Vec<String> = (0..60).map(|i| format!("src/f{i}.rs")).collect();
     let n = enqueue_branch_membership_bulk(
-        &qm, "t1", "projects", "w1", "/tmp/project", "feature", paths,
+        &qm, "t1", "projects", "w1", "/tmp/project", "feature", "main", paths,
     )
     .await
     .unwrap();

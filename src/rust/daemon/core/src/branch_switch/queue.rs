@@ -227,6 +227,10 @@ pub async fn enqueue_branch_membership_bulk(
     watch_folder_id: &str,
     project_root: &str,
     branch: &str,
+    // The switch's OLD branch: scopes the processor's candidate set to the
+    // generation the no-diff verification actually compared (see
+    // `BranchMembershipBulk::from_branch`).
+    from_branch: &str,
     paths: Vec<String>,
 ) -> Result<usize, String> {
     if paths.is_empty() {
@@ -244,6 +248,7 @@ pub async fn enqueue_branch_membership_bulk(
                 watch_folder_id: watch_folder_id.to_string(),
                 branch: branch.to_string(),
                 paths: chunk.to_vec(),
+                from_branch: Some(from_branch.to_string()),
             }),
         };
         let payload_json = serde_json::to_string(&payload)

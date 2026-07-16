@@ -53,6 +53,20 @@ pub struct BranchMembershipBulk {
     pub branch: String,
     /// Repo-relative paths, verified byte-identical on the target branch.
     pub paths: Vec<String>,
+    /// Branch the no-diff verification compared AGAINST (the switch's old
+    /// branch). "The path is git-identical across the switch" is a statement
+    /// about ONE generation — the one holding `from_branch` — not about every
+    /// Layer-2 generation of the path. Without this scope, the bulk append
+    /// tagged `branch` onto EVERY generation lacking it, stamping stale
+    /// debris generations with each newly created branch (the #224 overlap
+    /// fabricator: one branch creation from main = a whole-tree no-diff list
+    /// = every debris generation tagged in one op).
+    ///
+    /// Skipped from JSON when None so pre-field payloads (and their
+    /// idempotency keys) stay byte-identical; a `None` (an op enqueued before
+    /// this field shipped) keeps the legacy unscoped behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_branch: Option<String>,
 }
 
 /// Payload for tenant items with collection="libraries"

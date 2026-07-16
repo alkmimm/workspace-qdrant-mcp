@@ -359,8 +359,9 @@ async fn test_branch_bulk_persist_checkpoints_and_resumes() {
     let bp_a = wqm_common::hashing::compute_base_point("t1", "src/a.rs", "h_a");
     let paths = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
 
-    // Both base_points are candidates for 'feat' before any persist.
-    let before = select_branch_bulk_candidates(&pool, "w1", "feat", &paths)
+    // Both base_points are candidates for 'feat' before any persist (both
+    // generations hold 'main', the branch the no-diff verification compared).
+    let before = select_branch_bulk_candidates(&pool, "w1", "feat", Some("main"), &paths)
         .await
         .unwrap();
     assert_eq!(before.len(), 2, "both base_points missing 'feat'");
@@ -384,7 +385,7 @@ async fn test_branch_bulk_persist_checkpoints_and_resumes() {
     assert!(!branches_b.contains("feat"), "b.rs untouched: {branches_b}");
 
     // RESUME: re-selecting candidates now excludes a.rs — only b.rs remains.
-    let after = select_branch_bulk_candidates(&pool, "w1", "feat", &paths)
+    let after = select_branch_bulk_candidates(&pool, "w1", "feat", Some("main"), &paths)
         .await
         .unwrap();
     assert_eq!(after.len(), 1, "a.rs skipped after checkpoint — op resumes at b.rs");
