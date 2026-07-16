@@ -221,6 +221,7 @@ async fn enqueue_unchanged_files(
         watch_folder_id,
         project_root,
         new_branch,
+        old_branch,
         to_rekey,
     )
     .await

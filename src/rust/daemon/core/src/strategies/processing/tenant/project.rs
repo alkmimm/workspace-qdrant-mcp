@@ -112,13 +112,20 @@ async fn handle_branch_membership_bulk(
     }
 
     // Candidate base_points: tracked on this watch folder, for one of the listed
-    // paths, with a real base_point, not yet carrying the branch.
-    let candidates =
-        select_branch_bulk_candidates(&ctx.pool, &spec.watch_folder_id, &spec.branch, &spec.paths)
-            .await
-            .map_err(|e| {
-                UnifiedProcessorError::ProcessingFailed(format!("branch bulk select: {e}"))
-            })?;
+    // paths, with a real base_point, not yet carrying the branch — and, when the
+    // op carries `from_branch`, only the generation the no-diff verification
+    // actually compared (the one holding the switch's old branch). Without that
+    // scope this tagged EVERY generation of each path, stamping stale Layer-2
+    // debris with each newly created branch (#224 overlap fabricator).
+    let candidates = select_branch_bulk_candidates(
+        &ctx.pool,
+        &spec.watch_folder_id,
+        &spec.branch,
+        spec.from_branch.as_deref(),
+        &spec.paths,
+    )
+    .await
+    .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("branch bulk select: {e}")))?;
     if candidates.is_empty() {
         return Ok(());
     }
@@ -177,33 +184,54 @@ async fn handle_branch_membership_bulk(
 
 /// Select the base_points tracked under `watch_folder_id` for one of `paths`
 /// that do NOT yet carry `branch` (with a real `base_point` and non-null
-/// `branches`).
+/// `branches`) — scoped, when `from_branch` is present, to generations that
+/// HOLD `from_branch`.
 ///
-/// This is the bulk branch re-key's candidate set. Because it filters on
-/// `branch NOT EXISTS`, base_points already persisted by an earlier (possibly
-/// re-leased) pass are excluded — which is what lets
-/// [`handle_branch_membership_bulk`] resume rather than restart on re-lease.
+/// The scope is what makes "drive by path with no per-file hash recheck"
+/// sound: the caller verified the path produced no diff between `from_branch`
+/// and `branch`, which certifies exactly ONE generation — the one tagged
+/// `from_branch` — as the new branch's content. A path routinely has other
+/// Layer-2 generations (older content still held by other branches, or stale
+/// debris); tagging those too fabricated the #224 (path, branch) overlap
+/// groups on every branch creation. `from_branch = None` (an op enqueued
+/// before the field existed) keeps the legacy unscoped behaviour for the few
+/// minutes such items can still sit in the queue.
+///
+/// Because it also filters on `branch NOT EXISTS`, base_points already
+/// persisted by an earlier (possibly re-leased) pass are excluded — which is
+/// what lets [`handle_branch_membership_bulk`] resume rather than restart on
+/// re-lease.
 pub(crate) async fn select_branch_bulk_candidates(
     pool: &SqlitePool,
     watch_folder_id: &str,
     branch: &str,
+    from_branch: Option<&str>,
     paths: &[String],
 ) -> Result<Vec<String>, sqlx::Error> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
     let path_ph = vec!["?"; paths.len()].join(", ");
+    let from_clause = if from_branch.is_some() {
+        "AND EXISTS (SELECT 1 FROM json_each(tracked_files.branches) WHERE value = ?)"
+    } else {
+        ""
+    };
     let select_sql = format!(
         "SELECT DISTINCT base_point FROM tracked_files
          WHERE watch_folder_id = ? AND base_point IS NOT NULL AND branches IS NOT NULL
            AND relative_path IN ({path_ph})
-           AND NOT EXISTS (SELECT 1 FROM json_each(tracked_files.branches) WHERE value = ?)"
+           AND NOT EXISTS (SELECT 1 FROM json_each(tracked_files.branches) WHERE value = ?)
+           {from_clause}"
     );
     let mut sel = sqlx::query_scalar::<_, String>(&select_sql).bind(watch_folder_id);
     for p in paths {
         sel = sel.bind(p);
     }
     sel = sel.bind(branch);
+    if let Some(fb) = from_branch {
+        sel = sel.bind(fb);
+    }
     sel.fetch_all(pool).await
 }
 
@@ -785,4 +813,122 @@ async fn scan_project_directory(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_branch_bulk_candidates;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::SqlitePool;
+
+    async fn pool_with_two_generations() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+        // Production DDL (same constants SchemaManager applies).
+        sqlx::query(crate::watch_folders_schema::CREATE_WATCH_FOLDERS_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, created_at, updated_at)
+             VALUES ('w1', '/home/u/project', 'projects', 't1', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The live #224 shape: one path, TWO generations. The generation the
+        // no-diff verification certified (holds the old branch `main`) and a
+        // stale Layer-2 debris generation held by an unrelated dead branch.
+        for (hash, bp, branches) in [
+            ("hash-current", "bp-current", r#"["main"]"#),
+            ("hash-debris", "bp-debris", r#"["feat/long-dead"]"#),
+        ] {
+            sqlx::query(
+                "INSERT INTO tracked_files
+                   (watch_folder_id, relative_path, file_hash, base_point, branches,
+                    file_mtime, chunk_count, created_at, updated_at)
+                 VALUES ('w1', 'src/lib.rs', ?1, ?2, ?3,
+                         '2025-01-01T00:00:00Z', 1, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+            )
+            .bind(hash)
+            .bind(bp)
+            .bind(branches)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        pool
+    }
+
+    /// The #224 fabricator regression: with `from_branch` present, the bulk
+    /// re-key must tag ONLY the generation the no-diff verification compared —
+    /// never the other generations of the path (stale debris included).
+    #[tokio::test]
+    async fn bulk_candidates_skip_other_generation_debris() {
+        let pool = pool_with_two_generations().await;
+        let paths = vec!["src/lib.rs".to_string()];
+
+        let scoped =
+            select_branch_bulk_candidates(&pool, "w1", "feat/new-branch", Some("main"), &paths)
+                .await
+                .unwrap();
+        assert_eq!(
+            scoped,
+            vec!["bp-current".to_string()],
+            "only the generation holding the from_branch is certified content"
+        );
+
+        // A from_branch nothing holds selects nothing — the per-file reconcile
+        // (hash-gated) is the repair path, never a blind tag.
+        let none_hold =
+            select_branch_bulk_candidates(&pool, "w1", "feat/new-branch", Some("ghost"), &paths)
+                .await
+                .unwrap();
+        assert!(none_hold.is_empty());
+    }
+
+    /// Legacy ops (enqueued before `from_branch` existed) keep the unscoped
+    /// behaviour; and the `branch NOT EXISTS` resume filter still excludes
+    /// generations already tagged.
+    #[tokio::test]
+    async fn bulk_candidates_legacy_none_still_tags_every_other_generation() {
+        let pool = pool_with_two_generations().await;
+        let paths = vec!["src/lib.rs".to_string()];
+
+        let mut legacy =
+            select_branch_bulk_candidates(&pool, "w1", "feat/new-branch", None, &paths)
+                .await
+                .unwrap();
+        legacy.sort();
+        assert_eq!(
+            legacy,
+            vec!["bp-current".to_string(), "bp-debris".to_string()],
+            "None = pre-field op = legacy unscoped candidate set"
+        );
+
+        // Already-tagged generations are excluded (the re-lease resume filter).
+        sqlx::query(
+            "UPDATE tracked_files SET branches = json_insert(branches, '$[#]', 'feat/new-branch')
+             WHERE base_point = 'bp-current'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let resumed =
+            select_branch_bulk_candidates(&pool, "w1", "feat/new-branch", Some("main"), &paths)
+                .await
+                .unwrap();
+        assert!(
+            resumed.is_empty(),
+            "generation already carrying the branch is skipped on resume"
+        );
+    }
 }
