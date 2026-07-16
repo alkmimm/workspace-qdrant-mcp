@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use ignore::WalkBuilder;
 use sqlx::SqlitePool;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use sqlx::Row;
 
@@ -55,6 +55,28 @@ pub async fn reconcile_ignore_rules(
 
     let eligible_files = walk_eligible_files(project_root, global_ignore_path)?;
     let indexed_files = get_indexed_file_paths(pool, &watch_id).await?;
+
+    // Empty-walk safety net. A walk that yields ZERO eligible files while the
+    // index holds many is a walk failure (unreadable/half-mounted tree, a
+    // registered git worktree whose path resolves wrong, an ignore file that
+    // transiently excludes everything), NOT a signal that the whole project was
+    // deleted. Treating it as truth turns every indexed file into "stale" and
+    // enqueues a mass delete. This is the same class of guard `branch_prune`
+    // already carries ("repo unreadable / zero branches → skip the project").
+    // Observed live 2026-07-16: a worktree walk returned eligible=0 and 10 tags
+    // were dropped from real files before the per-branch scoping bounded it; a
+    // per-path reconciler here would have proposed the entire index (#280).
+    // Skipping is strictly safe: it only ever withholds deletes, and a genuinely
+    // empty project has nothing to reconcile away.
+    if eligible_files.is_empty() && !indexed_files.is_empty() {
+        warn!(
+            "[ignore_sync] {} — walk found 0 eligible files but {} are indexed; \
+             treating as a walk failure and skipping (no deletes enqueued)",
+            tenant_id,
+            indexed_files.len()
+        );
+        return Ok(ReconcileStats::default());
+    }
 
     // Staleness must be measured per (path, branch) because the remedy is
     // per-branch: a stale `file|delete` drops ONE tag from the Layer-2 content row
@@ -642,6 +664,53 @@ mod tests {
         // which is exactly why it looped.
         let all = get_indexed_file_paths(&pool, "wf1").await.unwrap();
         assert!(all.contains("proto/excluded.proto"));
+    }
+
+    /// A walk that returns zero eligible files against a non-empty index is a
+    /// walk failure, not a mass delete signal — reconcile must skip (#280).
+    #[tokio::test]
+    async fn empty_walk_against_nonempty_index_enqueues_nothing() {
+        use crate::queue_operations::QueueManager;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let pool = super::super::tests::create_test_pool().await;
+        super::super::tests::setup_schema(&pool).await;
+
+        // An empty directory → walk_eligible_files yields 0.
+        let empty_tree = TempDir::new().unwrap();
+        sqlx::query(
+            "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled, is_archived, created_at, updated_at) \
+             VALUES ('wf1', ?1, 'projects', 'tenant1', 1, 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .bind(empty_tree.path().to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap();
+        // ...but the index holds files (the failure case: walk empty, index full).
+        for rel in ["src/a.rs", "src/b.rs", "Makefile"] {
+            seed_generation(&pool, rel, &format!("h_{rel}"), r#"["main"]"#).await;
+        }
+
+        let qm = Arc::new(QueueManager::new(pool.clone()));
+        let stats = reconcile_ignore_rules(
+            empty_tree.path(),
+            "tenant1",
+            "projects",
+            &pool,
+            &qm,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stats.stale_deleted, 0, "must not delete against an empty walk");
+        assert_eq!(stats.missing_added, 0);
+        let queued: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM unified_queue")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(queued.0, 0, "nothing may be enqueued when the walk fails");
     }
 
     /// The branch must come from the tree that was walked, not a DB lookup that
