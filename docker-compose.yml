@@ -235,6 +235,15 @@ services:
       # Interval (s) of the graph ghost-node sweep (#245): removes nodes for files
       # that no longer exist. Default 1800 (30 min); lower to force a sweep sooner.
       WQM_GRAPH_GHOST_SWEEP_SECS: ${WQM_GRAPH_GHOST_SWEEP_SECS:-}
+      # ── Dead-branch generation prune (#224 stage 3) ──────────────────────────
+      # _COVERED_DELETE: what to do with a stale Layer-2 generation whose path is
+      #   still served by another generation on a LIVE branch. off | dry (default,
+      #   observe only) | on. Generations NOTHING else serves are always preserved
+      #   (the mislabeled-corpus guard).
+      # _COVERED_CAP: per-run ceiling on those deletes (0 = unlimited, default
+      #   500); the rest is deferred to the next startup. See docker/.env.example.
+      WQM_BRANCH_PRUNE_COVERED_DELETE: ${WQM_BRANCH_PRUNE_COVERED_DELETE:-}
+      WQM_BRANCH_PRUNE_COVERED_CAP: ${WQM_BRANCH_PRUNE_COVERED_CAP:-}
       # ── R8.3b: LSP-authoritative CALLS backfill (graph resolution precision) ──
       # WQM_GRAPH_LSP_BACKFILL=1 arms start_graph_lsp_backfill: after a 300s
       # settle, walk each tenant serially, start its dominant-language LSP, stamp
