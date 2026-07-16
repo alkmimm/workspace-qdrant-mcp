@@ -492,13 +492,37 @@ async fn prepare_update(
         )
         .await?;
     } else if defensive_delete_untracked {
-        // Not tracked yet — defensive cleanup via filter (filter matches
-        // the absolute path stored in the Qdrant payload's `file_path`
-        // field; the queue payload itself is relative).
-        ctx.storage_client
-            .delete_points_by_filter(&item.collection, abs_file_path, &item.tenant_id)
-            .await
-            .map_err(|e| UnifiedProcessorError::Storage(e.to_string()))?;
+        // Reaching here proves only "no generation is tagged item.branch" — NOT
+        // "untracked". `delete_points_by_filter` matches on (file_path,
+        // tenant_id) with no branch or base_point scope, so sweeping while
+        // another Layer-2 generation still holds this path wipes THAT
+        // generation's points and leaves its row advertising chunks Qdrant no
+        // longer has (#281 — same blast radius the delete path's fallback had
+        // before #278 D2). The sweep exists for a genuinely orphaned path, so
+        // require that no generation survives; when one does, skip — the
+        // ingest below upserts deterministic per-content point IDs, and
+        // tracked-path GC is `execute_update_deletion`'s job.
+        if let Ok(Some(other)) =
+            tracked_files_schema::lookup_tracked_file(pool, watch_folder_id, relative_path, None)
+                .await
+        {
+            tracing::debug!(
+                "Skipping defensive filter-delete for '{}': not tracked on branch '{}', \
+                 but generation file_id={} still holds it (branches={:?})",
+                relative_path,
+                item.branch,
+                other.file_id,
+                other.branches
+            );
+        } else {
+            // Not tracked at all — defensive cleanup via filter (filter matches
+            // the absolute path stored in the Qdrant payload's `file_path`
+            // field; the queue payload itself is relative).
+            ctx.storage_client
+                .delete_points_by_filter(&item.collection, abs_file_path, &item.tenant_id)
+                .await
+                .map_err(|e| UnifiedProcessorError::Storage(e.to_string()))?;
+        }
     }
     Ok(UpdateAction::Proceed)
 }
