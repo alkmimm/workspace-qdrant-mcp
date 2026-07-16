@@ -1,0 +1,247 @@
+{
+  "annotations": { "list": [] },
+  "description": "Reconciliation & index-hygiene signals (Loki-derived). Born from the 2026-07-16 #224 stage-1 incident: a non-convergent ignore-reconcile loop ran for weeks (49 reconciles/50min, ~40 cross-branch point-deletes/hour) with zero dashboard visibility — every signal on this board existed only in logs. Thresholds encode the incident signature.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "type": "row", "title": "Reconcile convergence — loop detectors",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "collapsed": false, "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "ignore_sync runs (1h)",
+      "description": "Reconciliation passes across all tenants in the last hour. A handful per real ignore-file edit is normal; a steady stream means a NON-CONVERGENT loop (incident signature: 49/50min reporting an identical stale count).",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container=\"wqm-memexd\"} |= \"[ignore_sync]\" |= \" stale,\" [1h]))",
+          "queryType": "instant"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "orientation": "auto" },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 6 }, { "color": "red", "value": 12 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Fallback point-deletes (1h)",
+      "description": "delete_points_by_filter fallback firings — the path-keyed, generation-blind sweep (guarded by #278 D2). Sustained non-zero = something is deleting by bare path again; the incident ran ~40/hour wiping live generations' points.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container=\"wqm-memexd\"} |= \"Deleted points for file (fallback)\" [1h]))",
+          "queryType": "instant"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "orientation": "auto" },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 20 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Walk failures — D4 guard (24h)",
+      "description": "\"walk found 0 eligible files but N are indexed\" — the empty-walk safety net (#278 D4) refusing a mass delete. ANY firing means a project walk is broken (unmounted tree, worktree path resolving wrong, ignore file excluding everything) and that tenant is not being reconciled.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container=\"wqm-memexd\"} |= \"walk found 0 eligible\" [24h]))",
+          "queryType": "instant"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "orientation": "auto" },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "ignore_watch triggers (1h)",
+      "description": "\"ignore file changed\" watcher firings. Before #278 D3 the mtime cache was keyed by basename, so any of a project's hundreds of nested ignore files re-fired reconciliation (~1/min for weeks). More than a few per hour with no real ignore edits = the amplifier is back.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container=\"wqm-memexd\"} |= \"ignore file changed\" [1h]))",
+          "queryType": "instant"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "orientation": "auto" },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 6 }, { "color": "red", "value": 12 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "ignore_sync runs by tenant",
+      "description": "Reconciliation passes per tenant. A flat repeating rate for one tenant with identical stale counts (next panel) is the non-convergence signature.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum by (tenant) (count_over_time({container=\"wqm-memexd\"} |= \"[ignore_sync]\" |= \" stale,\" | regexp \"\\\\[ignore_sync\\\\] (?P<tenant>\\\\S+) —\" [$__auto]))",
+          "legendFormat": "{{tenant}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } }, "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Stale / missing flagged per reconcile",
+      "description": "Counts each pass reports. Healthy: spikes that DRAIN to zero. A constant plateau (e.g. \"5 stale\" forever, or the standing \"55 missing\" churn tracked in #279) = the diff and its remedy disagree and the set never converges.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "max by (tenant) (max_over_time({container=\"wqm-memexd\"} |= \"[ignore_sync]\" |= \" stale,\" | regexp \"\\\\[ignore_sync\\\\] (?P<tenant>\\\\S+) — (?P<stale>\\\\d+) stale, (?P<missing>\\\\d+) missing\" | unwrap stale [$__auto]))",
+          "legendFormat": "{{tenant}} stale"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "max by (tenant) (max_over_time({container=\"wqm-memexd\"} |= \"[ignore_sync]\" |= \" stale,\" | regexp \"\\\\[ignore_sync\\\\] (?P<tenant>\\\\S+) — (?P<stale>\\\\d+) stale, (?P<missing>\\\\d+) missing\" | unwrap missing [$__auto]))",
+          "legendFormat": "{{tenant}} missing"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": false, "pointSize": 4, "showPoints": "always" }, "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "type": "row", "title": "Destructive-path signals",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }, "collapsed": false, "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Branch-tag removals (Removed branch)",
+      "description": "remove_branch_from_tracked_file outcomes — the ONLY code that strips a branch tag from the authority. \"row kept\" = ref-counted tag drop; \"row deleted\" = last tag gone, generation removed. A sustained tag-drop rate outside boot windows = something is enqueuing deletes it should not (the #224 loop stripped main from live files ~1/min).",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container=\"wqm-memexd\"} |= \"Removed branch\" |= \"row_deleted=false\" [$__auto]))",
+          "legendFormat": "tag drop (row kept)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container=\"wqm-memexd\"} |= \"Removed branch\" |= \"row_deleted=true\" [$__auto]))",
+          "legendFormat": "row deleted (last tag)"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } }, "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Delete guards: preserves, covered & dry-run",
+      "description": "\"Preserving index\" = the on-disk guard no-op'ing a delete (pre-stage-3 this ran ~1k/boot forever); \"covered\" = stage-3 covered-generation deletes enqueued; \"stage3-dry\" = what WOULD be deleted under policy=dry. Preserves should be rare after stage 3 — a regrowth means new debris is accumulating.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container=\"wqm-memexd\"} |= \"Preserving index for\" [$__auto]))",
+          "legendFormat": "preserve (uncovered)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container=\"wqm-memexd\"} |= \"covered by a live generation\" [$__auto]))",
+          "legendFormat": "covered (stage 3)"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container=\"wqm-memexd\"} |= \"[stage3-dry] WOULD delete\" [$__auto]))",
+          "legendFormat": "stage3 dry-run"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60 }, "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "type": "row", "title": "Incidents & boot hygiene (raw events)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }, "collapsed": false, "panels": []
+    },
+    {
+      "type": "logs",
+      "title": "Walk failures & reconcile warnings",
+      "description": "D4 guard firings and ignore_sync skips/failures. Anything here names a tenant whose reconciliation is NOT running — investigate the walk (path mounted? worktree resolved? ignore rules sane?).",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{container=\"wqm-memexd\"} |~ \"walk found 0 eligible|\\\\[ignore_sync\\\\].*(skipping|failed)|\\\\[ignore_watch\\\\].*failed\""
+        }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true, "dedupStrategy": "none", "prettifyLogMessage": false, "showCommonLabels": false, "showLabels": false }
+    },
+    {
+      "type": "logs",
+      "title": "branch_prune & stage-3 boot summaries",
+      "description": "One line per boot: how many orphaned branches were pruned, deletes enqueued, and how many were covered-generation candidates (stage 3). Compare consecutive boots — the covered count must shrink toward zero; monotonic growth = new stale generations are being fabricated faster than they drain.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{container=\"wqm-memexd\"} |~ \"\\\\[branch_prune\\\\] Pruned|covered-generation delete policy|deferred_to_next_cycle\""
+        }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true, "dedupStrategy": "none", "prettifyLogMessage": false, "showCommonLabels": false, "showLabels": false }
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["wqm", "hygiene", "reconciliation"],
+  "templating": { "list": [] },
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "WQM — Reconciliation & Index Hygiene",
+  "uid": "wqm-reconcile-hygiene",
+  "version": 1,
+  "weekStart": ""
+}
