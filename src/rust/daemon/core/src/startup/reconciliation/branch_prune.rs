@@ -469,15 +469,7 @@ async fn enqueue_branch_deletes(
                 continue;
             }
         };
-        let payload = FilePayload {
-            file_path: rel_path,
-            file_type: None,
-            file_hash: None,
-            size_bytes: None,
-            old_path: None,
-        };
-        let payload_json =
-            serde_json::to_string(&payload).map_err(|e| format!("serialize FilePayload: {e}"))?;
+        let payload_json = build_prune_delete_payload(&rel_path, branch)?;
 
         // Stage 3: tell the delete side whether another generation on a live
         // branch still serves this path. Only that fact distinguishes a stale
@@ -519,4 +511,111 @@ async fn enqueue_branch_deletes(
         }
     }
     Ok(tally)
+}
+
+/// `FilePayload` JSON for one pruned file, with the pruned branch carried IN
+/// the payload.
+///
+/// The idempotency key hashes `item_type|op|tenant|collection|payload_json`
+/// but NOT the item's `branch` column, so without this field the same-path
+/// deletes this module enqueues for DIFFERENT dead branches in one run all
+/// collide on one key and `INSERT OR IGNORE` swallows every insert after the
+/// first — mass dead-branch cleanup advanced one branch per path per startup
+/// (observed live 2026-07-16: a boot logged "enqueued 17,033" while only ~2k
+/// rows actually entered the queue). Extra payload fields are the established
+/// convention here (`ignore_enqueue::build_payload` ships `reason` the same
+/// way); `FilePayload`'s serde ignores unknown fields, and the delete
+/// executor keeps reading the item's `branch` COLUMN — this field exists only
+/// to differentiate the key, never as a second source of truth.
+fn build_prune_delete_payload(rel_path: &RelativePath, branch: &str) -> Result<String, String> {
+    let payload = FilePayload {
+        file_path: rel_path.clone(),
+        file_type: None,
+        file_hash: None,
+        size_bytes: None,
+        old_path: None,
+    };
+    let mut value =
+        serde_json::to_value(&payload).map_err(|e| format!("serialize FilePayload: {e}"))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| "FilePayload did not serialize to a JSON object".to_string())?
+        .insert(
+            "pruned_branch".to_string(),
+            serde_json::Value::String(branch.to_string()),
+        );
+    serde_json::to_string(&value).map_err(|e| format!("serialize payload value: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_prune_delete_payload;
+    use crate::unified_queue_schema::FilePayload;
+    use wqm_common::hashing::generate_idempotency_key;
+    use wqm_common::paths::RelativePath;
+    use wqm_common::queue_types::{ItemType, QueueOperation};
+
+    fn key_for(payload_json: &str) -> String {
+        generate_idempotency_key(
+            ItemType::File,
+            QueueOperation::Delete,
+            "tenant-1",
+            "projects",
+            payload_json,
+        )
+        .expect("key")
+    }
+
+    #[test]
+    fn pruned_branch_differentiates_same_path_keys_across_branches() {
+        // The live failure: one prune run enumerates many dead branches, each
+        // holding the same path. Every per-branch delete must get its own
+        // idempotency key or INSERT OR IGNORE keeps only the first.
+        let rel = RelativePath::from_user_input("src/tools/grep.ts").unwrap();
+        let a = build_prune_delete_payload(&rel, "feat/dead-a").unwrap();
+        let b = build_prune_delete_payload(&rel, "feat/dead-b").unwrap();
+        assert_ne!(a, b, "payloads must differ per pruned branch");
+        assert_ne!(key_for(&a), key_for(&b), "keys must differ per pruned branch");
+
+        // Same (path, branch) stays idempotent across runs.
+        let a_again = build_prune_delete_payload(&rel, "feat/dead-a").unwrap();
+        assert_eq!(key_for(&a), key_for(&a_again));
+    }
+
+    #[test]
+    fn pruned_branch_payload_round_trips_through_file_payload() {
+        // Consumer contract: the delete side deserializes the payload as
+        // FilePayload — the extra field must be ignored, not rejected, and
+        // the path must survive intact (same mechanism ignore_enqueue's
+        // `reason` field relies on).
+        let rel = RelativePath::from_user_input("proto/sector.proto").unwrap();
+        let json = build_prune_delete_payload(&rel, "fix/dead-branch").unwrap();
+        assert!(json.contains(r#""pruned_branch":"fix/dead-branch""#));
+
+        let parsed: FilePayload = serde_json::from_str(&json).expect("FilePayload ignores extras");
+        assert_eq!(parsed.file_path.as_str(), "proto/sector.proto");
+    }
+
+    #[test]
+    fn pruned_branch_field_is_additive_only() {
+        // The builder must not perturb any other field of the encoding: the
+        // JSON minus `pruned_branch` parses back to exactly the bare payload
+        // (guards the keys of every OTHER producer, which stay on the
+        // field-free encoding).
+        let rel = RelativePath::from_user_input("docker-compose.yml").unwrap();
+        let json = build_prune_delete_payload(&rel, "feat/x").unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("pruned_branch");
+
+        let bare = FilePayload {
+            file_path: rel,
+            file_type: None,
+            file_hash: None,
+            size_bytes: None,
+            old_path: None,
+        };
+        let bare_value =
+            serde_json::to_value(&bare).expect("serialize bare payload");
+        assert_eq!(value, bare_value);
+    }
 }

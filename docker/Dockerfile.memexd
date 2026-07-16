@@ -249,6 +249,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         restamp shadowed_strip branch_opt holding_branch other_generation \
+        pruned_branch \
         --test-threads=4
 
 # ─────────────────────────────────────────────
