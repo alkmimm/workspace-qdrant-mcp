@@ -137,7 +137,31 @@ pub(super) async fn process_file_delete(
         return delete_result;
     }
 
-    // Fallback: file not in tracked_files — attempt Qdrant filter delete.
+    // Reaching here proves only that no generation is tagged `item.branch` — NOT
+    // that the path is untracked. Under Layer 2 (#124) a path legitimately carries
+    // several content generations, each tagged with the branches holding it, and
+    // `delete_points_by_filter` matches on (file_path, tenant_id) with no branch
+    // or base_point scope. Sweeping here therefore wipes the points of generations
+    // nobody asked to delete, leaving their `tracked_files` rows advertising chunks
+    // Qdrant no longer has — the same path-keyed blast radius #273 had to dodge for
+    // graph edges and keyword extractions. Observed live 2026-07-16: 5 DOC-V2
+    // protos holding 308 chunk_count between them and 0 points, re-swept ~40x/hour
+    // by a delete that could never converge (#224). The filter sweep exists for a
+    // genuinely orphaned path, so require that no generation survives.
+    if let Ok(Some(other)) =
+        tracked_files_schema::lookup_tracked_file(pool, watch_folder_id, relative_path, None).await
+    {
+        debug!(
+            "Skipping fallback filter-delete for '{}': not tracked on branch '{}', but \
+             generation file_id={} still holds it (branches={:?}) — a path-keyed filter \
+             delete would wipe that generation's points",
+            relative_path, item.branch, other.file_id, other.branches
+        );
+        record_delete_timings(ctx, item, pool, detected_language, &timings).await;
+        return Ok(());
+    }
+
+    // Fallback: file genuinely absent from tracked_files — attempt Qdrant filter delete.
     // F-035: a fallback Qdrant delete failure is still a real failure — the
     // points may exist but cannot be deleted. Surface it so retry metadata is
     // populated.

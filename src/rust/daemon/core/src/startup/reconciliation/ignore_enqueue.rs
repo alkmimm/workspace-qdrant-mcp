@@ -4,7 +4,6 @@
 //! `file|delete` / `file|add` unified-queue items, batched as one SQLite
 //! transaction per batch.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use tracing::{debug, info, warn};
@@ -12,7 +11,6 @@ use wqm_common::paths::RelativePath;
 
 use crate::queue_operations::QueueManager;
 use crate::unified_queue_schema::{ItemType, QueueOperation};
-use crate::watching_queue::get_current_branch;
 
 use super::ignore_sync::ReconcileStats;
 
@@ -41,10 +39,16 @@ pub(super) async fn enqueue_reconcile_ops(
     collection: &str,
     stale: &[&String],
     missing: &[&String],
+    // The branch `ignore_sync` measured staleness against, read from the tree it
+    // actually walked. Passed in rather than re-resolved here: this value decides
+    // which tag every stale delete strips, and a second, independent resolution
+    // could name a different branch than the one the diff was computed for — a
+    // tenant owns one enabled `projects` row per clone AND per registered worktree
+    // (#167), so a DB lookup here can legitimately land on another tree's HEAD.
+    // `None` for non-`projects` collections, which have no branch.
+    branch_ref: Option<&str>,
 ) -> Result<ReconcileStats, String> {
     let mut stats = ReconcileStats::default();
-    let branch = resolve_watch_branch(queue_manager, tenant_id, collection).await;
-    let branch_ref = branch.as_deref();
 
     stats.stale_deleted = enqueue_ignore_ops(
         queue_manager,
@@ -77,31 +81,6 @@ pub(super) async fn enqueue_reconcile_ops(
     );
 
     Ok(stats)
-}
-
-
-async fn resolve_watch_branch(
-    queue_manager: &Arc<QueueManager>,
-    tenant_id: &str,
-    collection: &str,
-) -> Option<String> {
-    if collection != "projects" {
-        return None;
-    }
-
-    let path: Option<String> = sqlx::query_scalar(
-        "SELECT path FROM watch_folders \
-         WHERE tenant_id = ?1 AND collection = ?2 AND enabled = 1 \
-         ORDER BY is_active DESC, updated_at DESC LIMIT 1",
-    )
-    .bind(tenant_id)
-    .bind(collection)
-    .fetch_optional(queue_manager.pool())
-    .await
-    .ok()
-    .flatten();
-
-    path.map(|p| get_current_branch(Path::new(&p)))
 }
 
 /// Default batch size for ignore-sync enqueues.
@@ -229,8 +208,6 @@ fn build_payload(op: QueueOperation, rel: &RelativePath, reason: &str) -> String
 mod tests {
     use super::*;
     use crate::unified_queue_schema::FilePayload;
-    use std::process::Command;
-    use tempfile::TempDir;
 
     /// Regression for the Finance poison-queue incident: a literal `C:`
     /// directory inside a Linux project root produced walk paths like
@@ -273,34 +250,13 @@ mod tests {
     }
 
 
+    /// The branch the caller measured staleness against is the branch stamped on
+    /// every enqueued item. `ignore_sync` owns resolving it from the walked tree
+    /// (see `ignore_sync::resolve_branch`); this side must not second-guess it.
     #[tokio::test]
-    async fn reconcile_missing_files_use_current_project_branch() {
-        let repo = TempDir::new().unwrap();
-        let run_git = |args: &[&str]| {
-            let status = Command::new("git")
-                .args(args)
-                .current_dir(repo.path())
-                .status()
-                .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
-            assert!(status.success(), "git {args:?} failed with {status}");
-        };
-        run_git(&["init", "-b", "dev-clean"]);
-        run_git(&["config", "user.email", "wqm-test@example.invalid"]);
-        run_git(&["config", "user.name", "WQM Test"]);
-        std::fs::write(repo.path().join("README.md"), "test\n").unwrap();
-        run_git(&["add", "README.md"]);
-        run_git(&["commit", "-m", "init"]);
-
+    async fn reconcile_stamps_the_branch_it_was_given() {
         let pool = super::super::tests::create_test_pool().await;
         super::super::tests::setup_schema(&pool).await;
-        sqlx::query(
-            "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled, updated_at) \
-             VALUES ('w1', ?1, 'projects', 'tenant-branch', 1, '2026-01-01T00:00:00Z')",
-        )
-        .bind(repo.path().to_string_lossy().as_ref())
-        .execute(&pool)
-        .await
-        .unwrap();
         let queue_manager = Arc::new(QueueManager::new(pool.clone()));
 
         let missing = "src/app/transforms-builder.component.ts".to_string();
@@ -311,6 +267,7 @@ mod tests {
             "projects",
             &[],
             &paths,
+            Some("dev-clean"),
         )
         .await
         .unwrap();
@@ -324,6 +281,37 @@ mod tests {
         .unwrap();
         assert_eq!(row.0, "uplift");
         assert_eq!(row.1, "dev-clean");
+    }
+
+    /// A stale delete must carry the SAME branch the staleness diff used —
+    /// otherwise it strips a tag nobody measured (#224).
+    #[tokio::test]
+    async fn stale_deletes_carry_the_measured_branch() {
+        let pool = super::super::tests::create_test_pool().await;
+        super::super::tests::setup_schema(&pool).await;
+        let queue_manager = Arc::new(QueueManager::new(pool.clone()));
+
+        let stale_path = "proto/resources.proto".to_string();
+        let paths: Vec<&String> = vec![&stale_path];
+        let stats = enqueue_reconcile_ops(
+            &queue_manager,
+            "tenant-stale",
+            "projects",
+            &paths,
+            &[],
+            Some("feature/x"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.stale_deleted, 1);
+
+        let row: (String, String) =
+            sqlx::query_as("SELECT op, branch FROM unified_queue WHERE tenant_id = 'tenant-stale'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "delete");
+        assert_eq!(row.1, "feature/x");
     }
 
     #[tokio::test]
@@ -341,6 +329,7 @@ mod tests {
             "projects",
             &[],
             &paths,
+            None,
         )
         .await
         .unwrap();
