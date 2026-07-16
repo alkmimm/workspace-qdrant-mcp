@@ -277,6 +277,36 @@ The `--metrics-port <N>` CLI flag is a shortcut that forces
 `docs/observability/memexd-telemetry-dashboard.json` for a Grafana 10
 dashboard.
 
+### Provisioned Grafana stack (docker compose)
+
+The compose stack ships Grafana with Prometheus, Loki, and Tempo datasources
+and hot-provisions every dashboard in `docker/grafana/dashboards/` (30s file
+provider — drop a JSON in, it goes live; no rebuild or restart). Notable
+boards:
+
+- **WQM — Reconciliation & Index Hygiene** (`reconcile-hygiene.json`) —
+  Loki-derived loop detectors for the reconcile/prune subsystem: reconcile
+  convergence per tenant, branch-tag removal rates, delete-guard activity,
+  walk failures. Thresholds encode incident signatures (a steady reconcile
+  rate with an identical stale count = a non-convergent loop). Born from the
+  2026-07-16 #224 incident, which ran for weeks with zero dashboard
+  visibility; it surfaced two more live bugs (#280, #284) in its first hour.
+  First-class Prometheus counters for these signals are tracked in #283.
+- **WQM — System Overview / memexd / Qdrant / Token Economy** and friends —
+  queue, embedding, gRPC, graph, and token-economy panels.
+
+### Index-coverage guardrail
+
+`indexing_status` counts only walk-eligible files, so it can report "complete"
+while git-tracked files are invisible to the index (e.g. gitignore allowlist
+rot — see `docs/specs/06-file-watching.md`). Before trusting zero-hits in any
+coverage-sensitive audit:
+
+```bash
+scripts/tracked_but_unindexed.sh /abs/path/to/repo [prefix/]
+# exit 0 = coverage ok; exit 2 = tracked-but-unindexed files exist (listed)
+```
+
 ### OTLP traces (push)
 
 `#[tracing::instrument]` spans on the queue processor, watcher, gRPC,
