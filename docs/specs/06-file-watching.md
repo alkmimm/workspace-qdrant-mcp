@@ -151,6 +151,58 @@ The folder scanner reads two optional ignore files from the project root (and re
 
 **Implementation:** Uses the `ignore` crate (same library as ripgrep) which correctly handles nested files, negation, and directory anchoring.
 
+> **Index-blindness gotcha (allowlist rot):** the eligibility walk applies
+> gitignore *patterns* without consulting the git index — a git-TRACKED file
+> matching an un-negated pattern is invisible to the index even though git
+> versioning is unaffected (tracked wins over ignore only inside git). An
+> allowlist-style ignore (`*.ext` + per-file negations) therefore rots
+> silently: every new file needs a manual negation or it is both invisible to
+> `git status` (silent commit drops) and to the index (coverage blindness),
+> while `indexing_status` still reports "complete" — its denominator is only
+> what the walk saw. Guardrail: `scripts/tracked_but_unindexed.sh <repo>
+> [prefix/]` diffs `git ls-files` against `tracked_files` (exit 2 on gaps).
+> Observed 2026-07-16: 16 tracked protos invisible, 8 with no indexed copy
+> anywhere (#279 context).
+
+#### Ignore reconciliation invariants (#278 / #280 / #284)
+
+The ignore reconciler (`startup/reconciliation/ignore_sync.rs`, also fired at
+runtime by `watching_queue/ignore_watch.rs`) obeys five invariants, each one a
+live incident from 2026-07-16:
+
+1. **Staleness is per `(path, branch)`, never per path.** The stale remedy
+   (`file|delete`) drops ONE branch tag from the Layer-2 content row, so a
+   per-path diff can never converge for multi-branch rows — the path survives
+   and is re-enqueued forever (measured: 49 identical reconciles in 50 min).
+   `missing` stays per-path deliberately: its remedy (Uplift + branch merge)
+   has no per-branch asymmetry, and a per-branch `missing` would turn every
+   branch checkout into a full-repo Uplift storm (#278 D1).
+2. **The branch comes from the tree that was walked** (`resolve_branch` reads
+   HEAD of `project_root`), never from a second DB lookup (#278).
+3. **An empty walk over a non-empty index is a walk FAILURE, not truth.**
+   Zero eligible + N indexed → warn and skip; deletes are withheld (#278 D4).
+4. **The watch folder is single-sourced.** `reconcile_ignore_rules` takes
+   `watch_id` from the caller; startup passes each enumerated row's own id,
+   the watcher resolves by the folder's *path* (its identity). Registered
+   worktree folders are never reconciled — they own no `tracked_files` rows
+   (content is served by the main folder via branch tags). Pre-fix, an
+   unordered tenant-scoped `LIMIT 1` diffed the main clone's rows against a
+   worktree's empty walk: 15 whole-index stale storms in one evening (#280).
+5. **Walk-excluded ignore files never trigger reconciliation.** An ignore
+   file inside an ignored subtree (agent worktrees under `.claude/worktrees/`)
+   cannot change the walk's output; `handle_ignore_file_change` checks the
+   file against the same `IgnoreGate` the walk post-filters with
+   (ancestor-aware) and skips. Pre-fix, one new agent worktree fired 54
+   tenant-wide reconciles in 15 minutes (#284). Note: the mtime cache is keyed
+   by the ignore file's path *relative to the project root* — a basename key
+   collapses all of a project's ignore files into one slot (#278 D3).
+
+Deletion-side guards live in `strategies/processing/file/`: the fallback
+filter-delete (and the Update path's defensive sweep, #281) require that NO
+generation still holds the path before deleting by bare `(file_path,
+tenant_id)` — see `docs/specs/21-cross-branch-dedup.md` for the Layer-2 model
+these protect.
+
 #### Allowed Extensions by Category
 
 **1. Systems Languages**

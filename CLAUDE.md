@@ -141,6 +141,7 @@ These are **guardrails** — consult `docs/specs/` for full design details.
 - **All DB operations within transactions**: No bare queries outside a transaction
 - **4 canonical collections** (ADR-001): `projects` (by `tenant_id`), `libraries` (by `library_name`), `rules`, `scratchpad`
 - **Enqueue-only gRPC pattern**: gRPC handlers enqueue to unified queue; queue processor handles mutations (see `docs/specs/04-write-path.md`)
+- **Reconciliation invariants** (docs/specs/06-file-watching.md §"Ignore reconciliation invariants"): staleness is per (path, branch); the branch comes from the walked tree; an empty walk over a non-empty index is a failure, not truth; the watch folder is single-sourced from the caller (worktree folders are never reconciled); walk-excluded ignore files never trigger reconciliation. Path-keyed deletes (filter-delete fallback, Update defensive sweep) require that NO generation still holds the path.
 - **Idempotency key**: `SHA256(item_type|op|tenant_id|collection|payload_json)[:32]` — same algorithm in TypeScript, Rust daemon, and Rust CLI
 - **MCP tools**: store, search, rules, retrieve, grep, list (see `docs/specs/08-api-reference.md`)
 - **Hybrid search**: Dense (FastEmbed) + Sparse (BM25/IDF persisted in SQLite) + RRF fusion
