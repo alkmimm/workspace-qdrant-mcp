@@ -14,10 +14,9 @@ use ignore::WalkBuilder;
 use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
 
-use sqlx::Row;
-
 use crate::patterns::ignore_gate::IgnoreGate;
 use crate::queue_operations::QueueManager;
+use crate::watching_queue::WatchManager;
 
 /// Outcome of a single reconciliation run.
 #[derive(Debug, Default)]
@@ -36,16 +35,24 @@ pub struct ReconcileStats {
 /// `global_ignore_path` — optional path to `global.wqmignore`, applied on top
 /// of per-project ignore files. When `None` or when the file does not exist,
 /// only the per-project `.gitignore` / `.wqmignore` files are used.
+///
+/// `watch_id` — the watch folder whose rows are diffed, supplied by the caller
+/// who already knows which folder `project_root` belongs to (#280). It is NOT
+/// re-derived here: a tenant owns one enabled `projects` row per clone AND per
+/// registered git worktree, so a tenant-scoped `LIMIT 1` lookup can resolve to
+/// a DIFFERENT folder than the tree being walked — diffing folder A's rows
+/// against folder B's walk. Observed live 2026-07-16: the pre-#278 code did
+/// exactly that 15 times in one evening, flagging a tenant's entire 1,868-path
+/// index stale on every pass.
 pub async fn reconcile_ignore_rules(
     project_root: &Path,
+    watch_id: &str,
     tenant_id: &str,
     collection: &str,
     pool: &SqlitePool,
     queue_manager: &Arc<QueueManager>,
     global_ignore_path: Option<&Path>,
 ) -> Result<ReconcileStats, String> {
-    let watch_id = fetch_watch_id(pool, tenant_id, collection).await?;
-
     // Resolve the branch from the SAME tree we are about to walk. The stale
     // delete this pass enqueues drops exactly this branch's tag, so the branch a
     // delete targets and the branch whose staleness we measure must be one and
@@ -54,7 +61,7 @@ pub async fn reconcile_ignore_rules(
     let branch = resolve_branch(project_root, collection);
 
     let eligible_files = walk_eligible_files(project_root, global_ignore_path)?;
-    let indexed_files = get_indexed_file_paths(pool, &watch_id).await?;
+    let indexed_files = get_indexed_file_paths(pool, watch_id).await?;
 
     // Empty-walk safety net. A walk that yields ZERO eligible files while the
     // index holds many is a walk failure (unreadable/half-mounted tree, a
@@ -91,7 +98,7 @@ pub async fn reconcile_ignore_rules(
     // makes the pass converge after one cycle: once the tag is gone the path is no
     // longer indexed *on this branch*, so it is no longer stale.
     let indexed_on_branch = match branch.as_deref() {
-        Some(b) => get_indexed_file_paths_on_branch(pool, &watch_id, b).await?,
+        Some(b) => get_indexed_file_paths_on_branch(pool, watch_id, b).await?,
         None => indexed_files.clone(),
     };
 
@@ -155,28 +162,42 @@ fn resolve_branch(project_root: &Path, collection: &str) -> Option<String> {
     Some(crate::watching_queue::get_current_branch(project_root))
 }
 
-/// Look up the watch_id for a tenant+collection combination.
-async fn fetch_watch_id(
+/// Resolve a watch folder by the PATH being reconciled → `(watch_id, is_worktree)`.
+///
+/// The path is the folder's identity (#280): tenant-scoped lookups are ambiguous
+/// once a tenant owns several enabled rows (clones + registered worktrees).
+/// Exact string match first; on miss, compare each enabled row's path through
+/// `resolve_local_watch_path` (Docker Desktop aliases can make the walked root
+/// differ from the stored spelling).
+pub(crate) async fn fetch_watch_folder_by_path(
     pool: &SqlitePool,
-    tenant_id: &str,
-    collection: &str,
-) -> Result<String, String> {
-    let row = sqlx::query(
-        "SELECT watch_id FROM watch_folders \
-         WHERE tenant_id = ?1 AND collection = ?2 AND enabled = 1 LIMIT 1",
+    project_root: &Path,
+) -> Result<Option<(String, bool)>, String> {
+    let root = project_root.to_string_lossy().to_string();
+    let exact: Option<(String, i64)> = sqlx::query_as(
+        "SELECT watch_id, COALESCE(is_worktree, 0) FROM watch_folders \
+         WHERE path = ?1 AND enabled = 1 LIMIT 1",
     )
-    .bind(tenant_id)
-    .bind(collection)
+    .bind(&root)
     .fetch_optional(pool)
     .await
-    .map_err(|e| format!("lookup_watch_folder failed: {e}"))?
-    .ok_or_else(|| {
-        format!(
-            "No watch folder for tenant={} collection={}",
-            tenant_id, collection
-        )
-    })?;
-    Ok(row.get("watch_id"))
+    .map_err(|e| format!("watch folder lookup by path failed: {e}"))?;
+    if let Some((watch_id, is_wt)) = exact {
+        return Ok(Some((watch_id, is_wt != 0)));
+    }
+
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT watch_id, path, COALESCE(is_worktree, 0) FROM watch_folders WHERE enabled = 1",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("watch folder enumeration failed: {e}"))?;
+    for (watch_id, path, is_wt) in rows {
+        if WatchManager::resolve_local_watch_path(&path) == project_root {
+            return Ok(Some((watch_id, is_wt != 0)));
+        }
+    }
+    Ok(None)
 }
 
 /// Walk project tree and collect all eligible file paths (not excluded
@@ -695,6 +716,7 @@ mod tests {
         let qm = Arc::new(QueueManager::new(pool.clone()));
         let stats = reconcile_ignore_rules(
             empty_tree.path(),
+            "wf1",
             "tenant1",
             "projects",
             &pool,
@@ -711,6 +733,94 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(queued.0, 0, "nothing may be enqueued when the walk fails");
+    }
+
+    /// #280: the rows diffed are the ones of the watch_id the CALLER supplies —
+    /// two folders of the same tenant must reconcile independently.
+    #[tokio::test]
+    async fn reconcile_diffs_only_the_given_watch_folder() {
+        use crate::queue_operations::QueueManager;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let pool = super::super::tests::create_test_pool().await;
+        super::super::tests::setup_schema(&pool).await;
+
+        // Two enabled folders, SAME tenant (clone + second clone). Distinct
+        // paths — the production DDL enforces UNIQUE(watch_folders.path).
+        let tree_a = TempDir::new().unwrap();
+        let tree_b = TempDir::new().unwrap();
+        std::fs::write(tree_a.path().join("kept.rs"), "fn a() {}\n").unwrap();
+        for (wid, tree) in [("wfA", &tree_a), ("wfB", &tree_b)] {
+            sqlx::query(
+                "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled, is_archived, created_at, updated_at) \
+                 VALUES (?1, ?2, 'projects', 'tenant-multi', 1, 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+            )
+            .bind(wid)
+            .bind(tree.path().to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // Folder B owns a row for a path that does NOT exist on disk (stale on B).
+        sqlx::query(
+            "INSERT INTO tracked_files \
+             (watch_folder_id, relative_path, branches, file_mtime, file_hash, collection, base_point, created_at, updated_at) \
+             VALUES ('wfB', 'gone.rs', '[]', '2025-01-01T00:00:00Z', 'hB', 'projects', 'bp', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Reconciling folder A must NOT see folder B's stale row.
+        let qm = Arc::new(QueueManager::new(pool.clone()));
+        let stats = reconcile_ignore_rules(
+            tree_a.path(),
+            "wfA",
+            "tenant-multi",
+            "projects",
+            &pool,
+            &qm,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stats.stale_deleted, 0,
+            "folder B's rows must be invisible to folder A's diff"
+        );
+    }
+
+    /// #280: the by-path resolver returns the folder whose path matches, with
+    /// its worktree flag — never a tenant-scoped LIMIT 1 guess.
+    #[tokio::test]
+    async fn fetch_watch_folder_by_path_is_exact_and_flags_worktrees() {
+        let pool = super::super::tests::create_test_pool().await;
+        super::super::tests::setup_schema(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled, is_worktree, is_archived, created_at, updated_at) VALUES \
+             ('wf-main', '/repo/main', 'projects', 't1', 1, 0, 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z'), \
+             ('wf-wt',   '/repo/main/.claude/worktrees/x', 'projects', 't1', 1, 1, 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let main = fetch_watch_folder_by_path(&pool, Path::new("/repo/main"))
+            .await
+            .unwrap();
+        assert_eq!(main, Some(("wf-main".to_string(), false)));
+
+        let wt = fetch_watch_folder_by_path(&pool, Path::new("/repo/main/.claude/worktrees/x"))
+            .await
+            .unwrap();
+        assert_eq!(wt, Some(("wf-wt".to_string(), true)));
+
+        let miss = fetch_watch_folder_by_path(&pool, Path::new("/repo/other"))
+            .await
+            .unwrap();
+        assert_eq!(miss, None);
     }
 
     /// The branch must come from the tree that was walked, not a DB lookup that
