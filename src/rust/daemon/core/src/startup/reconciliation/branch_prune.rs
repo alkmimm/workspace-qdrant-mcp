@@ -124,12 +124,75 @@ pub struct BranchPruneStats {
     /// no-op'ing forever; they only execute under
     /// `WQM_BRANCH_PRUNE_COVERED_DELETE=on`.
     pub files_covered: u64,
+    /// Covered candidates NOT enqueued because the per-run cap was reached
+    /// (`WQM_BRANCH_PRUNE_COVERED_CAP`). They are picked up by the next cycle.
+    pub files_deferred: u64,
 }
 
 impl BranchPruneStats {
     /// Returns true if any branch was pruned.
     pub fn has_changes(&self) -> bool {
         self.branches_pruned > 0 || self.files_enqueued > 0
+    }
+}
+
+/// Per-run ceiling on COVERED deletes (issue #224 stage 3).
+///
+/// Bounds the blast radius of one prune cycle: if the coverage computation is
+/// ever wrong, at most this many stale generations can go before a human sees
+/// the counts. Covered candidates beyond the cap are simply not enqueued — the
+/// prune runs at every startup, so they are picked up by the next cycle.
+/// Uncovered deletes and multi-tag shrinks are untouched (pre-existing
+/// behaviour, not deletion-capable).
+///
+/// `WQM_BRANCH_PRUNE_COVERED_CAP`: a number (`0` = unlimited); default 500.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CoveredBudget {
+    /// Remaining covered enqueues this run; `None` = unlimited.
+    remaining: Option<u64>,
+    /// Covered candidates skipped because the cap was reached.
+    deferred: u64,
+}
+
+impl CoveredBudget {
+    /// Build from the env knob. Unparsable → the default cap (never unlimited:
+    /// a typo must not lift the ceiling).
+    pub(crate) fn from_env() -> Self {
+        const DEFAULT_CAP: u64 = 500;
+        let cap = std::env::var("WQM_BRANCH_PRUNE_COVERED_CAP")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_CAP);
+        Self::with_cap(cap)
+    }
+
+    /// `cap == 0` means unlimited.
+    pub(crate) fn with_cap(cap: u64) -> Self {
+        Self {
+            remaining: (cap > 0).then_some(cap),
+            deferred: 0,
+        }
+    }
+
+    /// Claim one covered enqueue. `false` → the cap is exhausted; the caller
+    /// must skip this candidate (counted as deferred).
+    pub(crate) fn take(&mut self) -> bool {
+        match self.remaining.as_mut() {
+            None => true, // unlimited
+            Some(0) => {
+                self.deferred += 1;
+                false
+            }
+            Some(n) => {
+                *n -= 1;
+                true
+            }
+        }
+    }
+
+    /// Covered candidates skipped because the cap was reached this run.
+    pub(crate) fn deferred(&self) -> u64 {
+        self.deferred
     }
 }
 
@@ -168,9 +231,21 @@ pub async fn prune_orphaned_branches(
     .await
     .map_err(|e| format!("query active projects: {e}"))?;
 
+    // One budget for the whole run: the cap bounds a cycle, not a project.
+    let mut budget = CoveredBudget::from_env();
+
     let mut totals = BranchPruneStats::default();
     for (watch_id, tenant_id, project_root) in &rows {
-        match prune_project_branches(pool, queue_manager, watch_id, tenant_id, project_root).await {
+        match prune_project_branches(
+            pool,
+            queue_manager,
+            watch_id,
+            tenant_id,
+            project_root,
+            &mut budget,
+        )
+        .await
+        {
             Ok(stats) => {
                 totals.branches_pruned += stats.branches_pruned;
                 totals.files_enqueued += stats.files_enqueued;
@@ -179,15 +254,19 @@ pub async fn prune_orphaned_branches(
             Err(e) => warn!("[branch_prune] reconciliation failed for {tenant_id}: {e}"),
         }
     }
+    totals.files_deferred = budget.deferred();
 
     if totals.has_changes() {
         info!(
             "[branch_prune] Pruned {} orphaned branch(es), enqueued {} file delete(s) \
-             ({} covered by a live generation — stage 3 candidates, policy={})",
+             ({} covered by a live generation — stage 3 candidates, policy={}, capped={}, \
+             deferred_to_next_cycle={})",
             totals.branches_pruned,
             totals.files_enqueued,
             totals.files_covered,
             std::env::var("WQM_BRANCH_PRUNE_COVERED_DELETE").unwrap_or_else(|_| "dry".into()),
+            totals.files_deferred > 0,
+            totals.files_deferred,
         );
     }
     Ok(totals)
@@ -200,6 +279,7 @@ async fn prune_project_branches(
     watch_id: &str,
     tenant_id: &str,
     project_root: &str,
+    budget: &mut CoveredBudget,
 ) -> Result<BranchPruneStats, String> {
     let root = WatchManager::resolve_local_watch_path(project_root);
     if !root.is_dir() {
@@ -296,6 +376,7 @@ async fn prune_project_branches(
             tenant_id,
             branch.as_str(),
             &live_generations,
+            budget,
         )
         .await?;
         if enqueued.total > 0 {
@@ -366,6 +447,7 @@ async fn enqueue_branch_deletes(
     tenant_id: &str,
     branch: &str,
     live_generations: &HashMap<String, Vec<i64>>,
+    budget: &mut CoveredBudget,
 ) -> Result<EnqueueTally, String> {
     let files: Vec<(i64, String)> = sqlx::query_as(
         "SELECT file_id, relative_path FROM tracked_files \
@@ -403,6 +485,12 @@ async fn enqueue_branch_deletes(
         // protects. The `branches`-set arithmetic itself stays on the delete
         // side (it re-reads the row under its own transaction).
         let covered = covered_by_other_live_generation(live_generations.get(&rel), file_id);
+        // Per-run ceiling on the deletion-capable class only: skip (defer to the
+        // next cycle) rather than enqueue once the cap is spent. Uncovered
+        // deletes keep flowing — they are no-ops under the preserve guard.
+        if covered && !budget.take() {
+            continue;
+        }
         let metadata = if covered {
             BRANCH_PRUNE_COVERED_DELETE_METADATA
         } else {

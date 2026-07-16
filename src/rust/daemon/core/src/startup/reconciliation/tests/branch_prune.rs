@@ -12,7 +12,9 @@ use tempfile::TempDir;
 
 use crate::queue_operations::QueueManager;
 
-use super::super::branch_prune::{covered_by_other_live_generation, prune_orphaned_branches};
+use super::super::branch_prune::{
+    covered_by_other_live_generation, prune_orphaned_branches, CoveredBudget,
+};
 use super::{create_test_pool, setup_schema};
 
 /// Initialise a git repo with one commit, then create the named local branches.
@@ -161,6 +163,25 @@ fn covered_by_other_live_generation_ignores_the_row_itself() {
     // No live generation at all for the path → the mislabeled-corpus case.
     assert!(!covered_by_other_live_generation(Some(&vec![]), 42));
     assert!(!covered_by_other_live_generation(None, 42));
+}
+
+/// The per-run cap bounds only the deletion-capable (covered) class, and
+/// defers the rest to the next cycle instead of dropping them.
+#[test]
+fn covered_budget_caps_the_run_and_counts_deferrals() {
+    let mut b = CoveredBudget::with_cap(2);
+    assert!(b.take(), "1st covered candidate fits");
+    assert!(b.take(), "2nd fits");
+    assert!(!b.take(), "3rd exceeds the cap");
+    assert!(!b.take());
+    assert_eq!(b.deferred(), 2, "both over-cap candidates are deferred");
+
+    // cap == 0 means unlimited — nothing is ever deferred.
+    let mut unlimited = CoveredBudget::with_cap(0);
+    for _ in 0..10_000 {
+        assert!(unlimited.take());
+    }
+    assert_eq!(unlimited.deferred(), 0);
 }
 
 /// A path whose ONLY generations sit on dead branches must never be reported as
