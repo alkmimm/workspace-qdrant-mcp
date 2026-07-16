@@ -61,8 +61,15 @@ MEMEXD_IMAGE ?= workspace-qdrant-mcp-memexd:local
 PROMETHEUS_PORT ?= 9090
 DB_BACKUP_DIR ?= $(REPO)/state/backups
 # Snapshots are heavy (~7.4 GB live: search.db 4.3G + graph.db 1.8G +
-# memexd.db 1.3G), so the default keeps only the last two. Raise per-call
-# (`make redeploy DB_BACKUP_KEEP=5`) ahead of risky migrations.
+# memexd.db 1.3G), so the default keeps only the last two.
+#
+# Before raising this, CHECK FREE SPACE — `DB_BACKUP_KEEP=5` (~35 GB) once
+# filled the host disk mid-rollout, killed the copy with a misleading
+# "unexpected EOF" (ENOSPC in disguise), and left a partial snapshot that
+# looked valid (issue #276). backup-db now rotates BEFORE copying and refuses
+# to start when the volume cannot hold the snapshot, so a raise that does not
+# fit fails loudly instead of wedging the host. One extra snapshot ahead of a
+# risky migration is what `redeploy` already takes for you.
 DB_BACKUP_KEEP ?= 2
 
 .PHONY: help check-env first-time redeploy \
@@ -176,9 +183,9 @@ backup-db: check-env
 	  -v "$(MEMEXD_DB_VOLUME)":/live:ro \
 	  -v "$(DB_BACKUP_DIR)":/backup \
 	  -v "$(REPO)/scripts/migration-rehearsal-copy.py":/copy.py:ro \
-	  --entrypoint python3 "$(MEMEXD_IMAGE)" /copy.py /live "/backup/pre-deploy-$$ts"; \
-	echo "backup: state/backups/pre-deploy-$$ts"; \
-	cd "$(DB_BACKUP_DIR)" && ls -dt pre-deploy-* 2>/dev/null | tail -n +$$(( $(DB_BACKUP_KEEP) + 1 )) | xargs -r rm -rf
+	  --entrypoint python3 "$(MEMEXD_IMAGE)" /copy.py /live "/backup/pre-deploy-$$ts" \
+	  --keep "$(DB_BACKUP_KEEP)" --rotate-dir /backup \
+	&& echo "backup: state/backups/pre-deploy-$$ts"
 
 rehearse-migrations: check-env
 	@docker run --rm \
