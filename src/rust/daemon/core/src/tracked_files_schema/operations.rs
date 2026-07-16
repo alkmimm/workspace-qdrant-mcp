@@ -180,6 +180,69 @@ pub async fn lookup_tracked_file(
     Ok(row.map(|r| tracked_file_from_row(&r)))
 }
 
+/// ALL generations of `(watch_folder_id, relative_path)` whose `branches` set
+/// contains `branch`, newest-updated first.
+///
+/// The Layer-2 invariant is that a branch names exactly ONE blob per path, so
+/// more than one row here is a duplicate-tag overlap (#224): the newest row is
+/// what [`lookup_tracked_file`] would return (and what reads serve); every
+/// older row is shadowed debris that a `LIMIT 1` strip can never reach.
+pub async fn lookup_tracked_files_holding_branch(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    relative_path: &str,
+    branch: &str,
+) -> Result<Vec<TrackedFile>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT file_id, watch_folder_id, relative_path, branches, file_type, language,
+                file_mtime, file_hash, chunk_count, chunking_method, chunker_version,
+                lsp_status, treesitter_status, last_error,
+                needs_reconcile, reconcile_reason, extension, is_test,
+                collection, base_point, incremental,
+                component, created_at, updated_at
+         FROM tracked_files
+         WHERE watch_folder_id = ?1 AND relative_path = ?2
+           AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?3)
+         ORDER BY updated_at DESC",
+    )
+    .bind(watch_folder_id)
+    .bind(relative_path)
+    .bind(branch)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.iter().map(tracked_file_from_row).collect())
+}
+
+/// True when a generation OTHER than `exclude_file_id` still tracks
+/// `(watch_folder_id, relative_path)`, regardless of branches.
+///
+/// Guards the path-keyed cleanups (graph edges, keyword extractions): those
+/// describe the PATH, not one content generation, so only the last surviving
+/// generation of a path may clear them — wiping them while another generation
+/// still serves the file is the #235/#245 "edges wiped, never rebuilt"
+/// failure. This is the in-situ form of the fact stage 3 (#224) stamps as
+/// `covered_by_live_generation` on prune deletes; unlike the stamp it needs no
+/// producer cooperation, so it also protects watcher/update-driven deletes.
+pub async fn other_generation_exists(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    relative_path: &str,
+    exclude_file_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM tracked_files
+         WHERE watch_folder_id = ?1 AND relative_path = ?2 AND file_id != ?3
+         LIMIT 1",
+    )
+    .bind(watch_folder_id)
+    .bind(relative_path)
+    .bind(exclude_file_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
 /// Insert a new tracked file record, returning the file_id.
 ///
 /// `relative_path` is the post-v37 anchored relative path stored alongside

@@ -244,6 +244,14 @@ services:
       #   500); the rest is deferred to the next startup. See docker/.env.example.
       WQM_BRANCH_PRUNE_COVERED_DELETE: ${WQM_BRANCH_PRUNE_COVERED_DELETE:-}
       WQM_BRANCH_PRUNE_COVERED_CAP: ${WQM_BRANCH_PRUNE_COVERED_CAP:-}
+      # ── Overlap-group producer fix (#224) ────────────────────────────────────
+      # _BRANCH_AT_PROCESS: re-read HEAD at PROCESS time for ingest ops so the
+      #   branch tag is paired with the bytes actually hashed (kill switch;
+      #   on by default, only the literal `off` disables).
+      # _STRIP_ALL_GENERATIONS: a (path, branch) strip also reaches generations
+      #   shadowed by the newest holder. off | dry (default, observe only) | on.
+      WQM_INGEST_BRANCH_AT_PROCESS: ${WQM_INGEST_BRANCH_AT_PROCESS:-}
+      WQM_BRANCH_STRIP_ALL_GENERATIONS: ${WQM_BRANCH_STRIP_ALL_GENERATIONS:-}
       # ── R8.3b: LSP-authoritative CALLS backfill (graph resolution precision) ──
       # WQM_GRAPH_LSP_BACKFILL=1 arms start_graph_lsp_backfill: after a 300s
       # settle, walk each tenant serially, start its dominant-language LSP, stamp

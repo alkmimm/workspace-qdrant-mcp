@@ -243,71 +243,41 @@ pub struct WatchingQueueStats {
 pub fn get_current_branch(repo_path: &Path) -> String {
     const DEFAULT_BRANCH: &str = "main";
 
-    // Try to open the Git repository
-    let repo = match Repository::open(repo_path) {
-        Ok(r) => r,
-        Err(_) => {
-            warn!(
-                "Not a Git repository, defaulting to '{}': {}",
-                DEFAULT_BRANCH,
-                repo_path.display()
-            );
-            return DEFAULT_BRANCH.to_string();
-        }
-    };
-
-    // Check if repository has any commits
-    if repo.head().is_err() {
-        warn!(
-            "Git repository has no commits yet, defaulting to '{}': {}",
-            DEFAULT_BRANCH,
-            repo_path.display()
-        );
-        return DEFAULT_BRANCH.to_string();
-    }
-
-    // Get HEAD reference
-    let head = match repo.head() {
-        Ok(h) => h,
-        Err(_) => {
-            warn!(
-                "Failed to read HEAD, defaulting to '{}': {}",
-                DEFAULT_BRANCH,
-                repo_path.display()
-            );
-            return DEFAULT_BRANCH.to_string();
-        }
-    };
-
-    // Check if HEAD is detached
-    if !head.is_branch() {
-        warn!(
-            "Git repository in detached HEAD state, defaulting to '{}': {}",
-            DEFAULT_BRANCH,
-            repo_path.display()
-        );
-        return DEFAULT_BRANCH.to_string();
-    }
-
-    // Get branch name
-    match head.shorthand() {
-        Some(branch_name) => {
-            debug!(
-                "Detected Git branch '{}' for repository at {}",
-                branch_name,
-                repo_path.display()
-            );
-            branch_name.to_string()
-        }
+    match get_current_branch_opt(repo_path) {
+        Some(branch) => branch,
         None => {
             warn!(
-                "Failed to get branch name from HEAD, defaulting to '{}': {}",
+                "Could not resolve a branch (non-git, no commits, detached HEAD, or \
+                 unreadable), defaulting to '{}': {}",
                 DEFAULT_BRANCH,
                 repo_path.display()
             );
             DEFAULT_BRANCH.to_string()
         }
     }
+}
+
+/// Like [`get_current_branch`] but WITHOUT the `"main"` fallback: `None` when
+/// the path is not a git repository, the repo has no commits, HEAD is
+/// detached, or HEAD cannot be read.
+///
+/// Callers that *act* on the resolved branch (e.g. the process-time branch
+/// re-stamp, #224) must use this form: the fallback has repeatedly turned an
+/// unreadable repo into a confident-but-wrong `"main"` (see
+/// `branch_prune.rs` guards). `None` means "keep whatever you already had".
+pub fn get_current_branch_opt(repo_path: &Path) -> Option<String> {
+    let repo = Repository::open(repo_path).ok()?;
+    let head = repo.head().ok()?;
+    if !head.is_branch() {
+        return None;
+    }
+    let branch_name = head.shorthand()?;
+    debug!(
+        "Detected Git branch '{}' for repository at {}",
+        branch_name,
+        repo_path.display()
+    );
+    Some(branch_name.to_string())
 }
 
 #[cfg(test)]

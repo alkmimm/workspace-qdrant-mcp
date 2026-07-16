@@ -239,6 +239,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib schema_version -- --test-threads=4
 
+# #224 overlap-fix tests run here for the same reason: hermetic (in-memory
+# SQLite + tempdir git fixtures, no FTS5/timing dependence) and they guard
+# deletion-capable behavior (the shadowed-holder strip) plus the branch
+# attribution every tag write depends on. Multiple libtest filters = union.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        restamp shadowed_strip branch_opt holding_branch other_generation \
+        --test-threads=4
+
 # ─────────────────────────────────────────────
 # Stage 3a: rust-analyzer binary download
 # Ships as a single statically-linked release archive on GitHub. Downloaded

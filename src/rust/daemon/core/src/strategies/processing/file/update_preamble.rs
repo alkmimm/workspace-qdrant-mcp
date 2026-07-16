@@ -77,6 +77,23 @@ pub(super) async fn execute_update_deletion(
             Instant::now(),
         )
         .await?;
+
+        // #224: `existing` is only the NEWEST holder of item.branch — any
+        // shadowed generation still carrying the tag would survive this move
+        // and duplicate once the ingest below re-adds the branch to the new
+        // content-row. Sweep them (policy-gated) so a tag MOVES instead of
+        // copying.
+        super::delete::strip_shadowed_holders(
+            ctx,
+            item,
+            pool,
+            watch_folder_id,
+            relative_path,
+            abs_file_path,
+            existing.file_id,
+            &mut timings,
+        )
+        .await;
     }
 
     record_preamble_timing(pool, item, payload, abs_file_path, preamble_start).await;

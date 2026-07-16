@@ -10,6 +10,63 @@ fn test_get_current_branch_non_git() {
     assert_eq!(branch, "main");
 }
 
+/// Helper: init a repo on branch `feat/x` with one commit.
+fn init_repo_on_branch(path: &std::path::Path) -> git2::Repository {
+    let mut opts = git2::RepositoryInitOptions::new();
+    opts.initial_head("feat/x");
+    let repo = git2::Repository::init_opts(path, &opts).unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    let tree_id = {
+        let mut index = repo.index().unwrap();
+        index.write_tree().unwrap()
+    };
+    {
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+    }
+    repo
+}
+
+// ── get_current_branch_opt (#224): no "main" fallback ──────────────────────
+// The branch re-stamp ACTS on the resolved value, so it must get `None` (and
+// stand down) in every case where `get_current_branch` would confidently
+// guess "main".
+
+#[test]
+fn branch_opt_is_none_for_non_git_dir() {
+    let temp_dir = tempdir().unwrap();
+    assert_eq!(get_current_branch_opt(temp_dir.path()), None);
+}
+
+#[test]
+fn branch_opt_is_none_for_repo_without_commits() {
+    let temp_dir = tempdir().unwrap();
+    git2::Repository::init(temp_dir.path()).unwrap();
+    assert_eq!(get_current_branch_opt(temp_dir.path()), None);
+}
+
+#[test]
+fn branch_opt_reads_the_checked_out_branch() {
+    let temp_dir = tempdir().unwrap();
+    init_repo_on_branch(temp_dir.path());
+    assert_eq!(
+        get_current_branch_opt(temp_dir.path()),
+        Some("feat/x".to_string())
+    );
+    // ...and the fallback form agrees when git CAN answer.
+    assert_eq!(get_current_branch(temp_dir.path()), "feat/x");
+}
+
+#[test]
+fn branch_opt_is_none_for_detached_head() {
+    let temp_dir = tempdir().unwrap();
+    let repo = init_repo_on_branch(temp_dir.path());
+    let head_oid = repo.head().unwrap().target().unwrap();
+    repo.set_head_detached(head_oid).unwrap();
+    assert_eq!(get_current_branch_opt(temp_dir.path()), None);
+}
+
 // Multi-tenant routing tests
 #[test]
 fn test_watch_type_default() {

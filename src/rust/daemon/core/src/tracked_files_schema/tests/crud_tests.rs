@@ -499,3 +499,132 @@ async fn test_get_tracked_files_by_prefix_no_false_positives() {
     );
     assert_eq!(result[0].1, "src/core/main.rs");
 }
+
+// ── #224 overlap groups: shadowed-holder queries ────────────────────────────
+
+/// Insert one generation of `path` with `hash`, tagged `branch`.
+async fn insert_generation(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    hash: &str,
+    branch: &str,
+) -> i64 {
+    insert_tracked_file(
+        pool,
+        "w1",
+        path,
+        Some(branch),
+        Some("code"),
+        Some("rust"),
+        "2025-01-01T00:00:00Z",
+        hash,
+        1,
+        None,
+        ProcessingStatus::Done,
+        ProcessingStatus::Done,
+        None,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .expect("insert generation")
+}
+
+#[tokio::test]
+async fn lookup_holding_branch_returns_every_generation_newest_first() {
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+
+    // The exact overlap shape from the live census: two generations of the
+    // same path (different hashes) BOTH tagged with the same branch — the
+    // state the enqueue-time/process-time branch race fabricates.
+    let old_gen = insert_generation(&pool, "docker-compose.yml", "hash-old", "feat/x").await;
+    let new_gen = insert_generation(&pool, "docker-compose.yml", "hash-new", "feat/x").await;
+    // Deterministic recency: `insert_tracked_file` stamps `updated_at = now()`
+    // on BOTH rows (the mtime argument is a different column), so pin both
+    // explicitly — pinning only one would leave it OLDER than the insert-time
+    // stamp of the other.
+    sqlx::query("UPDATE tracked_files SET updated_at = '2025-01-01T00:00:00Z' WHERE file_id = ?1")
+        .bind(old_gen)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tracked_files SET updated_at = '2025-01-02T00:00:00Z' WHERE file_id = ?1")
+        .bind(new_gen)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let holders = lookup_tracked_files_holding_branch(&pool, "w1", "docker-compose.yml", "feat/x")
+        .await
+        .unwrap();
+    assert_eq!(holders.len(), 2, "both generations hold the tag");
+    assert_eq!(holders[0].file_id, new_gen, "newest-updated first");
+    assert_eq!(holders[1].file_id, old_gen);
+
+    // The single-row lookup (what the primary strip targets) must agree with
+    // holders[0] — the older row is exactly the one it can never reach.
+    let primary = lookup_tracked_file(&pool, "w1", "docker-compose.yml", Some("feat/x"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(primary.file_id, new_gen);
+
+    // A branch held by neither generation matches nothing.
+    let none = lookup_tracked_files_holding_branch(&pool, "w1", "docker-compose.yml", "main")
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+}
+
+#[tokio::test]
+async fn other_generation_exists_only_when_another_row_tracks_the_path() {
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+
+    let gen_a = insert_generation(&pool, "src/lib.rs", "hash-a", "main").await;
+
+    // Single generation → nothing else tracks the path (path-keyed cleanups
+    // may run when THIS row is deleted).
+    assert!(!other_generation_exists(&pool, "w1", "src/lib.rs", gen_a)
+        .await
+        .unwrap());
+
+    // Second generation on ANOTHER branch → the path stays tracked when one
+    // of them is deleted, so path-keyed cleanups must be withheld.
+    let gen_b = insert_generation(&pool, "src/lib.rs", "hash-b", "feat/x").await;
+    assert!(other_generation_exists(&pool, "w1", "src/lib.rs", gen_a)
+        .await
+        .unwrap());
+    assert!(other_generation_exists(&pool, "w1", "src/lib.rs", gen_b)
+        .await
+        .unwrap());
+
+    // A different path is not a survivor for this one.
+    let gen_other = insert_generation(&pool, "src/other.rs", "hash-c", "main").await;
+    assert!(!other_generation_exists(&pool, "w1", "src/other.rs", gen_other)
+        .await
+        .unwrap());
+
+    // Excluding an already-deleted file_id still answers for the path: after
+    // the row is gone, "does anything else track it?" is what the cleanup
+    // gate actually asks (the check runs post-delete in delete_tracked_file).
+    sqlx::query("DELETE FROM tracked_files WHERE file_id = ?1")
+        .bind(gen_b)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(other_generation_exists(&pool, "w1", "src/lib.rs", gen_b)
+        .await
+        .unwrap(), "gen_a still tracks the path");
+    sqlx::query("DELETE FROM tracked_files WHERE file_id = ?1")
+        .bind(gen_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!other_generation_exists(&pool, "w1", "src/lib.rs", gen_a)
+        .await
+        .unwrap(), "no generation left — cleanups may run");
+}
