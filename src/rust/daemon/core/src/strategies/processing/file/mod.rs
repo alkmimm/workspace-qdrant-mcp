@@ -157,6 +157,35 @@ impl FileStrategy {
             .await;
         }
 
+        // Overlap producer fix (#224): pair the branch with the bytes it
+        // describes. Every File item is stamped `branch = HEAD` when it is
+        // ENQUEUED, but the content hash below is computed from the working
+        // tree when it is PROCESSED — with a queue backlog spanning a
+        // `git checkout`, that pairs branch X with branch Y's bytes and merges
+        // X's tag into Y's content generation (the silent fabricator behind
+        // the (path, branch) overlap groups). Ingest-type ops therefore
+        // re-read HEAD from the SAME tree the hash comes from, at the same
+        // moment. Delete ops are exempt (dispatched above): a delete strips
+        // exactly the tag its producer measured (#278 invariant 2) and never
+        // reads disk content. `None` (kill switch off, non-projects
+        // collection, non-git/unreadable HEAD, or already equal) keeps the
+        // enqueue-time branch.
+        let restamped_item;
+        let item = match effective_ingest_branch(item, &base_path) {
+            Some(head) => {
+                info!(
+                    "[branch-restamp] {}: enqueue-time branch '{}' → HEAD-at-process '{}' (op={:?})",
+                    relative_path, item.branch, head, item.op
+                );
+                restamped_item = UnifiedQueueItem {
+                    branch: head,
+                    ..item.clone()
+                };
+                &restamped_item
+            }
+            None => item,
+        };
+
         if !file_path.exists() {
             // F-035: handle_missing_file now returns Err if Qdrant delete failed;
             // propagate so the queue row picks up retry metadata.
@@ -261,6 +290,66 @@ impl FileStrategy {
 enum UpdateAction {
     Skip,
     Proceed,
+}
+
+/// The branch an ingest-type op must write under, or `None` to keep the
+/// enqueue-time branch.
+///
+/// Wraps the pure [`restamp_decision`] with the environment: the
+/// `WQM_INGEST_BRANCH_AT_PROCESS` kill switch and a HEAD read of the watch
+/// folder tree at the moment of the call (the same tree, and effectively the
+/// same instant, the content hash is computed from).
+fn effective_ingest_branch(item: &UnifiedQueueItem, base_path: &str) -> Option<String> {
+    if !ingest_branch_at_process_enabled() {
+        return None;
+    }
+    // Only `projects` rows carry git-branch semantics; libraries keep their
+    // enqueue-time label untouched.
+    if item.collection != COLLECTION_PROJECTS {
+        return None;
+    }
+    let head = crate::watching_queue::get_current_branch_opt(Path::new(base_path));
+    restamp_decision(&item.branch, head)
+}
+
+/// Pure re-stamp policy (#224): given the enqueue-time branch and the HEAD
+/// resolved at process time, decide the branch to ingest under.
+///
+/// * `Some(head)` differing from the item branch → re-stamp to `head` (the
+///   disk bytes belong to the checked-out tree, not to whatever was checked
+///   out when the event fired).
+/// * `None` (non-git folder, no commits, detached HEAD, unreadable) → keep
+///   the enqueue-time branch. NEVER guess: the `"main"` fallback of
+///   `get_current_branch` is exactly the confident-wrong answer that
+///   mislabeled corpora before (see `branch_prune.rs` guards), so the
+///   re-stamp uses the `_opt` form and stands down when git can't answer.
+fn restamp_decision(item_branch: &str, head_at_process: Option<String>) -> Option<String> {
+    match head_at_process {
+        Some(head) if head != item_branch => Some(head),
+        _ => None,
+    }
+}
+
+/// Cached read of the `WQM_INGEST_BRANCH_AT_PROCESS` kill switch (env is
+/// process-stable). Only the exact value `off` disables the re-stamp — an
+/// unset or mistyped knob keeps the fix active (it is corrective, not
+/// destructive, so default-on is the safe side).
+fn ingest_branch_at_process_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let raw = std::env::var("WQM_INGEST_BRANCH_AT_PROCESS").ok();
+        let enabled = parse_restamp_enabled(raw.as_deref());
+        if !enabled {
+            info!("[branch-restamp] disabled via WQM_INGEST_BRANCH_AT_PROCESS=off");
+        }
+        enabled
+    })
+}
+
+/// Pure parse of the kill switch: only a literal (trimmed) `off` disables.
+fn parse_restamp_enabled(raw: Option<&str>) -> bool {
+    !matches!(raw.map(str::trim), Some("off"))
 }
 
 /// Dequeue-time re-check of the full ignore decision (project cascade +
@@ -756,6 +845,38 @@ mod tests {
         let base = proj.path().to_string_lossy().to_string();
         let f = proj.path().join("src/lib.rs");
         assert!(!is_ignored_at_dequeue(&base, &f));
+    }
+
+    // ── #224: process-time branch re-stamp policy ──────────────────────────
+
+    #[test]
+    fn restamp_rewrites_only_a_readable_differing_head() {
+        // HEAD readable and different → re-stamp to HEAD (the bytes about to
+        // be hashed belong to the checked-out tree, not the enqueue-time one).
+        assert_eq!(
+            restamp_decision("feat/x", Some("main".to_string())),
+            Some("main".to_string())
+        );
+        // HEAD equals the item branch → nothing to do.
+        assert_eq!(restamp_decision("main", Some("main".to_string())), None);
+        // Git can't answer (non-git, no commits, detached, unreadable) →
+        // KEEP the enqueue-time branch; never substitute a guess.
+        assert_eq!(restamp_decision("feat/x", None), None);
+    }
+
+    #[test]
+    fn restamp_kill_switch_only_literal_off_disables() {
+        // Corrective (not destructive) fix → default-on is the safe side.
+        assert!(parse_restamp_enabled(None));
+        assert!(parse_restamp_enabled(Some("")));
+        assert!(parse_restamp_enabled(Some("on")));
+        assert!(parse_restamp_enabled(Some("banana")));
+        // Only a deliberate `off` (whitespace-tolerant, per the stage-3
+        // .env-line lesson) disables.
+        assert!(!parse_restamp_enabled(Some("off")));
+        assert!(!parse_restamp_enabled(Some(" off ")));
+        // Wrong case is NOT honoured — consistent with the other knobs.
+        assert!(parse_restamp_enabled(Some("OFF")));
     }
 
     mod skip_resolution {

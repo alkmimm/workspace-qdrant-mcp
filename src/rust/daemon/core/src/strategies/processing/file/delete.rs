@@ -57,6 +57,147 @@ fn covered_delete_policy() -> CoveredDeletePolicy {
     })
 }
 
+/// What to do when a `(path, branch)` strip finds the branch tag on MORE than
+/// one generation (issue #224 overlap groups).
+///
+/// A branch names exactly ONE blob per path, so at most one generation may
+/// legitimately hold its tag; the primary strip targets the newest holder
+/// (what `lookup_tracked_file`'s `ORDER BY updated_at DESC LIMIT 1` returns —
+/// and what reads serve), and every OLDER holder is shadowed debris the
+/// primary strip can never reach. Left alone, the shadowed tag survives
+/// forever and the overlap census only grows.
+///
+/// Set via `WQM_BRANCH_STRIP_ALL_GENERATIONS`:
+/// * `off` — strip only the primary holder (pre-#224 behaviour).
+/// * `dry` — **default**: log the shadowed holders that WOULD be stripped,
+///   mutate nothing beyond the primary.
+/// * `on`  — run the same reference-counted removal on every shadowed holder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShadowedStripPolicy {
+    Off,
+    Dry,
+    On,
+}
+
+/// Parse the policy from the env value. Pure (unit-tested); unknown/absent
+/// values fall back to `Dry` — an unreadable knob must never start deleting.
+pub(crate) fn parse_shadowed_strip_policy(raw: Option<&str>) -> ShadowedStripPolicy {
+    match raw.map(str::trim) {
+        Some("on") => ShadowedStripPolicy::On,
+        Some("off") => ShadowedStripPolicy::Off,
+        _ => ShadowedStripPolicy::Dry,
+    }
+}
+
+/// Cached read of `WQM_BRANCH_STRIP_ALL_GENERATIONS` (env is process-stable).
+fn shadowed_strip_policy() -> ShadowedStripPolicy {
+    static POLICY: OnceLock<ShadowedStripPolicy> = OnceLock::new();
+    *POLICY.get_or_init(|| {
+        let raw = std::env::var("WQM_BRANCH_STRIP_ALL_GENERATIONS").ok();
+        let policy = parse_shadowed_strip_policy(raw.as_deref());
+        info!("[overlap] shadowed-holder strip policy: {:?}", policy);
+        policy
+    })
+}
+
+/// Strip `item.branch` from every generation of `(watch_folder, path)` that
+/// still holds it beyond the already-processed primary row (#224).
+///
+/// Runs AFTER the primary strip so the newest holder keeps today's exact
+/// semantics (guards, refcounts, F-035 error propagation). Shadowed holders
+/// go through the same [`delete_tracked_file`] per row — same preserve
+/// guards, same reference-counted point deletion, and the path-keyed
+/// cleanups stay protected by the in-situ survivor check. Failures on a
+/// shadowed row are logged and skipped: the next `(path, branch)` strip
+/// retries them, and a debris row must never fail the primary operation.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn strip_shadowed_holders(
+    ctx: &ProcessingContext,
+    item: &UnifiedQueueItem,
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    relative_path: &str,
+    abs_file_path: &str,
+    primary_file_id: i64,
+    timings: &mut Vec<PhaseTiming>,
+) {
+    let policy = shadowed_strip_policy();
+    if policy == ShadowedStripPolicy::Off {
+        return;
+    }
+
+    let holders = match tracked_files_schema::lookup_tracked_files_holding_branch(
+        pool,
+        watch_folder_id,
+        relative_path,
+        &item.branch,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(
+                "[overlap] holder lookup failed for '{}' branch '{}': {} — skipping \
+                 shadowed-holder sweep",
+                relative_path, item.branch, e
+            );
+            return;
+        }
+    };
+    let shadowed: Vec<_> = holders
+        .into_iter()
+        .filter(|h| h.file_id != primary_file_id)
+        .collect();
+    if shadowed.is_empty() {
+        return;
+    }
+
+    let ids: Vec<i64> = shadowed.iter().map(|h| h.file_id).collect();
+    if policy == ShadowedStripPolicy::Dry {
+        info!(
+            "[overlap-dry] '{}': branch '{}' also held by {} shadowed generation(s) \
+             (file_ids={:?}) — WOULD strip; set WQM_BRANCH_STRIP_ALL_GENERATIONS=on to enable",
+            relative_path,
+            item.branch,
+            shadowed.len(),
+            ids
+        );
+        return;
+    }
+
+    let mut stripped = 0usize;
+    for holder in &shadowed {
+        match delete_tracked_file(
+            ctx,
+            item,
+            pool,
+            watch_folder_id,
+            relative_path,
+            abs_file_path,
+            holder,
+            timings,
+            Instant::now(),
+        )
+        .await
+        {
+            Ok(()) => stripped += 1,
+            Err(e) => warn!(
+                "[overlap] failed to strip shadowed holder file_id={} of '{}' branch '{}': {} \
+                 — continuing (next strip retries)",
+                holder.file_id, relative_path, item.branch, e
+            ),
+        }
+    }
+    info!(
+        "[overlap] '{}': stripped branch '{}' from {}/{} shadowed generation(s) (file_ids={:?})",
+        relative_path,
+        item.branch,
+        stripped,
+        shadowed.len(),
+        ids
+    );
+}
+
 /// Process file delete operation with tracked_files awareness (Task 506 + Task 519).
 ///
 /// **F-035 contract:** Qdrant delete failures block SQLite cleanup and return
@@ -133,6 +274,23 @@ pub(super) async fn process_file_delete(
         )
         .await;
 
+        // #224: the primary strip only reaches the newest holder; sweep any
+        // shadowed generations still carrying this tag (policy-gated). Only
+        // after a successful primary — a failed primary retries the whole item.
+        if delete_result.is_ok() {
+            strip_shadowed_holders(
+                ctx,
+                item,
+                pool,
+                watch_folder_id,
+                relative_path,
+                abs_file_path,
+                existing.file_id,
+                &mut timings,
+            )
+            .await;
+        }
+
         record_delete_timings(ctx, item, pool, detected_language, &timings).await;
         return delete_result;
     }
@@ -189,7 +347,6 @@ pub(super) async fn delete_tracked_file(
     timings: &mut Vec<PhaseTiming>,
     delete_start: Instant,
 ) -> UnifiedProcessorResult<()> {
-    let _ = watch_folder_id; // ref-counting is keyed by file_id / base_point now
     let bp = existing.base_point.as_deref();
 
     // Post-delete predicates (computed before mutating; the queries exclude THIS
@@ -335,16 +492,39 @@ pub(super) async fn delete_tracked_file(
         });
         // Graph edges and keyword extractions are keyed by (tenant, PATH), not by
         // file_id — they describe the file, not one content generation. When
-        // another live generation still serves this path (stage 3 covered
-        // delete), purging them here would wipe the graph/keywords of a file that
-        // remains fully indexed — the #235/#245 "edges wiped, never rebuilt"
-        // failure mode, self-inflicted. Only the last generation of a path may
-        // clear them.
-        if covered {
+        // another generation still tracks this path (stage 3 covered delete, or
+        // an overlap-debris strip, #224), purging them here would wipe the
+        // graph/keywords of a file that remains fully indexed — the #235/#245
+        // "edges wiped, never rebuilt" failure mode, self-inflicted. Only the
+        // last generation of a path may clear them. Checked two ways: the
+        // producer-stamped `covered` flag (prune deletes) AND an in-situ
+        // survivor query — the latter needs no producer cooperation, so it also
+        // protects watcher/update/overlap-sweep deletes. On a query error, skip
+        // the cleanup: stale graph edges for a truly-gone path are rebuilt on
+        // the next ingest of the path, wiping a live file's graph is not.
+        let survivor = match tracked_files_schema::other_generation_exists(
+            pool,
+            watch_folder_id,
+            relative_path,
+            existing.file_id,
+        )
+        .await
+        {
+            Ok(exists) => exists,
+            Err(e) => {
+                warn!(
+                    "[overlap] survivor check failed for '{}' (file_id={}): {} — keeping \
+                     path-keyed graph edges + keyword extraction (conservative)",
+                    relative_path, existing.file_id, e
+                );
+                true
+            }
+        };
+        if covered || survivor {
             debug!(
-                "[stage3] '{}' — keeping graph edges + keyword extraction: path still \
-                 served by another live generation (path-keyed, not per-generation)",
-                relative_path
+                "'{}' — keeping graph edges + keyword extraction: path still tracked by \
+                 another generation (covered={}, survivor={})",
+                relative_path, covered, survivor
             );
         } else {
             super::graph_ingest::delete_graph_edges(ctx, &item.tenant_id, relative_path).await;
@@ -625,6 +805,21 @@ pub(super) async fn cleanup_missing_file(
             Instant::now(),
         )
         .await?;
+
+        // #224: same shadowed-holder concern as the Delete and Update paths —
+        // the file is gone from this tree, so every generation still tagged
+        // with this branch is equally stale for it.
+        strip_shadowed_holders(
+            ctx,
+            item,
+            pool,
+            watch_folder_id,
+            relative_path,
+            abs_file_path,
+            existing.file_id,
+            &mut timings,
+        )
+        .await;
     }
     Ok(())
 }
@@ -686,7 +881,8 @@ mod tests {
     use super::{
         bypasses_on_disk_skip, delete_target_still_exists, is_branch_prune_delete,
         is_covered_by_live_generation, is_ignore_excluded_delete, parse_covered_delete_policy,
-        would_remove_last_tag, CoveredDeletePolicy,
+        parse_shadowed_strip_policy, would_remove_last_tag, CoveredDeletePolicy,
+        ShadowedStripPolicy,
     };
     use crate::unified_queue_schema::{ItemType, QueueOperation, QueueStatus, UnifiedQueueItem};
 
@@ -831,6 +1027,41 @@ mod tests {
         assert!(!is_covered_by_live_generation(&delete_item_with_metadata(
             Some(r#"{"reason":"branch_prune","covered_by_live_generation":"yes"}"#)
         )));
+    }
+
+    // ── #224: shadowed-holder strip policy ─────────────────────────────────
+
+    #[test]
+    fn shadowed_strip_policy_defaults_to_dry_for_anything_unknown() {
+        assert_eq!(
+            parse_shadowed_strip_policy(Some("on")),
+            ShadowedStripPolicy::On
+        );
+        assert_eq!(
+            parse_shadowed_strip_policy(Some("off")),
+            ShadowedStripPolicy::Off
+        );
+        assert_eq!(
+            parse_shadowed_strip_policy(Some(" on ")),
+            ShadowedStripPolicy::On,
+            "surrounding whitespace from a .env line must not silently disable the knob"
+        );
+        // Unset, empty, typo'd, or wrong-cased → dry. Deleting data must
+        // require an exact, deliberate opt-in (same contract as the stage-3
+        // covered-delete knob).
+        assert_eq!(parse_shadowed_strip_policy(None), ShadowedStripPolicy::Dry);
+        assert_eq!(
+            parse_shadowed_strip_policy(Some("")),
+            ShadowedStripPolicy::Dry
+        );
+        assert_eq!(
+            parse_shadowed_strip_policy(Some("ON")),
+            ShadowedStripPolicy::Dry
+        );
+        assert_eq!(
+            parse_shadowed_strip_policy(Some("true")),
+            ShadowedStripPolicy::Dry
+        );
     }
 
     #[test]
