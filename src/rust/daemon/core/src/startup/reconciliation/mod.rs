@@ -523,8 +523,14 @@ pub async fn reconcile_all_ignore_rules(
     pool: &SqlitePool,
     queue_manager: &std::sync::Arc<crate::queue_operations::QueueManager>,
 ) -> Result<ignore_sync::ReconcileStats, String> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT tenant_id, path FROM watch_folders \
+    // #280: carry each row's watch_id straight into the reconcile so the rows
+    // diffed always belong to the tree walked — a tenant-scoped re-lookup can
+    // land on another of the tenant's folders. Registered git worktrees are
+    // skipped: they own no tracked_files rows (content is served by the main
+    // folder via branch tags, #167), so reconciling them is at best a no-op
+    // and at worst a whole-tree Uplift storm against the wrong folder.
+    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+        "SELECT watch_id, tenant_id, path, COALESCE(is_worktree, 0) FROM watch_folders \
          WHERE collection = 'projects' AND enabled = 1",
     )
     .fetch_all(pool)
@@ -558,7 +564,14 @@ pub async fn reconcile_all_ignore_rules(
     }
 
     let mut totals = ignore_sync::ReconcileStats::default();
-    for (tenant_id, project_root) in &rows {
+    for (watch_id, tenant_id, project_root, is_worktree) in &rows {
+        if *is_worktree != 0 {
+            debug!(
+                "[ignore_sync] Skipping {tenant_id} worktree folder {watch_id} — \
+                 content is indexed via the main folder"
+            );
+            continue;
+        }
         let root = WatchManager::resolve_local_watch_path(project_root);
         if !root.is_dir() {
             debug!("[ignore_sync] Skipping {tenant_id} — path not a directory");
@@ -567,6 +580,7 @@ pub async fn reconcile_all_ignore_rules(
 
         match ignore_sync::reconcile_ignore_rules(
             root.as_path(),
+            watch_id,
             tenant_id,
             "projects",
             pool,
