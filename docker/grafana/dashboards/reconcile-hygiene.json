@@ -36,7 +36,7 @@
     {
       "type": "stat",
       "title": "Fallback point-deletes (1h)",
-      "description": "delete_points_by_filter fallback firings — the path-keyed, generation-blind sweep (guarded by #278 D2). Sustained non-zero = something is deleting by bare path again; the incident ran ~40/hour wiping live generations' points.",
+      "description": "delete_points_by_filter fallback firings. Post-#278 D2 the generation-wiping case is guarded (skipped with a debug log), so what remains here is the orphan sweep this fallback exists for — ambient rate measured ~30/h from watcher deletes of never-indexed artifacts in active dev repos. Thresholds sit ABOVE ambient: a jump past them means either mass on-disk deletions or a new generation-blind delete path (the #224 incident ran ~40/h of REAL point wipes on top of ambient).",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
       "targets": [
@@ -51,7 +51,7 @@
       "fieldConfig": {
         "defaults": {
           "noValue": "0",
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 20 } ] }
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 150 } ] }
         },
         "overrides": []
       }
