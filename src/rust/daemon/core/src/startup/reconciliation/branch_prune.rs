@@ -321,25 +321,30 @@ async fn prune_project_branches(
         return Ok(BranchPruneStats::default());
     }
 
-    // Per-branch tracked-file counts. The branch holding the most files is the
-    // project's corpus; a genuinely-deleted feature branch is a minor offshoot,
-    // never the bulk. Never prune the corpus branch — this is the primary guard
-    // against deleting a mislabeled main index.
-    let counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT je.value AS branch, COUNT(*) AS n \
-         FROM tracked_files, json_each(branches) je \
-         WHERE watch_folder_id = ?1 \
-         GROUP BY je.value",
-    )
-    .bind(watch_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("query tracked branches: {e}"))?;
-
-    let primary = counts
-        .iter()
-        .max_by_key(|(_, n)| *n)
-        .map(|(b, _)| b.as_str());
+    // Per-branch corpus size, counted in FILES (distinct paths) — never in rows.
+    // The branch covering the most files is the project's corpus; a genuinely-
+    // deleted feature branch is a minor offshoot, never the bulk. Never prune the
+    // corpus branch — this is the primary guard against deleting a mislabeled
+    // main index.
+    //
+    // `COUNT(DISTINCT relative_path)`, not `COUNT(*)`: under Layer 2 a path holds
+    // several content generations, so counting ROWS lets a dead branch that
+    // accumulated stale generations out-count the real corpus and protect itself
+    // FOREVER — and because it is never pruned, no `(path, branch)` delete is
+    // issued for it, so the shadowed-holder sweep never reaches its debris
+    // either (a closed loop: debris → largest → protected → no delete → debris).
+    // Observed live 2026-07-16 (#224): `fix/is-test-lookup-relative-path`, absent
+    // from git, held 1908 ROWS over 1859 distinct paths and outranked `main`'s
+    // 1869 — the tenant's whole overlap remainder hid behind that guard.
+    // Counting distinct paths measures what this guard has always claimed to
+    // measure, and keeps the original protection intact: a mislabeled corpus
+    // holds ALL of the project's paths, so it stays the largest and stays
+    // protected. (Verified read-only across all 10 live watch folders before
+    // shipping: the elected branch changed for exactly one — the case above —
+    // and every other project, including the mislabel-incident repos
+    // compress-mcp/bws-engineer, elected the same branch as before.)
+    let counts = branch_file_counts(pool, watch_id).await?;
+    let primary = elect_primary(&counts, &head);
 
     // Which paths are still served by a generation on a LIVE branch (stage 3).
     // Computed once per project, here, because this is the only place holding
@@ -391,6 +396,51 @@ async fn prune_project_branches(
         }
     }
     Ok(stats)
+}
+
+/// Per-branch corpus size for one watch folder: how many distinct FILES each
+/// branch tag covers.
+///
+/// Extracted from the prune so guard 3's input is testable against the
+/// production DDL — the row-vs-file distinction is the whole point (see the
+/// caller's comment), and it can only be proven with real `tracked_files` rows.
+async fn branch_file_counts(
+    pool: &SqlitePool,
+    watch_id: &str,
+) -> Result<Vec<(String, i64)>, String> {
+    sqlx::query_as(
+        "SELECT je.value AS branch, COUNT(DISTINCT relative_path) AS n \
+         FROM tracked_files, json_each(branches) je \
+         WHERE watch_folder_id = ?1 \
+         GROUP BY je.value",
+    )
+    .bind(watch_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("query tracked branches: {e}"))
+}
+
+/// Elect the project's corpus branch from per-branch distinct-file counts: the
+/// branch covering the most files is never pruned (guard 3).
+///
+/// Pure so the tie policy is testable. Ties are decided deliberately, never by
+/// `max_by_key` over an unordered `GROUP BY` — which branch is PROTECTED must
+/// not depend on SQLite's row order between boots:
+/// 1. HEAD wins a tie — a checked-out branch is the corpus by definition.
+/// 2. Otherwise the lexicographically first name wins: an arbitrary but STABLE
+///    choice, so the same project protects the same branch on every boot.
+fn elect_primary<'a>(counts: &'a [(String, i64)], head: &str) -> Option<&'a str> {
+    let max = counts.iter().map(|(_, n)| *n).max()?;
+    let mut tied: Vec<&'a str> = counts
+        .iter()
+        .filter(|(_, n)| *n == max)
+        .map(|(b, _)| b.as_str())
+        .collect();
+    if let Some(h) = tied.iter().find(|b| **b == head) {
+        return Some(*h);
+    }
+    tied.sort_unstable();
+    tied.into_iter().next()
 }
 
 /// For each `relative_path` in this watch folder, the `file_id`s of the
@@ -549,11 +599,130 @@ fn build_prune_delete_payload(rel_path: &RelativePath, branch: &str) -> Result<S
 
 #[cfg(test)]
 mod tests {
-    use super::build_prune_delete_payload;
+    use super::{build_prune_delete_payload, elect_primary};
     use crate::unified_queue_schema::FilePayload;
     use wqm_common::hashing::generate_idempotency_key;
     use wqm_common::paths::RelativePath;
     use wqm_common::queue_types::{ItemType, QueueOperation};
+
+    fn counts(pairs: &[(&str, i64)]) -> Vec<(String, i64)> {
+        pairs.iter().map(|(b, n)| (b.to_string(), *n)).collect()
+    }
+
+    // ── guard 3: corpus election (#224) ───────────────────────────────────
+
+    #[test]
+    fn corpus_election_ignores_generation_debris() {
+        // The live deadlock this fix exists for: a DEAD branch accumulated stale
+        // generations and out-counted the real corpus in ROWS, protecting itself
+        // forever. Counting distinct FILES elects `main` — the counts here are
+        // what the fixed query returns (paths, not rows).
+        let c = counts(&[
+            ("fix/is-test-lookup-relative-path", 1859),
+            ("main", 1869),
+            ("codex/linux-codex-register", 2),
+        ]);
+        assert_eq!(elect_primary(&c, "main"), Some("main"));
+    }
+
+    #[test]
+    fn corpus_election_still_protects_a_mislabeled_corpus() {
+        // The failure mode guard 3 was BORN for (bws-engineer / compress-mcp,
+        // whose whole corpus was indexed under a bogus label): the mislabeled
+        // branch holds ALL of the project's files, so it must stay the elected
+        // corpus and thus stay unprunable. Counting files instead of rows must
+        // not weaken this.
+        let c = counts(&[("bogus-main", 3000), ("dev-clean", 12), ("feat/x", 3)]);
+        assert_eq!(elect_primary(&c, "dev-clean"), Some("bogus-main"));
+    }
+
+    #[test]
+    fn corpus_election_breaks_ties_with_head_then_deterministically() {
+        // HEAD wins a tie: a checked-out branch IS the corpus.
+        let c = counts(&[("feat/b", 100), ("main", 100), ("feat/a", 100)]);
+        assert_eq!(elect_primary(&c, "main"), Some("main"));
+
+        // No HEAD among the tied → stable, order-independent choice. The input
+        // order comes from an unordered GROUP BY, so the same tie must elect the
+        // same branch on every boot (which branch is PROTECTED cannot flap).
+        let c1 = counts(&[("feat/b", 100), ("feat/a", 100)]);
+        let c2 = counts(&[("feat/a", 100), ("feat/b", 100)]);
+        assert_eq!(elect_primary(&c1, "main"), Some("feat/a"));
+        assert_eq!(
+            elect_primary(&c1, "main"),
+            elect_primary(&c2, "main"),
+            "row order must not decide which branch is protected"
+        );
+    }
+
+    #[test]
+    fn corpus_election_handles_empty_and_single() {
+        assert_eq!(elect_primary(&[], "main"), None);
+        let c = counts(&[("only", 7)]);
+        assert_eq!(elect_primary(&c, "main"), Some("only"));
+    }
+
+    /// The query itself, against the production DDL: it must count FILES, not
+    /// ROWS. Reproduces the live shape — a dead branch with several generations
+    /// of ONE path vs `main` with two paths. By rows the dead branch wins (3 > 2)
+    /// and protects itself forever; by distinct paths `main` wins (2 > 1) and the
+    /// dead branch becomes prunable.
+    #[tokio::test]
+    async fn branch_file_counts_counts_files_not_generations() {
+        use crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL;
+        use crate::watch_folders_schema::CREATE_WATCH_FOLDERS_SQL;
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+        sqlx::query(CREATE_WATCH_FOLDERS_SQL).execute(&pool).await.unwrap();
+        sqlx::query(CREATE_TRACKED_FILES_V41_SQL).execute(&pool).await.unwrap();
+
+        let now = "2026-07-16T00:00:00Z";
+        sqlx::query(
+            "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled, created_at, updated_at)
+             VALUES ('w1', '/tmp/p', 'projects', 't1', 1, ?1, ?1)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // (relative_path, file_hash, branches) — UNIQUE is (wf, path, hash), so
+        // three generations of a.rs are three legitimate rows.
+        let rows = [
+            ("a.rs", "h1", r#"["dead"]"#),
+            ("a.rs", "h2", r#"["dead"]"#),
+            ("a.rs", "h3", r#"["dead","main"]"#),
+            ("b.rs", "h4", r#"["main"]"#),
+        ];
+        for (rel, hash, branches) in rows {
+            sqlx::query(
+                "INSERT INTO tracked_files
+                 (watch_folder_id, relative_path, branches, file_mtime, file_hash,
+                  collection, created_at, updated_at)
+                 VALUES ('w1', ?1, ?2, ?3, ?4, 'projects', ?3, ?3)",
+            )
+            .bind(rel)
+            .bind(branches)
+            .bind(now)
+            .bind(hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let counts = super::branch_file_counts(&pool, "w1").await.unwrap();
+        let get = |b: &str| counts.iter().find(|(n, _)| n == b).map(|(_, c)| *c);
+        assert_eq!(get("dead"), Some(1), "dead covers ONE file across 3 generations");
+        assert_eq!(get("main"), Some(2), "main covers two files");
+
+        // Guard 3's verdict: main is the corpus, so the dead branch is prunable.
+        assert_eq!(elect_primary(&counts, "main"), Some("main"));
+    }
 
     fn key_for(payload_json: &str) -> String {
         generate_idempotency_key(
