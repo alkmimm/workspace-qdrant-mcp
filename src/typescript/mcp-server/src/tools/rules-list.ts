@@ -10,6 +10,10 @@ import { RULES_COLLECTION } from './rules-types.js';
 import { FIELD_PROJECT_ID, FIELD_CONTENT, FIELD_TITLE } from '../common/native-bridge.js';
 import { TENANT_GLOBAL } from '../constants/tenants.js';
 import { resolveProjectIdentity } from './branch-scope.js';
+import { applyByteBudget } from './response-budget.js';
+
+/** Preview length (chars) for summary-mode list entries. */
+const RULES_LIST_PREVIEW_CHARS = 200;
 
 /** Build Qdrant filter for list query based on scope. */
 function buildListFilter(
@@ -61,27 +65,36 @@ function pointToRule(point: {
 /** Build a scroll request for the rules collection. */
 function buildScrollRequest(
   limit: number,
-  filter: Record<string, unknown> | undefined
-): { limit: number; with_payload: boolean; filter?: Record<string, unknown> } {
-  const req: { limit: number; with_payload: boolean; filter?: Record<string, unknown> } = {
+  filter: Record<string, unknown> | undefined,
+  cursor?: string
+): { limit: number; with_payload: boolean; filter?: Record<string, unknown>; offset?: string } {
+  const req: {
+    limit: number;
+    with_payload: boolean;
+    filter?: Record<string, unknown>;
+    offset?: string;
+  } = {
     limit,
     with_payload: true,
   };
   if (filter) req.filter = filter;
+  if (cursor) req.offset = cursor;
   return req;
 }
 
-/** Attempt to read rules from the local mirror as fallback. */
+/** Attempt to read rules from the local mirror as fallback. Returns the raw
+ *  rules (full content) or null; the caller applies list shaping so the mirror
+ *  path is bounded identically to the Qdrant path. */
 function readRulesFromMirror(
   stateManager: SqliteStateManager,
   scope: RuleScope,
   resolvedProjectId: string | undefined,
   limit: number
-): RuleResponse | null {
+): Rule[] | null {
   try {
     const mirrorRows = stateManager.listRulesMirror(scope, resolvedProjectId, limit);
     if (mirrorRows.length === 0) return null;
-    const rules: Rule[] = mirrorRows.map((row) => {
+    return mirrorRows.map((row) => {
       const scope = (row.scope as RuleScope) ?? TENANT_GLOBAL;
       const rule: Rule = {
         id: row.ruleId,
@@ -94,12 +107,6 @@ function readRulesFromMirror(
       if (row.tenantId) rule.projectId = row.tenantId;
       return rule;
     });
-    return {
-      success: true,
-      action: 'list',
-      rules,
-      message: `Found ${rules.length} rule(s) from local mirror (Qdrant unavailable)`,
-    };
   } catch {
     return null;
   }
@@ -132,6 +139,84 @@ function withDeadline<T>(p: Promise<T>, ms: number): Promise<T | null> {
   });
 }
 
+/** Project a full Rule to its summary form (preview + content_length, no body). */
+function shapeRuleForList(rule: Rule, summary: boolean): Rule {
+  if (!summary) return rule;
+  const content = rule.content ?? '';
+  const shaped: Rule = {
+    id: rule.id,
+    scope: rule.scope,
+    preview: content.slice(0, RULES_LIST_PREVIEW_CHARS),
+    content_length: content.length,
+  };
+  if (rule.label) shaped.label = rule.label;
+  if (rule.projectId) shaped.projectId = rule.projectId;
+  if (rule.owner) shaped.owner = rule.owner;
+  if (rule.title) shaped.title = rule.title;
+  if (rule.tags) shaped.tags = rule.tags;
+  if (rule.priority !== undefined) shaped.priority = rule.priority;
+  if (rule.createdAt) shaped.createdAt = rule.createdAt;
+  if (rule.updatedAt) shaped.updatedAt = rule.updatedAt;
+  return shaped;
+}
+
+/**
+ * Shape a raw rules listing like every other read surface (scratchpad/search/
+ * grep): optional summary projection + the shared response byte budget + cursor
+ * pagination. Shaping is OFF by default (summary=false, budget=0) so internal
+ * callers — agent-rules' system-prompt injection, the seeder's content dedup —
+ * keep full, untruncated content; the MCP tool surface (buildRuleOptions) turns
+ * it on. The caller sets `message`.
+ */
+function buildListResponse(
+  rules: Rule[],
+  options: RuleOptions,
+  nextPageOffset?: unknown
+): RuleResponse {
+  const summary = options.summary ?? false;
+  const budget = options.maxResponseBytes ?? 0;
+  const shaped = rules.map((r) => shapeRuleForList(r, summary));
+  // Shared response budget (same semantics as search/grep/scratchpad): trailing
+  // rules are dropped (>=1 kept). Qdrant scroll offsets are inclusive point ids,
+  // so resuming at the first dropped rule loses nothing.
+  const { kept, dropped } = applyByteBudget(shaped, (r) => JSON.stringify(r).length, budget);
+  const response: RuleResponse = {
+    success: true,
+    action: 'list',
+    rules: kept,
+    count: kept.length,
+  };
+  const firstDropped = shaped[kept.length];
+  if (dropped > 0 && firstDropped) {
+    response.budget_truncated = { dropped };
+    response.next_cursor = firstDropped.id;
+  } else if (nextPageOffset !== null && nextPageOffset !== undefined) {
+    response.next_cursor = String(nextPageOffset);
+  }
+  if (summary) {
+    response.hint =
+      'Rules are summaries (preview + content_length). For a rule\'s full text pass ' +
+      'summary:false, or read one by id with retrieve (collection:"rules", documentId:<id>).';
+  }
+  return response;
+}
+
+/** Best-effort total rule count for the scope (omitted on any failure). */
+async function countRules(
+  qdrantClient: QdrantClient,
+  filter: Record<string, unknown> | undefined
+): Promise<number | undefined> {
+  try {
+    const res = await qdrantClient.count(RULES_COLLECTION, {
+      ...(filter ? { filter } : {}),
+      exact: true,
+    });
+    return res.count;
+  } catch {
+    return undefined;
+  }
+}
+
 /** List rules by scope from Qdrant, with rules_mirror fallback. */
 export async function listRules(
   qdrantClient: QdrantClient,
@@ -151,22 +236,35 @@ export async function listRules(
   // agent knows the listing is multi-tenant and reads each rule's `owner`.
   const unresolvedProjectScope = scope === 'project' && !resolvedProjectId;
 
+  // Shape the mirror fallback identically to the Qdrant path so a degraded
+  // response is bounded too (never a raw full-content dump).
+  const mirrorResponse = (): RuleResponse | null => {
+    const mirrorRules = readRulesFromMirror(stateManager, scope, resolvedProjectId, limit);
+    if (!mirrorRules) return null;
+    const response = buildListResponse(mirrorRules, options);
+    response.message = `Found ${response.count} rule(s) from local mirror (Qdrant unavailable)`;
+    return response;
+  };
+
   try {
     const filter = buildListFilter(scope, resolvedProjectId);
     const scrollResult = await withDeadline(
-      qdrantClient.scroll(RULES_COLLECTION, buildScrollRequest(limit, filter)),
+      qdrantClient.scroll(RULES_COLLECTION, buildScrollRequest(limit, filter, options.cursor)),
       RULES_SCROLL_DEADLINE_MS
     );
     if (scrollResult) {
       const rules: Rule[] = scrollResult.points.map(pointToRule);
-      const message = unresolvedProjectScope
-        ? `Found ${rules.length} rule(s) across ALL projects — the current project could not be detected, so this listing is not scoped. Each rule's "owner" field identifies its project (or "global"). Pass cwd or projectId to scope to one project.`
-        : `Found ${rules.length} rule(s)`;
-      return { success: true, action: 'list', rules, message };
+      const response = buildListResponse(rules, options, scrollResult.next_page_offset);
+      response.message = unresolvedProjectScope
+        ? `Found ${response.count} rule(s) across ALL projects — the current project could not be detected, so this listing is not scoped. Each rule's "owner" field identifies its project (or "global"). Pass cwd or projectId to scope to one project.`
+        : `Found ${response.count} rule(s)`;
+      const total = await countRules(qdrantClient, filter);
+      if (total !== undefined) response.total = total;
+      return response;
     }
     // Deadline hit — a slow COLD Qdrant scroll. Serve the local mirror fast so
     // the caller gets its rules instead of an MCP client timeout (-32001).
-    const mirror = readRulesFromMirror(stateManager, scope, resolvedProjectId, limit);
+    const mirror = mirrorResponse();
     if (mirror) return mirror;
     return {
       success: false,
@@ -176,7 +274,7 @@ export async function listRules(
         'Rules backend (Qdrant) was slow to respond (cold start) and no local mirror was available; retry shortly.',
     };
   } catch (error) {
-    const mirror = readRulesFromMirror(stateManager, scope, resolvedProjectId, limit);
+    const mirror = mirrorResponse();
     if (mirror) return mirror;
     return {
       success: false,

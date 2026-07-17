@@ -255,6 +255,50 @@ describe('RulesTool', () => {
     });
   });
 
+  describe('list shaping (summary / budget / cursor)', () => {
+    it('summary mode returns preview + content_length and omits the full body', async () => {
+      const result = await rulesTool.execute({
+        action: 'list',
+        scope: 'global',
+        summary: true,
+      });
+
+      expect(result.success).toBe(true);
+      const r1 = result.rules?.find((r) => r.id === 'rule-1');
+      expect(r1?.content).toBeUndefined();
+      expect(r1?.preview).toBe('Always use TypeScript');
+      expect(r1?.content_length).toBe('Always use TypeScript'.length);
+      // Metadata survives the projection so the summary is actionable.
+      expect(r1?.title).toBe('TypeScript Rule');
+      expect(r1?.priority).toBe(10);
+      expect(result.hint).toContain('summary:false');
+    });
+
+    it('default (no options) preserves full content for internal callers', async () => {
+      const result = await rulesTool.execute({ action: 'list', scope: 'global' });
+
+      const r1 = result.rules?.find((r) => r.id === 'rule-1');
+      expect(r1?.content).toBe('Always use TypeScript');
+      expect(r1?.preview).toBeUndefined();
+      expect(result.budget_truncated).toBeUndefined();
+      expect(result.next_cursor).toBeUndefined();
+    });
+
+    it('byte budget drops trailing rules and sets a lossless resume cursor', async () => {
+      const result = await rulesTool.execute({
+        action: 'list',
+        scope: 'global',
+        maxResponseBytes: 10, // smaller than one rule → keep 1, drop the rest
+      });
+
+      expect(result.rules?.length).toBe(1);
+      expect(result.count).toBe(1);
+      expect(result.budget_truncated?.dropped).toBe(1);
+      // Cursor resumes at the first dropped rule (inclusive Qdrant scroll id).
+      expect(result.next_cursor).toBe('rule-2');
+    });
+  });
+
   describe('unknown action', () => {
     it('should return error for unknown action', async () => {
       const options = {

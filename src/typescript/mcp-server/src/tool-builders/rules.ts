@@ -2,6 +2,8 @@
  * Rules tool argument builder — parse raw MCP tool arguments into RuleOptions
  */
 
+import { DEFAULT_MAX_RESPONSE_BYTES } from '../tools/search-types.js';
+
 export type RuleOptions = {
   action: 'add' | 'update' | 'remove' | 'list';
   content?: string;
@@ -12,6 +14,9 @@ export type RuleOptions = {
   tags?: string[];
   priority?: number;
   limit?: number;
+  summary?: boolean;
+  maxResponseBytes?: number;
+  cursor?: string;
 };
 
 /** Build rule options from raw tool arguments */
@@ -46,6 +51,20 @@ export function buildRuleOptions(args: Record<string, unknown> | undefined): Rul
 
   const limit = args?.['limit'] as number | undefined;
   if (limit !== undefined) options.limit = limit;
+
+  // List response shaping (parity with scratchpad/list): the MCP surface
+  // defaults to summary + the shared byte budget so a large rule set stays
+  // cheap to load at session start. Internal callers (agent-rules, seeder)
+  // bypass this builder and keep full, unbudgeted content.
+  if (action === 'list') {
+    const summary = args?.['summary'];
+    options.summary = typeof summary === 'boolean' ? summary : true;
+    const maxResponseBytes = args?.['maxResponseBytes'];
+    options.maxResponseBytes =
+      typeof maxResponseBytes === 'number' ? maxResponseBytes : DEFAULT_MAX_RESPONSE_BYTES;
+    const cursor = args?.['cursor'];
+    if (typeof cursor === 'string' && cursor) options.cursor = cursor;
+  }
 
   return options;
 }

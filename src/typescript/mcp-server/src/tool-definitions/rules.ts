@@ -61,6 +61,21 @@ export const rulesToolDefinition = {
         type: 'number',
         description: 'Max rules to return for list (default: 50)',
       },
+      summary: {
+        type: 'boolean',
+        description:
+          'For list: return compact summaries (label/title/scope/owner/priority/tags + a content preview and content_length) instead of full rule bodies. Default true — the whole rule set stays cheap to load at session start. Pass summary:false for full text (still byte-budgeted with a cursor), or read one rule with retrieve (collection:"rules", documentId:<id>).',
+      },
+      maxResponseBytes: {
+        type: 'number',
+        description:
+          'For list: cap on the rendered rules payload (default ~24000, the same budget as search/grep/scratchpad). Trailing rules beyond it are dropped (>=1 kept), budget_truncated.dropped reports how many, and next_cursor resumes at the first dropped rule — lossless. 0 disables.',
+      },
+      cursor: {
+        type: 'string',
+        description:
+          'For list: opaque pagination cursor — pass the next_cursor from a previous list response to fetch the next page.',
+      },
     },
     required: ['action'],
   },
