@@ -174,7 +174,7 @@ async fn handle_branch_switch(
 /// re-chunks. Only the (usually few) stale files pay that cost; the current
 /// majority still take the cheap bulk append.
 #[allow(clippy::too_many_arguments)]
-async fn enqueue_unchanged_files(
+pub(super) async fn enqueue_unchanged_files(
     pool: &SqlitePool,
     queue_manager: &QueueManager,
     watch_folder_id: &str,
@@ -201,11 +201,61 @@ async fn enqueue_unchanged_files(
     // Drop paths that genuinely changed (they take the full-ingest path); split
     // the rest into cheap bulk re-key (current fingerprint) vs per-file re-chunk
     // (stale fingerprint — see issue #246).
+    //
+    // Content guard (issue #224, cross-branch stale content): the bulk re-key
+    // appends `new_branch` to a tracked GENERATION selected by (path, old_branch)
+    // WITHOUT re-reading the file. That is sound ONLY when that generation's
+    // stored content really is `new_branch`'s content. `diff_tree(old_sha,
+    // new_sha)` certifies old_sha↔new_sha identity, NOT that the indexed
+    // generation holds old_sha's content — a generation left stale by an
+    // off-watch edit or a prior mis-key would otherwise get `new_branch` folded
+    // onto stale bytes (grep then serves the wrong content on `new_branch`). The
+    // working tree is on `new_branch` right now (the checkout just landed), so we
+    // verify each candidate's on-disk hash against the generation's stored hash;
+    // a mismatch is routed to the per-file `Add` path (content-safe:
+    // `try_branch_dedup` matches by file_hash and full-ingests when no generation
+    // matches), never the hash-free bulk append.
+    let root = Path::new(project_root);
     let mut to_rekey: Vec<String> = Vec::new();
     let mut to_rechunk: Vec<String> = Vec::new();
-    for (rel, chunker_version) in unchanged {
+    let mut diverged: u64 = 0;
+    for (rel, chunker_version, stored_hash) in unchanged {
         if changed_paths.contains(&rel) {
             continue;
+        }
+        match crate::tracked_files_schema::compute_file_hash(&root.join(&rel)) {
+            Ok(disk_hash) if disk_hash != stored_hash => {
+                // The tracked generation does not hold `new_branch`'s real
+                // content — re-ingest via the per-file path instead of folding
+                // the tag onto stale bytes.
+                match enqueue_unchanged_file(queue_manager, tenant_id, collection, &rel, new_branch)
+                    .await
+                {
+                    Ok(()) => {
+                        diverged += 1;
+                        stats.enqueued_changed += 1;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to enqueue content-diverged re-ingest for {}: {}",
+                            rel, e
+                        );
+                        stats.errors += 1;
+                    }
+                }
+                continue;
+            }
+            Ok(_) => {} // on-disk content matches the generation — safe to re-key
+            Err(e) => {
+                // Unreadable/missing (a real delete would already be in the diff):
+                // do NOT bulk re-key a file whose content we cannot verify. The
+                // per-file reconcile / next scan handles it.
+                debug!(
+                    "Branch re-key: cannot hash {} to verify content, skipping bulk re-key: {}",
+                    rel, e
+                );
+                continue;
+            }
         }
         if crate::tree_sitter::chunker::stored_fingerprint_is_stale(chunker_version.as_deref()) {
             to_rechunk.push(rel);
@@ -248,10 +298,10 @@ async fn enqueue_unchanged_files(
         }
     }
 
-    if stats.enqueued_unchanged > 0 || stale_count > 0 {
+    if stats.enqueued_unchanged > 0 || stale_count > 0 || diverged > 0 {
         info!(
-            "Branch re-key {} -> {}: {} unchanged bulk-appended, {} stale-chunker re-chunked",
-            old_branch, new_branch, stats.enqueued_unchanged, stale_count
+            "Branch re-key {} -> {}: {} unchanged bulk-appended, {} stale-chunker re-chunked, {} content-diverged re-ingested",
+            old_branch, new_branch, stats.enqueued_unchanged, stale_count, diverged
         );
     }
 }

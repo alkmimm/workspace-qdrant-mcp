@@ -21,14 +21,20 @@ use wqm_common::timestamps;
 /// The `NOT EXISTS` clause makes repeated switches idempotent: a file already
 /// tracked on the target branch is skipped here (and the dequeue-time hash gate
 /// would Skip it anyway).
+///
+/// Returns `(relative_path, chunker_version, file_hash)`. The `file_hash` is the
+/// stored content hash of the `old_branch` generation being considered for the
+/// re-key; the caller compares it against the on-disk hash to reject re-keying a
+/// generation whose content does not actually match the working tree (issue #224
+/// cross-branch stale content).
 pub async fn fetch_unchanged_paths_with_chunker(
     pool: &SqlitePool,
     watch_folder_id: &str,
     old_branch: &str,
     new_branch: &str,
-) -> Result<Vec<(String, Option<String>)>, String> {
-    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT t.relative_path, t.chunker_version
+) -> Result<Vec<(String, Option<String>, String)>, String> {
+    let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT t.relative_path, t.chunker_version, t.file_hash
          FROM tracked_files t
          WHERE t.watch_folder_id = ?1
            AND EXISTS (SELECT 1 FROM json_each(t.branches) WHERE value = ?2)

@@ -30,10 +30,11 @@ async fn fetch_unchanged_paths(
         fetch_unchanged_paths_with_chunker(pool, watch_folder_id, old_branch, new_branch)
             .await?
             .into_iter()
-            .map(|(p, _)| p)
+            .map(|(p, _, _)| p)
             .collect(),
     )
 }
+use super::handlers::enqueue_unchanged_files;
 use super::queue::{enqueue_branch_membership_bulk, enqueue_file_op, enqueue_unchanged_file};
 use super::reconcile_branch_membership;
 use super::types::BranchSwitchStats;
@@ -224,10 +225,86 @@ async fn test_fetch_unchanged_with_chunker_returns_versions() {
     // Classify with the same predicate the handler uses.
     let stale: Vec<&str> = rows
         .iter()
-        .filter(|(_, cv)| stored_fingerprint_is_stale(cv.as_deref()))
-        .map(|(p, _)| p.as_str())
+        .filter(|(_, cv, _)| stored_fingerprint_is_stale(cv.as_deref()))
+        .map(|(p, _, _)| p.as_str())
         .collect();
     assert_eq!(stale, vec!["src/stale.rs"], "only the old-version row is stale");
+}
+
+/// Content guard (issue #224 cross-branch stale content): a candidate whose
+/// tracked generation's stored hash does NOT match the on-disk file on the new
+/// branch must be re-ingested per-file (content-safe), NOT folded onto the stale
+/// generation by the hash-free bulk append. A candidate whose hash DOES match is
+/// bulk-re-keyed as before.
+#[tokio::test]
+async fn test_content_guard_reingests_diverged_generation() {
+    use crate::tracked_files_schema::compute_file_hash;
+    use std::collections::HashSet;
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let qm = QueueManager::new(pool.clone());
+
+    // Working tree is on `feature` (the checkout just landed).
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/match.rs"), b"fn matches() {}\n").unwrap();
+    std::fs::write(root.join("src/diverged.rs"), b"fn new_content_on_feature() {}\n").unwrap();
+    let root_str = root.to_str().unwrap();
+
+    // match.rs: tracked `main` generation's hash EQUALS the working tree → safe
+    // to bulk re-key onto `feature`.
+    let match_hash = compute_file_hash(&root.join("src/match.rs")).unwrap();
+    insert_watch_folder(&pool, "w1", "t1", root_str).await;
+    insert_tracked_file(&pool, "w1", &["main"], &match_hash, "src/match.rs").await;
+    // diverged.rs: tracked `main` generation holds STALE content (a hash that is
+    // NOT what is on disk) — the bug shape. Must NOT be bulk re-keyed.
+    insert_tracked_file(
+        &pool,
+        "w1",
+        &["main"],
+        "stale_hash_not_on_disk_0000000000000000000000000000000000000000",
+        "src/diverged.rs",
+    )
+    .await;
+
+    let changed: HashSet<String> = HashSet::new();
+    let mut stats = BranchSwitchStats::default();
+    enqueue_unchanged_files(
+        &pool, &qm, "w1", "main", "feature", "t1", "projects", root_str, &changed, &mut stats,
+    )
+    .await;
+
+    assert_eq!(stats.errors, 0);
+    assert_eq!(
+        stats.enqueued_changed, 1,
+        "the diverged file is routed to a per-file re-ingest"
+    );
+
+    let ops: Vec<(String, String)> =
+        sqlx::query_as("SELECT op, payload_json FROM unified_queue WHERE tenant_id = 't1'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+    // Exactly one per-file Add, and it is diverged.rs (not match.rs).
+    let adds: Vec<&(String, String)> = ops.iter().filter(|(op, _)| op == "add").collect();
+    assert_eq!(adds.len(), 1, "one per-file re-ingest");
+    assert!(adds[0].1.contains("src/diverged.rs"));
+    assert!(!adds[0].1.contains("src/match.rs"));
+
+    // The bulk branch-membership op carries the verified file, never the diverged.
+    let bulk: Vec<&(String, String)> = ops
+        .iter()
+        .filter(|(op, pj)| op == "scan" && pj.contains("branch_membership"))
+        .collect();
+    assert_eq!(bulk.len(), 1, "one bulk re-key op");
+    assert!(bulk[0].1.contains("src/match.rs"), "verified file bulk-re-keyed");
+    assert!(
+        !bulk[0].1.contains("src/diverged.rs"),
+        "diverged file must never be bulk-re-keyed onto stale content"
+    );
 }
 
 #[tokio::test]
