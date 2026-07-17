@@ -13,7 +13,13 @@ export type RuleScope = 'global' | 'project';
 export interface Rule {
   id: string;
   label?: string;
-  content: string;
+  /** Full rule text. Optional because summary-mode `list` omits it in favour
+   *  of `preview` + `content_length`; always present in full-content mode. */
+  content?: string;
+  /** Summary-mode (list) only: leading slice of `content`. */
+  preview?: string;
+  /** Summary-mode (list) only: total `content` length in chars. */
+  content_length?: number;
   scope: RuleScope;
   projectId?: string;
   /**
@@ -41,6 +47,20 @@ export interface RuleOptions {
   tags?: string[];
   priority?: number;
   limit?: number;
+  /**
+   * For list: return summary rules (preview + content_length) instead of full
+   * bodies. Undefined/false → full content (internal callers rely on this); the
+   * MCP tool surface defaults it to true.
+   */
+  summary?: boolean;
+  /**
+   * For list: cap on total response chars. Trailing rules are dropped (>=1
+   * kept) and `next_cursor` resumes at the first dropped rule. 0/undefined
+   * disables — internal callers get everything.
+   */
+  maxResponseBytes?: number;
+  /** For list: opaque pagination cursor from a prior response's `next_cursor`. */
+  cursor?: string;
 }
 
 export interface RuleResponse {
@@ -48,6 +68,16 @@ export interface RuleResponse {
   action: RuleAction;
   label?: string;
   rules?: Rule[];
+  /** Number of rules in `rules` (post-budget). */
+  count?: number;
+  /** Total rules matching the scope (best-effort; omitted on count failure). */
+  total?: number;
+  /** Pagination cursor — pass back as `cursor` for the next page. */
+  next_cursor?: string;
+  /** Rules dropped by the response byte budget (resume via next_cursor). */
+  budget_truncated?: { dropped: number };
+  /** Guidance shown in summary mode. */
+  hint?: string;
   similar_rules?: Array<Rule & { similarity: number }>;
   message?: string;
   fallback_mode?: 'unified_queue';

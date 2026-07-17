@@ -108,7 +108,7 @@ export function formatRulesForPrompt(rules: Rule[]): string {
     sectionRules.forEach((rule, index) => {
       const heading = rule.title ? `**${rule.title}**` : `Rule ${index + 1}`;
       const priority = rule.priority !== undefined ? ` [Priority: ${rule.priority}]` : '';
-      lines.push(`### ${heading}${priority}`, '', rule.content, '');
+      lines.push(`### ${heading}${priority}`, '', rule.content ?? '', '');
     });
   };
 
