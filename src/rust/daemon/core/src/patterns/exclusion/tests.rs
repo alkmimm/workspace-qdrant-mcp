@@ -242,6 +242,53 @@ fn test_hidden_component_with_various_formats() {
 }
 
 #[test]
+fn test_bare_pattern_no_substring_over_match() {
+    // Regression: the build-output token "out" (build_outputs = ["target",
+    // "build","dist","out"]) was stored as a bare CONTAINS substring, so it
+    // silently excluded every path merely containing it — "Route" ⊃ "out" —
+    // dropping RouteDefinition.java / ProtoRouteMapper.java / every Route*,
+    // Fanout*, Layout*, Checkout* source file from indexing.
+    let engine = ExclusionEngine::new().unwrap();
+
+    // Source files that contain a build token as a SUBSTRING must be indexed.
+    for p in [
+        "integrator-events/src/main/java/com/x/events/domain/RouteDefinition.java",
+        "integrator-events/src/main/java/com/x/events/shared/ProtoRouteMapper.java",
+        "src/routing/RoutingKeyFactory.java",
+        "web/src/components/Layout.tsx",   // "out" in Layout
+        "app/pages/Checkout.go",           // "out" in Checkout
+        "docs/About.md",                   // "out" in About
+        "src/RebuildIndex.rs",             // "build" in Rebuild
+        "lib/DistanceCalc.py",             // "dist" in Distance
+    ] {
+        assert!(
+            !engine.should_exclude(p).excluded,
+            "must NOT be excluded (substring over-match): {p}"
+        );
+    }
+
+    // Actual build-output DIRECTORIES must still be excluded (segment match).
+    for p in [
+        "out/index.html",
+        "project/out/bundle.js",
+        "target/debug/main",
+        "app/dist/app.js",
+        "pkg/build/artifact.o",
+        "project/node_modules/pkg/index.js",
+    ] {
+        assert!(
+            engine.should_exclude(p).excluded,
+            "build-output dir must be excluded: {p}"
+        );
+    }
+
+    // File-name / suffix tokens keep working.
+    assert!(engine.should_exclude("scratch/notes.tmp").excluded);
+    assert!(engine.should_exclude("a/b/Thumbs.db").excluded);
+    assert!(engine.should_exclude("keys/id_rsa").excluded);
+}
+
+#[test]
 fn test_should_exclude_directory() {
     // Well-known excluded directories
     assert!(should_exclude_directory("target"));
