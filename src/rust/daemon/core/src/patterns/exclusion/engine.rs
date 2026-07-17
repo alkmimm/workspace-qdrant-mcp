@@ -216,13 +216,18 @@ impl ExclusionEngine {
             }
         }
 
-        // Contains patterns (e.g., "node_modules")
+        // Directory / file-name patterns (e.g. "node_modules", "out", ".tmp").
+        // Matched at PATH-SEGMENT / filename boundaries — NOT as bare substrings.
+        // A raw `file_path.contains("out")` silently excluded every file whose
+        // path merely contains "out" (e.g. "RouteDefinition.java" — "Route"
+        // contains "out"; also "layout.tsx", "checkout.go", "about.md"). See
+        // `segment_or_suffix_match`.
         for pattern in &self.contains_patterns {
-            if file_path.contains(pattern) {
+            if segment_or_suffix_match(file_path, pattern) {
                 return ExclusionResult {
                     excluded: true,
                     rule: self.find_rule_for_pattern(pattern),
-                    reason: format!("Contains pattern match: {}", pattern),
+                    reason: format!("Path-segment pattern match: {}", pattern),
                 };
             }
         }
@@ -373,4 +378,23 @@ impl ExclusionEngine {
         }
         None
     }
+}
+
+/// Match a "bare" exclusion pattern (a directory or file name — no glob, no
+/// slash) at PATH-SEGMENT / filename boundaries instead of as a raw substring.
+///
+/// Fixes the over-match where a short build-output token like `out` (from
+/// `build_outputs: ["target","build","dist","out"]`) excluded every path merely
+/// CONTAINING it — "RouteDefinition.java" ("Route" ⊃ "out"), "layout.tsx",
+/// "checkout.go", "about.md". Now `out` matches only an actual `/out/` path
+/// segment. Preserved: directory names match a whole component
+/// (`node_modules` == `.../node_modules/...`); dotfile/extension tokens match a
+/// filename suffix (`.tmp` matches `notes.tmp`); the Office lock-file prefix
+/// `~$` matches `~$doc.docx`.
+fn segment_or_suffix_match(path: &str, pattern: &str) -> bool {
+    path.split(|c: char| c == '/' || c == '\\').any(|seg| {
+        seg == pattern
+            || (pattern.starts_with('.') && seg.ends_with(pattern))
+            || (pattern.starts_with("~$") && seg.starts_with("~$"))
+    })
 }
