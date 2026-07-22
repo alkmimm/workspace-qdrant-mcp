@@ -30,17 +30,27 @@ export function getWatchFolderIdByTenantId(
 }
 
 /**
- * Count the top-level watch folders registered for a tenant_id.
+ * Count the independent *clone instances* of a project (same tenant_id) that
+ * base_point narrowing would have to disambiguate.
  *
- * This is the number of independent clones/instances of the same project
- * (same tenant_id) the daemon is tracking. When it is <= 1 there is no
- * instance ambiguity: the tenant filter alone isolates results, so
- * per-file base_point narrowing is unnecessary. Only when 2+ clones share
- * a tenant_id does base_point filtering actually disambiguate instances.
+ * Only genuinely separate working copies count. A linked git **worktree**
+ * (`is_worktree = 1`) is deliberately EXCLUDED: git forbids checking out the
+ * same branch in two worktrees of one repo, so the branch filter already
+ * isolates a worktree's results from the main tree's — base_point narrowing
+ * between them is redundant. Counting worktrees here made every semantic
+ * search of a repo that merely *has* a worktree enumerate one base_point per
+ * tracked file, blow past {@link BASE_POINTS_FILTER_CAP}, and falsely report
+ * `status: uncertain` (F-014). Rows predating the `is_worktree` column (NULL)
+ * are treated as non-worktree clones, preserving the pre-column behaviour.
+ *
+ * When the result is <= 1 there is no instance ambiguity the tenant+branch
+ * filter can't already resolve, so per-file base_point narrowing is skipped.
+ * Only when 2+ genuine clones share a tenant_id does base_point filtering
+ * actually disambiguate instances.
  *
  * Returns 0 when the database is unavailable.
  */
-export function countWatchFoldersByTenantId(
+export function countCloneInstancesByTenantId(
   db: DatabaseType | null,
   tenantId: string,
 ): number {
@@ -49,7 +59,8 @@ export function countWatchFoldersByTenantId(
   try {
     const row = db.prepare(
       `SELECT COUNT(*) AS n FROM watch_folders
-       WHERE tenant_id = ? AND collection = 'projects' AND parent_watch_id IS NULL`
+       WHERE tenant_id = ? AND collection = 'projects' AND parent_watch_id IS NULL
+         AND COALESCE(is_worktree, 0) = 0`
     ).get(tenantId) as { n: number } | undefined;
 
     return row?.n ?? 0;

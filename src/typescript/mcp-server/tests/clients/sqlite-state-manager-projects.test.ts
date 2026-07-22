@@ -232,6 +232,61 @@ describe('SqliteStateManager', () => {
     });
   });
 
+  // F-014: base_point narrowing must treat a linked worktree as the SAME
+  // instance as its main working tree (git keeps them on distinct branches, so
+  // the branch filter already isolates them). Counting the worktree as a second
+  // clone made every semantic search of the repo enumerate one base_point per
+  // file, blow the 500 cap, and falsely report `status: uncertain`.
+  describe('countCloneInstancesByTenantId — worktrees excluded', () => {
+    const SHARED_TENANT = 'shared0tenant0';
+    let manager: SqliteStateManager;
+
+    beforeEach(() => {
+      const db = new Database(dbPath);
+      // Column added by the daemon via migration; the minimal test schema omits it.
+      db.exec('ALTER TABLE watch_folders ADD COLUMN is_worktree INTEGER DEFAULT 0');
+
+      // Main working tree + a linked worktree, BOTH under the same tenant_id.
+      db.prepare(
+        `INSERT INTO watch_folders
+         (watch_id, path, collection, tenant_id, is_active, is_worktree, created_at, updated_at)
+         VALUES ('wf-main', '/repos/proj', 'projects', ?, 1, 0, datetime('now'), datetime('now'))`
+      ).run(SHARED_TENANT);
+      db.prepare(
+        `INSERT INTO watch_folders
+         (watch_id, path, collection, tenant_id, is_active, is_worktree, created_at, updated_at)
+         VALUES ('wf-wt', '/repos/proj/.claude/worktrees/feat', 'projects', ?, 1, 1, datetime('now'), datetime('now'))`
+      ).run(SHARED_TENANT);
+      db.close();
+
+      manager = new SqliteStateManager({ dbPath });
+      manager.initialize();
+    });
+
+    afterEach(() => {
+      manager.close();
+    });
+
+    it('counts the main clone but NOT the linked worktree', () => {
+      // Two rows share the tenant, one is a worktree → a single genuine clone.
+      // Pre-fix this returned 2 and tripped the false degraded status.
+      expect(manager.countCloneInstancesByTenantId(SHARED_TENANT)).toBe(1);
+    });
+
+    it('counts 2 when a genuinely separate clone shares the tenant', () => {
+      const db = new Database(dbPath);
+      db.prepare(
+        `INSERT INTO watch_folders
+         (watch_id, path, collection, tenant_id, is_active, is_worktree, created_at, updated_at)
+         VALUES ('wf-clone2', '/repos/proj-clone2', 'projects', ?, 1, 0, datetime('now'), datetime('now'))`
+      ).run(SHARED_TENANT);
+      db.close();
+
+      // main + second clone = 2 genuine clones; the worktree is still excluded.
+      expect(manager.countCloneInstancesByTenantId(SHARED_TENANT)).toBe(2);
+    });
+  });
+
   // Daemon (in a Docker Desktop container) stores the project root under the
   // host mount `/run/desktop/mnt/host/c/...`, but a Windows MCP client reports
   // its CWD as `C:\...`. Detection must bridge these path namespaces.

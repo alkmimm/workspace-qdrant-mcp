@@ -1,11 +1,12 @@
 /**
  * Prometheus metrics for the workspace-qdrant MCP server.
  *
- * Defines 11 metric families:
+ * Defines 12 metric families:
  *   wqm_mcp_tool_invocations_total     - Counter, labels [tool, status]
  *   wqm_mcp_tool_duration_seconds      - Histogram, label [tool], buckets [0.01…5]
  *   wqm_mcp_session_count              - Gauge
  *   wqm_mcp_daemon_fallback_total      - Counter, labels [tool, reason]
+ *   wqm_mcp_multiclone_search_total    - Counter, label [degraded]
  *   wqm_mcp_cache_hits_total           - Counter, label [cache]
  *   wqm_mcp_cache_misses_total         - Counter, label [cache]
  *   wqm_mcp_http_requests_total        - Counter, labels [path, status_class]
@@ -79,6 +80,34 @@ export const cacheMisses = new Counter({
   labelNames: ['cache'] as const,
   registers: [register],
 });
+
+// ── Search instance-isolation (F-014) metrics ─────────────────────────────
+
+/**
+ * Genuine multi-clone project searches, labelled by whether base_point
+ * instance narrowing degraded (`degraded="true"` when the active base-point
+ * set exceeded the filter cap and per-file narrowing was bypassed).
+ *
+ * Only incremented for tenants with 2+ genuine CLONES (linked worktrees are
+ * excluded — the branch filter already isolates them). This is the #3
+ * observability signal that decides whether the server-side `watch_folders[]`
+ * filter (the "proper half" of the F-014 fix) is worth building: if
+ * `{degraded="true"}` stays flat at zero in practice, genuine multi-clone
+ * degradation never actually happens and the larger change is unnecessary.
+ *
+ * Cardinality: 1 metric × 2 label values = 2 series.
+ */
+export const multicloneSearches = new Counter({
+  name: 'wqm_mcp_multiclone_search_total',
+  help: 'Genuine multi-clone (worktrees excluded) project searches, by base_point degradation',
+  labelNames: ['degraded'] as const,
+  registers: [register],
+});
+// Pre-initialise both series to 0 so the metric is present (at zero) from
+// startup — a dashboard reads "0", not "no data", until the first genuine
+// multi-clone search actually degrades.
+multicloneSearches.labels({ degraded: 'true' }).inc(0);
+multicloneSearches.labels({ degraded: 'false' }).inc(0);
 
 // ── HTTP transport metrics (MCP_SERVER_MODE=http) ──────────────────────────
 
@@ -221,6 +250,18 @@ export function recordSessionEnd(): void {
  */
 export function recordDaemonFallback(tool: string, reason: string): void {
   daemonFallback.labels({ tool, reason }).inc();
+}
+
+// ── Multi-clone search helper ─────────────────────────────────────────────────
+
+/**
+ * Record one genuine multi-clone project search (2+ clones sharing a tenant,
+ * linked worktrees excluded). `degraded` is true when the active base-point
+ * set exceeded the filter cap so instance narrowing was bypassed. See
+ * {@link multicloneSearches}.
+ */
+export function recordMulticloneSearch(degraded: boolean): void {
+  multicloneSearches.labels({ degraded: degraded ? 'true' : 'false' }).inc();
 }
 
 // ── HTTP helpers ────────────────────────────────────────────────────────────
