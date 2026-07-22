@@ -15,10 +15,22 @@
  * count here is `countCloneInstancesByTenantId` (worktrees already excluded).
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { resolveProjectContext } from '../../src/tools/search-helpers.js';
+import { recordMulticloneSearch } from '../../src/telemetry/metrics.js';
 import type { SqliteStateManager } from '../../src/clients/sqlite-state-manager.js';
 import type { ProjectDetector } from '../../src/utils/project-detector.js';
+
+// Spy on the #3 multi-clone counter without disturbing the rest of the metrics
+// module (search-helpers pulls other exports transitively).
+vi.mock('../../src/telemetry/metrics.js', async (importActual) => {
+  const actual = await importActual<typeof import('../../src/telemetry/metrics.js')>();
+  return { ...actual, recordMulticloneSearch: vi.fn() };
+});
+
+beforeEach(() => {
+  vi.mocked(recordMulticloneSearch).mockClear();
+});
 
 const TENANT = 'project-a';
 const WATCH_FOLDER = 'watch-1';
@@ -50,6 +62,8 @@ describe('resolveProjectContext — single-clone projects never degrade', () => 
     expect(result.basePoints).toBeUndefined();
     expect(result.basePointsDegraded).toBeFalsy();
     expect(state.getActiveBasePoints).not.toHaveBeenCalled();
+    // Not a multi-clone search → not counted.
+    expect(recordMulticloneSearch).not.toHaveBeenCalled();
   });
 
   it('does not degrade for a single clone even far above the cap', async () => {
@@ -61,6 +75,7 @@ describe('resolveProjectContext — single-clone projects never degrade', () => 
     expect(result.basePoints).toBeUndefined();
     expect(result.basePointsDegraded).toBeFalsy();
     expect(state.getActiveBasePoints).not.toHaveBeenCalled();
+    expect(recordMulticloneSearch).not.toHaveBeenCalled();
   });
 });
 
@@ -71,6 +86,9 @@ describe('resolveProjectContext — multi-clone isolation', () => {
 
     expect(result.basePoints).toHaveLength(50);
     expect(result.basePointsDegraded).toBeFalsy();
+    // Genuine multi-clone, within cap → counted as non-degraded.
+    expect(recordMulticloneSearch).toHaveBeenCalledTimes(1);
+    expect(recordMulticloneSearch).toHaveBeenCalledWith(false);
   });
 
   it('surfaces degradation when 2+ clones exceed the 500 cap', async () => {
@@ -81,6 +99,8 @@ describe('resolveProjectContext — multi-clone isolation', () => {
     expect(result.basePoints).toBeUndefined();
     expect(result.basePointsDegraded).toBe(true);
     expect(result.basePointsActiveCount).toBe(501);
+    // The signal that decides whether the "proper half" is worth building.
+    expect(recordMulticloneSearch).toHaveBeenCalledWith(true);
   });
 
   it('does not flag degradation when multi-clone but no base points exist', async () => {
@@ -89,6 +109,8 @@ describe('resolveProjectContext — multi-clone isolation', () => {
 
     expect(result.basePoints).toBeUndefined();
     expect(result.basePointsDegraded).toBeFalsy();
+    // Still a genuine multi-clone search, just not degraded.
+    expect(recordMulticloneSearch).toHaveBeenCalledWith(false);
   });
 });
 
@@ -99,5 +121,7 @@ describe('resolveProjectContext — scope guard', () => {
 
     expect(result.basePoints).toBeUndefined();
     expect(result.basePointsDegraded).toBeFalsy();
+    // Non-project scope never enters the instance-narrowing path.
+    expect(recordMulticloneSearch).not.toHaveBeenCalled();
   });
 });

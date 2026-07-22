@@ -30,6 +30,7 @@ import {
   rerankEnabledByDefault,
   resolveDerankConfig,
 } from './search-types.js';
+import { recordMulticloneSearch } from '../telemetry/metrics.js';
 import { buildFilter } from './search-filters.js';
 import { dedupeIdenticalBodies } from './search-shaping.js';
 import { filterResultsByPathExclude, applyPathDerank } from './search-path-filters.js';
@@ -238,6 +239,10 @@ export async function resolveProjectContext(
           basePointsDegraded = true;
           basePointsActiveCount = points.length;
         }
+        // #3 observability: count every genuine multi-clone search, labelled by
+        // whether it degraded. If `{degraded="true"}` never fires in practice,
+        // the server-side `watch_folders[]` filter (the "proper half") is moot.
+        recordMulticloneSearch(basePointsDegraded);
       }
     }
   }
