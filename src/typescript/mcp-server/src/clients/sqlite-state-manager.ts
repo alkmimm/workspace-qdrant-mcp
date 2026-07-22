@@ -332,8 +332,8 @@ export class SqliteStateManager {
     return instanceQueries.getWatchFolderIdByTenantId(this.db, tenantId);
   }
 
-  countWatchFoldersByTenantId(tenantId: string) {
-    return instanceQueries.countWatchFoldersByTenantId(this.db, tenantId);
+  countCloneInstancesByTenantId(tenantId: string) {
+    return instanceQueries.countCloneInstancesByTenantId(this.db, tenantId);
   }
 
   getActiveBasePoints(watchFolderId: string, includeSubmodules = false) {

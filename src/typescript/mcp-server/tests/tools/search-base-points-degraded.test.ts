@@ -1,15 +1,18 @@
 /**
  * Regression tests for F-014 — base-point (worktree/instance) isolation.
  *
- * base_point narrowing only disambiguates multiple clones/worktrees that
- * share a single tenant_id. With one watch folder the tenant filter alone
- * isolates results, so `resolveProjectContext` MUST NOT enumerate base
- * points or flag degradation — doing so produced a false `status:
- * uncertain` on every project search (one base_point per tracked file
- * always blows past the cap on a real repo).
+ * base_point narrowing only disambiguates multiple independent CLONES that
+ * share a single tenant_id (linked worktrees do not count — see
+ * `countCloneInstancesByTenantId`; git keeps each on its own branch, so the
+ * branch filter already isolates them). With a single clone the tenant filter
+ * alone isolates results, so `resolveProjectContext` MUST NOT enumerate base
+ * points or flag degradation — doing so produced a false `status: uncertain`
+ * on every project search (one base_point per tracked file always blows past
+ * the cap on a real repo).
  *
  * Degradation is surfaced ONLY when there are genuinely 2+ clones AND the
- * active base-point set exceeds {@link BASE_POINTS_FILTER_CAP}.
+ * active base-point set exceeds {@link BASE_POINTS_FILTER_CAP}. The clone
+ * count here is `countCloneInstancesByTenantId` (worktrees already excluded).
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -25,7 +28,7 @@ function makeStateManager(activeCount: number, cloneCount: number): SqliteStateM
   return {
     getWatchFolderIdByTenantId: vi.fn().mockReturnValue(WATCH_FOLDER),
     getProjectById: vi.fn().mockReturnValue({ data: null }),
-    countWatchFoldersByTenantId: vi.fn().mockReturnValue(cloneCount),
+    countCloneInstancesByTenantId: vi.fn().mockReturnValue(cloneCount),
     getActiveBasePoints: vi.fn().mockReturnValue(points),
   } as unknown as SqliteStateManager;
 }
