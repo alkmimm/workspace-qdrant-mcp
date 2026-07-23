@@ -22,6 +22,7 @@ import {
   defaultRegistryPath,
   runAbandonAgentBranch,
   runAgentBranchStatus,
+  runCleanupOrphans,
   runFinishAgentBranch,
   runIncrementalCheck,
   runIncrementalCheckAll,
@@ -490,6 +491,7 @@ const TS_NATIVE_ACTIONS = new Set([
   'start_agent_branch',
   'finish_agent_branch',
   'abandon_agent_branch',
+  'cleanup_orphans',
   // Phase 2: observation/status surface — runs in the dockerized MCP
   // container without PowerShell. wqm/git absence is handled gracefully
   // (stub probe results) rather than failing the call.
@@ -590,6 +592,10 @@ function dispatchTsAction(
       const arg: AbandonAgentBranchArgs = { ...projectArgs, branchName, removeWorktree };
       return runAbandonAgentBranch(arg);
     }
+    case 'cleanup_orphans':
+      // Mutation is already gated by assertMutationAllowed() before dispatch;
+      // allowMutation===true means prune-and-write, otherwise report-only.
+      return runCleanupOrphans(base, args['allowMutation'] === true);
     // ── Phase 2: observation/status surface ─────────────────────────────
     case 'project_status':
       // Prefer the daemon-direct status (source of truth; works in the
