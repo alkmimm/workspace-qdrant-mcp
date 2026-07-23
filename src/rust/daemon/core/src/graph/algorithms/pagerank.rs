@@ -48,7 +48,7 @@ pub async fn compute_pagerank(
     config: &PageRankConfig,
     edge_types: Option<&[&str]>,
 ) -> Result<Vec<PageRankEntry>, sqlx::Error> {
-    let graph = load_adjacency_graph(pool, tenant_id, edge_types).await?;
+    let graph = load_adjacency_graph(pool, tenant_id, edge_types, true).await?;
 
     if graph.nodes.is_empty() {
         return Ok(Vec::new());

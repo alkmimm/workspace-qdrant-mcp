@@ -36,7 +36,7 @@ pub async fn compute_betweenness_centrality(
     edge_types: Option<&[&str]>,
     max_samples: Option<usize>,
 ) -> Result<Vec<BetweennessEntry>, sqlx::Error> {
-    let graph = load_adjacency_graph(pool, tenant_id, edge_types).await?;
+    let graph = load_adjacency_graph(pool, tenant_id, edge_types, true).await?;
 
     if graph.nodes.len() < 3 {
         return Ok(graph

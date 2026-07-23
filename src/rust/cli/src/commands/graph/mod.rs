@@ -1,12 +1,13 @@
 //! Graph command - code relationship queries and algorithms
 //!
-//! Subcommands: query, impact, stats, pagerank, communities, betweenness, migrate
+//! Subcommands: query, impact, stats, pagerank, communities, betweenness, cycles, migrate
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
 mod betweenness;
 mod communities;
+mod cycles;
 mod impact;
 mod migrate;
 mod pagerank;
@@ -153,6 +154,25 @@ enum GraphCommand {
         edge_types: Vec<String>,
     },
 
+    /// Detect dependency cycles (circular CALLS/IMPORTS between symbols/files)
+    Cycles {
+        /// Project tenant_id
+        #[arg(long)]
+        tenant: String,
+
+        /// Return only the top K cycles (cross-file first, then largest)
+        #[arg(long)]
+        top_k: Option<u32>,
+
+        /// Minimum cycle size to report (default: 2; pass 1 to include self-recursion)
+        #[arg(long)]
+        min_size: Option<u32>,
+
+        /// Edge type filter (comma-separated; default: CALLS,IMPORTS,USES_TYPE,EXTENDS,IMPLEMENTS)
+        #[arg(long, value_delimiter = ',')]
+        edge_types: Vec<String>,
+    },
+
     /// Migrate graph data between backends
     Migrate {
         /// Source backend (sqlite or ladybug)
@@ -220,6 +240,12 @@ pub async fn execute(args: GraphArgs) -> Result<()> {
             max_samples,
             edge_types,
         } => betweenness::betweenness(&tenant, top_k, max_samples, edge_types).await,
+        GraphCommand::Cycles {
+            tenant,
+            top_k,
+            min_size,
+            edge_types,
+        } => cycles::cycles(&tenant, top_k, min_size, edge_types).await,
         GraphCommand::Migrate {
             from,
             to,
