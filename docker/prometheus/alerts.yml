@@ -85,6 +85,32 @@ groups:
           summary: "Qdrant instance unreachable"
           description: "Prometheus has been unable to scrape Qdrant for more than 5 minutes."
 
+      # ── Application errors ───────────────────────────────────
+
+      - alert: MemexdIngestionErrors
+        # No existing rule covered application-level errors — only availability
+        # and queue freshness. This catches the daemon actually failing to
+        # ingest items (distinct from the benign infra log-noise, e.g. the
+        # Tempo block-poller, which is NOT a wqm signal).
+        expr: sum(increase(memexd_ingestion_errors_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: daemon
+        annotations:
+          summary: "memexd ingestion errors"
+          description: "memexd logged one or more ingestion errors in the last 5 minutes (increase(memexd_ingestion_errors_total[5m]) > 0). Check `docker logs wqm-memexd`."
+
+      - alert: MCPToolErrors
+        expr: sum(increase(wqm_mcp_tool_invocations_total{status="error"}[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: mcp
+        annotations:
+          summary: "MCP tool calls returning errors"
+          description: "One or more MCP tool invocations failed in the last 10 minutes (status=error). Check the MCP server logs / `wqm status health`."
+
       # ── MCP session health ───────────────────────────────────
 
       - alert: MCPNoInvocations
