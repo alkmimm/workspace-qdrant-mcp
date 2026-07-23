@@ -48,6 +48,8 @@ import type {
   ReapplyIgnoreRulesResponse,
   ReembedTenantRequest,
   ReembedTenantResponse,
+  PurgeTenantRequest,
+  PurgeTenantResponse,
 } from '../grpc-types.js';
 
 import { DaemonClientSystem } from './system-methods.js';
@@ -383,6 +385,17 @@ export class DaemonClientService extends DaemonClientSystem {
         'reembedTenant',
         request,
         this.getMethodTimeout('reembedTenant')
+      )
+    );
+  }
+
+  async purgeTenant(request: PurgeTenantRequest): Promise<PurgeTenantResponse> {
+    return this.callWithRetry(() =>
+      grpcUnaryWithTimeout(
+        this.adminWriteClient,
+        'purgeTenant',
+        request,
+        this.getMethodTimeout('purgeTenant')
       )
     );
   }

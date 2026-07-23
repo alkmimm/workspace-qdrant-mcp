@@ -19,6 +19,9 @@ pub mod text_search_service;
 // Re-embed pipeline (used by AdminWriteService.TriggerReembed)
 pub mod reembed;
 
+// Orphan-tenant purge (used by AdminWriteService.PurgeTenant)
+pub mod purge;
+
 // Write services (daemon-exclusive SQLite mutations)
 pub mod admin_write_service;
 pub mod library_write_service;

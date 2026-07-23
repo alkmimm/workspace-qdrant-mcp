@@ -333,6 +333,22 @@ export interface ReembedTenantResponse {
   message: string;
 }
 
+export interface PurgeTenantRequest {
+  tenant_id: string;
+  /** Report what would be deleted without mutating. */
+  dry_run?: boolean;
+  /** Required to actually delete (defense in depth on top of the admin gate). */
+  confirm?: boolean;
+}
+
+export interface PurgeTenantResponse {
+  success: boolean;
+  dry_run: boolean;
+  sqlite_rows_deleted: number;
+  qdrant_points_deleted: number;
+  message: string;
+}
+
 export interface AdminWriteServiceClient {
   reapplyIgnoreRules(
     request: Record<string, never>,
@@ -341,5 +357,9 @@ export interface AdminWriteServiceClient {
   reembedTenant(
     request: ReembedTenantRequest,
     callback: (error: Error | null, response: ReembedTenantResponse) => void
+  ): void;
+  purgeTenant(
+    request: PurgeTenantRequest,
+    callback: (error: Error | null, response: PurgeTenantResponse) => void
   ): void;
 }

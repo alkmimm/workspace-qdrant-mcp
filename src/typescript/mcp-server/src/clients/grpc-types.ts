@@ -127,4 +127,6 @@ export type {
   ReapplyIgnoreRulesResponse,
   ReembedTenantRequest,
   ReembedTenantResponse,
+  PurgeTenantRequest,
+  PurgeTenantResponse,
 } from './grpc-types-clients.js';
