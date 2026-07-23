@@ -105,4 +105,8 @@ export type {
   BetweennessRequest,
   BetweennessResponse,
   BetweennessNodeProto,
+  CycleRequest,
+  CycleResponse,
+  CycleProto,
+  CycleMemberProto,
 } from './grpc-types-search-graph.js';

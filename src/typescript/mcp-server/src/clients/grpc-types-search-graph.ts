@@ -194,3 +194,32 @@ export interface BetweennessResponse {
   total: number;
   query_time_ms: number;
 }
+
+export interface CycleRequest {
+  tenant_id: string;
+  edge_types?: string[];
+  /** Minimum SCC members to report (absent/0 = 2, which skips self-loops). */
+  min_cycle_size?: number;
+  top_k?: number;
+}
+
+export interface CycleMemberProto {
+  node_id: string;
+  symbol_name: string;
+  symbol_type: string;
+  file_path: string;
+}
+
+export interface CycleProto {
+  members: CycleMemberProto[];
+  /** Distinct files the cycle spans. */
+  files: string[];
+  /** True when the cycle crosses more than one file (a layering smell). */
+  cross_file: boolean;
+}
+
+export interface CycleResponse {
+  cycles: CycleProto[];
+  total: number;
+  query_time_ms: number;
+}

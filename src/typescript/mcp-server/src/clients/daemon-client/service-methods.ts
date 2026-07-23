@@ -27,6 +27,8 @@ import type {
   CommunityResponse,
   BetweennessRequest,
   BetweennessResponse,
+  CycleRequest,
+  CycleResponse,
   EnqueueItemRequest,
   EnqueueItemResponse,
   RetryAllResponse,
@@ -189,6 +191,17 @@ export class DaemonClientService extends DaemonClientSystem {
         'computeBetweenness',
         request,
         this.getMethodTimeout('computeBetweenness')
+      )
+    );
+  }
+
+  async detectCycles(request: CycleRequest): Promise<CycleResponse> {
+    return this.callWithRetry(() =>
+      grpcUnaryWithTimeout(
+        this.graphClient,
+        'detectCycles',
+        request,
+        this.getMethodTimeout('detectCycles')
       )
     );
   }

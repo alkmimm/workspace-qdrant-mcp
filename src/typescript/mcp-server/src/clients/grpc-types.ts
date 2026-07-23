@@ -88,6 +88,10 @@ export {
   type BetweennessRequest,
   type BetweennessResponse,
   type BetweennessNodeProto,
+  type CycleRequest,
+  type CycleResponse,
+  type CycleProto,
+  type CycleMemberProto,
   // QueueWriteService
   type EnqueueItemRequest,
   type EnqueueItemResponse,

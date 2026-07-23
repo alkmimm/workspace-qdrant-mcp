@@ -11,7 +11,7 @@ export const graphToolDefinition = {
     openWorldHint: false,
   },
   description:
-    'Navigate the code-relationship graph: callers/callees, change-impact, importance ranking, and module clusters. ' +
+    'Navigate the code-relationship graph: callers/callees, change-impact, importance ranking, module clusters, and circular dependencies. ' +
     'Built from symbol relations (calls, contains, uses-type, imports) extracted during indexing. ' +
     'Use this to understand how code connects before editing — e.g. "what calls this function?", "what breaks if I change X?", "what are the most central functions?". ' +
     'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules → none (project-wide). ' +
@@ -21,9 +21,18 @@ export const graphToolDefinition = {
     properties: {
       action: {
         type: 'string',
-        enum: ['stats', 'relations', 'impact', 'usages', 'hotspots', 'bridges', 'modules'],
+        enum: [
+          'stats',
+          'relations',
+          'impact',
+          'usages',
+          'hotspots',
+          'bridges',
+          'modules',
+          'cycles',
+        ],
         description:
-          "stats: node/edge counts. relations: a symbol's dependencies (calls/uses-type/imports/inheritance) — excludes CONTAINS membership by default, so a large class returns its dependencies, not its member list (pass edgeTypes:[\"CONTAINS\"] to list members). impact: transitive change blast-radius (direct + indirect dependents). usages: DIRECT references only (1-hop \"find references\"). hotspots: most central symbols (PageRank). bridges: bottleneck symbols on many shortest paths (betweenness). modules: code clusters. Default: 'stats'.",
+          "stats: node/edge counts. relations: a symbol's dependencies (calls/uses-type/imports/inheritance) — excludes CONTAINS membership by default, so a large class returns its dependencies, not its member list (pass edgeTypes:[\"CONTAINS\"] to list members). impact: transitive change blast-radius (direct + indirect dependents). usages: DIRECT references only (1-hop \"find references\"). hotspots: most central symbols (PageRank). bridges: bottleneck symbols on many shortest paths (betweenness). modules: code clusters. cycles: circular dependencies (Tarjan SCC over CALLS/IMPORTS) — CROSS-FILE cycles are returned FIRST as they are the layering smells (e.g. repository <-> service); same-file cycles are usually benign mutual recursion. Default: 'stats'.",
       },
       symbol: {
         type: 'string',
@@ -64,7 +73,8 @@ export const graphToolDefinition = {
       minSize: {
         type: 'number',
         default: 2,
-        description: "Minimum community size for 'modules' (default 2).",
+        description:
+          "Minimum size for 'modules' (community members) and 'cycles' (SCC members; pass 1 to include single-node self-recursion). Default 2.",
       },
       memberLimit: {
         type: 'number',
