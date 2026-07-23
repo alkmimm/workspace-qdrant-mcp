@@ -5,10 +5,12 @@
 /// in-memory adjacency lists, so they work identically regardless of backend.
 mod betweenness;
 mod community;
+mod cycles;
 mod pagerank;
 
 pub use betweenness::{compute_betweenness_centrality, BetweennessEntry};
 pub use community::{detect_communities, Community, CommunityConfig, CommunityMember};
+pub use cycles::{detect_cycles, Cycle, CycleMember};
 pub use pagerank::{compute_pagerank, PageRankConfig, PageRankEntry};
 
 use std::collections::{HashMap, HashSet};
@@ -135,10 +137,18 @@ fn centrality_usage_threshold(total_definitions: usize) -> usize {
 }
 
 /// Load the full adjacency graph for a tenant from SQLite.
+///
+/// `apply_genericity_filters` gates the CENTRALITY-only precision filters
+/// (path-exclude env, definition/usage-ubiquity drops, manual skip). Centrality
+/// callers pass `true` (rank only resolved, non-generic nodes); structural
+/// callers like cycle detection pass `false` — a real dependency cycle may pass
+/// through a high-in-degree node, so those filters would hide it. The stub drop
+/// (empty `file_path`) and the `weight >= 0.6` confidence gate always apply.
 pub(super) async fn load_adjacency_graph(
     pool: &SqlitePool,
     tenant_id: &str,
     edge_types: Option<&[&str]>,
+    apply_genericity_filters: bool,
 ) -> Result<AdjacencyGraph, sqlx::Error> {
     // Load nodes
     let node_rows = sqlx::query(
@@ -169,7 +179,7 @@ pub(super) async fn load_adjacency_graph(
     // in-degree matches the graph centrality will actually walk. Skipped entirely
     // when the filter is disabled (threshold = usize::MAX).
     let mut indeg_by_node: HashMap<String, usize> = HashMap::new();
-    if usage_threshold != usize::MAX {
+    if apply_genericity_filters && usage_threshold != usize::MAX {
         let indeg_rows = if let Some(types) = edge_types {
             let placeholders: Vec<String> = types.iter().map(|t| format!("'{}'", t)).collect();
             let query = format!(
@@ -216,7 +226,10 @@ pub(super) async fn load_adjacency_graph(
         // WQM_GRAPH_CENTRALITY_EXCLUDE env var). Edges to them auto-drop below (the
         // same "endpoint absent from `nodes`" logic that drops stub edges), so
         // out-degrees stay accurate.
-        if !exclude.is_empty() && is_centrality_excluded(&file_path, exclude) {
+        if apply_genericity_filters
+            && !exclude.is_empty()
+            && is_centrality_excluded(&file_path, exclude)
+        {
             excluded += 1;
             continue;
         }
@@ -232,9 +245,10 @@ pub(super) async fn load_adjacency_graph(
         //      with a stdlib builtin (collect/iter/Result), which axis 1 cannot
         //      see (def_count == 1). Also unglues the giant catch-all community.
         // Plus the optional manual symbol-name env override.
-        if def_count.get(&symbol_name).copied().unwrap_or(0) > generic_threshold
-            || indeg_by_node.get(&node_id).copied().unwrap_or(0) > usage_threshold
-            || manual_skip.contains(&symbol_name)
+        if apply_genericity_filters
+            && (def_count.get(&symbol_name).copied().unwrap_or(0) > generic_threshold
+                || indeg_by_node.get(&node_id).copied().unwrap_or(0) > usage_threshold
+                || manual_skip.contains(&symbol_name))
         {
             excluded += 1;
             continue;

@@ -3,14 +3,15 @@
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 use workspace_qdrant_core::graph::algorithms::{
-    compute_betweenness_centrality, compute_pagerank, detect_communities, CommunityConfig,
-    PageRankConfig,
+    compute_betweenness_centrality, compute_pagerank, detect_communities, detect_cycles,
+    CommunityConfig, PageRankConfig,
 };
 use workspace_qdrant_core::graph::EdgeType;
 
 use crate::proto::{
     graph_service_server::GraphService, BetweennessNodeProto, BetweennessRequest,
     BetweennessResponse, CommunityMemberProto, CommunityProto, CommunityRequest, CommunityResponse,
+    CycleMemberProto, CycleProto, CycleRequest, CycleResponse,
     GraphMigrateRequest, GraphMigrateResponse, GraphStatsRequest, GraphStatsResponse,
     ImpactAnalysisRequest, ImpactAnalysisResponse, ImpactNodeProto, PageRankNodeProto,
     PageRankRequest, PageRankResponse, QueryRelatedRequest, QueryRelatedResponse,
@@ -514,6 +515,79 @@ impl GraphService for GraphServiceImpl {
                     "Betweenness centrality failed: {}",
                     e
                 )))
+            }
+        }
+    }
+
+    #[tracing::instrument(skip_all, fields(method = "GraphService.detect_cycles"))]
+    async fn detect_cycles(
+        &self,
+        request: Request<CycleRequest>,
+    ) -> Result<Response<CycleResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.tenant_id.is_empty() {
+            return Err(Status::invalid_argument("tenant_id is required"));
+        }
+
+        let edge_filter = parse_edge_type_filter(&req.edge_types)?;
+        let edge_refs: Option<Vec<&str>> = edge_filter
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+        // Absent → 2 (skip single-node self-loops / direct recursion). An
+        // explicit 1 opts into self-loops; the algorithm floors at 1.
+        let min_cycle_size = req.min_cycle_size.map(|v| v as usize).unwrap_or(2);
+
+        debug!(
+            "GraphService.DetectCycles: tenant={} min_cycle_size={}",
+            req.tenant_id, min_cycle_size
+        );
+
+        let start = std::time::Instant::now();
+
+        let guard = self.graph_store.read().await;
+        let pool = guard.pool();
+
+        match detect_cycles(pool, &req.tenant_id, edge_refs.as_deref(), min_cycle_size).await {
+            Ok(mut cycles) => {
+                let total = cycles.len() as u32;
+
+                if let Some(k) = req.top_k {
+                    if k > 0 && (k as usize) < cycles.len() {
+                        cycles.truncate(k as usize);
+                    }
+                }
+
+                let query_time_ms = start.elapsed().as_millis() as i64;
+
+                let proto_cycles: Vec<CycleProto> = cycles
+                    .into_iter()
+                    .map(|c| CycleProto {
+                        members: c
+                            .members
+                            .into_iter()
+                            .map(|m| CycleMemberProto {
+                                node_id: m.node_id,
+                                symbol_name: m.symbol_name,
+                                symbol_type: m.symbol_type,
+                                file_path: m.file_path,
+                            })
+                            .collect(),
+                        files: c.files,
+                        cross_file: c.cross_file,
+                    })
+                    .collect();
+
+                Ok(Response::new(CycleResponse {
+                    cycles: proto_cycles,
+                    total,
+                    query_time_ms,
+                }))
+            }
+            Err(e) => {
+                error!("GraphService.DetectCycles failed: {}", e);
+                Err(Status::internal(format!("Cycle detection failed: {}", e)))
             }
         }
     }

@@ -531,7 +531,7 @@ async fn test_load_adjacency() {
     let pool = setup_graph_pool().await;
     build_diamond(&pool).await;
 
-    let graph = load_adjacency_graph(&pool, "t1", None).await.unwrap();
+    let graph = load_adjacency_graph(&pool, "t1", None, true).await.unwrap();
     assert_eq!(graph.nodes.len(), 4);
     assert_eq!(graph.outgoing.get("a").unwrap().len(), 2); // a -> b, a -> c
     assert_eq!(graph.incoming.get("d").unwrap().len(), 2); // b -> d, c -> d
@@ -547,7 +547,7 @@ async fn test_load_adjacency_filtered() {
     insert_edge(&pool, "t1", "a", "b", "IMPORTS").await;
 
     // Filter to CALLS only
-    let graph = load_adjacency_graph(&pool, "t1", Some(&["CALLS"]))
+    let graph = load_adjacency_graph(&pool, "t1", Some(&["CALLS"]), true)
         .await
         .unwrap();
     let out = graph.outgoing.get("a").unwrap();
@@ -577,7 +577,7 @@ async fn test_load_adjacency_drops_use_ubiquitous_node() {
     insert_edge(&pool, "t1", "c0", "norm", "CALLS").await;
     insert_edge(&pool, "t1", "c1", "norm", "CALLS").await;
 
-    let graph = load_adjacency_graph(&pool, "t1", None).await.unwrap();
+    let graph = load_adjacency_graph(&pool, "t1", None, true).await.unwrap();
 
     assert!(
         !graph.nodes.contains_key("hub"),
@@ -590,5 +590,15 @@ async fn test_load_adjacency_drops_use_ubiquitous_node() {
     assert!(
         graph.nodes.contains_key("c0"),
         "caller nodes must be kept"
+    );
+
+    // With genericity filters OFF (structural callers like cycle detection), the
+    // same use-ubiquitous node is KEPT — a real cycle may pass through it.
+    let raw = load_adjacency_graph(&pool, "t1", None, false)
+        .await
+        .unwrap();
+    assert!(
+        raw.nodes.contains_key("hub"),
+        "with genericity filters off, the ubiquitous node must be retained"
     );
 }

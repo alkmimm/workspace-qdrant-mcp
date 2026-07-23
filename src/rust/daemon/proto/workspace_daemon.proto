@@ -719,6 +719,9 @@ service GraphService {
     // Compute betweenness centrality scores
     rpc ComputeBetweenness(BetweennessRequest) returns (BetweennessResponse);
 
+    // Detect dependency cycles (strongly-connected components of the dep graph)
+    rpc DetectCycles(CycleRequest) returns (CycleResponse);
+
     // Migrate graph data between backends (SQLite ↔ LadybugDB)
     rpc MigrateGraph(GraphMigrateRequest) returns (GraphMigrateResponse);
 }
@@ -873,6 +876,36 @@ message BetweennessNodeProto {
     string symbol_type = 3;
     string file_path = 4;                             // [relative] Relative to project root
     double score = 5;
+}
+
+// Dependency Cycle Detection Request
+message CycleRequest {
+    string tenant_id = 1;
+    repeated string edge_types = 2;               // Filter edges; empty = dependency defaults (CALLS/IMPORTS/USES_TYPE/EXTENDS/IMPLEMENTS)
+    optional uint32 min_cycle_size = 3;           // Minimum SCC members to report (absent/0 = 2)
+    optional uint32 top_k = 4;                    // Return only top K cycles (0 = all)
+}
+
+// Dependency Cycle Detection Response
+message CycleResponse {
+    repeated CycleProto cycles = 1;
+    uint32 total = 2;
+    int64 query_time_ms = 3;
+}
+
+// A detected dependency cycle (a strongly-connected component)
+message CycleProto {
+    repeated CycleMemberProto members = 1;
+    repeated string files = 2;                        // [relative] Distinct files the cycle spans
+    bool cross_file = 3;                              // True when the cycle crosses > 1 file
+}
+
+// A member node of a dependency cycle
+message CycleMemberProto {
+    string node_id = 1;
+    string symbol_name = 2;
+    string symbol_type = 3;
+    string file_path = 4;                             // [relative] Relative to project root
 }
 
 // Graph Migration Request
