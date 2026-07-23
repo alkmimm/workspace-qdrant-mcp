@@ -118,23 +118,21 @@ pub async fn execute_purge(
         .begin()
         .await
         .map_err(|e| format!("transaction error: {}", e))?;
+
+    // Defer FK enforcement to commit time. `tracked_files` has a FK to
+    // `watch_folders` with NO ON DELETE CASCADE, so a naive parent-first delete
+    // fails (code 787). Deferring checks the constraint once, at commit, after
+    // ALL of the tenant's rows are gone — robust to delete order and to any
+    // other non-cascade FK into the tenant's tables.
+    sqlx::query("PRAGMA defer_foreign_keys = ON")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("database error (defer_foreign_keys): {}", e))?;
+
     let mut rows: u32 = 0;
 
-    rows += sqlx::query("DELETE FROM watch_folders WHERE tenant_id = ?1")
-        .bind(tenant_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("database error (watch_folders): {}", e))?
-        .rows_affected() as u32;
-
-    rows += sqlx::query("DELETE FROM unified_queue WHERE tenant_id = ?1")
-        .bind(tenant_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("database error (unified_queue): {}", e))?
-        .rows_affected() as u32;
-
-    // tracked_files may lack a tenant_id column in older schema versions.
+    // tracked_files (child of watch_folders) first. It may lack a tenant_id
+    // column in older schema versions — tolerate that.
     match sqlx::query("DELETE FROM tracked_files WHERE tenant_id = ?1")
         .bind(tenant_id)
         .execute(&mut *tx)
@@ -148,6 +146,41 @@ pub async fn execute_purge(
             }
         }
     }
+
+    // project_components also has a NO-ACTION FK to watch_folders, keyed by
+    // watch_folder_id (not tenant_id) — delete the tenant's components before
+    // its watch_folders. Tolerate the table not existing in older schemas.
+    match sqlx::query(
+        "DELETE FROM project_components WHERE watch_folder_id IN \
+         (SELECT watch_id FROM watch_folders WHERE tenant_id = ?1)",
+    )
+    .bind(tenant_id)
+    .execute(&mut *tx)
+    .await
+    {
+        Ok(r) => rows += r.rows_affected() as u32,
+        Err(e) => {
+            let msg = e.to_string();
+            if !(msg.contains("no such table") || msg.contains("no such column")) {
+                return Err(format!("database error (project_components): {}", e));
+            }
+        }
+    }
+
+    rows += sqlx::query("DELETE FROM unified_queue WHERE tenant_id = ?1")
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("database error (unified_queue): {}", e))?
+        .rows_affected() as u32;
+
+    // watch_folders (parent) last.
+    rows += sqlx::query("DELETE FROM watch_folders WHERE tenant_id = ?1")
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("database error (watch_folders): {}", e))?
+        .rows_affected() as u32;
 
     tx.commit()
         .await
