@@ -58,6 +58,8 @@ import type {
   CommunityResponse,
   BetweennessRequest,
   BetweennessResponse,
+  CycleRequest,
+  CycleResponse,
   EnqueueItemRequest,
   EnqueueItemResponse,
   RetryAllResponse,
@@ -234,6 +236,10 @@ export interface GraphServiceClient {
   computeBetweenness(
     request: BetweennessRequest,
     callback: (error: Error | null, response: BetweennessResponse) => void
+  ): void;
+  detectCycles(
+    request: CycleRequest,
+    callback: (error: Error | null, response: CycleResponse) => void
   ): void;
 }
 

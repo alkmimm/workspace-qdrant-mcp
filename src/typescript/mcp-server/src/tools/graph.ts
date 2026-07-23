@@ -28,6 +28,7 @@ import type {
   PageRankRequest,
   CommunityRequest,
   BetweennessRequest,
+  CycleRequest,
   QueryRelatedRequest,
 } from '../clients/grpc-types.js';
 
@@ -206,6 +207,22 @@ export async function handleGraph(
       return { success: true, action, tenant_id: tenant, ...r };
     }
 
+    case 'cycles': {
+      // Dependency cycles (Tarjan SCC): circular CALLS/IMPORTS between symbols.
+      // cross_file cycles are returned FIRST (layering smells worth flagging);
+      // same-file cycles are usually benign mutual recursion. `minSize` maps to
+      // the minimum SCC size (daemon default 2, which skips self-loops).
+      const minSize = num(args, 'minSize');
+      const req: CycleRequest = {
+        tenant_id: tenant,
+        top_k: num(args, 'topK') ?? 20,
+        ...(minSize !== undefined ? { min_cycle_size: minSize } : {}),
+        ...(edgeTypes ? { edge_types: edgeTypes } : {}),
+      };
+      const r = await daemonClient.detectCycles(req);
+      return { success: true, action, tenant_id: tenant, ...r };
+    }
+
     case 'modules': {
       const minSize = num(args, 'minSize');
       // Member sample per community. `top_k` bounds the community COUNT, but the
@@ -287,7 +304,7 @@ export async function handleGraph(
 
     default:
       throw new Error(
-        `Unknown graph action: '${action}'. Use one of: stats, relations, impact, usages, hotspots, bridges, modules.`
+        `Unknown graph action: '${action}'. Use one of: stats, relations, impact, usages, hotspots, bridges, modules, cycles.`
       );
   }
 }
