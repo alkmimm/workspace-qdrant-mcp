@@ -14,7 +14,7 @@ export const graphToolDefinition = {
     'Navigate the code-relationship graph: callers/callees, change-impact, importance ranking, module clusters, and circular dependencies. ' +
     'Built from symbol relations (calls, contains, uses-type, imports) extracted during indexing. ' +
     'Use this to understand how code connects before editing — e.g. "what calls this function?", "what breaks if I change X?", "what are the most central functions?". ' +
-    'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules → none (project-wide). ' +
+    'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules/cycles → none (project-wide). ' +
     'Each relations/impact/usages node carries a `confidence` (best-path certainty): ~1.0 precise, 0.7 tenant-unique name, ~1/N (e.g. 0.17) an ambiguous same-name fan-out; pass `minConfidence` (e.g. 0.5) to suppress the low-confidence homonym noise.',
   inputSchema: {
     type: 'object' as const,
@@ -58,7 +58,7 @@ export const graphToolDefinition = {
         type: 'number',
         default: 20,
         description:
-          "Max results: top symbols for 'hotspots'/'bridges', top-K largest clusters for 'modules' (default 20), and max nodes returned for 'impact'/'usages'/'relations' (nearest-first, default 50; 0 = all — the true total is still reported; when minConfidence is set, totals count the filtered set).",
+          "Max results: top symbols for 'hotspots'/'bridges', top-K largest clusters for 'modules', top-K cycles for 'cycles' (cross-file first; all default 20), and max nodes returned for 'impact'/'usages'/'relations' (nearest-first, default 50; 0 = all — the true total is still reported; when minConfidence is set, totals count the filtered set).",
       },
       maxSamples: {
         type: 'number',
