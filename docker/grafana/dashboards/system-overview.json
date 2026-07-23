@@ -60,6 +60,77 @@
   ],
   "panels": [
     {
+      "id": 100,
+      "title": "🔔 Active Alerts (warning + critical)",
+      "description": "Count of alert rules currently FIRING at warning/critical severity (docker/prometheus/alerts.yml). Info-level alerts (e.g. MCPNoInvocations, which fires when an MCP session is registered but idle) are intentionally excluded so this tile only lights up on actionable problems. Detail: Alerting -> Alert rules.",
+      "type": "stat",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OK — no active alerts",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "count(ALERTS{alertstate=\"firing\", severity=~\"warning|critical\"}) or vector(0)",
+          "legendFormat": "firing",
+          "refId": "A",
+          "instant": true
+        }
+      ]
+    },
+    {
       "id": 1,
       "title": "memexd Target Health",
       "description": "Prometheus scrape target health for the memexd job.",
@@ -68,7 +139,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 0
+        "y": 3
       },
       "datasource": {
         "type": "prometheus",
@@ -144,7 +215,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 0
+        "y": 3
       },
       "datasource": {
         "type": "prometheus",
@@ -220,7 +291,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 0
+        "y": 3
       },
       "datasource": {
         "type": "prometheus",
@@ -296,7 +367,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 0
+        "y": 3
       },
       "datasource": {
         "type": "prometheus",
@@ -360,7 +431,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 0
+        "y": 3
       },
       "datasource": {
         "type": "prometheus",
@@ -424,7 +495,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 0
+        "y": 3
       },
       "datasource": {
         "type": "prometheus",
@@ -482,13 +553,13 @@
     {
       "id": 30,
       "title": "MCP tool calls (last 24h, by tool)",
-      "description": "Total MCP tool invocations per tool over the last 24h (success + error). Use to confirm agents are actually exercising each tool \u2014 a tool stuck at 0 across a busy period is a discoverability/wiring signal, not necessarily an error.",
+      "description": "Total MCP tool invocations per tool over the last 24h (success + error). Use to confirm agents are actually exercising each tool — a tool stuck at 0 across a busy period is a discoverability/wiring signal, not necessarily an error.",
       "type": "bargauge",
       "gridPos": {
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 72
+        "y": 75
       },
       "datasource": {
         "type": "prometheus",
@@ -538,7 +609,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 8
+        "y": 11
       },
       "datasource": {
         "type": "prometheus",
@@ -596,7 +667,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 8
+        "y": 11
       },
       "datasource": {
         "type": "prometheus",
@@ -693,7 +764,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 19
       },
       "datasource": {
         "type": "prometheus",
@@ -790,7 +861,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 4
+        "y": 7
       },
       "datasource": {
         "type": "prometheus",
@@ -846,7 +917,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 4
+        "y": 7
       },
       "datasource": {
         "type": "prometheus",
@@ -902,7 +973,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 4
+        "y": 7
       },
       "datasource": {
         "type": "prometheus",
@@ -958,7 +1029,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 4
+        "y": 7
       },
       "datasource": {
         "type": "prometheus",
@@ -1014,7 +1085,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 4
+        "y": 7
       },
       "datasource": {
         "type": "prometheus",
@@ -1070,7 +1141,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 4
+        "y": 7
       },
       "datasource": {
         "type": "prometheus",
@@ -1128,13 +1199,13 @@
     {
       "id": 17,
       "title": "Unified Queue Depth + Graph Backlog",
-      "description": "Index queue depth by item type and status (left axis). The code graph is built INLINE as each file is indexed \u2014 it has no separate queue \u2014 so its closest backlog analog, internal unresolved stubs (external/stdlib refs excluded), is overlaid on the right axis.",
+      "description": "Index queue depth by item type and status (left axis). The code graph is built INLINE as each file is indexed — it has no separate queue — so its closest backlog analog, internal unresolved stubs (external/stdlib refs excluded), is overlaid on the right axis.",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 24
+        "y": 27
       },
       "datasource": {
         "type": "prometheus",
@@ -1251,7 +1322,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 24
+        "y": 27
       },
       "datasource": {
         "type": "prometheus",
@@ -1313,7 +1384,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 24
+        "y": 27
       },
       "datasource": {
         "type": "prometheus",
@@ -1450,7 +1521,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 35
       },
       "datasource": {
         "type": "prometheus",
@@ -1547,7 +1618,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 35
       },
       "datasource": {
         "type": "prometheus",
@@ -1635,7 +1706,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 43
       },
       "datasource": {
         "type": "prometheus",
@@ -1876,7 +1947,7 @@
                     "type": "value",
                     "options": {
                       "true": {
-                        "text": "\u2713 active",
+                        "text": "✓ active",
                         "color": "green"
                       }
                     }
@@ -1911,7 +1982,7 @@
                     "type": "value",
                     "options": {
                       "true": {
-                        "text": "\u21aa worktree",
+                        "text": "↪ worktree",
                         "color": "orange"
                       }
                     }
@@ -1955,7 +2026,7 @@
                     "type": "value",
                     "options": {
                       "false": {
-                        "text": "\u2014",
+                        "text": "—",
                         "color": "text-secondary"
                       }
                     }
@@ -2180,13 +2251,13 @@
     {
       "id": 22,
       "title": "Git Hook Activity",
-      "description": "Rate of git-hook \u2192 sync_current_branch calls reaching the MCP server, broken down by originating hook (post-commit / post-checkout / post-merge / post-rewrite / post-worktree-add / manual) and result. Sustained `error` or `bad_request` indicates the daemon registerProject path is failing or hooks are mis-installed.",
+      "description": "Rate of git-hook → sync_current_branch calls reaching the MCP server, broken down by originating hook (post-commit / post-checkout / post-merge / post-rewrite / post-worktree-add / manual) and result. Sustained `error` or `bad_request` indicates the daemon registerProject path is failing or hooks are mis-installed.",
       "type": "timeseries",
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 52
+        "y": 55
       },
       "datasource": {
         "type": "prometheus",
@@ -2260,7 +2331,7 @@
             "uid": "prometheus"
           },
           "expr": "sum by (hook, result) (rate(wqm_git_hook_invocations_total[5m]))",
-          "legendFormat": "{{hook}} \u00b7 result={{result}}",
+          "legendFormat": "{{hook}} · result={{result}}",
           "refId": "A"
         }
       ]
@@ -2274,7 +2345,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 52
+        "y": 55
       },
       "datasource": {
         "type": "prometheus",
@@ -2362,7 +2433,7 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 60
+        "y": 63
       },
       "datasource": {
         "type": "prometheus",
@@ -2427,7 +2498,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 64
+        "y": 67
       },
       "datasource": {
         "type": "prometheus",
@@ -2490,7 +2561,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 64
+        "y": 67
       },
       "datasource": {
         "type": "prometheus",
@@ -2561,7 +2632,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 83
       },
       "datasource": {
         "type": "tempo",
@@ -2590,7 +2661,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 89
+        "y": 92
       },
       "id": 200,
       "title": "Code Graph",
@@ -2604,7 +2675,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 90
+        "y": 93
       },
       "datasource": {
         "type": "prometheus",
@@ -2650,7 +2721,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 90
+        "y": 93
       },
       "datasource": {
         "type": "prometheus",
@@ -2695,7 +2766,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 90
+        "y": 93
       },
       "datasource": {
         "type": "prometheus",
@@ -2755,7 +2826,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 90
+        "y": 93
       },
       "datasource": {
         "type": "prometheus",
@@ -2814,7 +2885,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 90
+        "y": 93
       },
       "datasource": {
         "type": "prometheus",
@@ -2859,7 +2930,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 90
+        "y": 93
       },
       "datasource": {
         "type": "prometheus",
@@ -2906,7 +2977,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 94
+        "y": 97
       },
       "datasource": {
         "type": "prometheus",
@@ -2976,7 +3047,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "WQM \u2014 System Overview",
+  "title": "WQM — System Overview",
   "uid": "wqm-system",
   "version": 31
 }
