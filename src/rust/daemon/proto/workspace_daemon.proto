@@ -1075,6 +1075,13 @@ service AdminWriteService {
     // and re-embedded. Non-destructive — unlike TriggerReembed it does NOT
     // drop/recreate collections (use that only for an output_dim change).
     rpc ReembedTenant(ReembedTenantRequest) returns (ReembedTenantResponse);
+
+    // Purge all state for an ORPHANED tenant: delete its Qdrant points across
+    // the 4 canonical collections and its rows in watch_folders / unified_queue
+    // / tracked_files. Refuses if any of the tenant's watch-folder roots still
+    // exists on disk (i.e. it is a live project), preventing accidental data
+    // loss. Use to clean up a dead-worktree local_* registration + residuals.
+    rpc PurgeTenant(PurgeTenantRequest) returns (PurgeTenantResponse);
 }
 
 // =============================================================================
@@ -1400,6 +1407,22 @@ message ReembedTenantRequest {
 message ReembedTenantResponse {
     uint32 files_enqueued = 1;                        // Folder scans re-enqueued for the tenant
     string message = 2;
+}
+
+// PurgeTenant Request
+message PurgeTenantRequest {
+    string tenant_id = 1;                             // Orphan tenant to purge
+    bool dry_run = 2;                                 // Report what would be deleted; no mutation
+    bool confirm = 3;                                 // Required for actual deletion (defense in depth)
+}
+
+// PurgeTenant Response
+message PurgeTenantResponse {
+    bool success = 1;
+    bool dry_run = 2;
+    uint32 sqlite_rows_deleted = 3;                   // watch_folders + unified_queue + tracked_files
+    uint64 qdrant_points_deleted = 4;                 // total across the 4 canonical collections
+    string message = 5;
 }
 
 // GetEmbeddingProviderStatus Response

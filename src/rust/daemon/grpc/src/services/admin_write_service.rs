@@ -14,9 +14,10 @@ use workspace_qdrant_core::write_actor::{
 };
 
 use crate::proto::{
-    admin_write_service_server::AdminWriteService, ReapplyIgnoreRulesResponse, RebalanceIdfRequest,
-    RebalanceIdfResponse, ReembedTenantRequest, ReembedTenantResponse, RenameTenantAdminRequest,
-    RenameTenantAdminResponse, TriggerReembedRequest, TriggerReembedResponse,
+    admin_write_service_server::AdminWriteService, PurgeTenantRequest, PurgeTenantResponse,
+    ReapplyIgnoreRulesResponse, RebalanceIdfRequest, RebalanceIdfResponse, ReembedTenantRequest,
+    ReembedTenantResponse, RenameTenantAdminRequest, RenameTenantAdminResponse,
+    TriggerReembedRequest, TriggerReembedResponse,
 };
 use crate::services::reembed::{execute_reembed, ReembedContext, StorageClientRecreator};
 
@@ -49,6 +50,8 @@ impl AdminWriteServiceImpl {
 fn to_status(err: String) -> Status {
     if err.contains("must not be empty") {
         Status::invalid_argument(err)
+    } else if err.contains("refusing to purge") || err.contains("requires confirm") {
+        Status::failed_precondition(err)
     } else {
         Status::internal(err)
     }
@@ -179,6 +182,30 @@ impl AdminWriteService for AdminWriteServiceImpl {
         Ok(Response::new(ReembedTenantResponse {
             files_enqueued: result.files_enqueued,
             message: result.message,
+        }))
+    }
+
+    async fn purge_tenant(
+        &self,
+        request: Request<PurgeTenantRequest>,
+    ) -> Result<Response<PurgeTenantResponse>, Status> {
+        let req = request.into_inner();
+        let ctx = self.reembed_ctx.clone().ok_or_else(|| {
+            Status::failed_precondition(
+                "PurgeTenant not available: reembed context not wired \
+                 (storage client + db pool required)",
+            )
+        })?;
+        let outcome =
+            crate::services::purge::execute_purge(&ctx, &req.tenant_id, req.dry_run, req.confirm)
+                .await
+                .map_err(to_status)?;
+        Ok(Response::new(PurgeTenantResponse {
+            success: true,
+            dry_run: outcome.dry_run,
+            sqlite_rows_deleted: outcome.sqlite_rows_deleted,
+            qdrant_points_deleted: outcome.qdrant_points_deleted,
+            message: outcome.message,
         }))
     }
 }

@@ -845,6 +845,59 @@ const handleProjectReembed: RouteHandler = async (req, res, { daemonClient }) =>
   }
 };
 
+// ── /api/projects/purge — remove an ORPHANED tenant's data (daemon-side) ─────
+
+interface ProjectPurgeRequest {
+  /** Tenant to purge (e.g. a dead-worktree local_* registration). */
+  tenantId: string;
+  /** Report what would be deleted without mutating. */
+  dryRun?: boolean;
+  /** Required to actually delete. */
+  confirm?: boolean;
+}
+
+/**
+ * Calls `AdminWriteService.PurgeTenant` — deletes the tenant's Qdrant points
+ * (4 canonical collections) and its watch_folders / unified_queue /
+ * tracked_files rows. The daemon REFUSES if any of the tenant's watch roots
+ * still exists on disk (a live project), so this only cleans true orphans.
+ * Pass `dryRun: true` to preview counts; `confirm: true` is required to mutate.
+ */
+const handleProjectPurge: RouteHandler = async (req, res, { daemonClient }) => {
+  const body = (await readJsonBody(req)) as Partial<ProjectPurgeRequest>;
+  const tenantId = body.tenantId;
+  if (!tenantId || typeof tenantId !== 'string') {
+    writeError(res, 400, 'tenantId required');
+    return;
+  }
+  const dryRun = body.dryRun === true;
+  const confirm = body.confirm === true;
+  try {
+    const response = await daemonClient.purgeTenant({
+      tenant_id: tenantId,
+      dry_run: dryRun,
+      confirm,
+    });
+    logInfo('admin project purge', {
+      tenantId,
+      dryRun,
+      confirm,
+      sqliteRowsDeleted: response.sqlite_rows_deleted,
+      qdrantPointsDeleted: response.qdrant_points_deleted,
+    });
+    writeJson(res, 200, {
+      ok: true,
+      dryRun: response.dry_run,
+      sqliteRowsDeleted: response.sqlite_rows_deleted,
+      qdrantPointsDeleted: response.qdrant_points_deleted,
+      message: response.message,
+    });
+  } catch (error) {
+    logError('admin project purge failed', error, { tenantId });
+    writeError(res, 502, 'purge failed', error instanceof Error ? error.message : String(error));
+  }
+};
+
 // ── /api/settings — read + write the JSON settings file ─────────────────────
 
 const handleGetSettings: RouteHandler = async (_req, res) => {
@@ -1413,6 +1466,7 @@ const ROUTES: ReadonlyArray<Route> = [
   { method: 'POST', path: '/admin/api/watches/resume', handler: handleWatchResume },
   { method: 'POST', path: '/admin/api/projects/reindex', handler: handleProjectReindex },
   { method: 'POST', path: '/admin/api/projects/reembed', handler: handleProjectReembed },
+  { method: 'POST', path: '/admin/api/projects/purge', handler: handleProjectPurge },
   { method: 'GET', path: '/admin/api/config/clients', handler: handleGetClientConfigs },
   { method: 'GET', path: '/admin/api/logs/mcp', handler: handleGetMcpLogs },
   { method: 'GET', path: '/admin/api/daemon/raw-health', handler: handleDaemonRawHealth },
