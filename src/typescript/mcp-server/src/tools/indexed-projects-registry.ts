@@ -186,6 +186,156 @@ export function writeRegistry(registryPath: string, registry: Registry): void {
   writeFileSync(registryPath, JSON.stringify(registry, null, 4) + '\n', 'utf-8');
 }
 
+// ── Orphan cleanup (port of PS Cleanup-OrphanedIndex) ────────────────────────
+
+export interface IndexedBranchHealth {
+  path: string;
+  pathExists: boolean;
+  gitRepo: boolean;
+  branchExists: boolean;
+  stale: boolean;
+  reason: string;
+  branchName: string;
+  kind?: string | undefined;
+  status?: string | undefined;
+  useWorktree?: boolean | undefined;
+}
+
+/** Does `branchName` still exist as a local ref in the git repo at `repoPath`? */
+function branchExistsInRepo(repoPath: string, branchName: string): boolean {
+  try {
+    execFileSync(
+      'git',
+      ['-C', repoPath, 'rev-parse', '--verify', '--quiet', `refs/heads/${branchName}`],
+      { stdio: ['ignore', 'ignore', 'ignore'], timeout: 10_000 }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Port of the PowerShell `Test-IndexedBranchHealth`: a registered branch is
+ * stale when its checkout path is gone, is no longer a git repo, or the branch
+ * ref itself has been deleted. The path is host→container translated first
+ * (via toAbs), so this works host-native and inside the dockerized MCP
+ * container alike.
+ */
+export function testIndexedBranchHealth(branch: RegistryBranch): IndexedBranchHealth {
+  const path = toAbs(branch.path);
+  const pathExists = existsSync(path);
+  let gitRepo = false;
+  let branchExists = false;
+  const reasons: string[] = [];
+
+  if (!pathExists) {
+    reasons.push('path_missing');
+  } else {
+    gitRepo = existsSync(join(path, '.git'));
+    if (!gitRepo) {
+      reasons.push('git_repo_missing');
+    } else if (!branchExistsInRepo(path, branch.name)) {
+      reasons.push('branch_missing');
+    } else {
+      branchExists = true;
+    }
+  }
+
+  return {
+    path,
+    pathExists,
+    gitRepo,
+    branchExists,
+    stale: reasons.length > 0,
+    reason: reasons.join(','),
+    branchName: branch.name,
+    kind: branch.kind,
+    status: branch.status,
+    useWorktree: branch.useWorktree,
+  };
+}
+
+interface RemovedBranchReport {
+  project: string;
+  branch: string;
+  path: string;
+  kind?: string | undefined;
+  status?: string | undefined;
+  reason: string;
+}
+
+interface RemovedProjectReport {
+  project: string;
+  root: string;
+}
+
+/**
+ * Port of the PowerShell `Cleanup-OrphanedIndex`. Drops registry branches whose
+ * checkout is gone (or is no longer a valid repo/ref) and any project left with
+ * zero live branches. TS-native so it runs inside the dockerized MCP container
+ * — the PowerShell bridge cannot (no `pwsh` in the image, see issue #300).
+ *
+ * Scope: this operates ONLY on the `.wqm-fork/indexed-projects.json` registry.
+ * It does NOT touch daemon-side watch/tenant state, so a daemon-only orphan (a
+ * project the daemon indexes but that is absent from this file) is out of scope.
+ *
+ * @param mutate when true, writes the pruned registry back; otherwise reports
+ *   what WOULD be removed without touching the file.
+ */
+export function runCleanupOrphans(args: BaseArgs, mutate: boolean): unknown {
+  const registry = readRegistry(args.registryPath);
+  const removedBranches: RemovedBranchReport[] = [];
+  const removedProjects: RemovedProjectReport[] = [];
+  const keptProjects: RegistryProject[] = [];
+
+  for (const project of registry.projects) {
+    const keptBranches: RegistryBranch[] = [];
+    for (const branch of project.branches ?? []) {
+      const health = testIndexedBranchHealth(branch);
+      if (health.stale) {
+        removedBranches.push({
+          project: project.name,
+          branch: branch.name,
+          path: health.path,
+          kind: health.kind,
+          status: health.status,
+          reason: health.reason,
+        });
+        continue;
+      }
+      keptBranches.push(branch);
+    }
+
+    if (keptBranches.length === 0) {
+      removedProjects.push({ project: project.name, root: project.root });
+      continue;
+    }
+
+    if (mutate) {
+      project.branches = keptBranches;
+      project.updatedAt = utcNow();
+    }
+    keptProjects.push(project);
+  }
+
+  if (mutate) {
+    registry.projects = keptProjects;
+    writeRegistry(args.registryPath, registry);
+  }
+
+  return {
+    success: true,
+    action: 'cleanup_orphans',
+    mutated: mutate,
+    removedBranchCount: removedBranches.length,
+    removedProjectCount: removedProjects.length,
+    removedBranches,
+    removedProjects,
+    keptProjectCount: keptProjects.length,
+  };
+}
+
 // ── Lookup helpers ──────────────────────────────────────────────────────────
 
 function normalizeProject(p: RegistryProject): RegistryProject {
