@@ -76,6 +76,11 @@ export const rulesToolDefinition = {
         description:
           'For list: opaque pagination cursor — pass the next_cursor from a previous list response to fetch the next page.',
       },
+      includeGlobal: {
+        type: 'boolean',
+        description:
+          'For list with the default scope:"project": also return the global rules, which apply to every project. Default true — a project with no rules of its own would otherwise report zero while global rules exist. Each rule\'s "owner" field says which it is (the project tenant_id, or "global"). Pass false for this project\'s rules only.',
+      },
     },
     required: ['action'],
   },

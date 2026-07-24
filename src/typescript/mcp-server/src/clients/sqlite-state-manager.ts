@@ -350,8 +350,8 @@ export class SqliteStateManager {
     rulesMirrorQueries.deleteRulesMirror(this.daemonClient, ruleId);
   }
 
-  listRulesMirror(scope?: string, tenantId?: string, limit = 50) {
-    return rulesMirrorQueries.listRulesMirror(this.db, scope, tenantId, limit);
+  listRulesMirror(scope?: string, tenantId?: string, limit = 50, includeGlobal = false) {
+    return rulesMirrorQueries.listRulesMirror(this.db, scope, tenantId, limit, includeGlobal);
   }
 
   // ── Scratchpad mirror (delegated) ──────────────────────────────────────

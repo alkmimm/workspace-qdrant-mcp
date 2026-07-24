@@ -17,6 +17,7 @@ export type RuleOptions = {
   summary?: boolean;
   maxResponseBytes?: number;
   cursor?: string;
+  includeGlobal?: boolean;
 };
 
 /** Build rule options from raw tool arguments */
@@ -64,6 +65,12 @@ export function buildRuleOptions(args: Record<string, unknown> | undefined): Rul
       typeof maxResponseBytes === 'number' ? maxResponseBytes : DEFAULT_MAX_RESPONSE_BYTES;
     const cursor = args?.['cursor'];
     if (typeof cursor === 'string' && cursor) options.cursor = cursor;
+    // A project-scoped listing also carries the global rules: they apply to
+    // every project, and this is the session-start "load the rules" call — a
+    // project with no rules of its own must not answer "0 rules". Internal
+    // callers bypass this builder and list each scope separately.
+    const includeGlobal = args?.['includeGlobal'];
+    options.includeGlobal = typeof includeGlobal === 'boolean' ? includeGlobal : true;
   }
 
   return options;
