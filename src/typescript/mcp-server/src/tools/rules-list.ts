@@ -18,15 +18,30 @@ const RULES_LIST_PREVIEW_CHARS = 200;
 /** Build Qdrant filter for list query based on scope. */
 function buildListFilter(
   scope: RuleScope,
-  projectId?: string
+  projectId?: string,
+  includeGlobal = false
 ): Record<string, unknown> | undefined {
   const mustConditions: Record<string, unknown>[] = [];
 
   if (scope === TENANT_GLOBAL) {
     mustConditions.push({ key: 'scope', match: { value: TENANT_GLOBAL } });
   } else if (scope === 'project' && projectId) {
-    mustConditions.push({ key: 'scope', match: { value: 'project' } });
-    mustConditions.push({ key: FIELD_PROJECT_ID, match: { value: projectId } });
+    // Global rules apply to every project, so a project-scoped listing that
+    // omits them under-reports: a project with no rules of its own answered
+    // "0 rules" while global rules existed. Widen to
+    // (scope=project AND project_id=X) OR scope=global — `owner` on each rule
+    // keeps the two apart. Gated so internal callers that list both scopes
+    // separately (agent-rules) do not get globals twice.
+    const projectOnly = [
+      { key: 'scope', match: { value: 'project' } },
+      { key: FIELD_PROJECT_ID, match: { value: projectId } },
+    ];
+    if (includeGlobal) {
+      return {
+        should: [{ must: projectOnly }, { key: 'scope', match: { value: TENANT_GLOBAL } }],
+      };
+    }
+    mustConditions.push(...projectOnly);
   }
 
   return mustConditions.length > 0 ? { must: mustConditions } : undefined;
@@ -89,10 +104,11 @@ function readRulesFromMirror(
   stateManager: SqliteStateManager,
   scope: RuleScope,
   resolvedProjectId: string | undefined,
-  limit: number
+  limit: number,
+  includeGlobal = false
 ): Rule[] | null {
   try {
-    const mirrorRows = stateManager.listRulesMirror(scope, resolvedProjectId, limit);
+    const mirrorRows = stateManager.listRulesMirror(scope, resolvedProjectId, limit, includeGlobal);
     if (mirrorRows.length === 0) return null;
     return mirrorRows.map((row) => {
       const scope = (row.scope as RuleScope) ?? TENANT_GLOBAL;
@@ -195,7 +211,7 @@ function buildListResponse(
   }
   if (summary) {
     response.hint =
-      'Rules are summaries (preview + content_length). For a rule\'s full text pass ' +
+      "Rules are summaries (preview + content_length). For a rule's full text pass " +
       'summary:false, or read one by id with retrieve (collection:"rules", documentId:<id>).';
   }
   return response;
@@ -224,7 +240,7 @@ export async function listRules(
   projectDetector: ProjectDetector,
   options: RuleOptions
 ): Promise<RuleResponse> {
-  const { scope = 'project', projectId, limit = 50 } = options;
+  const { scope = 'project', projectId, limit = 50, includeGlobal = false } = options;
 
   let resolvedProjectId = projectId;
   if (scope === 'project' && !resolvedProjectId) {
@@ -235,11 +251,19 @@ export async function listRules(
   // no filter and the scroll spans every project's rules. Surface that so the
   // agent knows the listing is multi-tenant and reads each rule's `owner`.
   const unresolvedProjectScope = scope === 'project' && !resolvedProjectId;
+  // Project listing widened to also carry the globals (see RuleOptions.includeGlobal).
+  const widenedToGlobal = scope === 'project' && !!resolvedProjectId && includeGlobal;
 
   // Shape the mirror fallback identically to the Qdrant path so a degraded
   // response is bounded too (never a raw full-content dump).
   const mirrorResponse = (): RuleResponse | null => {
-    const mirrorRules = readRulesFromMirror(stateManager, scope, resolvedProjectId, limit);
+    const mirrorRules = readRulesFromMirror(
+      stateManager,
+      scope,
+      resolvedProjectId,
+      limit,
+      includeGlobal
+    );
     if (!mirrorRules) return null;
     const response = buildListResponse(mirrorRules, options);
     response.message = `Found ${response.count} rule(s) from local mirror (Qdrant unavailable)`;
@@ -247,7 +271,7 @@ export async function listRules(
   };
 
   try {
-    const filter = buildListFilter(scope, resolvedProjectId);
+    const filter = buildListFilter(scope, resolvedProjectId, includeGlobal);
     const scrollResult = await withDeadline(
       qdrantClient.scroll(RULES_COLLECTION, buildScrollRequest(limit, filter, options.cursor)),
       RULES_SCROLL_DEADLINE_MS
@@ -257,7 +281,9 @@ export async function listRules(
       const response = buildListResponse(rules, options, scrollResult.next_page_offset);
       response.message = unresolvedProjectScope
         ? `Found ${response.count} rule(s) across ALL projects — the current project could not be detected, so this listing is not scoped. Each rule's "owner" field identifies its project (or "global"). Pass cwd or projectId to scope to one project.`
-        : `Found ${response.count} rule(s)`;
+        : widenedToGlobal
+          ? `Found ${response.count} rule(s) for this project plus global rules that apply everywhere — each rule's "owner" field is its project's tenant_id or "global".`
+          : `Found ${response.count} rule(s)`;
       const total = await countRules(qdrantClient, filter);
       if (total !== undefined) response.total = total;
       return response;

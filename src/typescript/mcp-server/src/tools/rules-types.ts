@@ -61,6 +61,16 @@ export interface RuleOptions {
   maxResponseBytes?: number;
   /** For list: opaque pagination cursor from a prior response's `next_cursor`. */
   cursor?: string;
+  /**
+   * For list with `scope: "project"`: also return global rules, which apply to
+   * every project. Undefined/false → project rules only, because internal
+   * callers (agent-rules' system-prompt injection) issue a SEPARATE global list
+   * and would otherwise inject each global rule twice. The MCP tool surface
+   * defaults it to true: `rules action:"list"` is the session-start call, and a
+   * project with no rules of its own must not answer "0 rules" while global
+   * rules exist. Each rule's `owner` (tenant_id or "global") tells them apart.
+   */
+  includeGlobal?: boolean;
 }
 
 export interface RuleResponse {

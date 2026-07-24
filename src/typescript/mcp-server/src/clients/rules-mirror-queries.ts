@@ -73,7 +73,8 @@ export function listRulesMirror(
   db: DatabaseType | null,
   scope?: string,
   tenantId?: string,
-  limit = 50
+  limit = 50,
+  includeGlobal = false
 ): RulesMirrorEntry[] {
   if (!db) return [];
 
@@ -88,8 +89,17 @@ export function listRulesMirror(
     if (scope === TENANT_GLOBAL) {
       conditions.push("(scope = 'global' OR scope IS NULL)");
     } else if (scope === 'project' && tenantId) {
-      conditions.push("scope = 'project'");
-      conditions.push('tenant_id = ?');
+      // Mirrors the Qdrant filter (rules-list.ts buildListFilter): with
+      // includeGlobal the project listing also carries the globals, so the
+      // degraded fallback answers the same question as the live path.
+      if (includeGlobal) {
+        conditions.push(
+          "((scope = 'project' AND tenant_id = ?) OR scope = 'global' OR scope IS NULL)"
+        );
+      } else {
+        conditions.push("scope = 'project'");
+        conditions.push('tenant_id = ?');
+      }
       params.push(tenantId);
     }
 
