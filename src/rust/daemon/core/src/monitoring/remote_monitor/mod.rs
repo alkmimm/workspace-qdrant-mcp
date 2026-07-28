@@ -346,11 +346,21 @@ pub async fn check_git_state_changes(
     ) in &watches
     {
         result.projects_checked += 1;
+        // `project_path` is the raw/canonical path — used ONLY for tenant IDENTITY
+        // (`calculator.calculate` below); the tenant_id must never depend on where
+        // a bind mount happens to appear. Detect git state against the RESOLVED
+        // on-disk path instead (Docker Desktop can expose the same mount under a
+        // `/run/desktop/mnt/host/...` alias): otherwise `detect_git_status(raw)`
+        // sees no `.git`, fabricates a "git → local" transition, and — since
+        // guard_cascade_rename resolves the alias and finds the folder present —
+        // a solo canonical repo gets demoted to `local_*` (the #299 silent-zero).
+        // Resolving here keeps the transition detector and the guard in agreement.
         let project_path = std::path::Path::new(path.as_str());
+        let resolved_path = WatchManager::resolve_local_watch_path(path);
 
-        let git_status = crate::git::detect_git_status(project_path);
+        let git_status = crate::git::detect_git_status(&resolved_path);
         let current_remote = if git_status.is_git {
-            get_git_remote_url(path).ok()
+            get_git_remote_url(resolved_path.to_str().unwrap_or(path)).ok()
         } else {
             None
         };
@@ -458,7 +468,7 @@ async fn apply_git_state_transition(
     // canonical tenant. The guard suppresses (or prunes) instead — and by
     // running before the UPDATE it also avoids leaving watch_folders on a tenant
     // Qdrant never received.
-    match guard_cascade_rename(
+    let guard = guard_cascade_rename(
         pool,
         watch_id,
         &project_path.to_string_lossy(),
@@ -466,11 +476,22 @@ async fn apply_git_state_transition(
         old_tenant_id,
         &new_tenant_id,
     )
-    .await
-    {
-        RenameGuardOutcome::Proceed => {}
-        RenameGuardOutcome::Block | RenameGuardOutcome::Pruned => return Ok(()),
+    .await;
+    if guard == RenameGuardOutcome::Pruned {
+        // The guard archived this orphan row; nothing left to persist.
+        return Ok(());
     }
+
+    // On Block, still persist the git-state metadata (is_git_tracked / remote /
+    // hash) so the detected transition CONVERGES and does not re-fire on every
+    // 60s cycle — but keep the CURRENT tenant_id (a worktree or otherwise shared
+    // tenant is never demoted). Only Proceed moves the tenant and enqueues the
+    // Qdrant cascade rename.
+    let store_tenant_id: &str = if guard == RenameGuardOutcome::Proceed {
+        &new_tenant_id
+    } else {
+        old_tenant_id
+    };
 
     let new_remote_hash = current_remote
         .as_ref()
@@ -491,14 +512,14 @@ async fn apply_git_state_transition(
     .bind(if is_now_git { 1i32 } else { 0i32 })
     .bind(current_remote.as_deref())
     .bind(new_remote_hash.as_deref())
-    .bind(&new_tenant_id)
+    .bind(store_tenant_id)
     .bind(&now)
     .bind(watch_id)
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to update watch_folders: {}", e))?;
 
-    if new_tenant_id != old_tenant_id {
+    if guard == RenameGuardOutcome::Proceed && new_tenant_id != old_tenant_id {
         let reason = format!("Git state transition: {}", transition);
         enqueue_cascade_rename(queue_manager, old_tenant_id, &new_tenant_id, &reason).await;
     }
@@ -508,7 +529,7 @@ async fn apply_git_state_transition(
 
 /// Decision from [`guard_cascade_rename`] — the issue #299 safety gate that runs
 /// before any tenant cascade rename the remote/git-state monitors would enqueue.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenameGuardOutcome {
     /// The rename is safe to enqueue.
     Proceed,
@@ -577,15 +598,32 @@ async fn guard_cascade_rename(
         return RenameGuardOutcome::Block;
     }
 
+    // Rule 3 gates only the demotion direction (canonical -> local_*). A canonical
+    // -> canonical rename off a SHARED tenant is deliberately NOT blocked here: on
+    // this system only worktrees share a tenant (disambiguation gives distinct
+    // clones distinct tenants), and gating every shared rename would deadlock the
+    // legitimate "repo transferred to a new org" convergence (issue #299).
     if new_tenant_id.starts_with("local_") && !old_tenant_id.starts_with("local_") {
-        let shared: i64 = sqlx::query_scalar::<_, i64>(
+        let shared: i64 = match sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM watch_folders WHERE tenant_id = ?1 AND watch_id != ?2",
         )
         .bind(old_tenant_id)
         .bind(watch_id)
         .fetch_one(pool)
         .await
-        .unwrap_or(0);
+        {
+            Ok(n) => n,
+            Err(e) => {
+                // Fail CLOSED: a transient COUNT error must not let the exact
+                // shared-canonical demotion this guard exists to stop slip through.
+                warn!(
+                    "Shared-tenant COUNT failed for {} ({}); blocking the canonical -> local_* \
+                     demotion to be safe (issue #299)",
+                    watch_id, e
+                );
+                return RenameGuardOutcome::Block;
+            }
+        };
 
         if shared > 0 {
             warn!(

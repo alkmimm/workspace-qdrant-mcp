@@ -483,6 +483,10 @@ async function handleIndexingStatus(
     // the vector lane — but ONLY when the queue looks drained AND non-empty, so
     // the probe stays cheap and never false-positives while Qdrant legitimately
     // lags an in-flight queue. Best-effort: a probe failure never alters status.
+    // Residual edge (accepted): during a bulk DELETE a tenant can transiently keep
+    // tracked_files rows (done>0) with 0 points before the queue drains — a narrow
+    // window that can read as degraded. A fully-emptied project has done==0 and is
+    // skipped entirely.
     let degradedReason: string | undefined;
     let qdrantPoints: number | undefined;
     if (probeQdrantPointCount && inFlight === 0 && done > 0) {
