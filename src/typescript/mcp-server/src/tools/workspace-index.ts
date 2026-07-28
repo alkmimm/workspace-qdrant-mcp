@@ -440,6 +440,7 @@ async function handleIndexingStatus(
     // the status call, and the sample is capped so a large backlog stays cheap
     // (total_failed still reports the true count).
     let failedItems: Array<{
+      queue_id: string;
       file_path: string;
       op: string;
       error_message: string;
@@ -454,7 +455,11 @@ async function handleIndexingStatus(
           tenant_id: projectId,
           limit: FAILED_SAMPLE_LIMIT,
         });
+        // Keep queue_id: it is the handle for the safe, per-file incremental
+        // retry (`wqm queue retry <queue_id>`). tenant/collection/branch are the
+        // noise we drop.
         failedItems = (resp.items ?? []).map((it) => ({
+          queue_id: it.queue_id,
           file_path: it.file_path,
           op: it.op,
           error_message: it.error_message,
@@ -492,7 +497,7 @@ async function handleIndexingStatus(
       ...(failed > 0
         ? {
             remediation:
-              "Retry only the failed items with `wqm queue retry --all` (re-processes the failed queue rows, not a full re-embed); each item's error_message and retry_count tell you why it failed. If they keep failing, force a clean re-ingest via the admin reembed endpoint.",
+              "Safe incremental retry: `wqm queue retry <queue_id>` re-runs ONE file (queue_id is on each failed_items entry) — no re-embed. `wqm queue retry --all` resets EVERY failed item across ALL projects (broad). Each item's error_message/retry_count says why it failed; if it persists after a retry, force a clean re-ingest via the admin reembed endpoint.",
           }
         : {}),
     };

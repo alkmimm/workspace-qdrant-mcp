@@ -361,6 +361,8 @@ describe('workspace_index status resolution', () => {
       indexing: { failed: 2 },
       failed_items: [
         {
+          // queue_id is kept — it is the handle for `wqm queue retry <queue_id>`.
+          queue_id: 'q1',
           file_path: 'src/broken.rs',
           op: 'Uplift',
           error_message: 'parse error at line 3',
@@ -371,11 +373,12 @@ describe('workspace_index status resolution', () => {
       // one shown of two → truncation flagged with the true total
       failed_items_truncated: { shown: 1, total: 2 },
     });
-    expect(result.remediation).toContain('wqm queue retry');
-    // compact projection — the queue/tenant/collection noise is dropped
+    // remediation leads with the per-file incremental retry, not the broad --all.
+    expect(result.remediation).toContain('wqm queue retry <queue_id>');
+    // compact projection — the tenant/collection/branch noise is dropped
     const items = result.failed_items as Array<Record<string, unknown>>;
-    expect(items[0]).not.toHaveProperty('queue_id');
     expect(items[0]).not.toHaveProperty('tenant_id');
+    expect(items[0]).not.toHaveProperty('collection');
   });
 
   it('omits failed_items and never calls ListFailedItems when nothing failed', async () => {
