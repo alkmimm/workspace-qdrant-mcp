@@ -92,6 +92,9 @@ export {
   type CycleResponse,
   type CycleProto,
   type CycleMemberProto,
+  type TestGapsRequest,
+  type TestGapsResponse,
+  type TestGapProto,
   // QueueWriteService
   type EnqueueItemRequest,
   type EnqueueItemResponse,

@@ -29,6 +29,7 @@ import type {
   CommunityRequest,
   BetweennessRequest,
   CycleRequest,
+  TestGapsRequest,
   QueryRelatedRequest,
 } from '../clients/grpc-types.js';
 
@@ -98,10 +99,7 @@ function computeNodeId(
     .slice(0, 32);
 }
 
-async function resolveTenant(
-  args: JsonObject,
-  projectDetector: ProjectDetector
-): Promise<string> {
+async function resolveTenant(args: JsonObject, projectDetector: ProjectDetector): Promise<string> {
   const explicit = str(args, 'projectId') ?? str(args, 'tenantId');
   if (explicit) return explicit;
   // Resolve the caller's cwd to its project exactly like `search`/`grep`/`list`
@@ -220,6 +218,22 @@ export async function handleGraph(
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
       };
       const r = await daemonClient.detectCycles(req);
+      return { success: true, action, tenant_id: tenant, ...r };
+    }
+
+    case 'test_gaps': {
+      // Production symbols no test reaches over the call graph (test → CALLS /
+      // USES_TYPE → production). `gaps` are ranked by production_dependents
+      // (most-relied-on untested code first); `topK` bounds the list while
+      // `gap_count`/`covered`/`total_production` stay exact. NOTE: this is
+      // call-graph REACHABILITY from test code — an approximation of coverage,
+      // NOT execution coverage; it complements, not replaces, coverage tools.
+      const req: TestGapsRequest = {
+        tenant_id: tenant,
+        top_k: num(args, 'topK') ?? 20,
+        ...(edgeTypes ? { edge_types: edgeTypes } : {}),
+      };
+      const r = await daemonClient.detectTestGaps(req);
       return { success: true, action, tenant_id: tenant, ...r };
     }
 

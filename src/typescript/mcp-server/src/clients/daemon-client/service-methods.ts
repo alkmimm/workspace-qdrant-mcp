@@ -29,6 +29,8 @@ import type {
   BetweennessResponse,
   CycleRequest,
   CycleResponse,
+  TestGapsRequest,
+  TestGapsResponse,
   EnqueueItemRequest,
   EnqueueItemResponse,
   RetryAllResponse,
@@ -95,12 +97,7 @@ export class DaemonClientService extends DaemonClientSystem {
 
   async rerank(request: RerankRequest): Promise<RerankResponse> {
     return this.callWithRetry(() =>
-      grpcUnaryWithTimeout(
-        this.embeddingClient,
-        'rerank',
-        request,
-        this.getMethodTimeout('rerank')
-      )
+      grpcUnaryWithTimeout(this.embeddingClient, 'rerank', request, this.getMethodTimeout('rerank'))
     );
   }
 
@@ -208,6 +205,17 @@ export class DaemonClientService extends DaemonClientSystem {
     );
   }
 
+  async detectTestGaps(request: TestGapsRequest): Promise<TestGapsResponse> {
+    return this.callWithRetry(() =>
+      grpcUnaryWithTimeout(
+        this.graphClient,
+        'detectTestGaps',
+        request,
+        this.getMethodTimeout('detectTestGaps')
+      )
+    );
+  }
+
   // ── QueueWriteService ──
 
   async enqueueItem(request: EnqueueItemRequest): Promise<EnqueueItemResponse> {
@@ -224,12 +232,7 @@ export class DaemonClientService extends DaemonClientSystem {
   /** Reset all failed queue items back to 'pending' (QueueWriteService.RetryAll). */
   async retryAll(): Promise<RetryAllResponse> {
     return this.callWithRetry(() =>
-      grpcUnaryWithTimeout(
-        this.queueWriteClient,
-        'retryAll',
-        {},
-        this.getMethodTimeout('retryAll')
-      )
+      grpcUnaryWithTimeout(this.queueWriteClient, 'retryAll', {}, this.getMethodTimeout('retryAll'))
     );
   }
 

@@ -60,6 +60,8 @@ import type {
   BetweennessResponse,
   CycleRequest,
   CycleResponse,
+  TestGapsRequest,
+  TestGapsResponse,
   EnqueueItemRequest,
   EnqueueItemResponse,
   RetryAllResponse,
@@ -240,6 +242,10 @@ export interface GraphServiceClient {
   detectCycles(
     request: CycleRequest,
     callback: (error: Error | null, response: CycleResponse) => void
+  ): void;
+  detectTestGaps(
+    request: TestGapsRequest,
+    callback: (error: Error | null, response: TestGapsResponse) => void
   ): void;
 }
 

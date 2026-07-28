@@ -223,3 +223,29 @@ export interface CycleResponse {
   total: number;
   query_time_ms: number;
 }
+
+export interface TestGapsRequest {
+  tenant_id: string;
+  /** Edges meaning "exercised by"; empty = CALLS/USES_TYPE. */
+  edge_types?: string[];
+  /** Return only top K gaps (0/absent = all); gap_count stays exact. */
+  top_k?: number;
+}
+
+export interface TestGapProto {
+  node_id: string;
+  symbol_name: string;
+  symbol_type: string;
+  file_path: string;
+  /** Non-test nodes that depend on this symbol (drives the ranking). */
+  production_dependents: number;
+}
+
+export interface TestGapsResponse {
+  /** Ranked: most production-depended-upon first. */
+  gaps: TestGapProto[];
+  total_production: number;
+  covered: number;
+  gap_count: number;
+  query_time_ms: number;
+}

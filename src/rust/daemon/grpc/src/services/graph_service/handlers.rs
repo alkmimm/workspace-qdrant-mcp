@@ -4,7 +4,7 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 use workspace_qdrant_core::graph::algorithms::{
     compute_betweenness_centrality, compute_pagerank, detect_communities, detect_cycles,
-    CommunityConfig, PageRankConfig,
+    detect_test_gaps, CommunityConfig, PageRankConfig,
 };
 use workspace_qdrant_core::graph::EdgeType;
 
@@ -15,7 +15,7 @@ use crate::proto::{
     GraphMigrateRequest, GraphMigrateResponse, GraphStatsRequest, GraphStatsResponse,
     ImpactAnalysisRequest, ImpactAnalysisResponse, ImpactNodeProto, PageRankNodeProto,
     PageRankRequest, PageRankResponse, QueryRelatedRequest, QueryRelatedResponse,
-    TraversalNodeProto,
+    TestGapProto, TestGapsRequest, TestGapsResponse, TraversalNodeProto,
 };
 use crate::validation::extract_relative_path;
 
@@ -588,6 +588,65 @@ impl GraphService for GraphServiceImpl {
             Err(e) => {
                 error!("GraphService.DetectCycles failed: {}", e);
                 Err(Status::internal(format!("Cycle detection failed: {}", e)))
+            }
+        }
+    }
+
+    #[tracing::instrument(skip_all, fields(method = "GraphService.detect_test_gaps"))]
+    async fn detect_test_gaps(
+        &self,
+        request: Request<TestGapsRequest>,
+    ) -> Result<Response<TestGapsResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.tenant_id.is_empty() {
+            return Err(Status::invalid_argument("tenant_id is required"));
+        }
+
+        let edge_filter = parse_edge_type_filter(&req.edge_types)?;
+        let edge_refs: Option<Vec<&str>> = edge_filter
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+        // Absent/0 = return all gaps; the algorithm floors truncation itself.
+        let top_k = req.top_k.map(|v| v as usize).unwrap_or(0);
+
+        debug!(
+            "GraphService.DetectTestGaps: tenant={} top_k={}",
+            req.tenant_id, top_k
+        );
+
+        let start = std::time::Instant::now();
+
+        let guard = self.graph_store.read().await;
+        let pool = guard.pool();
+
+        match detect_test_gaps(pool, &req.tenant_id, edge_refs.as_deref(), top_k).await {
+            Ok(report) => {
+                let query_time_ms = start.elapsed().as_millis() as i64;
+                let gaps: Vec<TestGapProto> = report
+                    .gaps
+                    .into_iter()
+                    .map(|g| TestGapProto {
+                        node_id: g.node_id,
+                        symbol_name: g.symbol_name,
+                        symbol_type: g.symbol_type,
+                        file_path: g.file_path,
+                        production_dependents: g.production_dependents,
+                    })
+                    .collect();
+
+                Ok(Response::new(TestGapsResponse {
+                    gaps,
+                    total_production: report.total_production,
+                    covered: report.covered,
+                    gap_count: report.gap_count,
+                    query_time_ms,
+                }))
+            }
+            Err(e) => {
+                error!("GraphService.DetectTestGaps failed: {}", e);
+                Err(Status::internal(format!("Test-gap detection failed: {}", e)))
             }
         }
     }

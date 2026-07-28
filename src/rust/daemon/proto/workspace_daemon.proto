@@ -722,6 +722,9 @@ service GraphService {
     // Detect dependency cycles (strongly-connected components of the dep graph)
     rpc DetectCycles(CycleRequest) returns (CycleResponse);
 
+    // Detect test gaps: production symbols no test reaches over the call graph
+    rpc DetectTestGaps(TestGapsRequest) returns (TestGapsResponse);
+
     // Migrate graph data between backends (SQLite ↔ LadybugDB)
     rpc MigrateGraph(GraphMigrateRequest) returns (GraphMigrateResponse);
 }
@@ -906,6 +909,32 @@ message CycleMemberProto {
     string symbol_name = 2;
     string symbol_type = 3;
     string file_path = 4;                             // [relative] Relative to project root
+}
+
+// Test-Gap Detection Request
+message TestGapsRequest {
+    string tenant_id = 1;
+    repeated string edge_types = 2;               // Edges meaning "exercised by"; empty = CALLS/USES_TYPE
+    optional uint32 top_k = 3;                    // Return only top K gaps (0/absent = all); total is always exact
+}
+
+// Test-Gap Detection Response. Coverage = call-graph reachability from test
+// code (an approximation, not execution coverage).
+message TestGapsResponse {
+    repeated TestGapProto gaps = 1;               // Ranked: most production-depended-upon first
+    uint32 total_production = 2;                  // Production definition nodes considered
+    uint32 covered = 3;                           // Of those, reached by some test
+    uint32 gap_count = 4;                         // True total of gaps (gaps may be truncated to top_k)
+    int64 query_time_ms = 5;
+}
+
+// A production definition no test reaches
+message TestGapProto {
+    string node_id = 1;
+    string symbol_name = 2;
+    string symbol_type = 3;
+    string file_path = 4;                             // [relative] Relative to project root
+    uint32 production_dependents = 5;                 // Non-test nodes that depend on this symbol
 }
 
 // Graph Migration Request
