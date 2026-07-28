@@ -321,6 +321,13 @@ mod tests {
 fn top_level_test() {
     assert_eq!(parse("ab"), 2);
 }
+
+// A file-scope item directly gated by #[cfg(test)] (not inside a mod, not a
+// #[test] fn) is still test-only code.
+#[cfg(test)]
+fn cfg_gated_helper() -> u8 {
+    7
+}
 "#;
     let extractor = GenericExtractor::new("rust", lang, rust_patterns());
     let chunks = extractor
@@ -345,6 +352,8 @@ fn top_level_test() {
     assert!(is_test("checks_parse_async"), "#[tokio::test] fn is a test");
     // A #[test] fn outside any cfg(test) module, by its own attribute.
     assert!(is_test("top_level_test"), "top-level #[test] fn is a test");
+    // A file-scope item directly gated by #[cfg(test)] (own attribute, no mod).
+    assert!(is_test("cfg_gated_helper"), "#[cfg(test)] fn is test-only code");
 }
 
 #[test]

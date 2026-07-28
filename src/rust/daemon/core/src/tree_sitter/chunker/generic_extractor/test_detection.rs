@@ -28,13 +28,19 @@ use crate::tree_sitter::chunker::helpers::node_text;
 /// purpose: they are test code that exercises production symbols, so seeding the
 /// gap BFS from them is correct.
 pub(super) fn rust_is_test_node(node: &Node, source: &str) -> bool {
-    // 1. The node's own attributes mark it a test function.
-    if any_preceding_attr(node, source, attr_text_marks_test_fn) {
+    // 1. The node's OWN attributes mark it test-only: a test-function attribute
+    //    (`#[test]` &c.) or a direct `#[cfg(test)]` gate on any item (a
+    //    cfg(test) fn/struct/mod is test-only code). This also tags the
+    //    `#[cfg(test)] mod tests` container itself.
+    if any_preceding_attr(node, source, |t| {
+        attr_text_marks_test_fn(t) || attr_text_is_cfg_test(t)
+    }) {
         return true;
     }
-    // 2. The node itself, or any ancestor, is a `#[cfg(test)]` module. Start at
-    //    the node so a `#[cfg(test)] mod tests` container is itself tagged.
-    let mut cur = Some(*node);
+    // 2. The node is nested inside a `#[cfg(test)]` module (the common idiom for
+    //    inline tests and their non-`#[test]` helpers). Walk ancestors from the
+    //    parent — the node itself was covered in step 1.
+    let mut cur = node.parent();
     while let Some(n) = cur {
         if n.kind() == "mod_item" && any_preceding_attr(&n, source, attr_text_is_cfg_test) {
             return true;
