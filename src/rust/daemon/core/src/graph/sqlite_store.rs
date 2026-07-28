@@ -704,9 +704,28 @@ impl GraphStore for SqliteGraphStore {
             });
         }
 
+        // When the caller pins a `file_path`, they want the blast radius of ONE
+        // specific definition, not every same-named symbol. `find_target_nodes`
+        // already scopes the TARGET by file, but the reverse edges still carry the
+        // R1 ambiguous fan-out: a call site that could not be resolved emits a 1/N
+        // low-weight edge to EVERY same-name definition (`graph::mod` edge bands:
+        // <0.6 = one of N ambiguous candidates). Drop those with the same
+        // `weight >= 0.6` confidence floor that cycles and centrality already apply,
+        // so a path-anchored impact query is precise instead of homonym-inflated.
+        // Without a file_path the query is intentionally broad ("everything named
+        // X"), so no floor is applied and behaviour is unchanged.
+        const AMBIGUOUS_EDGE_CONFIDENCE_FLOOR: f64 = 0.6;
+        let min_edge_confidence = if file_path.is_some() {
+            AMBIGUOUS_EDGE_CONFIDENCE_FLOOR
+        } else {
+            0.0
+        };
+
         let mut all_impacted = Vec::new();
         for target_id in &target_nodes {
-            let impacted = self.reverse_traverse(tenant_id, target_id).await?;
+            let impacted = self
+                .reverse_traverse(tenant_id, target_id, min_edge_confidence)
+                .await?;
             all_impacted.extend(impacted);
         }
 
@@ -1270,12 +1289,18 @@ impl SqliteGraphStore {
         &self,
         tenant_id: &str,
         target_id: &str,
+        min_edge_confidence: f64,
     ) -> GraphDbResult<Vec<ImpactNode>> {
         // Bounded breadth-first REVERSE traversal (callers of `target_id`, up to 3
         // hops). Same rationale as `query_related`: the previous recursive
         // `UNION ALL` CTE re-expanded nodes via every path and could blow up on a
         // hub-heavy graph. One index-seeking query per hop (`target_node_id IN (...)`
         // → idx_edges_target), visited-set dedup, node budget.
+        //
+        // `min_edge_confidence` prunes low-weight incoming edges before they enter
+        // the frontier (0.0 = keep all, the unanchored default); `impact_analysis`
+        // passes the 0.6 ambiguous-fan-out floor when a `file_path` anchors the
+        // query, so a strict impact never traverses the R1 homonym fan-out.
         const MAX_DISTANCE: u32 = 3;
         const NODE_BUDGET: usize = 10_000;
 
@@ -1323,6 +1348,14 @@ impl SqliteGraphStore {
                     let tgt: String = row.get("target_node_id");
                     let edge_type: String = row.get("edge_type");
                     let weight: f64 = row.get("w");
+                    // Skip the R1 ambiguous fan-out edge (weight < floor) so its
+                    // caller never enters the frontier — a caller reachable ONLY via
+                    // such an edge is not a confident impact. Gated per-edge (not on
+                    // the cumulative product) so deep high-confidence chains survive.
+                    // A 0.0 floor keeps every edge (the unanchored default).
+                    if weight < min_edge_confidence {
+                        continue;
+                    }
                     let pconf = parent.get(tgt.as_str()).copied().unwrap_or(1.0);
                     let confidence = pconf * weight;
                     match best.entry(src) {

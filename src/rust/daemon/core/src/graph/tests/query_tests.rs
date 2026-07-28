@@ -283,6 +283,68 @@ async fn test_impact_analysis_direct_callers() {
         .all(|n| n.impact_type == "direct_caller"));
 }
 
+/// A path-anchored `impact_analysis` (file_path given) must drop the R1 ambiguous
+/// fan-out — the low-weight (<0.6) edge a call site emits to a same-name definition
+/// when it could not resolve which one. `find_target_nodes` already scopes the
+/// target by file; this proves the reverse traversal also gates on edge confidence,
+/// matching the `weight >= 0.6` floor cycles/centrality use. Without a file_path the
+/// query stays broad and keeps the fan-out.
+#[tokio::test]
+async fn test_impact_strict_filepath_drops_ambiguous_fanout() {
+    let store = test_store().await;
+
+    let target = GraphNode::new(TENANT, "lib.rs", "remove", NodeType::Function);
+    let confident = GraphNode::new(TENANT, "user.rs", "confident_caller", NodeType::Function);
+    let ambiguous = GraphNode::new(TENANT, "other.rs", "ambiguous_caller", NodeType::Function);
+    store
+        .upsert_nodes(&[target.clone(), confident.clone(), ambiguous.clone()])
+        .await
+        .unwrap();
+
+    // A confident caller (default weight 1.0) and an unresolved 1/N fan-out caller
+    // whose call could belong to any same-name `remove` (ambiguous, weight 0.3).
+    let good = GraphEdge::new(
+        TENANT,
+        &confident.node_id,
+        &target.node_id,
+        EdgeType::Calls,
+        "user.rs",
+    );
+    let mut fanout = GraphEdge::new(
+        TENANT,
+        &ambiguous.node_id,
+        &target.node_id,
+        EdgeType::Calls,
+        "other.rs",
+    );
+    fanout.weight = 0.3;
+    store.insert_edges(&[good, fanout]).await.unwrap();
+
+    // Strict: file_path anchors the target → the 0.3 fan-out edge is dropped.
+    let strict = store
+        .impact_analysis(TENANT, "remove", Some("lib.rs"))
+        .await
+        .unwrap();
+    assert_eq!(
+        strict.total_impacted,
+        1,
+        "path-anchored impact keeps only the confident caller, got {:?}",
+        strict
+            .impacted_nodes
+            .iter()
+            .map(|n| &n.symbol_name)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(strict.impacted_nodes[0].symbol_name, "confident_caller");
+
+    // Broad: no file_path → unchanged, both callers returned.
+    let broad = store.impact_analysis(TENANT, "remove", None).await.unwrap();
+    assert_eq!(
+        broad.total_impacted, 2,
+        "unanchored impact stays broad and keeps the fan-out"
+    );
+}
+
 #[tokio::test]
 async fn test_impact_analysis_transitive() {
     let store = test_store().await;
