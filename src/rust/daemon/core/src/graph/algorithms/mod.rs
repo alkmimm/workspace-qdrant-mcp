@@ -7,11 +7,13 @@ mod betweenness;
 mod community;
 mod cycles;
 mod pagerank;
+mod test_gaps;
 
 pub use betweenness::{compute_betweenness_centrality, BetweennessEntry};
 pub use community::{detect_communities, Community, CommunityConfig, CommunityMember};
 pub use cycles::{detect_cycles, Cycle, CycleMember};
 pub use pagerank::{compute_pagerank, PageRankConfig, PageRankEntry};
+pub use test_gaps::{detect_test_gaps, TestGap, TestGapsReport};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;

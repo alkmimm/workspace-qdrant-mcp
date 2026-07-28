@@ -109,4 +109,7 @@ export type {
   CycleResponse,
   CycleProto,
   CycleMemberProto,
+  TestGapsRequest,
+  TestGapsResponse,
+  TestGapProto,
 } from './grpc-types-search-graph.js';

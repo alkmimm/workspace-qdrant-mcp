@@ -14,7 +14,7 @@ export const graphToolDefinition = {
     'Navigate the code-relationship graph: callers/callees, change-impact, importance ranking, module clusters, and circular dependencies. ' +
     'Built from symbol relations (calls, contains, uses-type, imports) extracted during indexing. ' +
     'Use this to understand how code connects before editing — e.g. "what calls this function?", "what breaks if I change X?", "what are the most central functions?". ' +
-    'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules/cycles → none (project-wide). ' +
+    'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules/cycles/test_gaps → none (project-wide). ' +
     'Each relations/impact/usages node carries a `confidence` (best-path certainty): ~1.0 precise, 0.7 tenant-unique name, ~1/N (e.g. 0.17) an ambiguous same-name fan-out; pass `minConfidence` (e.g. 0.5) to suppress the low-confidence homonym noise.',
   inputSchema: {
     type: 'object' as const,
@@ -30,9 +30,10 @@ export const graphToolDefinition = {
           'bridges',
           'modules',
           'cycles',
+          'test_gaps',
         ],
         description:
-          "stats: node/edge counts. relations: a symbol's dependencies (calls/uses-type/imports/inheritance) — excludes CONTAINS membership by default, so a large class returns its dependencies, not its member list (pass edgeTypes:[\"CONTAINS\"] to list members). impact: transitive change blast-radius (direct + indirect dependents). usages: DIRECT references only (1-hop \"find references\"). hotspots: most central symbols (PageRank). bridges: bottleneck symbols on many shortest paths (betweenness). modules: code clusters. cycles: circular dependencies (Tarjan SCC over CALLS/IMPORTS) — CROSS-FILE cycles are returned FIRST as they are the layering smells (e.g. repository <-> service); same-file cycles are usually benign mutual recursion. Default: 'stats'.",
+          'stats: node/edge counts. relations: a symbol\'s dependencies (calls/uses-type/imports/inheritance) — excludes CONTAINS membership by default, so a large class returns its dependencies, not its member list (pass edgeTypes:["CONTAINS"] to list members). impact: transitive change blast-radius (direct + indirect dependents). usages: DIRECT references only (1-hop "find references"). hotspots: most central symbols (PageRank). bridges: bottleneck symbols on many shortest paths (betweenness). modules: code clusters. cycles: circular dependencies (Tarjan SCC over CALLS/IMPORTS) — CROSS-FILE cycles are returned FIRST as they are the layering smells (e.g. repository <-> service); same-file cycles are usually benign mutual recursion. test_gaps: production symbols NO test reaches over the call graph — ranked by production_dependents (most-relied-on untested code first), with total_production/covered/gap_count. This is call-graph REACHABILITY from test code (an approximation), NOT execution coverage. Tests are detected by file path, so Rust INLINE #[cfg(test)] unit tests are NOT counted (a Rust-heavy project over-reports gaps); TS/JS separate test files and tests/ dirs are detected. Use it to prioritize where tests are missing, then confirm with a coverage tool. Default: \'stats\'.',
       },
       symbol: {
         type: 'string',

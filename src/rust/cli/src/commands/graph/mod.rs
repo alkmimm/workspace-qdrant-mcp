@@ -1,6 +1,6 @@
 //! Graph command - code relationship queries and algorithms
 //!
-//! Subcommands: query, impact, stats, pagerank, communities, betweenness, cycles, migrate
+//! Subcommands: query, impact, stats, pagerank, communities, betweenness, cycles, test-gaps, migrate
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -13,6 +13,7 @@ mod migrate;
 mod pagerank;
 mod query;
 mod stats;
+mod test_gaps;
 
 /// Graph command arguments
 #[derive(Args)]
@@ -173,6 +174,21 @@ enum GraphCommand {
         edge_types: Vec<String>,
     },
 
+    /// Detect test gaps: production symbols no test reaches over the call graph
+    TestGaps {
+        /// Project tenant_id
+        #[arg(long)]
+        tenant: String,
+
+        /// Return only the top K gaps (most production-depended-upon first)
+        #[arg(long)]
+        top_k: Option<u32>,
+
+        /// Edge type filter (comma-separated; default: CALLS,USES_TYPE)
+        #[arg(long, value_delimiter = ',')]
+        edge_types: Vec<String>,
+    },
+
     /// Migrate graph data between backends
     Migrate {
         /// Source backend (sqlite or ladybug)
@@ -246,6 +262,11 @@ pub async fn execute(args: GraphArgs) -> Result<()> {
             min_size,
             edge_types,
         } => cycles::cycles(&tenant, top_k, min_size, edge_types).await,
+        GraphCommand::TestGaps {
+            tenant,
+            top_k,
+            edge_types,
+        } => test_gaps::test_gaps(&tenant, top_k, edge_types).await,
         GraphCommand::Migrate {
             from,
             to,
