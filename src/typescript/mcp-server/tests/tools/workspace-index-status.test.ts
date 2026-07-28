@@ -443,4 +443,99 @@ describe('workspace_index status resolution', () => {
       },
     });
   });
+
+  // ── Issue #299: vector-lane cross-check (silent-zero search self-report) ──
+
+  it('flags degraded when the queue is complete but the tenant has 0 Qdrant points', async () => {
+    const { daemon } = makeDaemon('367157a01d98'); // done=1933, nothing in flight
+    const probe = vi.fn().mockResolvedValue(0);
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'indexing_status', projectId: '367157a01d98' },
+      daemon,
+      undefined,
+      probe
+    )) as Record<string, unknown>;
+
+    expect(probe).toHaveBeenCalledWith('367157a01d98');
+    expect(result).toMatchObject({
+      success: true,
+      degraded: true,
+      qdrant_points: 0,
+      indexing: { state: 'degraded' },
+    });
+    expect(result.degraded_reason).toContain('issue #299');
+    // remediation lever (force reembed) is embedded in the reason
+    expect(result.degraded_reason).toContain('force');
+    expect(result.summary).toContain('DEGRADED');
+  });
+
+  it('does not flag degraded when the tenant has Qdrant points', async () => {
+    const { daemon } = makeDaemon('367157a01d98');
+    const probe = vi.fn().mockResolvedValue(1933);
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'indexing_status', projectId: '367157a01d98' },
+      daemon,
+      undefined,
+      probe
+    )) as Record<string, unknown>;
+
+    expect(probe).toHaveBeenCalledWith('367157a01d98');
+    expect(result).not.toHaveProperty('degraded');
+    expect(result).toMatchObject({ qdrant_points: 1933, indexing: { state: 'complete' } });
+  });
+
+  it('skips the Qdrant cross-check while indexing is still in flight', async () => {
+    const { daemon } = makeDaemon('367157a01d98', {
+      pending_count: 40,
+      done_count: 1893,
+      total_count: 1933,
+      percent_complete: 97.9,
+    });
+    const probe = vi.fn().mockResolvedValue(0);
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'indexing_status', projectId: '367157a01d98' },
+      daemon,
+      undefined,
+      probe
+    )) as Record<string, unknown>;
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('degraded');
+  });
+
+  it('skips the Qdrant cross-check when nothing is indexed yet (done=0)', async () => {
+    const { daemon } = makeDaemon('367157a01d98', {
+      done_count: 0,
+      total_count: 0,
+      percent_complete: 100,
+    });
+    const probe = vi.fn().mockResolvedValue(0);
+
+    await handleWorkspaceIndex(
+      { action: 'indexing_status', projectId: '367157a01d98' },
+      daemon,
+      undefined,
+      probe
+    );
+
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('keeps the status usable when the Qdrant probe throws (advisory)', async () => {
+    const { daemon } = makeDaemon('367157a01d98');
+    const probe = vi.fn().mockRejectedValue(new Error('qdrant unreachable'));
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'indexing_status', projectId: '367157a01d98' },
+      daemon,
+      undefined,
+      probe
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ success: true });
+    expect(result).not.toHaveProperty('degraded');
+  });
 });
