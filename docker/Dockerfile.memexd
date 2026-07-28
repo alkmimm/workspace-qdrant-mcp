@@ -252,6 +252,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         pruned_branch corpus_election branch_file_counts \
         --test-threads=4
 
+# Issue #299 cascade-rename guard tests run here too, same rationale: hermetic
+# (in-memory SQLite + tempdir git fixtures, no FTS5/timing dependence) and they
+# guard the tenant-rename suppression + orphan prune that prevents the silent-
+# zero-search re-key (a rename off a SHARED canonical tenant onto a dead
+# worktree's local_* fallback). The whole remote_monitor test module — remote-URL
+# change, git-state transition, and the new guard cases — is filesystem-and-SQLite
+# only, so it is a reliable gate.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib remote_monitor -- --test-threads=4
+
 # ─────────────────────────────────────────────
 # Stage 3a: rust-analyzer binary download
 # Ships as a single statically-linked release archive on GitHub. Downloaded

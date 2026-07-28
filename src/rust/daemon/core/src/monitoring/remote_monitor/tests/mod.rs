@@ -5,6 +5,7 @@ use git2::Repository;
 use sqlx::SqlitePool;
 
 mod git_state;
+mod guard;
 mod remote_url;
 
 /// Helper to create in-memory SQLite database with watch_folders schema
@@ -24,6 +25,7 @@ pub(super) async fn create_test_database() -> SqlitePool {
             is_active INTEGER DEFAULT 0 CHECK (is_active >= 0),
             is_archived INTEGER DEFAULT 0 CHECK (is_archived IN (0, 1)),
             is_git_tracked INTEGER DEFAULT 0 CHECK (is_git_tracked IN (0, 1)),
+            is_worktree INTEGER DEFAULT 0 CHECK (is_worktree IN (0, 1)),
             git_remote_url TEXT,
             remote_hash TEXT,
             disambiguation_path TEXT,

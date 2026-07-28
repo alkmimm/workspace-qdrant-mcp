@@ -369,7 +369,8 @@ async function handleIndexingStatus(
   args: JsonObject,
   daemonClient: DaemonClient,
   actionLabel: 'indexing_status' | 'project_status' = 'indexing_status',
-  projectDetector?: ProjectDetector
+  projectDetector?: ProjectDetector,
+  probeQdrantPointCount?: (tenantId: string) => Promise<number | null>
 ): Promise<unknown> {
   const resolved = await resolveProjectIdForStatus(args, daemonClient, projectDetector);
 
@@ -475,6 +476,39 @@ async function handleIndexingStatus(
       }
     }
 
+    // Issue #299 self-report: the unified queue can report "complete" while the
+    // canonical tenant holds ZERO vector points in Qdrant (a tenant re-key
+    // emptied it). SQLite stays healthy, so grep/graph/list and this very count
+    // all look fine while semantic `search` silently returns nothing. Cross-check
+    // the vector lane — but ONLY when the queue looks drained AND non-empty, so
+    // the probe stays cheap and never false-positives while Qdrant legitimately
+    // lags an in-flight queue. Best-effort: a probe failure never alters status.
+    // Residual edge (accepted): during a bulk DELETE a tenant can transiently keep
+    // tracked_files rows (done>0) with 0 points before the queue drains — a narrow
+    // window that can read as degraded. A fully-emptied project has done==0 and is
+    // skipped entirely.
+    let degradedReason: string | undefined;
+    let qdrantPoints: number | undefined;
+    if (probeQdrantPointCount && inFlight === 0 && done > 0) {
+      try {
+        const points = await probeQdrantPointCount(projectId);
+        if (typeof points === 'number') {
+          qdrantPoints = points;
+          if (points === 0) {
+            indexing.state = 'degraded';
+            degradedReason =
+              `${done} file(s) are indexed in SQLite but the canonical tenant holds 0 vector ` +
+              `points in Qdrant — semantic search silently returns nothing while grep/graph/list ` +
+              `stay healthy (issue #299). Repopulate with ` +
+              `POST /admin/api/projects/reembed {"tenantId":"${projectId}","force":true} — ` +
+              `force is required, unchanged content hashes are otherwise skipped.`;
+          }
+        }
+      } catch {
+        // Vector-lane probe is advisory — keep the queue-based status if it fails.
+      }
+    }
+
     return {
       success: true,
       action: actionLabel,
@@ -490,7 +524,11 @@ async function handleIndexingStatus(
       is_active: status.is_active,
       indexing_active: inFlight > 0,
       indexing,
-      summary,
+      summary: degradedReason
+        ? `DEGRADED: ${done} files indexed in SQLite but 0 vector points in Qdrant — semantic search is broken for this project (issue #299).`
+        : summary,
+      ...(qdrantPoints !== undefined ? { qdrant_points: qdrantPoints } : {}),
+      ...(degradedReason !== undefined ? { degraded: true, degraded_reason: degradedReason } : {}),
       ...(statusReason !== undefined ? { status_reason: statusReason } : {}),
       ...(failedItems.length > 0 ? { failed_items: failedItems } : {}),
       ...(failedItemsTruncated ? { failed_items_truncated: failedItemsTruncated } : {}),
@@ -599,7 +637,8 @@ function dispatchTsAction(
   args: JsonObject,
   repoDir: string,
   daemonClient: DaemonClient | undefined,
-  projectDetector: ProjectDetector | undefined
+  projectDetector: ProjectDetector | undefined,
+  probeQdrantPointCount?: (tenantId: string) => Promise<number | null>
 ): unknown | Promise<unknown> {
   const registryPath = stringArg(args, 'registryPath') ?? defaultRegistryPath(repoDir);
   const base: BaseArgs = { registryPath };
@@ -652,7 +691,13 @@ function dispatchTsAction(
       // PowerShell path reads is empty → "project not found" for a valid
       // tenant). Fall back to the registry/PowerShell path only without a daemon.
       return daemonClient
-        ? handleIndexingStatus(args, daemonClient, 'project_status', projectDetector)
+        ? handleIndexingStatus(
+            args,
+            daemonClient,
+            'project_status',
+            projectDetector,
+            probeQdrantPointCount
+          )
         : runProjectStatus(projectArgs, daemonClient);
     case 'status_all':
       return runStatusAll(base, daemonClient);
@@ -672,7 +717,8 @@ function dispatchTsAction(
 export async function handleWorkspaceIndex(
   rawArgs: Record<string, unknown> | undefined,
   daemonClient?: DaemonClient,
-  projectDetector?: ProjectDetector
+  projectDetector?: ProjectDetector,
+  probeQdrantPointCount?: (tenantId: string) => Promise<number | null>
 ): Promise<unknown> {
   const args = rawArgs ?? {};
 
@@ -691,7 +737,13 @@ export async function handleWorkspaceIndex(
     if (!daemonClient) {
       throw new Error('indexing_status requires a connected daemon client (gRPC unavailable)');
     }
-    return handleIndexingStatus(args, daemonClient, 'indexing_status', projectDetector);
+    return handleIndexingStatus(
+      args,
+      daemonClient,
+      'indexing_status',
+      projectDetector,
+      probeQdrantPointCount
+    );
   }
 
   // TS-native registry actions (Phases 1 + 2 ports from
@@ -702,7 +754,14 @@ export async function handleWorkspaceIndex(
   if (action && TS_NATIVE_ACTIONS.has(action)) {
     assertMutationAllowed(action, args);
     const repoDir = resolveRepoDir(args);
-    return dispatchTsAction(action, args, repoDir, daemonClient, projectDetector);
+    return dispatchTsAction(
+      action,
+      args,
+      repoDir,
+      daemonClient,
+      projectDetector,
+      probeQdrantPointCount
+    );
   }
 
   // PowerShell-backed actions: require the workspace-qdrant-mcp checkout to

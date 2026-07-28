@@ -18,6 +18,7 @@ use tracing::{debug, info, warn};
 
 use crate::project_disambiguation::ProjectIdCalculator;
 use crate::queue_operations::QueueManager;
+use crate::watching_queue::WatchManager;
 use wqm_common::constants::COLLECTION_PROJECTS;
 
 /// Result of a single remote URL change detection cycle
@@ -59,10 +60,12 @@ pub async fn check_remote_url_changes(
         String,
         Option<String>,
         Option<String>,
+        i64,
     )> = sqlx::query_as(
         r#"
             SELECT watch_id, path, tenant_id, git_remote_url,
-                   remote_hash, disambiguation_path
+                   remote_hash, disambiguation_path,
+                   COALESCE(is_worktree, 0) AS is_worktree
             FROM watch_folders
             WHERE is_active > 0
               AND COALESCE(is_archived, 0) = 0
@@ -78,7 +81,9 @@ pub async fn check_remote_url_changes(
 
     let calculator = ProjectIdCalculator::new();
 
-    for (watch_id, path, old_tenant_id, stored_url, _stored_hash, disambiguation_path) in &watches {
+    for (watch_id, path, old_tenant_id, stored_url, _stored_hash, disambiguation_path, is_worktree) in
+        &watches
+    {
         result.projects_checked += 1;
 
         let current_url = match get_git_remote_url(path) {
@@ -103,6 +108,7 @@ pub async fn check_remote_url_changes(
             &calculator,
             watch_id,
             path,
+            *is_worktree != 0,
             old_tenant_id,
             &current_url,
             disambiguation_path.as_deref(),
@@ -123,12 +129,14 @@ pub async fn check_remote_url_changes(
 }
 
 /// Process a single detected remote URL change: update SQLite and enqueue rename.
+#[allow(clippy::too_many_arguments)]
 async fn process_remote_change(
     pool: &SqlitePool,
     queue_manager: &QueueManager,
     calculator: &ProjectIdCalculator,
     watch_id: &str,
     path: &str,
+    is_worktree: bool,
     old_tenant_id: &str,
     current_url: &str,
     disambiguation_path: Option<&str>,
@@ -146,6 +154,15 @@ async fn process_remote_change(
         Some(current_url),
         disambiguation_path,
     );
+
+    // Issue #299: gate the tenant move BEFORE mutating SQLite, so a suppressed
+    // rename never leaves watch_folders pointing at a tenant Qdrant never
+    // received (the exact SQLite/Qdrant drift that hides as a silent-zero search).
+    match guard_cascade_rename(pool, watch_id, path, is_worktree, old_tenant_id, &new_tenant_id).await
+    {
+        RenameGuardOutcome::Proceed => {}
+        RenameGuardOutcome::Block | RenameGuardOutcome::Pruned => return Ok(()),
+    }
 
     update_watch_folders_remote(
         pool,
@@ -290,35 +307,60 @@ pub async fn check_git_state_changes(
 ) -> Result<GitStateCheckResult, String> {
     let mut result = GitStateCheckResult::default();
 
-    let watches: Vec<(String, String, String, i32, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            r#"
+    let watches: Vec<(
+        String,
+        String,
+        String,
+        i32,
+        Option<String>,
+        Option<String>,
+        i64,
+    )> = sqlx::query_as(
+        r#"
             SELECT watch_id, path, tenant_id,
                    COALESCE(is_git_tracked, 0) AS is_git_tracked,
-                   git_remote_url, disambiguation_path
+                   git_remote_url, disambiguation_path,
+                   COALESCE(is_worktree, 0) AS is_worktree
             FROM watch_folders
             WHERE is_active > 0
               AND COALESCE(is_archived, 0) = 0
               AND collection = ?1
               AND parent_watch_id IS NULL
             "#,
-        )
-        .bind(COLLECTION_PROJECTS)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to query watch_folders for git state check: {}", e))?;
+    )
+    .bind(COLLECTION_PROJECTS)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to query watch_folders for git state check: {}", e))?;
 
     let calculator = ProjectIdCalculator::new();
 
-    for (watch_id, path, old_tenant_id, stored_git_tracked, stored_remote, disambiguation_path) in
-        &watches
+    for (
+        watch_id,
+        path,
+        old_tenant_id,
+        stored_git_tracked,
+        stored_remote,
+        disambiguation_path,
+        is_worktree,
+    ) in &watches
     {
         result.projects_checked += 1;
+        // `project_path` is the raw/canonical path — used ONLY for tenant IDENTITY
+        // (`calculator.calculate` below); the tenant_id must never depend on where
+        // a bind mount happens to appear. Detect git state against the RESOLVED
+        // on-disk path instead (Docker Desktop can expose the same mount under a
+        // `/run/desktop/mnt/host/...` alias): otherwise `detect_git_status(raw)`
+        // sees no `.git`, fabricates a "git → local" transition, and — since
+        // guard_cascade_rename resolves the alias and finds the folder present —
+        // a solo canonical repo gets demoted to `local_*` (the #299 silent-zero).
+        // Resolving here keeps the transition detector and the guard in agreement.
         let project_path = std::path::Path::new(path.as_str());
+        let resolved_path = WatchManager::resolve_local_watch_path(path);
 
-        let git_status = crate::git::detect_git_status(project_path);
+        let git_status = crate::git::detect_git_status(&resolved_path);
         let current_remote = if git_status.is_git {
-            get_git_remote_url(path).ok()
+            get_git_remote_url(resolved_path.to_str().unwrap_or(path)).ok()
         } else {
             None
         };
@@ -347,6 +389,7 @@ pub async fn check_git_state_changes(
             &calculator,
             watch_id,
             project_path,
+            *is_worktree != 0,
             old_tenant_id,
             disambiguation_path.as_deref(),
             git_status.is_git,
@@ -399,12 +442,14 @@ fn detect_git_transition(
 }
 
 /// Apply a detected git state transition: update SQLite and enqueue cascade rename.
+#[allow(clippy::too_many_arguments)]
 async fn apply_git_state_transition(
     pool: &SqlitePool,
     queue_manager: &QueueManager,
     calculator: &ProjectIdCalculator,
     watch_id: &str,
     project_path: &std::path::Path,
+    is_worktree: bool,
     old_tenant_id: &str,
     disambiguation_path: Option<&str>,
     is_now_git: bool,
@@ -414,6 +459,38 @@ async fn apply_git_state_transition(
     let new_tenant_id = match current_remote {
         Some(url) => calculator.calculate(project_path, Some(url.as_str()), disambiguation_path),
         None => calculator.calculate(project_path, None, None),
+    };
+
+    // Issue #299: gate BEFORE mutating SQLite. A "git → local" transition on a
+    // worktree (or a folder whose backing path vanished) recomputes a `local_*`
+    // fallback id; enqueuing a cascade rename off the SHARED canonical tenant
+    // would drag the main repo's Qdrant points onto that fallback and empty the
+    // canonical tenant. The guard suppresses (or prunes) instead — and by
+    // running before the UPDATE it also avoids leaving watch_folders on a tenant
+    // Qdrant never received.
+    let guard = guard_cascade_rename(
+        pool,
+        watch_id,
+        &project_path.to_string_lossy(),
+        is_worktree,
+        old_tenant_id,
+        &new_tenant_id,
+    )
+    .await;
+    if guard == RenameGuardOutcome::Pruned {
+        // The guard archived this orphan row; nothing left to persist.
+        return Ok(());
+    }
+
+    // On Block, still persist the git-state metadata (is_git_tracked / remote /
+    // hash) so the detected transition CONVERGES and does not re-fire on every
+    // 60s cycle — but keep the CURRENT tenant_id (a worktree or otherwise shared
+    // tenant is never demoted). Only Proceed moves the tenant and enqueues the
+    // Qdrant cascade rename.
+    let store_tenant_id: &str = if guard == RenameGuardOutcome::Proceed {
+        &new_tenant_id
+    } else {
+        old_tenant_id
     };
 
     let new_remote_hash = current_remote
@@ -435,19 +512,151 @@ async fn apply_git_state_transition(
     .bind(if is_now_git { 1i32 } else { 0i32 })
     .bind(current_remote.as_deref())
     .bind(new_remote_hash.as_deref())
-    .bind(&new_tenant_id)
+    .bind(store_tenant_id)
     .bind(&now)
     .bind(watch_id)
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to update watch_folders: {}", e))?;
 
-    if new_tenant_id != old_tenant_id {
+    if guard == RenameGuardOutcome::Proceed && new_tenant_id != old_tenant_id {
         let reason = format!("Git state transition: {}", transition);
         enqueue_cascade_rename(queue_manager, old_tenant_id, &new_tenant_id, &reason).await;
     }
 
     Ok(())
+}
+
+/// Decision from [`guard_cascade_rename`] — the issue #299 safety gate that runs
+/// before any tenant cascade rename the remote/git-state monitors would enqueue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameGuardOutcome {
+    /// The rename is safe to enqueue.
+    Proceed,
+    /// The rename is unsafe and was suppressed (no SQLite/Qdrant mutation).
+    Block,
+    /// The watch folder was an on-disk orphan and has been archived; skip.
+    Pruned,
+}
+
+/// Guard a pending tenant cascade rename against the issue #299 failure mode.
+///
+/// A cascade rename is keyed on `tenant_id`, so renaming a tenant that is SHARED
+/// by more than one watch folder drags every co-tenant's Qdrant points onto the
+/// new id. A worktree shares the main repo's canonical tenant; its gitlink
+/// defeats git-remote resolution, so a background git-state check recomputes a
+/// `local_<pathhash>` fallback and would enqueue a rename off the shared
+/// canonical tenant — silently emptying it while SQLite stays healthy (semantic
+/// search then returns 0, but grep/graph/list/indexing_status all look fine).
+///
+/// Precedence:
+/// 1. On-disk orphan (resolved path is gone) that is a worktree or already a
+///    `local_*` fallback → archive it (`is_active=0, is_archived=1`) so it stops
+///    firing every cycle. A canonical, non-worktree folder with a missing path
+///    is NOT pruned (a transient bind-mount outage would make every project look
+///    gone) — its rename is merely suppressed this cycle.
+/// 2. A worktree never renames its (shared) tenant; its content is indexed via
+///    the main folder.
+/// 3. Never demote a canonical (git-derived) tenant onto a `local_*` fallback
+///    while another watch folder still shares it — the git-derived id wins.
+async fn guard_cascade_rename(
+    pool: &SqlitePool,
+    watch_id: &str,
+    path: &str,
+    is_worktree: bool,
+    old_tenant_id: &str,
+    new_tenant_id: &str,
+) -> RenameGuardOutcome {
+    let on_disk = WatchManager::resolve_local_watch_path(path).is_dir();
+
+    if !on_disk {
+        if is_worktree || old_tenant_id.starts_with("local_") {
+            match archive_orphan_watch_folder(pool, watch_id).await {
+                Ok(n) => warn!(
+                    "Pruned orphan watch folder {} (path missing on disk: {}); archived {} \
+                     row(s), suppressed cascade rename {} -> {} (issue #299)",
+                    watch_id, path, n, old_tenant_id, new_tenant_id
+                ),
+                Err(e) => warn!("Failed to prune orphan watch folder {}: {}", watch_id, e),
+            }
+            return RenameGuardOutcome::Pruned;
+        }
+        warn!(
+            "Suppressing cascade rename {} -> {} for {} (path missing on disk: {}); not pruning a \
+             canonical folder — possible transient mount (issue #299)",
+            old_tenant_id, new_tenant_id, watch_id, path
+        );
+        return RenameGuardOutcome::Block;
+    }
+
+    if is_worktree {
+        debug!(
+            "Skipping cascade rename for worktree watch folder {} — content is indexed via the \
+             main folder (issue #299)",
+            watch_id
+        );
+        return RenameGuardOutcome::Block;
+    }
+
+    // Rule 3 gates only the demotion direction (canonical -> local_*). A canonical
+    // -> canonical rename off a SHARED tenant is deliberately NOT blocked here: on
+    // this system only worktrees share a tenant (disambiguation gives distinct
+    // clones distinct tenants), and gating every shared rename would deadlock the
+    // legitimate "repo transferred to a new org" convergence (issue #299).
+    if new_tenant_id.starts_with("local_") && !old_tenant_id.starts_with("local_") {
+        let shared: i64 = match sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM watch_folders WHERE tenant_id = ?1 AND watch_id != ?2",
+        )
+        .bind(old_tenant_id)
+        .bind(watch_id)
+        .fetch_one(pool)
+        .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                // Fail CLOSED: a transient COUNT error must not let the exact
+                // shared-canonical demotion this guard exists to stop slip through.
+                warn!(
+                    "Shared-tenant COUNT failed for {} ({}); blocking the canonical -> local_* \
+                     demotion to be safe (issue #299)",
+                    watch_id, e
+                );
+                return RenameGuardOutcome::Block;
+            }
+        };
+
+        if shared > 0 {
+            warn!(
+                "Blocked cascade rename {} -> {} for {}: canonical tenant shared by {} other watch \
+                 folder(s); refusing to demote onto a path-hash fallback (issue #299)",
+                old_tenant_id, new_tenant_id, watch_id, shared
+            );
+            return RenameGuardOutcome::Block;
+        }
+    }
+
+    RenameGuardOutcome::Proceed
+}
+
+/// Archive an orphaned watch folder so the monitors stop re-processing it.
+///
+/// Sets `is_active = 0, is_archived = 1`, which removes the row from every
+/// monitor query (they filter `is_active > 0 AND COALESCE(is_archived,0) = 0`).
+/// This only deregisters the folder — it does NOT delete Qdrant points; reclaim
+/// those with the guarded admin `PurgeTenant` path when appropriate.
+async fn archive_orphan_watch_folder(pool: &SqlitePool, watch_id: &str) -> Result<u64, String> {
+    let now = wqm_common::timestamps::now_utc();
+    let result = sqlx::query(
+        "UPDATE watch_folders SET is_active = 0, is_archived = 1, updated_at = ?1 \
+         WHERE watch_id = ?2",
+    )
+    .bind(&now)
+    .bind(watch_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to archive orphan watch folder {}: {}", watch_id, e))?;
+
+    Ok(result.rows_affected())
 }
 
 /// Enqueue cascade rename, logging success/failure without propagating errors.

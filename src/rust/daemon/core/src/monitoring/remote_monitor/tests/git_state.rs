@@ -246,3 +246,74 @@ async fn test_git_state_check_skips_inactive() {
     assert_eq!(result.projects_checked, 0);
     assert_eq!(result.transitions_detected, 0);
 }
+
+#[tokio::test]
+async fn test_git_state_worktree_converges_without_demotion() {
+    // Issue #299 (review finding C): a worktree that shows a git-state transition
+    // is BLOCKED — it never renames its SHARED tenant — but its git-state metadata
+    // must still be persisted so the transition converges and stops re-firing on
+    // every 60s cycle. Verify: tenant is NOT demoted, is_git_tracked converges, no
+    // cascade rename is enqueued, and the second cycle detects no transition.
+    let pool = create_test_database().await;
+    let queue_manager = QueueManager::new(pool.clone());
+
+    let temp = TempDir::new().unwrap();
+    // Real git repo WITH a remote, present on disk.
+    create_git_repo_with_remote(temp.path(), "https://github.com/user/repo.git");
+
+    // Registered as a WORKTREE stored as local (is_git_tracked=0, no remote),
+    // holding a canonical tenant it shares with its (implicit) main folder.
+    const SHARED_CANONICAL: &str = "abcdef123456";
+    sqlx::query(
+        r#"
+        INSERT INTO watch_folders (watch_id, path, collection, tenant_id, is_active,
+            is_git_tracked, git_remote_url, is_worktree)
+        VALUES ('wt-1', ?1, 'projects', ?2, 1, 0, NULL, 1)
+        "#,
+    )
+    .bind(temp.path().to_str().unwrap())
+    .bind(SHARED_CANONICAL)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let first = check_git_state_changes(&pool, &queue_manager)
+        .await
+        .unwrap();
+    assert_eq!(first.projects_checked, 1);
+    assert_eq!(first.transitions_detected, 1, "worktree transition detected");
+
+    // Tenant must NOT be demoted/changed — the worktree keeps the shared tenant.
+    let tid: String =
+        sqlx::query_scalar("SELECT tenant_id FROM watch_folders WHERE watch_id = 'wt-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tid, SHARED_CANONICAL, "worktree tenant must not be demoted");
+
+    // ...but the git-state metadata IS persisted (converged).
+    let is_git: i32 =
+        sqlx::query_scalar("SELECT is_git_tracked FROM watch_folders WHERE watch_id = 'wt-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(is_git, 1, "is_git_tracked converged to current on-disk state");
+
+    // No cascade rename was enqueued (the worktree's tenant never moved).
+    let rename_count: i32 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM unified_queue WHERE item_type = 'tenant' AND op = 'rename'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rename_count, 0, "a blocked worktree must not enqueue a rename");
+
+    // Second cycle: stored state now matches reality → NO transition re-fires.
+    let second = check_git_state_changes(&pool, &queue_manager)
+        .await
+        .unwrap();
+    assert_eq!(
+        second.transitions_detected, 0,
+        "converged worktree must not re-fire a transition"
+    );
+}

@@ -25,6 +25,8 @@ import { storeUrl, storeScratchpad } from './store-handlers.js';
 import { handleEmbedding } from './tools/embedding.js';
 import { handleWorkspaceIndex } from './tools/workspace-index.js';
 import { handleGraph } from './tools/graph.js';
+import { getQdrantClient } from './clients/qdrant-client-factory.js';
+import { PROJECTS_COLLECTION } from './tools/retrieve-types.js';
 import { runSearchEval } from './tools/search-eval.js';
 import {
   ensureClientProjectActive,
@@ -237,8 +239,27 @@ async function routeToolInner(
       return listTool.list(buildListOptions(args));
     case 'embedding':
       return handleEmbedding(args, daemonClient);
-    case 'workspace_index':
-      return handleWorkspaceIndex(args, daemonClient, projectDetector);
+    case 'workspace_index': {
+      const { qdrantUrl, qdrantApiKey } = components.qdrantConfig;
+      // Issue #299: let indexing_status/project_status cross-check the vector
+      // lane. Count the canonical tenant's points in the `projects` collection —
+      // the same lane semantic search reads — so a tenant re-key that emptied it
+      // surfaces as `degraded` instead of a false `complete`. Only invoked when
+      // the queue already looks drained-and-non-empty; any failure resolves null.
+      const probeQdrantPointCount = async (tenantId: string): Promise<number | null> => {
+        try {
+          const client = getQdrantClient({ url: qdrantUrl, apiKey: qdrantApiKey });
+          const res = await client.count(PROJECTS_COLLECTION, {
+            filter: { must: [{ key: 'tenant_id', match: { value: tenantId } }] },
+            exact: true,
+          });
+          return typeof res?.count === 'number' ? res.count : null;
+        } catch {
+          return null;
+        }
+      };
+      return handleWorkspaceIndex(args, daemonClient, projectDetector, probeQdrantPointCount);
+    }
     case 'graph':
       return handleGraph(args, daemonClient, projectDetector);
     case 'search_eval':
