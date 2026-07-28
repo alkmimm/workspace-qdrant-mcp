@@ -70,7 +70,7 @@ Depois de alterar, reinicie o Claude Desktop.
 Codex usa `config.toml`. Exemplo:
 
 ```toml
-[projects.'\\wsl.localhost\Ubuntu-24.04\home\alkmimm\respositorios\workspace-qdrant-mcp']
+[projects.'\\wsl.localhost\Ubuntu-24.04\home\dev\repos\workspace-qdrant-mcp']
 trust_level = "trusted"
 
 [mcp_servers.workspace-qdrant]

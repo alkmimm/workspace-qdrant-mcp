@@ -21,10 +21,10 @@ We take security vulnerabilities seriously. Please follow our responsible disclo
 
 ### 🚨 **For Sensitive/Critical Issues**
 
-**Email:** [alberto.souza@althoztecnologia.com.br](mailto:alberto.souza@althoztecnologia.com.br)
+**Report privately via GitHub:** open a [private security advisory](https://github.com/alkmimm/workspace-qdrant-mcp/security/advisories/new) (repository **Security** tab → *Report a vulnerability*). This keeps the report confidential until a fix is ready.
 
 - Use this for vulnerabilities that could be exploited maliciously
-- Include "SECURITY" in the subject line
+- Include "SECURITY" in the advisory title
 - We'll acknowledge receipt within 48 hours
 - Initial assessment provided within 1 week
 
@@ -188,4 +188,4 @@ This security policy complements but does not replace our [License](LICENSE). Fo
 **Last Updated:** September 1, 2025
 **Next Review:** December 1, 2025
 
-For questions about this security policy, please email [alberto.souza@althoztecnologia.com.br](mailto:alberto.souza@althoztecnologia.com.br) or open a [general discussion](https://github.com/alkmimm/workspace-qdrant-mcp/discussions).
+For questions about this security policy, open a [general discussion](https://github.com/alkmimm/workspace-qdrant-mcp/discussions), or a [private security advisory](https://github.com/alkmimm/workspace-qdrant-mcp/security/advisories/new) for anything sensitive.

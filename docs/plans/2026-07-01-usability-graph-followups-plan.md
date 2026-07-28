@@ -17,7 +17,7 @@
   homônimo ETIQUETADO (confidence 0.167/0.1 vs 0.7 dos edges reais). `hotspots`/`bridges` poluídos por
   genéricos e fixtures de teste. Uplift idle roda com `updated=0` (44 passes/6h).
   `lsp_enrichments_total`: pending 7793 / skipped 18184 / **nenhuma série success**.
-- DOC-V2: 55.5k nós / 838.7k arestas (735.9k CALLS ≈ 13/nó — teto fuzzy conhecido, ver plano R8).
+- example-monorepo: 55.5k nós / 838.7k arestas (735.9k CALLS ≈ 13/nó — teto fuzzy conhecido, ver plano R8).
 
 ### Fechado na própria sessão de 2026-07-01 (não repriorizar)
 
@@ -25,7 +25,7 @@
   (`applied.rerankWeight: 0.1`). Ganho medido: top1 +2.2pp, MRR +0.01.
 - ☑ CLAUDE.md — seção "Subagent Dispatch — MCP Preamble (mandatory)" com o preâmbulo canônico.
 - ☑ `docker/.env.example` — comentário da era BGE-M3 reescrito (0.10 p/ CodeRankEmbed + aviso).
-- ☑ **DOC-V2 Java 22k nós = LEGÍTIMO** (diagnóstico via `list` no tenant: `doc-backend/application/src/main/java/`,
+- ☑ **example-monorepo Java 22k nós = LEGÍTIMO** (diagnóstico via `list` no tenant: `doc-backend/application/src/main/java/`,
   1689 arquivos — backend Java real do monorepo, não vendor). Nenhuma ação.
 
 ---
@@ -111,7 +111,7 @@ mostrar os valores).
   zero símbolos com path em tests/fixtures; `with_capacity`/`as_ref`/`find` fora do top-10.
 - Sobreviventes esperados continuam lá (`GraphDbResult`, `GraphDbError`, `SchemaError`, `ProjectDetector`).
 - Antes/depois colado neste doc (§8). Se sobrar genérico pontual, aí sim `SKIP_SYMBOLS=<nome>` (não antes).
-- Efeito é global (todos os tenants) — conferir DOC-V2 `hotspots` também (excludes de teste valem lá).
+- Efeito é global (todos os tenants) — conferir example-monorepo `hotspots` também (excludes de teste valem lá).
 
 **Esforço/Risco.** S / baixo (reversível por env; afeta só centralidade). **Rollback:** remover as
 linhas + recreate.
@@ -301,13 +301,13 @@ bridges  DEPOIS: extract_object, basename, connect_readonly, timeout, output(mod
 generics no top-10 de ambos. Resíduo (`cmp`, `extension`, `basename`, `timeout`) são
 funções REAIS em código-fonte real — legítimo para betweenness (surface de conectores).
 NÃO baixar `USAGE_THRESHOLD` abaixo de 115 (pico de domínio real medido ~113 seria
-comido). Efeito é global; conferir DOC-V2 fica como spot-check opcional.
+comido). Efeito é global; conferir example-monorepo fica como spot-check opcional.
 
 ---
 
 ## 9. Fora deste plano (ponteiros)
 
-- **Homônimos de método / inflação CALLS (~13/nó em DOC-V2):** teto estrutural fuzzy — a alavanca é
+- **Homônimos de método / inflação CALLS (~13/nó em example-monorepo):** teto estrutural fuzzy — a alavanca é
   a trilha R8/LSP (`docs/plans/2026-07-01-r8-lsp-authoritative-edges-plan.md`), incluindo o item
   aberto "Dart resolve 0 mesmo warm". Este plano NÃO adiciona heurísticas novas (decisão R7: stop).
 - **PT cross-lingual (bucket pt top3 25%):** mitigação em vigor (queries em EN nas descrições +

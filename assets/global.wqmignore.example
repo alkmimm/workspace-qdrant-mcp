@@ -24,7 +24,7 @@
 # =============================================================================
 
 # ─── Pattern syntax note ─────────────────────────────────────────────────────
-# Directory exclusion via trailing slash (`testlink/`) does NOT reliably keep
+# Directory exclusion via trailing slash (`legacy-app/`) does NOT reliably keep
 # the walker out of that subtree when the pattern lives in global.wqmignore.
 # Use the explicit `/**` suffix when you want to exclude an entire subtree:
 #

@@ -1362,7 +1362,7 @@ async fn sweep_ghost_nodes(
 ///
 /// When `WQM_GRAPH_LSP_BACKFILL=1`, after a settle delay it walks each tenant
 /// SERIALLY and, within a tenant, each LANGUAGE that has callers and an available
-/// server — NOT a single "dominant" language (a monorepo like DOC-V2 is
+/// server — NOT a single "dominant" language (a monorepo like example-monorepo is
 /// Java-dominant but its Dart `.build()` calls are the whole point). For each
 /// (tenant, language): start the LSP (subject to the global server cap — raise
 /// `WQM_LSP_MAX_GLOBAL_SERVERS` to give the backfill a slot), WAIT for it to warm
@@ -1430,7 +1430,7 @@ pub fn start_graph_lsp_backfill(
 
                 // Enumerate the tenant's languages by CALLER count, grouped by the
                 // LSP Language they map to (e.g. typescript + tsx -> one server).
-                // Per-language, NOT a single "dominant" language: DOC-V2 is
+                // Per-language, NOT a single "dominant" language: example-monorepo is
                 // Java-dominant but its Dart .build() calls are the whole point.
                 let lang_rows: Vec<(String, i64)> = {
                     let guard = graph_store.read().await;

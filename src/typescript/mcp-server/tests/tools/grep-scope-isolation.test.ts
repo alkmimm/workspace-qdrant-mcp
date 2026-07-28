@@ -47,7 +47,7 @@ function makeDaemon(impl: (req: { tenant_id?: string }) => Promise<unknown>): {
 }
 
 const OTHER_REPO_MATCH = {
-  file_path: 'compress-mcp/tests/test_redaction.py',
+  file_path: 'example-tool/tests/test_redaction.py',
   line_number: 55,
   content: 'JWT_SECRET = "not-a-real-secret"',
   context_before: [],

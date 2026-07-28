@@ -2,7 +2,7 @@
  * Lazy client-project activation (`ensureClientProjectActive`).
  *
  * Over HTTP the session bootstrap runs before any tool call and cannot see the
- * client's cwd, so a connecting client's project (DOC-V2, bws-engineer, …) never
+ * client's cwd, so a connecting client's project (example-monorepo, example-service, …) never
  * became `is_active` — only the wqm self-repo did. These tests guard the fix:
  * the FIRST tool call carries the client cwd (via the request context), and we
  * lazily resolve + register that project as this session's live project so the
@@ -79,18 +79,18 @@ describe('ensureClientProjectActive', () => {
   it('activates the resolved client project as this session (first tool call)', async () => {
     const session = makeSession();
     const { client, registerProject } = makeDaemon();
-    const getProjectInfo = vi.fn().mockResolvedValue(projectInfo('tenant-doc', '/repos/DOC-V2'));
+    const getProjectInfo = vi.fn().mockResolvedValue(projectInfo('tenant-doc', '/repos/example-monorepo'));
 
-    await run('/repos/DOC-V2', () =>
+    await run('/repos/example-monorepo', () =>
       ensureClientProjectActive(session, client, makeDetector(getProjectInfo))
     );
 
-    expect(getProjectInfo).toHaveBeenCalledWith('/repos/DOC-V2', false, {
+    expect(getProjectInfo).toHaveBeenCalledWith('/repos/example-monorepo', false, {
       fallbackToSoleProject: true,
     });
     expect(session.projectId).toBe('tenant-doc');
-    expect(session.projectPath).toBe('/repos/DOC-V2');
-    expect(session.activatedForCwd).toBe('/repos/DOC-V2');
+    expect(session.projectPath).toBe('/repos/example-monorepo');
+    expect(session.activatedForCwd).toBe('/repos/example-monorepo');
     // Registered as a live session (session_id → is_active on the daemon).
     expect(registerProject).toHaveBeenCalledOnce();
     expect(registerProject).toHaveBeenCalledWith(
@@ -105,11 +105,11 @@ describe('ensureClientProjectActive', () => {
   it('is a no-op on the next call for the same cwd (does not re-resolve or re-register)', async () => {
     const session = makeSession();
     const { client, registerProject } = makeDaemon();
-    const getProjectInfo = vi.fn().mockResolvedValue(projectInfo('tenant-doc', '/repos/DOC-V2'));
+    const getProjectInfo = vi.fn().mockResolvedValue(projectInfo('tenant-doc', '/repos/example-monorepo'));
     const detector = makeDetector(getProjectInfo);
 
-    await run('/repos/DOC-V2', () => ensureClientProjectActive(session, client, detector));
-    await run('/repos/DOC-V2', () => ensureClientProjectActive(session, client, detector));
+    await run('/repos/example-monorepo', () => ensureClientProjectActive(session, client, detector));
+    await run('/repos/example-monorepo', () => ensureClientProjectActive(session, client, detector));
 
     expect(getProjectInfo).toHaveBeenCalledOnce(); // short-circuited on the 2nd call
     expect(registerProject).toHaveBeenCalledOnce();
@@ -222,9 +222,9 @@ describe('ensureClientProjectActive', () => {
   it('skips entirely when the daemon is not connected (retried once connected)', async () => {
     const session = makeSession({ daemonConnected: false });
     const { client, registerProject } = makeDaemon();
-    const getProjectInfo = vi.fn().mockResolvedValue(projectInfo('tenant-doc', '/repos/DOC-V2'));
+    const getProjectInfo = vi.fn().mockResolvedValue(projectInfo('tenant-doc', '/repos/example-monorepo'));
 
-    await run('/repos/DOC-V2', () =>
+    await run('/repos/example-monorepo', () =>
       ensureClientProjectActive(session, client, makeDetector(getProjectInfo))
     );
 
@@ -239,7 +239,7 @@ describe('ensureClientProjectActive', () => {
     const getProjectInfo = vi.fn().mockRejectedValue(new Error('SQLITE_CANTOPEN'));
 
     await expect(
-      run('/repos/DOC-V2', () =>
+      run('/repos/example-monorepo', () =>
         ensureClientProjectActive(session, client, makeDetector(getProjectInfo))
       )
     ).resolves.toBeUndefined();

@@ -296,7 +296,7 @@ mod tests {
     async fn authoritative_args_resolve_method_and_function_to_real_nodes() {
         let t = "t1";
         let store = mk_store().await;
-        // A METHOD `build` (the DOC-V2 case) and a free FUNCTION `helper`.
+        // A METHOD `build` (the example-monorepo case) and a free FUNCTION `helper`.
         let build = {
             let mut n = GraphNode::new(t, "lib/widget.dart", "build", NodeType::Method);
             n.start_line = Some(42);

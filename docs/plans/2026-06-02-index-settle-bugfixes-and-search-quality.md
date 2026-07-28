@@ -2,7 +2,7 @@
 
 ## Context
 
-After migrating the repo to native **ext4** (`/home/alkmimm/respositorios/workspace-qdrant-mcp`,
+After migrating the repo to native **ext4** (`/home/dev/repos/workspace-qdrant-mcp`,
 Docker WSL-integration bind-mount, no 9P), the daemon was stable when idle but
 **the index never reached a settled state** under reconcile, which blocked any
 trustworthy semantic-search quality measurement (`search_eval` / the host

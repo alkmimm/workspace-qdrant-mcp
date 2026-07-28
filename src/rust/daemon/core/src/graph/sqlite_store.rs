@@ -852,7 +852,7 @@ impl GraphStore for SqliteGraphStore {
         // not prove the partial predicate and failed the whole query with
         // "no query solution". `t.tenant_id = ?1` is equivalent to the original
         // (edges only ever target same-tenant nodes; row counts verified
-        // identical). Measured on the live DOC-V2 graph (no stats):
+        // identical). Measured on the live example-monorepo graph (no stats):
         // target 650ms -> ~293ms, source 254ms -> ~19ms.
         let target_dangling = sqlx::query(
             "SELECT e.edge_id, e.source_node_id, e.edge_type, e.source_file,

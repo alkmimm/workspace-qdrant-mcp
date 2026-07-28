@@ -367,7 +367,7 @@ async fn folder_scan_enqueue_uses_null_path_for_root() {
     let pool = fresh_pool().await;
     sqlx::query(
         "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled) \
-         VALUES ('w1', '/home/u/repos/DOC-V2', 'projects', 't1', 1)",
+         VALUES ('w1', '/home/u/repos/example-monorepo', 'projects', 't1', 1)",
     )
     .execute(&pool)
     .await
@@ -392,7 +392,7 @@ async fn folder_scan_enqueue_uses_null_path_for_root() {
         "folder_path must be null (root scan), not the absolute path; got payload {payload}"
     );
     assert!(
-        !payload.contains("/home/u/repos/DOC-V2"),
+        !payload.contains("/home/u/repos/example-monorepo"),
         "payload must not embed the absolute root path: {payload}"
     );
     assert_eq!(v.get("uplift"), Some(&serde_json::Value::Bool(true)));

@@ -7,7 +7,7 @@
 #
 # Run this from inside the WSL distro (native ext4), e.g.:
 #   wsl -d ubuntu-24.04
-#   cd /home/alkmimm/respositorios/workspace-qdrant-mcp
+#   cd /home/dev/repos/workspace-qdrant-mcp
 #   make help
 #
 # The Windows/PowerShell flow lives in `Makefile.win` (use `make -f Makefile.win`).
@@ -121,7 +121,7 @@ help:
 	@echo "------------------------------------------------------------"
 	@echo "Watch root (daemon-observed projects) is set via WQM_DEV_ROOT in"
 	@echo "$(COMPOSE_ENV_FILE). For WSL use a native ext4 path, e.g."
-	@echo "  WQM_DEV_ROOT=/home/<user>/respositorios"
+	@echo "  WQM_DEV_ROOT=/home/<user>/repos"
 	@echo "============================================================"
 
 check-env:

@@ -234,24 +234,24 @@ mod tests {
         assert!(!is_ignored_by_file(&absent, p, false));
     }
 
-    // ── exclusion-with-re-inclusion patterns (testlink / zabbix) ──────────────
+    // ── exclusion-with-re-inclusion patterns (legacy_app / vendor_monitoring) ──────────────
 
     #[test]
-    fn zabbix_vendored_tree_is_ignored() {
-        let (_d, ig) = write_global("**/zabbix/zabbix/**\n");
-        let p = Path::new("/home/u/repos/bws-engineer/zabbix/zabbix/Dockerfiles/web/conf.d/x.conf");
+    fn vendor_monitoring_vendored_tree_is_ignored() {
+        let (_d, ig) = write_global("**/vendor_monitoring/vendor_monitoring/**\n");
+        let p = Path::new("/home/u/repos/example-service/vendor_monitoring/vendor_monitoring/Dockerfiles/web/conf.d/x.conf");
         assert!(is_ignored_by_file(&ig, p, false));
     }
 
     #[test]
-    fn testlink_non_reincluded_subtree_is_ignored() {
+    fn legacy_app_non_reincluded_subtree_is_ignored() {
         let (_d, ig) = write_global(
-            "**/bws-dev-plataform/testlink/**\n!**/bws-dev-plataform/testlink/cfg/**\n",
+            "**/example-platform/legacy_app/**\n!**/example-platform/legacy_app/cfg/**\n",
         );
-        let p = Path::new("/home/u/repos/x/bws-dev-plataform/testlink/lib/api/foo.php");
+        let p = Path::new("/home/u/repos/x/example-platform/legacy_app/lib/api/foo.php");
         assert!(
             is_ignored_by_file(&ig, p, false),
-            "testlink files outside cfg/custom must stay excluded"
+            "legacy_app files outside cfg/custom must stay excluded"
         );
     }
 
@@ -263,12 +263,12 @@ mod tests {
     // files are never reached during a scan. This is why cfg/custom showed 0
     // indexed files despite the `!.../cfg/**` re-include.
     #[test]
-    fn testlink_cfg_contents_only_reincludes_file_but_not_dir() {
+    fn legacy_app_cfg_contents_only_reincludes_file_but_not_dir() {
         let (_d, ig) = write_global(
-            "**/bws-dev-plataform/testlink/**\n!**/bws-dev-plataform/testlink/cfg/**\n",
+            "**/example-platform/legacy_app/**\n!**/example-platform/legacy_app/cfg/**\n",
         );
-        let cfg_file = Path::new("/home/u/x/bws-dev-plataform/testlink/cfg/const.inc.php");
-        let cfg_dir = Path::new("/home/u/x/bws-dev-plataform/testlink/cfg");
+        let cfg_file = Path::new("/home/u/x/example-platform/legacy_app/cfg/const.inc.php");
+        let cfg_dir = Path::new("/home/u/x/example-platform/legacy_app/cfg");
         assert!(
             !is_ignored_by_file(&ig, cfg_file, false),
             "the cfg FILE is re-included by !.../cfg/**"
@@ -283,14 +283,14 @@ mod tests {
     // descends into cfg and indexes the re-included files. Both the dir
     // (is_dir=true) and the file (is_dir=false) must report not-ignored.
     #[test]
-    fn testlink_cfg_reincluded_when_dir_and_contents_both_negated() {
+    fn legacy_app_cfg_reincluded_when_dir_and_contents_both_negated() {
         let (_d, ig) = write_global(
-            "**/bws-dev-plataform/testlink/**\n\
-             !**/bws-dev-plataform/testlink/cfg/\n\
-             !**/bws-dev-plataform/testlink/cfg/**\n",
+            "**/example-platform/legacy_app/**\n\
+             !**/example-platform/legacy_app/cfg/\n\
+             !**/example-platform/legacy_app/cfg/**\n",
         );
-        let cfg_file = Path::new("/home/u/x/bws-dev-plataform/testlink/cfg/const.inc.php");
-        let cfg_dir = Path::new("/home/u/x/bws-dev-plataform/testlink/cfg");
+        let cfg_file = Path::new("/home/u/x/example-platform/legacy_app/cfg/const.inc.php");
+        let cfg_dir = Path::new("/home/u/x/example-platform/legacy_app/cfg");
         assert!(
             !is_ignored_by_file(&ig, cfg_dir, true),
             "dir-form !.../cfg/ re-includes the dir so the walk descends"

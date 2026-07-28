@@ -146,7 +146,7 @@ export function ensureProjectFresh(sessionState: SessionState): void {
  * therefore resolves nothing, `sessionState.projectId` stays null, and the
  * heartbeat's `if (sessionState.projectId)` block never runs. The net effect:
  * only the wqm self-repo (registered explicitly by `ensureSelfRepoRegistered`)
- * ever becomes `is_active`; a client project like DOC-V2 never does, no matter
+ * ever becomes `is_active`; a client project like example-monorepo never does, no matter
  * how heavily its agent uses the MCP.
  *
  * The fix: the FIRST tool call DOES carry the client's cwd (bound into the

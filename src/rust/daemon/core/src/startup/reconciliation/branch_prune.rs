@@ -307,8 +307,8 @@ async fn prune_project_branches(
     // Consistency proof. The repo's current HEAD branch MUST appear in the live
     // set. `get_current_branch` falls back to "main" when the repo can't be read
     // or HEAD can't be resolved — the exact failure that, at index time, labels a
-    // project's corpus under a non-existent branch (observed: bws-engineer's and
-    // compress-mcp's content was indexed under a bogus "main" while git only had
+    // project's corpus under a non-existent branch (observed: example-service's and
+    // example-tool's content was indexed under a bogus "main" while git only had
     // master/dev-clean). If HEAD isn't in `live`, the stored branch labels are not
     // trustworthy ground truth for this repo — skip rather than risk deleting the
     // real index.
@@ -342,7 +342,7 @@ async fn prune_project_branches(
     // protected. (Verified read-only across all 10 live watch folders before
     // shipping: the elected branch changed for exactly one — the case above —
     // and every other project, including the mislabel-incident repos
-    // compress-mcp/bws-engineer, elected the same branch as before.)
+    // example-tool/example-service, elected the same branch as before.)
     let counts = branch_file_counts(pool, watch_id).await?;
     let primary = elect_primary(&counts, &head);
 
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn corpus_election_still_protects_a_mislabeled_corpus() {
-        // The failure mode guard 3 was BORN for (bws-engineer / compress-mcp,
+        // The failure mode guard 3 was BORN for (example-service / example-tool,
         // whose whole corpus was indexed under a bogus label): the mislabeled
         // branch holds ALL of the project's files, so it must stay the elected
         // corpus and thus stay unprunable. Counting files instead of rows must

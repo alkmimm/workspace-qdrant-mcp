@@ -124,7 +124,7 @@ retrieval-ceiling lever. **Not yet wired to the daemon (still on `fastembed`).**
 ### ⚠️ Scope caveat
 `projects` is ONE collection partitioned by `tenant_id` (ADR-001). The dim change
 recreates it → **re-embeds ALL indexed projects** (workspace-qdrant-mcp,
-bws-engineer, v0-bws-training, …), and **all search is degraded during the reembed
+example-service, example-training, …), and **all search is degraded during the reembed
 window.** On CPU that's hours; on GPU, minutes — hence the push for a working GPU
 server. The reembed is **model-bound, not server-bound**: bge-large 1024d vectors
 produced on CPU-TEI are identical to GPU-Infinity, so a later CPU→GPU swap needs

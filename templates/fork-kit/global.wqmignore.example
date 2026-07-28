@@ -22,21 +22,21 @@
 # at the next daemon restart).
 # =============================================================================
 
-# testlink upstream sources (222 files). Use /** suffix — trailing-slash
-# form `testlink/` was leaving files indexed (likely `add_ignore()` quirk).
+# legacy-app upstream sources (222 files). Use /** suffix — trailing-slash
+# form `legacy-app/` was leaving files indexed (likely `add_ignore()` quirk).
 # Re-include cfg/ and custom/ with /** matching contents explicitly.
-**/bws-dev-plataform/testlink/**
+**/example-platform/legacy-app/**
 # Re-include cfg/ and custom/. The DIRECTORY itself must be negated (trailing
 # slash, no /**) in addition to its contents (/**): a directory-pruning walk
 # tests the dir entry and, without the bare-dir negation, prunes cfg/ before
 # descending — so the contents-only re-include never fires and the 14 cfg/custom
 # files stay unindexed. Both forms together let the walk descend AND keep files.
-!**/bws-dev-plataform/testlink/cfg/
-!**/bws-dev-plataform/testlink/cfg/**
-!**/bws-dev-plataform/testlink/custom/
-!**/bws-dev-plataform/testlink/custom/**
+!**/example-platform/legacy-app/cfg/
+!**/example-platform/legacy-app/cfg/**
+!**/example-platform/legacy-app/custom/
+!**/example-platform/legacy-app/custom/**
 
-**/zabbix/zabbix/**
+**/vendor-monitoring/vendor-monitoring/**
 
 # ─── Self-storage (Qdrant + memexd + MCP local state) ────────────────────────
 # When the workspace-qdrant-mcp repo itself is indexed, the daemon would
@@ -131,7 +131,7 @@ __pycache__/
 **/.rustup/
 .stack-work/
 **/.stack-work/
-# Flutter/Dart SDK checked into a project's tools/ dir (DOC-V2/tools/flutter =
+# Flutter/Dart SDK checked into a project's tools/ dir (example-monorepo/tools/flutter =
 # 3GB of framework .dart source). The `.tools/` patterns above only match the
 # dotted form; an SDK under plain `tools/flutter/` leaks thousands of framework
 # files into the embedding queue. Exclude the SDK subtree specifically (keeps

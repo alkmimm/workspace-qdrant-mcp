@@ -111,7 +111,7 @@ removed. **Adding the receiver's type is precisely what re-bounds it.**
    fallback** — exactly Sourcegraph's model. We already have the infra: per-
    project LSP integration and `jdtls` in the image, and the roadmap's **R8
    (wire warm-LSP to stamp authoritative edges)**. Dart ships a language server.
-   → For DOC-V2 (Dart) and the typed languages, let the **LSP resolve `.build()`
+   → For example-monorepo (Dart) and the typed languages, let the **LSP resolve `.build()`
    correctly** and keep tree-sitter fuzzy as the fallback for the other ~43.
 3. **Do NOT adopt stack-graphs as a dependency** (archived). Borrow the *idea*
    (scope-aware receiver lookup) only if LSP proves too heavy in the daemon.

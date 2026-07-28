@@ -132,13 +132,13 @@ table:
 
 ```bash
 npm run benchmark:semantic:sweep -- \
-  --workspace-root=/home/alkmimm/respositorios/workspace-qdrant-mcp \
+  --workspace-root=/home/dev/repos/workspace-qdrant-mcp \
   --project-id=367157a01d98 \
   --qdrant-url=http://qdrant:6333 \
   --daemon-host=localhost --daemon-port=50051 \
-  --database-path=/home/alkmimm/respositorios/workspace-qdrant-mcp/tmp/bench-memexd.db \
+  --database-path=/home/dev/repos/workspace-qdrant-mcp/tmp/bench-memexd.db \
   --weights=0,0.05,0.10,0.15,0.25,0.5,1 \
-  --output=/home/alkmimm/respositorios/workspace-qdrant-mcp/tmp/bench-sweep.json
+  --output=/home/dev/repos/workspace-qdrant-mcp/tmp/bench-sweep.json
 ```
 
 After redeploying the CLI image, the same sweep is available from inside the
@@ -146,14 +146,14 @@ After redeploying the CLI image, the same sweep is available from inside the
 
 ```bash
 wqm benchmark semantic-search-sweep \
-  --workspace-root /home/alkmimm/respositorios/workspace-qdrant-mcp \
+  --workspace-root /home/dev/repos/workspace-qdrant-mcp \
   --project-id 367157a01d98 \
   --qdrant-url http://qdrant:6333 \
   --daemon-host localhost \
   --daemon-port 50051 \
-  --database-path /home/alkmimm/respositorios/workspace-qdrant-mcp/tmp/bench-memexd.db \
+  --database-path /home/dev/repos/workspace-qdrant-mcp/tmp/bench-memexd.db \
   --weights 0,0.05,0.10,0.15,0.25,0.5,1 \
-  --output /home/alkmimm/respositorios/workspace-qdrant-mcp/tmp/bench-sweep.json
+  --output /home/dev/repos/workspace-qdrant-mcp/tmp/bench-sweep.json
 ```
 
 For a small exploratory run, add repeated `--query-id=<id>` flags or define

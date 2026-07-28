@@ -434,11 +434,11 @@ mod tests {
 
     #[test]
     fn docker_desktop_aliases_include_common_windows_paths() {
-        let aliases = WatchManager::watch_path_aliases("/mnt/c/Users/alber/dev");
+        let aliases = WatchManager::watch_path_aliases("/mnt/c/Users/you/dev");
         assert_eq!(
             aliases[0],
-            PathBuf::from("/run/desktop/mnt/host/c/Users/alber/dev")
+            PathBuf::from("/run/desktop/mnt/host/c/Users/you/dev")
         );
-        assert_eq!(aliases[1], PathBuf::from("/host_mnt/c/Users/alber/dev"));
+        assert_eq!(aliases[1], PathBuf::from("/host_mnt/c/Users/you/dev"));
     }
 }
