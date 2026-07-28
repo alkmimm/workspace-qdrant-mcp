@@ -209,13 +209,21 @@ export async function ensureClientProjectActive(
       return;
     }
 
-    // First activation, or a switch to a different client project. On a switch,
-    // tear down the previous project's session row first so its is_active does
-    // not leak — using the same deprioritize the disconnect path uses, while
-    // sessionState still reflects the OLD project's worktree/watch_path.
-    if (sessionState.projectId) {
-      await deprioritizeSessionProject(sessionState, daemonClient, sessionState.projectId);
-    }
+    // First activation, or a switch to a different client project. Capture the
+    // OUTGOING project (if any) before mutating, point the session at the NEW
+    // project, THEN tear down the old one. Doing the swap first is what keeps
+    // the switch leak-free: if a heartbeat interleaves with the deprioritize/
+    // register awaits, it beats the NEW project (re-registering IT on
+    // acknowledged:false) instead of resurrecting the project being switched
+    // away from (which its own `sessionState.projectId`-keyed re-register would
+    // otherwise do).
+    const previous: DeprioritizeTarget | null = sessionState.projectId
+      ? {
+          projectId: sessionState.projectId,
+          isWorktree: sessionState.isWorktree,
+          watchPath: sessionState.watchPath,
+        }
+      : null;
 
     sessionState.projectId = info.projectId;
     sessionState.projectPath = info.projectPath;
@@ -224,6 +232,10 @@ export async function ensureClientProjectActive(
     sessionState.watchPath = null;
     sessionState.isWorktree = false;
     refreshGitState(sessionState);
+
+    if (previous) {
+      await deprioritizeSessionProject(daemonClient, sessionState.sessionId, previous);
+    }
 
     // Registers the session (register_if_new + priority high → register_session
     // → is_active). Awaited inside this detached call so it never blocks the
@@ -633,6 +645,17 @@ export async function sendHeartbeat(
 }
 
 /**
+ * A project to deprioritize for this session, captured as plain values so it is
+ * decoupled from live `sessionState` (which the switch path mutates before the
+ * deprioritize completes).
+ */
+interface DeprioritizeTarget {
+  projectId: string;
+  isWorktree: boolean;
+  watchPath: string | null;
+}
+
+/**
  * Deprioritize one project for THIS session: drop its `project_sessions` row so
  * the daemon re-projects `is_active` (decrementing when this was the last live
  * session). Path-scoped for worktree sessions (`watch_path`), tenant-wide
@@ -640,30 +663,30 @@ export async function sendHeartbeat(
  *
  * Shared by `cleanup` (session teardown) and `ensureClientProjectActive` (mid-
  * session cwd switch), so a switched-away project is torn down with the exact
- * same call the disconnect path uses — no `is_active` leak either way. Reads the
- * worktree/watch_path from `sessionState`, which still reflect the project being
- * deprioritized at call time (the switch path deprioritizes BEFORE mutating it).
+ * same call the disconnect path uses — no `is_active` leak either way. Takes the
+ * target as explicit values rather than reading `sessionState`, because the
+ * switch path points the session at the NEW project BEFORE deprioritizing the
+ * old one (so an interleaving heartbeat re-registers the new project, not the
+ * one being torn down).
  */
 async function deprioritizeSessionProject(
-  sessionState: SessionState,
   daemonClient: DaemonClient,
-  projectId: string
+  sessionId: string,
+  target: DeprioritizeTarget
 ): Promise<void> {
   try {
     const response = await daemonClient.deprioritizeProject({
-      project_id: projectId,
-      ...(sessionState.sessionId ? { session_id: sessionState.sessionId } : {}),
-      ...(sessionState.isWorktree && sessionState.watchPath
-        ? { watch_path: sessionState.watchPath }
-        : {}),
+      project_id: target.projectId,
+      ...(sessionId ? { session_id: sessionId } : {}),
+      ...(target.isWorktree && target.watchPath ? { watch_path: target.watchPath } : {}),
     });
     logSessionEvent('deprioritize', {
-      project_id: projectId,
+      project_id: target.projectId,
       is_active: response.is_active,
       new_priority: response.new_priority,
     });
   } catch (error) {
-    logError('Failed to deprioritize project', error, { project_id: projectId });
+    logError('Failed to deprioritize project', error, { project_id: target.projectId });
   }
 }
 
@@ -687,7 +710,11 @@ export async function cleanup(
   }
 
   if (sessionState.projectId && sessionState.daemonConnected) {
-    await deprioritizeSessionProject(sessionState, daemonClient, sessionState.projectId);
+    await deprioritizeSessionProject(daemonClient, sessionState.sessionId, {
+      projectId: sessionState.projectId,
+      isWorktree: sessionState.isWorktree,
+      watchPath: sessionState.watchPath,
+    });
   }
 
   // Best-effort closes: teardown runs from session cleanup / onclose and must

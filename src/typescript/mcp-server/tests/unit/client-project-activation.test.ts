@@ -155,6 +155,40 @@ describe('ensureClientProjectActive', () => {
     expect(registerProject).toHaveBeenCalledTimes(2);
   });
 
+  it('points the session at the new project BEFORE deprioritizing the old one (leak-free switch)', async () => {
+    // Guards the switch ordering: sessionState.projectId must already be the NEW
+    // project when the old one is deprioritized, so a heartbeat interleaving the
+    // deprioritize/register awaits re-registers the new project (via its
+    // acknowledged:false self-heal) instead of resurrecting the old one.
+    const session = makeSession();
+    const registerProject = vi.fn().mockResolvedValue({
+      created: false,
+      project_id: 'ignored',
+      priority: 'high',
+      is_active: true,
+      newly_registered: false,
+    });
+    let projectIdAtDeprioritize: string | null = 'UNSET';
+    const deprioritizeProject = vi.fn().mockImplementation(() => {
+      projectIdAtDeprioritize = session.projectId;
+      return Promise.resolve({ success: true, is_active: false, new_priority: 'normal' });
+    });
+    const client = { registerProject, deprioritizeProject } as unknown as DaemonClient;
+    const getProjectInfo = vi
+      .fn()
+      .mockResolvedValueOnce(projectInfo('tenant-a', '/repos/a'))
+      .mockResolvedValueOnce(projectInfo('tenant-b', '/repos/b'));
+    const detector = makeDetector(getProjectInfo);
+
+    await run('/repos/a', () => ensureClientProjectActive(session, client, detector));
+    await run('/repos/b', () => ensureClientProjectActive(session, client, detector));
+
+    expect(deprioritizeProject).toHaveBeenCalledWith(
+      expect.objectContaining({ project_id: 'tenant-a' })
+    );
+    expect(projectIdAtDeprioritize).toBe('tenant-b'); // swapped BEFORE the teardown
+  });
+
   it('does not deprioritize/re-register when a new cwd resolves to the same project', async () => {
     const session = makeSession();
     const { client, registerProject, deprioritizeProject } = makeDaemon();
