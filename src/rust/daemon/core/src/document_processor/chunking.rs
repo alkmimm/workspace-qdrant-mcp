@@ -251,6 +251,25 @@ pub fn convert_semantic_chunks_to_text_chunks(
             metadata.insert("end_line".to_string(), chunk.end_line.to_string());
             metadata.insert("language".to_string(), chunk.language.clone());
 
+            // Rust inline unit test (`#[cfg(test)]` / `#[test]`-family), detected
+            // by the tree-sitter extractor. Read by the graph extractor to tag the
+            // symbol's graph node (`GraphNode.is_test_symbol`), so call-graph
+            // test-gap detection seeds from inline tests that share a production
+            // `.rs` file. Only ever `true` for Rust.
+            //
+            // Note (deliberately NOT wired into search/grep `is_test` here): the
+            // `excludeTests` / `is_test` surfaces are FILE-grained by design — the
+            // semantic filter reads the per-file `tags` "test" marker
+            // (chunk_embed/payload.rs, from `is_test_file`) and grep/exact reads
+            // the per-file `tracked_files.is_test` (store_track.rs, same source).
+            // A file has ONE is_test verdict, so a per-SYMBOL flag can't be
+            // expressed there without per-chunk test tagging across the Qdrant
+            // payload AND the tracked-files schema — a separate change. The graph
+            // is node-grained, which is why the fix lands cleanly there.
+            if chunk.is_test {
+                metadata.insert("is_test_symbol".to_string(), "true".to_string());
+            }
+
             // Add fragment info if applicable
             if chunk.is_fragment {
                 metadata.insert("is_fragment".to_string(), "true".to_string());

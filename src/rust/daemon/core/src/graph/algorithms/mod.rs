@@ -29,6 +29,10 @@ pub(super) struct NodeInfo {
     pub(super) symbol_name: String,
     pub(super) symbol_type: String,
     pub(super) file_path: String,
+    /// Rust inline unit test (`#[cfg(test)]` / `#[test]`-family) tagged at
+    /// extraction, independent of file path. `detect_test_gaps` seeds its BFS
+    /// from `is_test_file(path) OR is_test_symbol`.
+    pub(super) is_test_symbol: bool,
 }
 
 /// Adjacency list representation for algorithm execution.
@@ -177,7 +181,7 @@ pub(super) async fn load_adjacency_graph(
 ) -> Result<AdjacencyGraph, sqlx::Error> {
     // Load nodes
     let node_rows = sqlx::query(
-        "SELECT node_id, symbol_name, symbol_type, file_path
+        "SELECT node_id, symbol_name, symbol_type, file_path, is_test_symbol
          FROM graph_nodes WHERE tenant_id = ?1",
     )
     .bind(tenant_id)
@@ -282,6 +286,9 @@ pub(super) async fn load_adjacency_graph(
                 symbol_name,
                 symbol_type: row.get("symbol_type"),
                 file_path,
+                // Column is INTEGER (0/1); read as i64 to be robust to the
+                // migration default and avoid a decode-type mismatch.
+                is_test_symbol: row.get::<i64, _>("is_test_symbol") != 0,
             },
         );
     }

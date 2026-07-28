@@ -18,7 +18,7 @@ pub async fn export_nodes_sqlite(
         Some(tid) => {
             sqlx::query(
                 "SELECT node_id, tenant_id, symbol_name, symbol_type,
-                        file_path, start_line, end_line, signature, language
+                        file_path, start_line, end_line, signature, language, is_test_symbol
                  FROM graph_nodes WHERE tenant_id = ?1
                  ORDER BY node_id",
             )
@@ -29,7 +29,7 @@ pub async fn export_nodes_sqlite(
         None => {
             sqlx::query(
                 "SELECT node_id, tenant_id, symbol_name, symbol_type,
-                        file_path, start_line, end_line, signature, language
+                        file_path, start_line, end_line, signature, language, is_test_symbol
                  FROM graph_nodes ORDER BY node_id",
             )
             .fetch_all(pool)
@@ -52,6 +52,7 @@ pub async fn export_nodes_sqlite(
                 end_line: row.get::<Option<i64>, _>("end_line").map(|v| v as u32),
                 signature: row.get("signature"),
                 language: row.get("language"),
+                is_test_symbol: row.get::<i64, _>("is_test_symbol") != 0,
             })
         })
         .collect::<Vec<_>>();
@@ -171,6 +172,9 @@ pub fn export_nodes_ladybug(
             end_line: row.get(6).and_then(|s| s.parse().ok()),
             signature: row.get(7).map(|s| s.clone()).filter(|s| !s.is_empty()),
             language: row.get(8).map(|s| s.clone()).filter(|s| !s.is_empty()),
+            // LadybugDB (secondary backend) does not persist this flag; default
+            // false. A SQLite re-index re-derives it authoritatively.
+            is_test_symbol: false,
         });
     }
 

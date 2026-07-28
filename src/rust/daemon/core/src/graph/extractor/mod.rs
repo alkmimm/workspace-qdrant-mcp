@@ -128,6 +128,9 @@ pub fn extract_edges(
         node.end_line = Some(chunk.end_line as u32);
         node.signature = chunk.signature.clone();
         node.language = Some(chunk.language.clone());
+        // Rust inline unit test (`#[cfg(test)]` / `#[test]`-family) — tag the
+        // node so test-gap detection seeds the BFS from it (see `GraphNode`).
+        node.is_test_symbol = chunk.is_test;
         result.nodes.push(node.clone());
 
         extract_chunk_edges(chunk, &node, tenant_id, file_path, &mut result);
@@ -199,6 +202,9 @@ fn process_text_chunk(
     node.end_line = meta.get("end_line").and_then(|s| s.parse::<u32>().ok());
     node.signature = meta.get("signature").cloned();
     node.language = Some(language.clone());
+    // Rust inline unit test flag carried through the TextChunk metadata by
+    // `convert_semantic_chunks_to_text_chunks` (see `GraphNode::is_test_symbol`).
+    node.is_test_symbol = meta.get("is_test_symbol").map(|s| s == "true").unwrap_or(false);
     result.nodes.push(node.clone());
 
     add_contains_edges(meta, &node, tenant_id, file_path, &language, result);

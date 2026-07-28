@@ -283,6 +283,7 @@ mod tests {
                 node_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, symbol_name TEXT NOT NULL,
                 symbol_type TEXT NOT NULL, file_path TEXT NOT NULL, start_line INTEGER,
                 end_line INTEGER, signature TEXT, language TEXT,
+                is_test_symbol INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')",
         )
         .execute(&pool)
