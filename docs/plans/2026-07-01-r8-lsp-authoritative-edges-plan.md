@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-01
 **Why:** the [community/SOTA survey](2026-07-01-code-graph-resolution-community-survey.md)
-concluded that method-call homonym ambiguity (`build`×300 in DOC-V2) is
+concluded that method-call homonym ambiguity (`build`×300 in example-monorepo) is
 **structurally unsolvable by a by-name/CST fuzzy resolver** and requires
 type-awareness. The industry answer is a **hybrid** (Sourcegraph's model): precise
 where a type-aware source exists, fuzzy fallback elsewhere. We already have the
@@ -21,17 +21,17 @@ an authoritative edge source.
 - Prereq: the image bundles the **Dart SDK** (`dart language-server --lsp`,
   v3.7.2) — Dart/Flutter LSP is available.
 
-## Gaps (why it doesn't help DOC-V2 today)
+## Gaps (why it doesn't help example-monorepo today)
 
 1. **Additive, not authoritative.** The LSP edge is ADDED next to the tree-sitter
    stub; `resolve_stub_edges` still fans the stub out to ~300 candidates, drowning
    the precise edge. The LSP edge must SUPPRESS the fuzzy stub it supersedes.
 2. **Cold at ingestion.** `resolve_calls_via_lsp` is gated on
    `is_server_ready_for_file`, but the LSP is not warm during a cold ingest/reembed
-   (the file's own comment says so), so on DOC-V2's reembed it was a **no-op**.
+   (the file's own comment says so), so on example-monorepo's reembed it was a **no-op**.
    Needs a **warm backfill pass** that runs after the LSP has indexed.
 3. **Activation.** LSP starts only via gRPC project activation; the uplift idle
-   pass never re-runs it. Dart LSP for DOC-V2 must be activated + warmed.
+   pass never re-runs it. Dart LSP for example-monorepo must be activated + warmed.
 
 ## Increments
 
@@ -45,10 +45,10 @@ an authoritative edge source.
 - **R8.2 — Warm backfill idle pass.** A background pass that, once the LSP is
   indexed for a project, re-resolves calls over already-ingested files and stamps
   authoritative edges (delete this file's fuzzy CALLS stubs it now resolves, add
-  the precise edges), without a reembed. This is what delivers the DOC-V2 win.
+  the precise edges), without a reembed. This is what delivers the example-monorepo win.
 - **R8.3 — Activation for target projects.** Ensure the Dart LSP is activated +
-  warmed for DOC-V2 (and typed languages generally); avoid the dormant-LSP trap.
-- **R8.4 — Measure.** Hand-label a set of ambiguous DOC-V2 calls; measure
+  warmed for example-monorepo (and typed languages generally); avoid the dormant-LSP trap.
+- **R8.4 — Measure.** Hand-label a set of ambiguous example-monorepo calls; measure
   precision/recall of fuzzy vs import-anchored vs R8-LSP, so the
   keep-heuristics-vs-adopt-indexer call rests on our numbers (survey recommendation #4).
 
@@ -63,7 +63,7 @@ Before building the backfill loop we probed the running daemon's LSP metrics/log
   refusing to start new server … running=3 max=3` — there is a **global cap of 3
   LSP servers**, already saturated. Dart (and Go/Rust/TS/Java/…) are refused.
 - The registrations logged are all for the *active* repo tenant (`367157a01d98`),
-  not DOC-V2 — DOC-V2's LSP is not registered/warm.
+  not example-monorepo — example-monorepo's LSP is not registered/warm.
 
 **Implication:** the R8.2 backfill loop, built naively, would deliver **zero** —
 `is_server_ready_for_file` returns false for Dart. The real linchpin is a
@@ -71,7 +71,7 @@ Before building the backfill loop we probed the running daemon's LSP metrics/log
 - Raise / rework the `max=3` cap (it is a memory guard — LSP servers are heavy),
   or make it **on-demand per (tenant, language) for a bounded backfill window**
   (start Dart → resolve the tenant's callers → stop), or a small dedicated slot.
-- Register + warm the Dart LSP for the target tenant (DOC-V2), then run backfill.
+- Register + warm the Dart LSP for the target tenant (example-monorepo), then run backfill.
 
 So the corrected sequence is: **R8.3 activation/cap policy FIRST** (it gates
 everything), then **R8.2 backfill** using the DB primitive below.
@@ -101,12 +101,12 @@ everything), then **R8.2 backfill** using the DB primitive below.
   slot by raising `WQM_LSP_MAX_SERVERS` for the run, or a dedicated transient
   slot, and never stop a live enrichment server; (3) waits for warmup (start_server
   already blocks on the start semaphore); (4) calls `run_backfill_tenant`;
-  (5) `stop_server`. Then **R8.4 measure** on DOC-V2.
+  (5) `stop_server`. Then **R8.4 measure** on example-monorepo.
 - **Open subtleties for R8.3b (noted so the build is de-risked):** caller `column`
   is read best-effort from source (`symbol_column_in_line`); `start_line`
   0-indexing must match the LSP; dominant-language detection from
   `graph_nodes.language`; the whole thing is deploy-verified (no unit test spins a
-  real Dart LSP) — enable on DOC-V2 first and watch the `resolution:"lsp"` edge
+  real Dart LSP) — enable on example-monorepo first and watch the `resolution:"lsp"` edge
   count before trusting it broadly.
 
 ## Non-goals / guardrails
@@ -130,7 +130,7 @@ as referências **entrantes** (quem usa o símbolo) — a direção reversa do
 - `references` é core request do protocolo (suporte quase universal);
   `callHierarchy` é capability opcional — R9 cobre servidores onde o R8 não
   consegue. **Sonda discriminante: Dart** (o problema aberto "resolve 0 mesmo
-  warm" é via callHierarchy; se `references` responder, R9 destrava DOC-V2).
+  warm" é via callHierarchy; se `references` responder, R9 destrava example-monorepo).
 - Valida/suprime arestas fuzzy pelo lado de USO (complementa a supressão
   autoritativa do R8.1, que age pelo lado da chamada).
 

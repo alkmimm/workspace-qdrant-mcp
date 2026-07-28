@@ -54,7 +54,7 @@
       "title": "Inspect daemon shared state before overwriting it",
       "priority": 9,
       "tags": ["safety", "daemon", "ops"],
-      "content": "Before overwriting or deleting daemon-owned shared state (global.wqmignore, named volumes, the queue/search SQLite DBs), inspect/diff the target first. The live global.wqmignore is NOT empty — it carries custom entries (e.g. `**/bws-dev-plataform/testlink/**`, `**/zabbix/zabbix/**`) that a blind truncate-overwrite would destroy. Prefer append over overwrite; diff against assets/global.wqmignore.example rather than replacing."
+      "content": "Before overwriting or deleting daemon-owned shared state (global.wqmignore, named volumes, the queue/search SQLite DBs), inspect/diff the target first. The live global.wqmignore is NOT empty — it carries custom entries (e.g. `**/example-platform/legacy-app/**`, `**/vendor-monitoring/vendor-monitoring/**`) that a blind truncate-overwrite would destroy. Prefer append over overwrite; diff against assets/global.wqmignore.example rather than replacing."
     },
     {
       "label": "daemon-via-grpc",

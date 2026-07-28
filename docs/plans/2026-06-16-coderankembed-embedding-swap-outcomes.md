@@ -15,7 +15,7 @@ docs: [embeddings.md](../deployment/embeddings.md) (deployment reference),
    reran the destructive reembed (all 11 watched projects → **116,409 points**,
    0 failed, ~30 min on the GPU at ~5 items/s — pipeline-bound, GPU only ~33%).
 3. **Measured** the 46-query benchmark before↔after; **re-tuned** fusion.
-4. **Quantified the Portuguese trade-off** on the real DOC-V2 corpus.
+4. **Quantified the Portuguese trade-off** on the real example-monorepo corpus.
 5. **Restored the CPU failover** (Infinity-on-CPU) after the ONNX export proved
    infeasible, and validated GPU→CPU failover + recovery on the live stack.
 
@@ -54,8 +54,8 @@ bottleneck was **representation**, not ranking.
    matches in other tenants — do not over-fit it to one English repo.
 
 3. **An English-centric code model's "Portuguese regression" is cross-lingual
-   ONLY — measure before fearing it.** On the real DOC-V2 corpus:
-   - query-PT → **doc-PT** (same-language prose, DOC-V2's actual use): **100%
+   ONLY — measure before fearing it.** On the real example-monorepo corpus:
+   - query-PT → **doc-PT** (same-language prose, example-monorepo's actual use): **100%
      recall** (12 known-item queries, top-1 100%, MRR 1.0). Unaffected.
    - query-PT → **code-EN** (cross-lingual): **16.7%** recall@10; the *same 12
      queries in English* → **75%**. So the gap is purely linguistic, and is
@@ -89,7 +89,7 @@ bottleneck was **representation**, not ranking.
 
 6. **The offline `search_eval` harness is the gate.** Inline `cases` + `rerank`
    on/off drove the whole loop — baseline, the `KEYWORD_WEIGHT` sweep, and the
-   DOC-V2 cross-lingual quantification — all without redeploys.
+   example-monorepo cross-lingual quantification — all without redeploys.
 
 ## How the swap was done (runbook recap)
 
@@ -122,7 +122,7 @@ Config is gitignored deploy-state; the durable record is
 ## Watch-outs / debt
 
 - The swap is **global**: it changed embeddings for every watched project, not
-  just code ones. DOC-V2 docs were validated (100%); other doc-heavy / non-English
+  just code ones. example-monorepo docs were validated (100%); other doc-heavy / non-English
   corpora are unmeasured.
 - `KEYWORD_WEIGHT=0.25` was kept after only a quick 0.25/0.10 sweep — a fuller
   sweep could squeeze a bit more out of `hybrid`, but `semantic` is the ceiling.

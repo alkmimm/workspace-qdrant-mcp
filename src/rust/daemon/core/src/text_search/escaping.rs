@@ -251,7 +251,7 @@ mod tests {
     fn test_normalized_relative_glob_matches_absolute_path() {
         // Regression: a project-relative glob must match the ABSOLUTE file_path
         // stored in the index. Before normalization it silently matched nothing.
-        let abs = "/home/u/respositorios/DOC-V2/doc-backend/domain/Order.java";
+        let abs = "/home/u/repos/example-monorepo/doc-backend/domain/Order.java";
 
         let raw = compile_glob_matcher("doc-backend/domain/**/*.java").unwrap();
         assert!(
@@ -267,7 +267,7 @@ mod tests {
         );
         // And it must not over-match a different directory.
         assert!(!normalized(
-            "/home/u/respositorios/DOC-V2/doc-frontend/app/Order.java"
+            "/home/u/repos/example-monorepo/doc-frontend/app/Order.java"
         ));
     }
 

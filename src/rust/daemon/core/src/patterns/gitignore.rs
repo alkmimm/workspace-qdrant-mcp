@@ -55,7 +55,7 @@ pub struct ProjectIgnoreMatcher {
     /// them both ways: a slash-containing negation (`!common/**/*.proto` in
     /// `proto/.gitignore`) resolved against the PROJECT root and went inert,
     /// while a bare glob (`*.proto`) leaked out of `proto/` onto the whole
-    /// tree — which silently dropped DOC-V2's hand-authored proto sources
+    /// tree — which silently dropped example-monorepo's hand-authored proto sources
     /// from the index (2026-06-10).
     exclusion_layers: Vec<Gitignore>,
     /// Per-ancestor `.wqmignore` re-inclusion matchers (`!`/`- ` lines),
@@ -558,7 +558,7 @@ mod tests {
     }
 
     // ── nested ignore files anchor at their OWN directory ──────────────────
-    // Regression for the DOC-V2 proto incident (2026-06-10): proto/.gitignore
+    // Regression for the example-monorepo proto incident (2026-06-10): proto/.gitignore
     // whitelists sources via slash-anchored negations. With a single
     // root-anchored builder the negations resolved against the project root
     // (inert) while the bare `*.proto` glob leaked tree-wide — hand-authored

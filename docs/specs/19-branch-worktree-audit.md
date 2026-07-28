@@ -344,7 +344,7 @@ All seven are now resolved.
 
 ## 8. Discovery-tool branch scoping (2026-06)
 
-A discovery test against a project sitting on a feature branch (`bws-engineer`,
+A discovery test against a project sitting on a feature branch (`example-service`,
 on `docs/integration-collector-plano-melhoria`) surfaced that the MCP discovery
 tools returned almost nothing on a non-default branch. Investigation isolated
 two independent MCP-side bugs (both fixed) plus two follow-ups (scoped, not yet
@@ -373,13 +373,13 @@ was complete the whole time; the defects were in branch scoping, not retrieval.
   (cross-branch-dedup, spec 21, re-keys only changed-but-identical files);
   unchanged files keep the project's base-branch tag. So a branch-scoped `list`
   on a feature branch returned only the handful of changed files (56 of ~2210 on
-  bws-engineer).
+  example-service).
 - **Fix**: on a non-base branch, `list` matches `branch IN (current, base)` and
   suppresses base-branch rows whose `relative_path` is overridden on the current
   branch (those show in their feature version instead) — i.e. the project as it
   appears on that branch. The base branch is resolved from the indexed DATA
   (`getBaseBranch` = the branch the daemon tagged the bulk of files under), NOT
-  git's local default, because they can differ: bws-engineer's files are tagged
+  git's local default, because they can differ: example-service's files are tagged
   `main` while git's default (`origin/HEAD`) is `master`. (An initial git-based
   `getDefaultBranch` resolved `master`, matched zero rows, and merged nothing —
   reverted in favour of the data-driven resolver.) No-op on the base branch and

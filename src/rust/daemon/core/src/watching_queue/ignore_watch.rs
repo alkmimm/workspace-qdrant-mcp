@@ -39,7 +39,7 @@ impl FileWatcherQueue {
 
         // Key the mtime slot by the ignore file's path relative to the project
         // root, never by its basename. A project holds one ignore file per
-        // package plus one per checked-out git worktree (DOC-V2: 360 of them),
+        // package plus one per checked-out git worktree (example-monorepo: 360 of them),
         // and `ignore_file_mtimes` is keyed (project_root, file_path) — so a
         // basename key collapses every one of them into a single `.gitignore`
         // row. Whichever file was touched last then owns the slot, and any

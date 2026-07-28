@@ -44,14 +44,14 @@ function ConvertTo-WqmAbsolutePath {
 
 function ConvertTo-WqmPosixPath {
   # Replace backslashes with forward slashes; leave drive letter intact.
-  # Example: C:\Users\alber\dev -> C:/Users/alber/dev
+  # Example: C:\Users\you\dev -> C:/Users/you/dev
   param([Parameter(Mandatory)][string]$Path)
   return ($Path -replace '\\', '/')
 }
 
 function ConvertTo-WqmWslPath {
   # Translate a Windows absolute path to WSL-style mount path.
-  # Example: C:\Users\alber\dev -> /mnt/c/Users/alber/dev
+  # Example: C:\Users\you\dev -> /mnt/c/Users/you/dev
   # Returns the input unchanged if it's already POSIX or /mnt/ form.
   param([Parameter(Mandatory)][string]$Path)
   if (-not $Path) { return $Path }

@@ -94,8 +94,8 @@ metric to prove it, de-noise hotspots. All tree-sitter-only, no new extraction.
 
 ## Status updates
 
-- **2026-07-01 — Fan-out ceiling shipped (the actual lever for DOC-V2).** After
-  R2.5+R4 landed, a fan-out audit on DOC-V2 (`685731a5e037`) showed the ~617k
+- **2026-07-01 — Fan-out ceiling shipped (the actual lever for example-monorepo).** After
+  R2.5+R4 landed, a fan-out audit on example-monorepo (`685731a5e037`) showed the ~617k
   `ambiguous` edges are the UNTOUCHED cause: **99.7% target `method`** (no
   spurious-kind to prune), and the cost is dominated by a mega-fan-out TAIL —
   distinct `(caller, name)` groups fanning to N=27/37/66/82/167/194 candidates
@@ -138,7 +138,7 @@ metric to prove it, de-noise hotspots. All tree-sitter-only, no new extraction.
 
 - **2026-07-01 — R2.5 proximity precedence shipped (CALLS fan-out dedup).** The
   R1 keep-all-candidates tier is correct for recall but inflates the physical
-  CALLS edge count ~8× on DOC-V2: every ambiguous callee (`save`, `build`, `of`,
+  CALLS edge count ~8× on example-monorepo: every ambiguous callee (`save`, `build`, `of`,
   `getId`, domain verbs) fans out to N file-backed candidates at weight `1/N`.
   That inflation is invisible to centrality (already gated at `weight >= 0.6`, so
   `1/N ≤ 0.5` is excluded) but bloats `graph stats` and dilutes impact/usages

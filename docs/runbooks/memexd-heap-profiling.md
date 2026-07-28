@@ -127,7 +127,7 @@ heaptrack só dá endereços. É preciso um build temporário com símbolos.
 ### 1. Build com símbolos — edite o **repo MAIN** (não a worktree!)
 
 O `docker compose build` usa o contexto do repo **main**
-(`/home/alkmimm/respositorios/workspace-qdrant-mcp`). Editar a Cargo.toml de uma
+(`/home/dev/repos/workspace-qdrant-mcp`). Editar a Cargo.toml de uma
 worktree NÃO tem efeito no build. Em `src/rust/Cargo.toml`:
 
 ```toml
@@ -167,13 +167,13 @@ CMD ["--foreground", "--grpc-port", "50051", "--metrics-port", "9091"]
 # limpar a fila e deixar 1 projeto ativo (repro mínimo)
 docker run --rm -v workspace-qdrant-mcp_memexd_db:/db alpine sh -c \
  "apk add -q sqlite; sqlite3 /db/memexd.db \"DELETE FROM unified_queue;\"; \
-  sqlite3 /db/memexd.db \"UPDATE watch_folders SET enabled=(path='/home/alkmimm/respositorios/workspace-qdrant-mcp');\""
+  sqlite3 /db/memexd.db \"UPDATE watch_folders SET enabled=(path='/home/dev/repos/workspace-qdrant-mcp');\""
 ```
 
 ### 4. Rodar sob heaptrack (rede/volumes/env do compose)
 
 ```bash
-ROOT=/home/alkmimm/respositorios/workspace-qdrant-mcp
+ROOT=/home/dev/repos/workspace-qdrant-mcp
 docker run -d --name memexd-ht --network workspace-qdrant-mcp_workspace-network \
   --env-file docker/.env -e QDRANT_URL=http://qdrant:6334 \
   -v "$ROOT/.fastembed_cache:/home/memexd/.workspace-qdrant/models" \

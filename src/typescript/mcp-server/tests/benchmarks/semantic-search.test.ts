@@ -32,8 +32,8 @@ describe('semantic-search benchmark helpers', () => {
   it('normalizes absolute and relative paths against the workspace root', () => {
     expect(
       normalizeBenchmarkPath(
-        'C:\\Users\\alber\\Documents\\repositorios\\workspace-qdrant-mcp\\src\\tools\\search.ts',
-        'C:\\Users\\alber\\Documents\\repositorios\\workspace-qdrant-mcp'
+        'C:\\Users\\you\\Documents\\repositorios\\workspace-qdrant-mcp\\src\\tools\\search.ts',
+        'C:\\Users\\you\\Documents\\repositorios\\workspace-qdrant-mcp'
       )
     ).toBe('src/tools/search.ts');
     expect(normalizeBenchmarkPath('./docs/plans/search.md', 'C:\\repo')).toBe('docs/plans/search.md');
@@ -55,7 +55,7 @@ describe('semantic-search benchmark helpers', () => {
       ),
       createResult(
         '2',
-        'C:\\Users\\alber\\Documents\\repositorios\\workspace-qdrant-mcp\\docs\\plans\\2026-05-25-search-quality-next-steps.md',
+        'C:\\Users\\you\\Documents\\repositorios\\workspace-qdrant-mcp\\docs\\plans\\2026-05-25-search-quality-next-steps.md',
         0.95,
         false
       ),
@@ -77,7 +77,7 @@ describe('semantic-search benchmark helpers', () => {
         'src/typescript/mcp-server/src/tools/search.ts',
         'docs/plans/2026-05-25-search-quality-next-steps.md',
       ],
-      'C:\\Users\\alber\\Documents\\repositorios\\workspace-qdrant-mcp',
+      'C:\\Users\\you\\Documents\\repositorios\\workspace-qdrant-mcp',
       10
     );
 

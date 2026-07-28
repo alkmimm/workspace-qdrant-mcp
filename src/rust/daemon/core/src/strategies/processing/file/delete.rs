@@ -302,7 +302,7 @@ pub(super) async fn process_file_delete(
     // or base_point scope. Sweeping here therefore wipes the points of generations
     // nobody asked to delete, leaving their `tracked_files` rows advertising chunks
     // Qdrant no longer has — the same path-keyed blast radius #273 had to dodge for
-    // graph edges and keyword extractions. Observed live 2026-07-16: 5 DOC-V2
+    // graph edges and keyword extractions. Observed live 2026-07-16: 5 example-monorepo
     // protos holding 308 chunk_count between them and 0 points, re-swept ~40x/hour
     // by a delete that could never converge (#224). The filter sweep exists for a
     // genuinely orphaned path, so require that no generation survives.

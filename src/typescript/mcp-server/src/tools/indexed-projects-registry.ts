@@ -99,7 +99,7 @@ function utcNow(): string {
 }
 
 /**
- * Translate a host-style path (`C:\Users\alber\...` or `C:/Users/alber/...`)
+ * Translate a host-style path (`C:\Users\you\...` or `C:/Users/you/...`)
  * to the bind-mount path visible inside the container (`/run/desktop/...`),
  * using the WQM_HOST_DEV_ROOT → WQM_DEV_ROOT translation declared in
  * `docker/.env`. Returns the original path unchanged when:
@@ -543,7 +543,7 @@ export async function runListProjects(
 
   // Cross-reference the daemon's actually-indexed projects (watch_folders) so a
   // project the daemon indexes but that was never written to
-  // indexed-projects.json (the eval's DOC-V2 case) is still visible. Match on
+  // indexed-projects.json (the eval's example-monorepo case) is still visible. Match on
   // canonical root (then name); a daemon match fills a null registry projectId
   // and promotes the entry to `both`. Daemon-only projects are appended as
   // `indexed`. Best-effort: if the daemon is unreachable, fall back to the
@@ -700,7 +700,7 @@ export async function runStatusAll(
     .filter((p) => p.enabled);
 
   // Surface daemon-indexed projects that are absent from indexed-projects.json
-  // (the DOC-V2 case) so status_all reflects what the daemon actually serves,
+  // (the example-monorepo case) so status_all reflects what the daemon actually serves,
   // not a stale/polluted registry. Mirrors runListProjects' daemon
   // cross-reference and the incremental_check synthesized-project fallback.
   // Best-effort: if the daemon is unreachable, fall back to the registry-only

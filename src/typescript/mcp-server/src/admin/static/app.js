@@ -1693,7 +1693,7 @@ const PG_PRESETS = {
   store: [
     { label: 'Scratchpad note', args: { type: 'scratchpad', content: 'playground test note', title: 'test' } },
     { label: 'Library doc', args: { type: 'library', libraryName: 'tokio', title: 'Tokio', content: 'Async runtime for Rust.' } },
-    { label: 'Register project', args: { type: 'project', path: '/home/alkmimm/respositorios/<repo>' } },
+    { label: 'Register project', args: { type: 'project', path: '/home/dev/repos/<repo>' } },
   ],
   scratchpad: [
     { label: 'List', args: { action: 'list' } },

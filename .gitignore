@@ -156,3 +156,6 @@ affected_commits.txt
 
 # Benchmark reports
 reports/
+# Per-user generated MCP client configs (regenerated locally)
+generated/
+src/typescript/mcp-server/reports/

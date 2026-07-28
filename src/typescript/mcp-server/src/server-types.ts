@@ -43,7 +43,7 @@ export interface SessionState {
    * lazily ACTIVATED (registered as a live session → `is_active`) by the tool
    * dispatcher (see `ensureClientProjectActive`). Over HTTP the session
    * bootstrap runs before any tool call and cannot see the client cwd, so the
-   * client's project (DOC-V2, bws-engineer, …) never gets activated at start —
+   * client's project (example-monorepo, example-service, …) never gets activated at start —
    * only the wqm self-repo does. The first tool call carries the cwd, and once
    * we activate its project we cache the cwd here to skip re-resolving on every
    * subsequent call. `null` until a client project is activated. Distinct from

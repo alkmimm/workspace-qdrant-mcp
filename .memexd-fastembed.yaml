@@ -87,7 +87,7 @@ observability:
       headers: {}
 embedding:
   cache_max_entries: 1000
-  model_cache_dir: "C:/Users/alber/Documents/repositorios/workspace-qdrant-mcp/.fastembed_cache"
+  model_cache_dir: "C:/Users/you/dev/workspace-qdrant-mcp/.fastembed_cache"
   provider: fastembed
   model: AllMiniLM-L6-v2
   base_url: ""

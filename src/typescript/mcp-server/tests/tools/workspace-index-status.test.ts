@@ -14,7 +14,7 @@ function makeStatus(projectId: string, overrides: Record<string, unknown> = {}) 
     found: true,
     project_id: projectId,
     project_name: 'workspace-qdrant-mcp',
-    project_root: '/home/alkmimm/respositorios/workspace-qdrant-mcp',
+    project_root: '/home/dev/repos/workspace-qdrant-mcp',
     is_active: true,
     pending_count: 0,
     in_progress_count: 0,
@@ -56,7 +56,7 @@ function makeDetector(projectId: string | null): {
     projectId
       ? {
           projectId,
-          projectPath: '/home/alkmimm/respositorios/workspace-qdrant-mcp',
+          projectPath: '/home/dev/repos/workspace-qdrant-mcp',
           isActive: true,
         }
       : null
@@ -70,12 +70,12 @@ describe('workspace_index status resolution', () => {
     const { detector, getProjectInfo } = makeDetector('367157a01d98');
 
     const result = (await runWithRequestContext(
-      { hostCwd: '/home/alkmimm/respositorios/workspace-qdrant-mcp' },
+      { hostCwd: '/home/dev/repos/workspace-qdrant-mcp' },
       () => handleWorkspaceIndex({ action: 'project_status' }, daemon, detector)
     )) as Record<string, unknown>;
 
     expect(getProjectInfo).toHaveBeenCalledWith(
-      '/home/alkmimm/respositorios/workspace-qdrant-mcp',
+      '/home/dev/repos/workspace-qdrant-mcp',
       false,
       { fallbackToSoleProject: true }
     );
@@ -96,14 +96,14 @@ describe('workspace_index status resolution', () => {
     const result = (await handleWorkspaceIndex(
       {
         action: 'indexing_status',
-        cwd: '/home/alkmimm/respositorios/workspace-qdrant-mcp/src/typescript/mcp-server',
+        cwd: '/home/dev/repos/workspace-qdrant-mcp/src/typescript/mcp-server',
       },
       daemon,
       detector
     )) as Record<string, unknown>;
 
     expect(getProjectInfo).toHaveBeenCalledWith(
-      '/home/alkmimm/respositorios/workspace-qdrant-mcp/src/typescript/mcp-server',
+      '/home/dev/repos/workspace-qdrant-mcp/src/typescript/mcp-server',
       false,
       { fallbackToSoleProject: true }
     );
@@ -127,8 +127,8 @@ describe('workspace_index status resolution', () => {
   it('reports session activity separately from indexing activity', async () => {
     const getProjectStatus = vi.fn().mockResolvedValue(
       makeStatus('9634ef90c02d', {
-        project_name: 'bws-engineer',
-        project_root: '/home/alkmimm/respositorios/bws-engineer',
+        project_name: 'example-service',
+        project_root: '/home/dev/repos/example-service',
         is_active: false,
         pending_count: 596,
         done_count: 2459,
@@ -168,8 +168,8 @@ describe('workspace_index status resolution', () => {
       projects: [
         {
           project_id: '9634ef90c02d',
-          project_name: 'bws-engineer',
-          project_root: '/tmp/no-such-bws-engineer',
+          project_name: 'example-service',
+          project_root: '/tmp/no-such-example-service',
           priority: 'high',
           is_active: false,
         },
@@ -193,14 +193,14 @@ describe('workspace_index status resolution', () => {
     expect(listProjects).toHaveBeenCalledWith({});
     expect(result).toMatchObject({
       success: true,
-      project: 'bws-engineer',
+      project: 'example-service',
       projectId: '9634ef90c02d',
       source: 'indexed',
       branches: [
         {
           name: 'main',
           kind: 'primary',
-          path: '/tmp/no-such-bws-engineer',
+          path: '/tmp/no-such-example-service',
           status: 'inactive',
           watchEnabled: true,
           indexed: true,
@@ -213,8 +213,8 @@ describe('workspace_index status resolution', () => {
       projects: [
         {
           project_id: '9634ef90c02d',
-          project_name: 'bws-engineer',
-          project_root: '/tmp/no-such-bws-engineer',
+          project_name: 'example-service',
+          project_root: '/tmp/no-such-example-service',
           priority: 'high',
           is_active: false,
         },
@@ -239,12 +239,12 @@ describe('workspace_index status resolution', () => {
         projects: [
           {
             name: 'Finance',
-            root: '/home/alkmimm/respositorios/Finance',
+            root: '/home/dev/repos/Finance',
             branches: [
               {
                 name: 'main',
                 kind: 'primary',
-                path: '/home/alkmimm/respositorios/Finance',
+                path: '/home/dev/repos/Finance',
                 status: 'active',
                 createdAt: new Date().toISOString(),
                 lastSeenAt: new Date().toISOString(),
@@ -258,7 +258,7 @@ describe('workspace_index status resolution', () => {
     const result = (await handleWorkspaceIndex(
       {
         action: 'list_branches',
-        cwd: '/tmp/no-such-bws-engineer',
+        cwd: '/tmp/no-such-example-service',
         registryPath,
       },
       daemon
@@ -266,7 +266,7 @@ describe('workspace_index status resolution', () => {
 
     expect(result).toMatchObject({
       success: true,
-      project: 'bws-engineer',
+      project: 'example-service',
       projectId: '9634ef90c02d',
       source: 'indexed',
     });
@@ -296,7 +296,7 @@ describe('workspace_index status resolution', () => {
       projects: [
         {
           project_id: 'daemon-only',
-          project_name: 'bws-engineer',
+          project_name: 'example-service',
           project_root: join(tmpdir(), 'wqm-daemon-only-no-such-repo'),
         },
       ],
@@ -311,7 +311,7 @@ describe('workspace_index status resolution', () => {
     expect(listProjects).toHaveBeenCalledWith({});
     expect(result).toMatchObject({
       success: true,
-      project: 'bws-engineer',
+      project: 'example-service',
       projectId: 'daemon-only',
       branches: [
         expect.objectContaining({

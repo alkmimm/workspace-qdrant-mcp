@@ -146,7 +146,7 @@ fn centrality_generic_threshold(total_definitions: usize) -> usize {
 /// size — a bigger codebase just has MORE names above the line, not a higher line.
 /// Calibrated on three tenants (real-domain peak ~111-113 in-degree everywhere;
 /// generic floor ~118+): floor 50 (small libs), then `total/150` in the mid-range,
-/// capped at 125 so a large monorepo (e.g. DOC-V2 at 40k defs) is not handed an
+/// capped at 125 so a large monorepo (e.g. example-monorepo at 40k defs) is not handed an
 /// over-lenient 270 that lets `isBlank`/`collect`/`assertEquals` survive. Override
 /// with `WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD` (0 disables). (R3)
 fn centrality_usage_threshold(total_definitions: usize) -> usize {

@@ -16,7 +16,7 @@
 //! the 1/N ambiguous fan-out, but a uniquely-yet-wrongly-resolved generic call
 //! can still close a spurious cycle. The tool surfaces *candidates* ranked
 //! cross-file-first; the caller judges. Same-file mutual recursion (the measured
-//! majority — 58/62 on this repo, 46/47 on DOC-V2) is reported but flagged
+//! majority — 58/62 on this repo, 46/47 on example-monorepo) is reported but flagged
 //! `cross_file = false`, so it never buries the rare cross-file smells.
 
 use std::collections::HashMap;
@@ -408,11 +408,11 @@ mod tests {
     // ── Scenarios grounded in real graph data ──────────────────────────
     // Mined from the live graph (weight ≥ 0.6, dependency edges):
     //   workspace-qdrant-mcp: 62 two-cycles — 58 same-file, 4 cross-file
-    //   DOC-V2:               47 two-cycles — 46 same-file, 1 cross-file
+    //   example-monorepo:               47 two-cycles — 46 same-file, 1 cross-file
     //   both: 0 self-loops. The 58:4 ratio makes cross-file-first ordering
     //   load-bearing, and the same-file majority is benign mutual recursion.
 
-    /// Real pattern (DOC-V2): a repository and a service that call each other
+    /// Real pattern (example-monorepo): a repository and a service that call each other
     /// across files — `getResourceViewUrl`(resources_repository.dart) ↔
     /// `getViewUrl`(resources_service.dart). A 2-node cross-file cycle is the
     /// canonical layering smell the detector exists to surface.

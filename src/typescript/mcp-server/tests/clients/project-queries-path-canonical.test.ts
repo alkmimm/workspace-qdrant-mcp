@@ -9,23 +9,23 @@ import { canonicalizeHostPath } from '../../src/clients/project-queries.js';
 
 describe('canonicalizeHostPath', () => {
   it('folds Windows, Docker Desktop, WSL and MSYS forms of drive C to one path', () => {
-    const expected = '/c/Users/alber/repo';
-    expect(canonicalizeHostPath('C:\\Users\\alber\\repo')).toBe(expected);
-    expect(canonicalizeHostPath('C:/Users/alber/repo')).toBe(expected);
-    expect(canonicalizeHostPath('/run/desktop/mnt/host/c/Users/alber/repo')).toBe(expected);
-    expect(canonicalizeHostPath('/mnt/c/Users/alber/repo')).toBe(expected);
-    expect(canonicalizeHostPath('/c/Users/alber/repo')).toBe(expected);
+    const expected = '/c/Users/you/repo';
+    expect(canonicalizeHostPath('C:\\Users\\you\\repo')).toBe(expected);
+    expect(canonicalizeHostPath('C:/Users/you/repo')).toBe(expected);
+    expect(canonicalizeHostPath('/run/desktop/mnt/host/c/Users/you/repo')).toBe(expected);
+    expect(canonicalizeHostPath('/mnt/c/Users/you/repo')).toBe(expected);
+    expect(canonicalizeHostPath('/c/Users/you/repo')).toBe(expected);
   });
 
   it('folds a WSL UNC share (Windows host editing an ext4 repo) to its POSIX root', () => {
-    // The daemon runs inside the distro and stores `/home/alkmimm/...`; a
+    // The daemon runs inside the distro and stores `/home/dev/...`; a
     // Windows-host client reports the `\\wsl.localhost\<distro>\...` UNC view.
-    const expected = '/home/alkmimm/respositorios/DOC-V2';
-    expect(canonicalizeHostPath('\\\\wsl.localhost\\ubuntu-24.04\\home\\alkmimm\\respositorios\\DOC-V2')).toBe(expected);
-    expect(canonicalizeHostPath('//wsl.localhost/ubuntu-24.04/home/alkmimm/respositorios/DOC-V2')).toBe(expected);
+    const expected = '/home/dev/repos/example-monorepo';
+    expect(canonicalizeHostPath('\\\\wsl.localhost\\ubuntu-24.04\\home\\dev\\repos\\example-monorepo')).toBe(expected);
+    expect(canonicalizeHostPath('//wsl.localhost/ubuntu-24.04/home/dev/repos/example-monorepo')).toBe(expected);
     // Legacy `\\wsl$\<distro>\...` form, and case-insensitive share host.
-    expect(canonicalizeHostPath('\\\\wsl$\\Ubuntu-24.04\\home\\alkmimm\\respositorios\\DOC-V2')).toBe(expected);
-    expect(canonicalizeHostPath('//WSL.localhost/ubuntu-24.04/home/alkmimm/respositorios/DOC-V2')).toBe(expected);
+    expect(canonicalizeHostPath('\\\\wsl$\\Ubuntu-24.04\\home\\dev\\repos\\example-monorepo')).toBe(expected);
+    expect(canonicalizeHostPath('//WSL.localhost/ubuntu-24.04/home/dev/repos/example-monorepo')).toBe(expected);
   });
 
   it('does not treat a plain POSIX dir named like the share as a WSL UNC path', () => {
@@ -46,8 +46,8 @@ describe('canonicalizeHostPath', () => {
   });
 
   it('normalizes duplicate and trailing slashes', () => {
-    expect(canonicalizeHostPath('C:\\Users\\\\alber\\repo\\')).toBe('/c/Users/alber/repo');
-    expect(canonicalizeHostPath('/c/Users/alber/repo/')).toBe('/c/Users/alber/repo');
+    expect(canonicalizeHostPath('C:\\Users\\\\you\\repo\\')).toBe('/c/Users/you/repo');
+    expect(canonicalizeHostPath('/c/Users/you/repo/')).toBe('/c/Users/you/repo');
   });
 
   it('handles a bare drive root', () => {

@@ -202,7 +202,7 @@ describe('searchExact — branch "*" wildcard', () => {
         truncated: true,
       });
     // No recorded base branch → the base-branch fallback can't fire; only the
-    // empty-result auto-widen recovers the hit (the bws-engineer symptom).
+    // empty-result auto-widen recovers the hit (the example-service symptom).
     const state = makeStateManager(); // getBaseBranch → null
     const result = await searchExact(
       makeQdrant(),

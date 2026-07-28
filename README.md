@@ -7,9 +7,28 @@
 [![Qdrant](https://img.shields.io/badge/Qdrant-1.7%2B-red.svg)](https://qdrant.tech)
 [![Docker](https://img.shields.io/badge/Docker-container--first-2496ED.svg)](https://www.docker.com/)
 
-Project-scoped vector database for AI assistants, providing hybrid semantic + keyword search with automatic project detection.
+**A local, project-aware memory and code-search layer for AI coding assistants.** It runs as an
+[MCP](https://modelcontextprotocol.io) server that any MCP client — Claude Code, Claude Desktop, Codex, and
+others — connects to, giving the assistant hybrid semantic + keyword search over your indexed repositories, a
+code-relationship graph, and a knowledge base that persists across sessions. Everything runs on your machine;
+with the local embedding options your code never leaves it.
 
-This is [alkmimm](https://github.com/alkmimm)'s personal development fork of
+### Why use it
+
+- **Find code by meaning, not just by string.** Hybrid search (dense embeddings + keyword/BM25, fused with
+  Reciprocal Rank Fusion) answers *"where is auth handled?"* as well as *"grep this identifier"* — faster and
+  more accurate than an assistant reading files blindly.
+- **Understand structure before editing.** The code graph answers *"what calls X?"*, *"what breaks if I change
+  Y?"*, and *"what are the most central symbols?"* from real extracted relationships, not guesses.
+- **Stop re-learning the codebase every session.** The assistant records findings, design rationale, and your
+  standing preferences (`scratchpad` + `rules`) and retrieves them next time — cross-session memory instead of
+  cold starts.
+- **Project-scoped and multi-repo.** Automatic Git-project detection keeps each repository's index isolated;
+  search one project or across all of them.
+- **Local and private.** Container-first, runs entirely on your host — and **no GPU is required** (see
+  [Running without a GPU](#running-without-a-gpu)).
+
+This is a development fork of
 [ChrisGVE/workspace-qdrant-mcp](https://github.com/ChrisGVE/workspace-qdrant-mcp), rewritten with a
 TypeScript MCP server and a Rust daemon/CLI. It's a work in progress with no stability or backward-compatibility
 guarantees — see [CLAUDE.md](CLAUDE.md) for the architecture this fork actually runs today.
@@ -20,7 +39,7 @@ guarantees — see [CLAUDE.md](CLAUDE.md) for the architecture this fork actuall
 - **Project Detection** - Automatic Git repository awareness and project-scoped collections
 - **11 MCP Tools** - search, retrieve, rules, store, scratchpad, grep, list, graph, embedding, search_eval, workspace_index
 - **Code Intelligence** - Tree-sitter semantic chunking + LSP integration for active projects
-- **Code Graph** - Relationship graph with algorithms (PageRank, community detection, betweenness centrality)
+- **Code Graph** - Relationship graph with algorithms (PageRank, community detection, betweenness centrality), dependency-cycle detection, and test-gap analysis (production symbols no test reaches)
 - **High-Performance CLI** - Rust-based `wqm` command-line tool
 - **Background Daemon** - `memexd` for continuous file monitoring and processing
 
@@ -52,6 +71,38 @@ make -f Makefile.win first-time   # Windows / PowerShell
 This builds the `mcp` and `memexd` images, starts the stack, and installs Git hooks. See
 `make help` for the full target list, and [Installation Reference](docs/reference/installation.md) /
 [Windows Installation Guide](docs/reference/windows-installation.md) for platform-specific notes.
+
+### Running without a GPU
+
+A GPU is **optional** — it only speeds up embedding generation. There are two CPU-only paths; pick one in
+`docker/.env` before `make first-time` (or run `make redeploy` after changing it).
+
+**1. Zero-setup — FastEmbed (in-process, simplest).** No embedding service and no separate model server: the
+daemon embeds in-process with `all-MiniLM-L6-v2` (384-dim). Retrieval quality is lower than the
+code-specialized models, but it runs anywhere with no extra moving parts.
+
+```bash
+WQM_EMBEDDING_PROVIDER=fastembed
+WQM_FASTEMBED_CACHE_DIR=./.fastembed_cache
+```
+
+**2. CPU embedding backend (higher quality).** Run a real embedding model on CPU via the compose
+`embeddings-cpu` profile — slower than a GPU but noticeably better retrieval than FastEmbed.
+
+```bash
+WQM_EMBEDDING_PROVIDER=openai_compatible
+OPENAI_API_KEY=local-dev-no-auth   # dummy: the local backend needs a non-empty value, not real auth
+COMPOSE_PROFILES=embeddings-cpu
+```
+
+**With a GPU (optional).** Add the `embeddings-gpu` profile to prefer the GPU with the CPU backend as a warm
+standby: `COMPOSE_PROFILES=embeddings-cpu,embeddings-gpu`. This requires the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) on the Docker
+engine (a working `nvidia-smi` inside WSL is **not** sufficient). Switching CPU↔GPU never requires
+re-indexing — vectors are model-bound, not device-bound.
+
+See [Embeddings deployment guide](docs/deployment/embeddings.md) for the full model/dimension reference and
+how to change the served model.
 
 ### Configure MCP
 
@@ -154,7 +205,7 @@ workspace-qdrant is under active development. If you encounter errors, unexpecte
 | `scratchpad` | List, update, or delete scratchpad entries (analysis, design rationale) |
 | `grep` | Exact substring or regex search using FTS5 |
 | `list` | List project files and folder structure |
-| `graph` | Navigate the code-relationship graph (callers, impact, centrality) |
+| `graph` | Navigate the code-relationship graph (callers, impact, centrality, cycles, test gaps) |
 | `embedding` | Generate vector embeddings for text |
 | `search_eval` | Evaluate search quality (hit@k, recall) against a case set |
 | `workspace_index` | Manage the indexed-project registry and branch sync |

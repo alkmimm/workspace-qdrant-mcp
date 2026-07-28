@@ -91,7 +91,7 @@ pub async fn reconcile_ignore_rules(
     // whenever another branch still holds that content. Diffing a per-PATH
     // "indexed" set against a per-BRANCH remedy therefore cannot converge — the
     // path survives in `tracked_files`, is re-diagnosed stale on the next pass, and
-    // is re-enqueued forever. Measured live on DOC-V2 2026-07-16: 49 reconciles in
+    // is re-enqueued forever. Measured live on example-monorepo 2026-07-16: 49 reconciles in
     // 50 minutes all reporting an identical `5 stale`, each one stripping `main`
     // off a live on-disk file and then filter-deleting its points across every
     // branch (#224). Scoping the diff to the branch we are about to delete from
@@ -445,15 +445,15 @@ mod tests {
     fn walk_eligible_files_excludes_generated_with_realistic_global() {
         // Reproduction of the live finding: with the FULL real global.wqmignore
         // pattern set (re-inclusions + many rules), deep generated/ files under a
-        // DOC-V2-shaped tree must still be excluded by the post-filter.
+        // example-monorepo-shaped tree must still be excluded by the post-filter.
         let global_dir = tempfile::tempdir().unwrap();
         let global_ignore = global_dir.path().join("global.wqmignore");
         fs::write(
             &global_ignore,
-            "**/bws-dev-plataform/testlink/**\n\
-             !**/bws-dev-plataform/testlink/cfg/\n\
-             !**/bws-dev-plataform/testlink/cfg/**\n\
-             **/zabbix/zabbix/**\n\
+            "**/example-platform/legacy_app/**\n\
+             !**/example-platform/legacy_app/cfg/\n\
+             !**/example-platform/legacy_app/cfg/**\n\
+             **/vendor_monitoring/vendor_monitoring/**\n\
              state/\n\
              **/state/qdrant/\n\
              node_modules/\n\

@@ -222,7 +222,7 @@ async fn dead_only_path_is_never_covered() {
     );
 }
 
-/// Regression for the bws-engineer / compress-mcp incident: a project's corpus
+/// Regression for the example-service / example-tool incident: a project's corpus
 /// mislabeled under a non-existent branch must NEVER be deleted. The largest
 /// tracked branch is protected even when absent from git.
 #[tokio::test]

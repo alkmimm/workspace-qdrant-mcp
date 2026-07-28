@@ -139,9 +139,9 @@ model, dimension, and prefixes match.
 gate — the biggest single retrieval win to date, because the prior models
 (e5 / BGE-M3) are general/multilingual and underperform on code. **Trade-off:**
 it is English-centric, but the regression is **cross-lingual-only**. Measured on
-DOC-V2's real Portuguese docs, a Portuguese query against Portuguese docs is
+example-monorepo's real Portuguese docs, a Portuguese query against Portuguese docs is
 **100% recall** — same-language prose is unaffected. The only loss is the niche
-of a **Portuguese query against English code** (query-PT→code on DOC-V2: 16.7%
+of a **Portuguese query against English code** (query-PT→code on example-monorepo: 16.7%
 recall@10 vs **75%** for the same queries in English), which is avoidable by
 querying code in English (the search tool's own guidance). The swap is global
 (one shared dense vector space across all tenants), so it can't be scoped
