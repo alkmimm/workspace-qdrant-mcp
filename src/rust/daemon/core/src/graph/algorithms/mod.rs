@@ -40,27 +40,48 @@ pub(super) struct AdjacencyGraph {
     pub(super) incoming: HashMap<String, Vec<String>>,
 }
 
-/// Path substrings that exclude a node from CENTRALITY (hotspots/bridges/modules)
-/// — NOT from search/grep/relations/impact, which never call this loader. Set via
-/// the `WQM_GRAPH_CENTRALITY_EXCLUDE` env var (comma-separated substrings), e.g.
-/// `old_project/,/test/,Test.java`. A node is excluded when its file_path CONTAINS
-/// any pattern. Without this, legacy/test/util code (`old_project/`, `assertEquals`,
-/// util builders) dominates PageRank/betweenness/community and buries the real,
-/// current hotspots. Empty/unset = no exclusion. Parsed once per process.
-fn centrality_exclude_patterns() -> &'static [String] {
+/// Path patterns that exclude a node from ALL graph analysis — centrality
+/// (hotspots/bridges/modules) AND cycle detection — but NOT search/grep/
+/// relations/impact, which never call this loader. Excluding a legacy/generated
+/// tree (`old_project/`) is a SCOPE decision ("don't analyze this"), so it
+/// applies to cycles too: a cycle living entirely in `old_project/` is noise the
+/// same way it inflates hotspots. (Distinct from the genericity filters, which
+/// are centrality-only precision-for-ranking.)
+///
+/// Set via `WQM_GRAPH_EXCLUDE` (comma-separated), unioned with the legacy
+/// `WQM_GRAPH_CENTRALITY_EXCLUDE` name for back-compat. Persist a default by
+/// putting it in `docker/.env`. Matched by SUBSTRING (see `is_graph_excluded` for
+/// why — curated infix markers like `OuterClass`/`.pb.`/`_pb2`). Empty/unset = no
+/// exclusion. Parsed once per process.
+fn graph_exclude_patterns() -> &'static [String] {
     static PATTERNS: OnceLock<Vec<String>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
-        std::env::var("WQM_GRAPH_CENTRALITY_EXCLUDE")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for name in ["WQM_GRAPH_EXCLUDE", "WQM_GRAPH_CENTRALITY_EXCLUDE"] {
+            for tok in std::env::var(name).unwrap_or_default().split(',') {
+                let t = tok.trim();
+                if !t.is_empty() && seen.insert(t.to_string()) {
+                    out.push(t.to_string());
+                }
+            }
+        }
+        out
     })
 }
 
-/// True if `file_path` matches any centrality-exclude pattern (substring match).
-fn is_centrality_excluded(file_path: &str, patterns: &[String]) -> bool {
+/// True if `file_path` CONTAINS any graph-exclude pattern (substring match).
+///
+/// Deliberately substring, NOT the path-segment matcher `patterns::exclusion::
+/// segment_or_suffix_match` uses (#294). That fix was for AUTO-derived, short,
+/// generic `build_outputs` tokens (`out`) that over-matched unrelated words
+/// (`Route`). This list is user-CURATED and leans on filename-INFIX markers where
+/// substring is exactly what's wanted — the reference config excludes generated
+/// code via `OuterClass` (`*OuterClass.java`), `.pb.` (`*.pb.dart`/`*.pb.go`),
+/// `_pb2` (`*_pb2.py`), which a segment/suffix matcher would silently STOP
+/// excluding. A power user who wants a short token treated as a whole directory
+/// should write it with slashes (`/out/`). Case-sensitive.
+fn is_graph_excluded(file_path: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|p| file_path.contains(p.as_str()))
 }
 
@@ -139,11 +160,13 @@ fn centrality_usage_threshold(total_definitions: usize) -> usize {
 /// Load the full adjacency graph for a tenant from SQLite.
 ///
 /// `apply_genericity_filters` gates the CENTRALITY-only precision filters
-/// (path-exclude env, definition/usage-ubiquity drops, manual skip). Centrality
-/// callers pass `true` (rank only resolved, non-generic nodes); structural
-/// callers like cycle detection pass `false` — a real dependency cycle may pass
-/// through a high-in-degree node, so those filters would hide it. The stub drop
-/// (empty `file_path`) and the `weight >= 0.6` confidence gate always apply.
+/// (definition/usage-ubiquity drops, manual symbol skip). Centrality callers pass
+/// `true` (rank only resolved, non-generic nodes); structural callers like cycle
+/// detection pass `false` — a real dependency cycle may pass through a
+/// high-in-degree node, so those filters would hide it. The stub drop (empty
+/// `file_path`), the `weight >= 0.6` confidence gate, AND the graph-scope
+/// path-exclude (`WQM_GRAPH_EXCLUDE`) always apply — excluding a legacy/generated
+/// tree is a scope decision, so cycles honour it too.
 pub(super) async fn load_adjacency_graph(
     pool: &SqlitePool,
     tenant_id: &str,
@@ -207,7 +230,7 @@ pub(super) async fn load_adjacency_graph(
     }
 
     let mut nodes = HashMap::with_capacity(node_rows.len());
-    let exclude = centrality_exclude_patterns();
+    let exclude = graph_exclude_patterns();
     let mut excluded = 0usize;
     for row in &node_rows {
         let file_path: String = row.get("file_path");
@@ -222,14 +245,12 @@ pub(super) async fn load_adjacency_graph(
         if file_path.is_empty() {
             continue;
         }
-        // Skip nodes on centrality-excluded paths (legacy/test/util noise, via the
-        // WQM_GRAPH_CENTRALITY_EXCLUDE env var). Edges to them auto-drop below (the
-        // same "endpoint absent from `nodes`" logic that drops stub edges), so
-        // out-degrees stay accurate.
-        if apply_genericity_filters
-            && !exclude.is_empty()
-            && is_centrality_excluded(&file_path, exclude)
-        {
+        // Skip nodes on graph-excluded paths (legacy/generated trees, via
+        // WQM_GRAPH_EXCLUDE). UNCONDITIONAL — unlike the genericity filters below,
+        // this applies to cycles too (a cycle inside old_project/ is scope noise).
+        // Edges to them auto-drop (the same "endpoint absent from `nodes`" logic
+        // that drops stub edges), so out-degrees stay accurate.
+        if !exclude.is_empty() && is_graph_excluded(&file_path, exclude) {
             excluded += 1;
             continue;
         }

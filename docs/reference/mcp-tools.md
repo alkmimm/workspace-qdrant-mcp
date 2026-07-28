@@ -91,8 +91,9 @@ Silence a legacy tree that pollutes the ranking (hard exclude):
 
 > **De-rank vs exclude.** `pathExclude` removes matching hits outright, per call.
 > To *demote* a path everywhere WITHOUT passing it each call, the deployment sets
-> `WQM_SEARCH_DERANK` (comma-separated path substrings — same format as
-> `WQM_GRAPH_CENTRALITY_EXCLUDE`, so one value feeds both). A matched hit's ranking
+> `WQM_SEARCH_DERANK` (comma-separated path substrings). (For the graph, the
+> analogous knob is `WQM_GRAPH_EXCLUDE`, which HARD-excludes legacy/generated trees
+> from centrality AND cycles — see the env table.) A matched hit's ranking
 > score is multiplied by `WQM_SEARCH_DERANK_PENALTY` (0–1, default `0.2`) so it sinks
 > below live code but stays findable. Semantic/hybrid `search` only — `grep` and
 > exact search are literal, not ranked. Read per-call; change ⇒ recreate the mcp

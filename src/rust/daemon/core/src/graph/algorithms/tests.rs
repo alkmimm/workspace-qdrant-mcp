@@ -3,20 +3,36 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
 #[test]
-fn centrality_exclude_matches_substrings() {
+fn graph_exclude_matches_by_substring() {
     let patterns = vec![
         "old_project/".to_string(),
-        "/test/".to_string(),
+        "/tests/".to_string(),
         "Test.java".to_string(),
     ];
-    // Prefix, mid-path, and suffix patterns all match via substring.
-    assert!(is_centrality_excluded("src/old_project/legacy.rs", &patterns));
-    assert!(is_centrality_excluded("app/src/test/Helper.kt", &patterns));
-    assert!(is_centrality_excluded("api/UserTest.java", &patterns));
+    // Prefix, mid-path, and suffix path fragments all match via substring.
+    assert!(is_graph_excluded("src/old_project/legacy.rs", &patterns));
+    assert!(is_graph_excluded("app/src/tests/Helper.kt", &patterns));
+    assert!(is_graph_excluded("api/UserTest.java", &patterns));
     // Real, current source is kept.
-    assert!(!is_centrality_excluded("src/core/user.rs", &patterns));
+    assert!(!is_graph_excluded("src/core/user.rs", &patterns));
     // An empty pattern list never excludes.
-    assert!(!is_centrality_excluded("src/old_project/legacy.rs", &[]));
+    assert!(!is_graph_excluded("src/old_project/legacy.rs", &[]));
+
+    // Substring is DELIBERATE (not the #294 segment matcher): the reference config
+    // excludes generated code via filename-INFIX markers a segment/suffix matcher
+    // would silently miss.
+    let generated = vec![
+        "OuterClass".to_string(),
+        ".pb.".to_string(),
+        "_pb2".to_string(),
+        ".g.dart".to_string(),
+    ];
+    assert!(is_graph_excluded("gen/java/UserOuterClass.java", &generated));
+    assert!(is_graph_excluded("lib/api/user.pb.dart", &generated));
+    assert!(is_graph_excluded("proto/user_pb2.py", &generated));
+    assert!(is_graph_excluded("lib/models/user.g.dart", &generated));
+    // Hand-written code with the same base name is NOT generated → kept.
+    assert!(!is_graph_excluded("lib/api/user.dart", &generated));
 }
 
 #[test]
