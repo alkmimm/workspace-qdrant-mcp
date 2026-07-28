@@ -38,6 +38,26 @@ export interface SessionState {
    * explicit cwd is seen. See `resolveStickyCwd` and `handleToolCall`.
    */
   lastHostCwd: string | null;
+  /**
+   * Effective host cwd for which the connecting client's project has been
+   * lazily ACTIVATED (registered as a live session → `is_active`) by the tool
+   * dispatcher (see `ensureClientProjectActive`). Over HTTP the session
+   * bootstrap runs before any tool call and cannot see the client cwd, so the
+   * client's project (DOC-V2, bws-engineer, …) never gets activated at start —
+   * only the wqm self-repo does. The first tool call carries the cwd, and once
+   * we activate its project we cache the cwd here to skip re-resolving on every
+   * subsequent call. `null` until a client project is activated. Distinct from
+   * `lastHostCwd`, which tracks the last cwd seen for tool SCOPING regardless of
+   * whether a project was found.
+   */
+  activatedForCwd: string | null;
+  /**
+   * The cwd for which `ensureClientProjectActive` currently has an activation
+   * in flight, or `null`. In-flight guard so concurrent tool calls in the same
+   * session do not each fire a duplicate register while the first is still
+   * resolving/registering. Cleared in a `finally`.
+   */
+  activatingCwd: string | null;
   /** Canonical watch path returned by daemon (may differ from projectPath due to symlink resolution) */
   watchPath: string | null;
   isWorktree: boolean;

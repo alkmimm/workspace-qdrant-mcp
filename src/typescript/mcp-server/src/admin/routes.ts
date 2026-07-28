@@ -1391,6 +1391,8 @@ function makePlaygroundSession(cwd: string | undefined): SessionState {
     projectId: null,
     projectPath: cwd ?? null,
     lastHostCwd: cwd ?? null,
+    activatedForCwd: null,
+    activatingCwd: null,
     watchPath: null,
     isWorktree: false,
     selfRepoProjectId: null,

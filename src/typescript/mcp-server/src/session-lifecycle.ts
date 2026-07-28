@@ -136,6 +136,115 @@ export function ensureProjectFresh(sessionState: SessionState): void {
   refreshGitState(sessionState);
 }
 
+/**
+ * Lazily activate the CONNECTING CLIENT'S project from its per-tool-call cwd.
+ *
+ * Why this exists: over HTTP the session bootstrap (`initializeSession`) runs
+ * AFTER the transport handshake but with no request context, so `getEffectiveCwd`
+ * falls back to the container's `WQM_PROJECT_ROOT` (the bind-mounted dev-root —
+ * the parent of all repos, which has no project marker). `detectProjectForSession`
+ * therefore resolves nothing, `sessionState.projectId` stays null, and the
+ * heartbeat's `if (sessionState.projectId)` block never runs. The net effect:
+ * only the wqm self-repo (registered explicitly by `ensureSelfRepoRegistered`)
+ * ever becomes `is_active`; a client project like DOC-V2 never does, no matter
+ * how heavily its agent uses the MCP.
+ *
+ * The fix: the FIRST tool call DOES carry the client's cwd (bound into the
+ * request context by `handleToolCall` from the header / body `cwd` / session
+ * sticky cwd). Resolve the project from that cwd — using the SAME
+ * `getProjectInfo` + `fallbackToSoleProject` resolution the read tools scope
+ * with, so `is_active` tracks exactly the tenant the tools hit — and register it
+ * as THIS session's project (`sessionState.projectId`). From there the existing
+ * machinery does the rest for free: the heartbeat loop keeps it alive, and
+ * `cleanup` deprioritizes it on disconnect — both keyed on `sessionState.projectId`.
+ *
+ * Independent of the self-repo path: `ensureSelfRepoRegistered` keeps the wqm
+ * checkout registered under its stable `"self-repo"` session id regardless; this
+ * only populates the CLIENT session's project. If the client happens to be the
+ * wqm checkout, both point at the same tenant (two session rows, count ≥ 1) —
+ * harmless, and the client row is dropped on disconnect while self-repo persists.
+ *
+ * Best-effort and non-blocking: call it fire-and-forget (`void`). It never
+ * throws, short-circuits once the cwd is activated, guards against concurrent
+ * re-entry, and on a mid-session cwd switch deprioritizes the previously-active
+ * client project before activating the new one (no `is_active` leak). `cwd` is
+ * read SYNCHRONOUSLY first so the request-context binding is observed before any
+ * `await` unwinds the AsyncLocalStorage frame.
+ */
+export async function ensureClientProjectActive(
+  sessionState: SessionState,
+  daemonClient: DaemonClient,
+  projectDetector: ProjectDetector
+): Promise<void> {
+  // Read the effective cwd BEFORE any await (still inside the request context).
+  const cwd = getEffectiveCwd();
+  if (!cwd || cwd.length === 0) return;
+  // Nothing to register with, and getProjectInfo alone wouldn't help — a later
+  // call (once the heartbeat recovers `daemonConnected`) retries.
+  if (!sessionState.daemonConnected) return;
+  // Fast path: this cwd's project is already activated for the session.
+  if (sessionState.activatedForCwd === cwd) return;
+  // An activation is already in flight (possibly for another cwd) — let it
+  // settle; a later call re-evaluates the then-current cwd.
+  if (sessionState.activatingCwd !== null) return;
+  // A system dir leaking through (container WORKDIR, C:\WINDOWS, /) is never a
+  // client project — don't even resolve it.
+  if (isSuspiciousCwd(cwd)) return;
+
+  sessionState.activatingCwd = cwd;
+  try {
+    // Same resolution the read tools use (`resolveProjectIdentity`): a
+    // longest-prefix match of the cwd against daemon-registered project paths,
+    // falling back to the sole registered project. Returns null when the cwd
+    // maps to no registered tenant (yet) — then we simply don't activate.
+    const info = await projectDetector.getProjectInfo(cwd, false, {
+      fallbackToSoleProject: true,
+    });
+    if (!info) return; // leave activatedForCwd unset so a later call retries
+
+    // Already this session's active project (e.g. cwd moved to a subdir of the
+    // same repo): just remember the cwd, nothing to register.
+    if (sessionState.projectId === info.projectId) {
+      sessionState.activatedForCwd = cwd;
+      return;
+    }
+
+    // First activation, or a switch to a different client project. On a switch,
+    // tear down the previous project's session row first so its is_active does
+    // not leak — using the same deprioritize the disconnect path uses, while
+    // sessionState still reflects the OLD project's worktree/watch_path.
+    if (sessionState.projectId) {
+      await deprioritizeSessionProject(sessionState, daemonClient, sessionState.projectId);
+    }
+
+    sessionState.projectId = info.projectId;
+    sessionState.projectPath = info.projectPath;
+    // Reset per-project git/worktree state; refreshGitState + registerProject
+    // (via its response) repopulate them for the new project.
+    sessionState.watchPath = null;
+    sessionState.isWorktree = false;
+    refreshGitState(sessionState);
+
+    // Registers the session (register_if_new + priority high → register_session
+    // → is_active). Awaited inside this detached call so it never blocks the
+    // tool; the LSP-startup cost the daemon pays on activation stays off the
+    // tool-call latency path.
+    await registerProject(sessionState, daemonClient);
+    sessionState.activatedForCwd = cwd;
+    logSessionEvent('client_activate', {
+      project_id: sessionState.projectId,
+      project_path: sessionState.projectPath,
+      cwd,
+    });
+  } catch (error) {
+    // Best-effort: a failed activation must never surface on the tool call.
+    // Leave activatedForCwd unset so a later call retries.
+    logDebug('Client project activation skipped', { cwd, error: String(error) });
+  } finally {
+    sessionState.activatingCwd = null;
+  }
+}
+
 export async function initializeSession(
   sessionState: SessionState,
   daemonClient: DaemonClient,
@@ -524,6 +633,41 @@ export async function sendHeartbeat(
 }
 
 /**
+ * Deprioritize one project for THIS session: drop its `project_sessions` row so
+ * the daemon re-projects `is_active` (decrementing when this was the last live
+ * session). Path-scoped for worktree sessions (`watch_path`), tenant-wide
+ * otherwise. Best-effort — never throws.
+ *
+ * Shared by `cleanup` (session teardown) and `ensureClientProjectActive` (mid-
+ * session cwd switch), so a switched-away project is torn down with the exact
+ * same call the disconnect path uses — no `is_active` leak either way. Reads the
+ * worktree/watch_path from `sessionState`, which still reflect the project being
+ * deprioritized at call time (the switch path deprioritizes BEFORE mutating it).
+ */
+async function deprioritizeSessionProject(
+  sessionState: SessionState,
+  daemonClient: DaemonClient,
+  projectId: string
+): Promise<void> {
+  try {
+    const response = await daemonClient.deprioritizeProject({
+      project_id: projectId,
+      ...(sessionState.sessionId ? { session_id: sessionState.sessionId } : {}),
+      ...(sessionState.isWorktree && sessionState.watchPath
+        ? { watch_path: sessionState.watchPath }
+        : {}),
+    });
+    logSessionEvent('deprioritize', {
+      project_id: projectId,
+      is_active: response.is_active,
+      new_priority: response.new_priority,
+    });
+  } catch (error) {
+    logError('Failed to deprioritize project', error, { project_id: projectId });
+  }
+}
+
+/**
  * Clean up session resources: stop health monitor, heartbeat, deprioritize project,
  * close daemon and state manager.
  */
@@ -543,25 +687,7 @@ export async function cleanup(
   }
 
   if (sessionState.projectId && sessionState.daemonConnected) {
-    try {
-      const projectId = sessionState.projectId;
-      const response = await daemonClient.deprioritizeProject({
-        project_id: projectId,
-        ...(sessionState.sessionId ? { session_id: sessionState.sessionId } : {}),
-        ...(sessionState.isWorktree && sessionState.watchPath
-          ? { watch_path: sessionState.watchPath }
-          : {}),
-      });
-      logSessionEvent('deprioritize', {
-        project_id: sessionState.projectId,
-        is_active: response.is_active,
-        new_priority: response.new_priority,
-      });
-    } catch (error) {
-      logError('Failed to deprioritize project', error, {
-        project_id: sessionState.projectId,
-      });
-    }
+    await deprioritizeSessionProject(sessionState, daemonClient, sessionState.projectId);
   }
 
   // Best-effort closes: teardown runs from session cleanup / onclose and must
