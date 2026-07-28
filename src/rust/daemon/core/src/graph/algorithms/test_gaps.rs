@@ -12,15 +12,16 @@
 //! the graph's `weight >= 0.6` ambiguity gate reads as a gap. It complements —
 //! does not replace — real coverage tools, and needs no test run, just the index.
 //!
-//! **Test-detection boundary (a Rust blind spot — follow-up "B").** A node counts
-//! as a test by its FILE PATH (`is_test_file`: `*.test.ts`, `*.spec.ts`,
-//! `*_test.rs`, files under `tests/`). Rust INLINE unit tests (`#[cfg(test)] mod
-//! tests { … }`) live in the SAME production `.rs` file, so their functions are on
-//! a production path and are NOT seeded as tests — the production symbols they
-//! exercise then read as gaps. A Rust-heavy tenant therefore OVER-reports gaps;
-//! TS/JS (separate `.test.ts` files) and integration tests (`tests/` dirs) are
-//! detected correctly. Detecting inline tests needs the extractor to tag
-//! `#[cfg(test)]`/`#[test]` symbols (tracked separately).
+//! **Test detection.** A node counts as a test when its FILE is a test file
+//! (`is_test_file`: `*.test.ts`, `*.spec.ts`, `*_test.rs`, files under `tests/`)
+//! OR the extractor tagged the SYMBOL as an inline test (`is_test_symbol`). The
+//! symbol flag closes the Rust blind spot: `#[cfg(test)] mod tests { … }` and
+//! `#[test]`-family functions live in the SAME production `.rs` file, so a path
+//! check alone would leave the production symbols they exercise reading as gaps.
+//! The extractor tags those symbols (`#[cfg(test)]` modules and `#[test]` /
+//! `#[tokio::test]` / `#[rstest]` / `#[test_case]` attributes) at index time, so
+//! inline unit tests now seed coverage like any other test — a tenant must be
+//! (re)indexed after the schema bump for the flag to populate.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
@@ -103,11 +104,14 @@ pub async fn detect_test_gaps(
     }
 
     // Classify each node once (file-path parsing is not free at graph scale):
-    // node_id → is this a test file?
+    // a node is TEST if its FILE is a test file (`is_test_file`: `*.test.ts`,
+    // `tests/` dirs, …) OR the extractor tagged the SYMBOL as an inline test
+    // (`is_test_symbol`: a Rust `#[cfg(test)]` / `#[test]`-family symbol that
+    // shares a production `.rs` file, which the path check alone cannot see).
     let test_set: HashSet<&str> = graph
         .nodes
         .iter()
-        .filter(|(_, info)| is_test_file(Path::new(&info.file_path)))
+        .filter(|(_, info)| info.is_test_symbol || is_test_file(Path::new(&info.file_path)))
         .map(|(id, _)| id.as_str())
         .collect();
 
@@ -211,6 +215,7 @@ mod tests {
                 symbol_name TEXT NOT NULL, symbol_type TEXT NOT NULL,
                 file_path TEXT NOT NULL, start_line INTEGER, end_line INTEGER,
                 signature TEXT, language TEXT,
+                is_test_symbol INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')",
         )
         .execute(&pool)
@@ -239,6 +244,23 @@ mod tests {
         .bind(T)
         .bind(name)
         .bind(stype)
+        .bind(file_path)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A node tagged `is_test_symbol = 1` on a PRODUCTION file path — a Rust
+    /// inline unit test (`#[cfg(test)]`), which `is_test_file` cannot detect.
+    async fn inline_test_node(pool: &SqlitePool, id: &str, name: &str, file_path: &str) {
+        sqlx::query(
+            "INSERT INTO graph_nodes
+                (node_id, tenant_id, symbol_name, symbol_type, file_path, is_test_symbol)
+             VALUES (?, ?, ?, 'function', ?, 1)",
+        )
+        .bind(id)
+        .bind(T)
+        .bind(name)
         .bind(file_path)
         .execute(pool)
         .await
@@ -294,6 +316,34 @@ mod tests {
         assert_eq!(r.gaps[0].symbol_name, "orphan_q");
         assert_eq!(r.gaps[0].production_dependents, 2);
         assert_eq!(names, vec!["orphan_q", "orphan_p", "orphan_r"]);
+    }
+
+    /// A Rust inline unit test on a PRODUCTION path (`is_test_symbol = 1`, not a
+    /// test file) seeds coverage: the production symbol it calls is covered, not
+    /// a gap, and the inline test itself is never a production candidate. This is
+    /// the follow-up "B" fix — without the symbol flag, `inline_test` would read
+    /// as production and `prod_target` as an untested gap.
+    #[tokio::test]
+    async fn inline_test_symbol_seeds_coverage() {
+        let p = pool().await;
+        // Inline test lives in a production .rs file (not `*_test.rs`, no tests/).
+        inline_test_node(&p, "it", "detects_cycles", "graph/algorithms/cycles.rs").await;
+        // Production symbol the inline test exercises, same production file.
+        node(&p, "pt", "detect_cycles", "function", "graph/algorithms/cycles.rs").await;
+        // An unrelated, genuinely untested production symbol.
+        node(&p, "orph", "orphan", "function", "graph/other.rs").await;
+        edge(&p, "it", "pt").await;
+
+        let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
+
+        // Candidates: detect_cycles + orphan (the inline test is NOT a candidate).
+        assert_eq!(r.total_production, 2, "inline test excluded from candidates");
+        assert_eq!(r.covered, 1, "detect_cycles reached from the inline test");
+        assert_eq!(r.gap_count, 1);
+        let names: Vec<&str> = r.gaps.iter().map(|g| g.symbol_name.as_str()).collect();
+        assert_eq!(names, vec!["orphan"], "only the truly untested symbol is a gap");
+        assert!(!names.contains(&"detect_cycles"), "inline-tested symbol is covered");
+        assert!(!names.contains(&"detects_cycles"), "the inline test itself is not a gap");
     }
 
     /// `top_k` truncates the returned list but not the true `gap_count`.

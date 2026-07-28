@@ -6,6 +6,7 @@
 //! functions, classes, methods, structs, enums, traits, modules, etc.
 
 mod docstring;
+mod test_detection;
 mod walker;
 
 use std::path::Path;
@@ -226,7 +227,8 @@ impl GenericExtractor {
             &self.language_name,
             file_path,
         )
-        .with_calls(calls);
+        .with_calls(calls)
+        .with_test(self.is_rust_test_node(node, source));
 
         if let Some(sig) = signature {
             chunk = chunk.with_signature(sig);
@@ -239,6 +241,14 @@ impl GenericExtractor {
         }
 
         chunk
+    }
+
+    /// Tag Rust inline unit tests (`#[cfg(test)]` modules, `#[test]`-family
+    /// attributes) independent of file path, so the code graph seeds test-gap
+    /// detection from them. Gated on Rust — the attributes and node kinds are
+    /// Rust-specific; every other language is `false` (see `test_detection`).
+    fn is_rust_test_node(&self, node: &Node, source: &str) -> bool {
+        self.language_name == "rust" && test_detection::rust_is_test_node(node, source)
     }
 
     // ── Name extraction ───────────────────────────────────────────────
@@ -441,7 +451,8 @@ impl GenericExtractor {
             end_line,
             &self.language_name,
             file_path,
-        );
+        )
+        .with_test(self.is_rust_test_node(node, source));
 
         if let Some(doc) = docstring {
             chunk = chunk.with_docstring(doc);

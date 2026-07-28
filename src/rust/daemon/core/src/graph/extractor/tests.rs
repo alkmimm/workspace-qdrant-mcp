@@ -275,6 +275,84 @@ fn test_extract_edges_contains() {
 }
 
 #[test]
+fn test_is_test_symbol_propagates_from_semantic_chunk() {
+    // A chunk tagged is_test (Rust inline unit test) → its graph node carries
+    // is_test_symbol; an untagged chunk does not. Stub/File nodes stay false.
+    let test_chunk = SemanticChunk::new(
+        ChunkType::Function,
+        "checks_parse",
+        "fn checks_parse() {}",
+        1,
+        3,
+        "rust",
+        "src/parser.rs",
+    )
+    .with_test(true);
+    let prod_chunk = SemanticChunk::new(
+        ChunkType::Function,
+        "parse",
+        "fn parse() {}",
+        5,
+        7,
+        "rust",
+        "src/parser.rs",
+    );
+
+    let result = extract_edges(&[test_chunk, prod_chunk], "t1", "src/parser.rs");
+
+    let flag = |name: &str| {
+        result
+            .nodes
+            .iter()
+            .find(|n| n.symbol_name == name && !n.file_path.is_empty())
+            .unwrap_or_else(|| panic!("no file-backed node named {name}"))
+            .is_test_symbol
+    };
+    assert!(flag("checks_parse"), "inline-test symbol tagged is_test_symbol");
+    assert!(!flag("parse"), "production symbol not tagged");
+}
+
+#[test]
+fn test_is_test_symbol_propagates_from_text_chunk_metadata() {
+    use crate::TextChunk;
+    use std::collections::HashMap;
+
+    let mk = |name: &str, is_test: bool| {
+        let mut metadata = HashMap::new();
+        metadata.insert("chunk_type".to_string(), "function".to_string());
+        metadata.insert("symbol_name".to_string(), name.to_string());
+        metadata.insert("language".to_string(), "rust".to_string());
+        if is_test {
+            metadata.insert("is_test_symbol".to_string(), "true".to_string());
+        }
+        TextChunk {
+            content: format!("fn {name}() {{}}"),
+            chunk_index: 0,
+            start_char: 0,
+            end_char: 0,
+            metadata,
+        }
+    };
+
+    let result = extract_edges_from_text_chunks(
+        &[mk("checks_parse", true), mk("parse", false)],
+        "t1",
+        "src/parser.rs",
+    );
+
+    let flag = |name: &str| {
+        result
+            .nodes
+            .iter()
+            .find(|n| n.symbol_name == name && !n.file_path.is_empty())
+            .unwrap_or_else(|| panic!("no file-backed node named {name}"))
+            .is_test_symbol
+    };
+    assert!(flag("checks_parse"), "is_test_symbol metadata → node flag");
+    assert!(!flag("parse"), "absent metadata → node not tagged");
+}
+
+#[test]
 fn test_extract_edges_calls() {
     let mut chunk = SemanticChunk::new(
         ChunkType::Function,

@@ -152,9 +152,9 @@ impl GraphStore for SqliteGraphStore {
         let now = now_utc();
         sqlx::query(
             "INSERT INTO graph_nodes (node_id, tenant_id, symbol_name, symbol_type,
-                file_path, start_line, end_line, signature, language,
+                file_path, start_line, end_line, signature, language, is_test_symbol,
                 created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
             ON CONFLICT(node_id) DO UPDATE SET
                 symbol_name = excluded.symbol_name,
                 symbol_type = excluded.symbol_type,
@@ -164,7 +164,13 @@ impl GraphStore for SqliteGraphStore {
                 end_line = COALESCE(excluded.end_line, graph_nodes.end_line),
                 signature = COALESCE(excluded.signature, graph_nodes.signature),
                 language = COALESCE(excluded.language, graph_nodes.language),
-                updated_at = ?10",
+                -- Straight replace (like symbol_type): the symbol's OWN file
+                -- extraction is authoritative and self-healing — reembed and every
+                -- incremental reingest re-assert the current value, so a removed
+                -- `#[cfg(test)]` correctly clears the flag. Inline test fns are
+                -- never call TARGETS, so no weaker foreign upsert competes for them.
+                is_test_symbol = excluded.is_test_symbol,
+                updated_at = ?11",
         )
         .bind(&node.node_id)
         .bind(&node.tenant_id)
@@ -175,6 +181,7 @@ impl GraphStore for SqliteGraphStore {
         .bind(node.end_line.map(|v| v as i64))
         .bind(&node.signature)
         .bind(&node.language)
+        .bind(node.is_test_symbol as i64)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -192,9 +199,9 @@ impl GraphStore for SqliteGraphStore {
         for node in nodes {
             sqlx::query(
                 "INSERT INTO graph_nodes (node_id, tenant_id, symbol_name, symbol_type,
-                    file_path, start_line, end_line, signature, language,
+                    file_path, start_line, end_line, signature, language, is_test_symbol,
                     created_at, updated_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
                 ON CONFLICT(node_id) DO UPDATE SET
                     symbol_name = excluded.symbol_name,
                     symbol_type = excluded.symbol_type,
@@ -204,7 +211,10 @@ impl GraphStore for SqliteGraphStore {
                     end_line = COALESCE(excluded.end_line, graph_nodes.end_line),
                     signature = COALESCE(excluded.signature, graph_nodes.signature),
                     language = COALESCE(excluded.language, graph_nodes.language),
-                    updated_at = ?10",
+                    -- Straight replace: the symbol's own file extraction is
+                    -- authoritative and self-healing (see `upsert_node`).
+                    is_test_symbol = excluded.is_test_symbol,
+                    updated_at = ?11",
             )
             .bind(&node.node_id)
             .bind(&node.tenant_id)
@@ -215,6 +225,7 @@ impl GraphStore for SqliteGraphStore {
             .bind(node.end_line.map(|v| v as i64))
             .bind(&node.signature)
             .bind(&node.language)
+            .bind(node.is_test_symbol as i64)
             .bind(&now)
             .execute(&mut *tx)
             .await?;

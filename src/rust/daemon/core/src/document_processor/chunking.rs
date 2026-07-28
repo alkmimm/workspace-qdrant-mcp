@@ -251,6 +251,22 @@ pub fn convert_semantic_chunks_to_text_chunks(
             metadata.insert("end_line".to_string(), chunk.end_line.to_string());
             metadata.insert("language".to_string(), chunk.language.clone());
 
+            // Rust inline unit test (`#[cfg(test)]` / `#[test]`-family), detected
+            // by the tree-sitter extractor. Two consumers of the same signal:
+            //   1. `is_test_symbol` — read by the graph extractor to tag the
+            //      symbol's graph node, so call-graph test-gap detection seeds
+            //      from inline tests (which share a production `.rs` file).
+            //   2. `is_test` — the PROJECT-collection payload flag used by
+            //      search/grep (`excludeTests`, `is_test:true`). Enrichment sets
+            //      it per FILE (`is_test_file`); OR the symbol-level signal on top
+            //      so an inline test in a production file is also excluded. Only
+            //      ever `true` for Rust, so no other language is affected; a
+            //      non-test chunk keeps the file-level value from enrichment.
+            if chunk.is_test {
+                metadata.insert("is_test_symbol".to_string(), "true".to_string());
+                metadata.insert("is_test".to_string(), "true".to_string());
+            }
+
             // Add fragment info if applicable
             if chunk.is_fragment {
                 metadata.insert("is_fragment".to_string(), "true".to_string());

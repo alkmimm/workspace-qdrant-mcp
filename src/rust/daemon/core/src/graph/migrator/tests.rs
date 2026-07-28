@@ -21,6 +21,7 @@ async fn setup_pool() -> SqlitePool {
             end_line INTEGER,
             signature TEXT,
             language TEXT,
+            is_test_symbol INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT ''
         )",

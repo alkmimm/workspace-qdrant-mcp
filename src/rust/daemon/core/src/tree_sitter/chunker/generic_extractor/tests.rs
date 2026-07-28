@@ -283,6 +283,89 @@ impl Point {
 }
 
 #[test]
+fn test_rust_inline_test_detection() {
+    let Some(lang) = get_language("rust") else {
+        return;
+    };
+    // Production `parse`, a `#[cfg(test)] mod tests` with a non-`#[test]` HELPER
+    // and a `#[test]` fn, plus a top-level `#[test]` fn outside any cfg(test)
+    // module. `#[cfg(test)]` and `#[test]` are preceding-sibling attributes, so
+    // detection walks the tree — not the chunk content, which excludes them.
+    let source = r#"
+/// Production parser — NOT test code.
+fn parse(input: &str) -> usize {
+    input.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A helper with NO #[test] attribute, but inside a #[cfg(test)] module.
+    fn make_input() -> &'static str {
+        "abc"
+    }
+
+    #[test]
+    fn checks_parse() {
+        assert_eq!(parse(make_input()), 3);
+    }
+
+    #[tokio::test]
+    async fn checks_parse_async() {
+        assert_eq!(parse("x"), 1);
+    }
+}
+
+#[test]
+fn top_level_test() {
+    assert_eq!(parse("ab"), 2);
+}
+"#;
+    let extractor = GenericExtractor::new("rust", lang, rust_patterns());
+    let chunks = extractor
+        .extract_chunks(source, &PathBuf::from("src/parser.rs"))
+        .unwrap();
+
+    let is_test = |name: &str| {
+        chunks
+            .iter()
+            .find(|c| c.symbol_name == name)
+            .unwrap_or_else(|| panic!("no chunk named {name}; got {:?}",
+                chunks.iter().map(|c| &c.symbol_name).collect::<Vec<_>>()))
+            .is_test
+    };
+
+    // Production code on a production path: NOT a test.
+    assert!(!is_test("parse"), "production `parse` must not be a test");
+    // Everything inside `#[cfg(test)] mod tests`, incl. the non-#[test] helper.
+    assert!(is_test("tests"), "the #[cfg(test)] module itself is a test");
+    assert!(is_test("make_input"), "helper inside #[cfg(test)] is a test");
+    assert!(is_test("checks_parse"), "#[test] fn is a test");
+    assert!(is_test("checks_parse_async"), "#[tokio::test] fn is a test");
+    // A #[test] fn outside any cfg(test) module, by its own attribute.
+    assert!(is_test("top_level_test"), "top-level #[test] fn is a test");
+}
+
+#[test]
+fn test_non_rust_never_flagged_as_test() {
+    let Some(lang) = get_language("python") else {
+        return;
+    };
+    // A Python function named like a test must NOT be flagged — inline-test
+    // detection is Rust-gated (attributes/cfg(test) are Rust syntax).
+    let source = "def test_something():\n    assert True\n";
+    let extractor = GenericExtractor::new("python", lang, python_patterns());
+    let chunks = extractor
+        .extract_chunks(source, &PathBuf::from("test_mod.py"))
+        .unwrap();
+    assert!(
+        chunks.iter().all(|c| !c.is_test),
+        "non-Rust chunks are never tagged is_test"
+    );
+}
+
+#[test]
 fn test_typescript_exported_function_and_const_chunks() {
     let Some(lang) = get_language("typescript") else {
         return;

@@ -306,7 +306,8 @@ mod tests {
         // Minimal schema: only the columns load_adjacency_graph reads.
         sqlx::query(
             "CREATE TABLE graph_nodes (node_id TEXT PRIMARY KEY, tenant_id TEXT, \
-             symbol_name TEXT, symbol_type TEXT, file_path TEXT)",
+             symbol_name TEXT, symbol_type TEXT, file_path TEXT, \
+             is_test_symbol INTEGER NOT NULL DEFAULT 0)",
         )
         .execute(&pool)
         .await

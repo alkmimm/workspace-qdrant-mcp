@@ -11,7 +11,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 /// Current schema version for graph.db.
-pub const GRAPH_SCHEMA_VERSION: i32 = 4;
+pub const GRAPH_SCHEMA_VERSION: i32 = 5;
 
 /// Default graph database filename.
 pub const GRAPH_DB_FILENAME: &str = "graph.db";
@@ -167,6 +167,7 @@ impl GraphDbManager {
             2 => self.migrate_v2().await,
             3 => self.migrate_v3().await,
             4 => self.migrate_v4().await,
+            5 => self.migrate_v5().await,
             _ => Err(GraphDbError::Migration(format!(
                 "Unknown graph migration version: {}",
                 version
@@ -300,6 +301,24 @@ impl GraphDbManager {
             .await?;
         Ok(())
     }
+
+    /// v5: add `is_test_symbol` to `graph_nodes`. Tags a symbol as TEST code
+    /// independent of file path — a Rust inline unit test (`#[cfg(test)]` module
+    /// or `#[test]`-family attribute) that shares a production `.rs` file. Set at
+    /// (re)extraction time; existing rows default to 0 until the tenant is
+    /// re-indexed. Consumed by `detect_test_gaps`, which seeds the coverage BFS
+    /// from `is_test_file(path) OR is_test_symbol` so inline tests count. SQLite
+    /// `ADD COLUMN` is non-rewriting and idempotent-safe here because the column
+    /// only ever exists once this migration runs on a linear version chain.
+    async fn migrate_v5(&self) -> GraphDbResult<()> {
+        info!("Graph migration v5: adding graph_nodes.is_test_symbol");
+        sqlx::query(
+            "ALTER TABLE graph_nodes ADD COLUMN is_test_symbol INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 impl Clone for GraphDbManager {
@@ -320,7 +339,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db = tmp.path().join("graph.db");
 
-        // `new` opens the DB and runs all pending migrations (v1 → v4).
+        // `new` opens the DB and runs all pending migrations (v1 → v5).
         let mgr = GraphDbManager::new(&db).await.expect("open graph db");
 
         // Schema lands at the latest version.
@@ -329,7 +348,16 @@ mod tests {
             .await
             .expect("read schema version");
         assert_eq!(version, GRAPH_SCHEMA_VERSION);
-        assert_eq!(version, 4, "v4 must be applied");
+        assert_eq!(version, 5, "v5 must be applied");
+
+        // v5 adds the is_test_symbol column to graph_nodes.
+        let has_is_test: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('graph_nodes') WHERE name = 'is_test_symbol'",
+        )
+        .fetch_one(&mgr.pool)
+        .await
+        .expect("query pragma_table_info");
+        assert_eq!(has_is_test, 1, "v5 must add graph_nodes.is_test_symbol");
 
         // The v2 covering index for the metrics aggregate exists.
         let idx_v2: Option<String> = sqlx::query_scalar(

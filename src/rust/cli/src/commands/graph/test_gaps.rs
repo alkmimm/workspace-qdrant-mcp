@@ -68,8 +68,10 @@ pub async fn test_gaps(tenant_id: &str, top_k: Option<u32>, edge_types: Vec<Stri
     );
     println!(
         "Note: coverage = call-graph reachability from test code, NOT execution coverage. \
-         Tests are detected by file path — Rust INLINE #[cfg(test)] unit tests are NOT counted \
-         (they live on production paths), so a Rust-heavy project over-reports gaps."
+         Tests are detected by file path AND by symbol — Rust INLINE #[cfg(test)] / #[test] \
+         unit tests (which share a production file) are counted, so a re-indexed tenant no \
+         longer over-reports gaps. A gap whose only test edge is below the graph's 0.6 \
+         ambiguity gate can still read as untested."
     );
 
     Ok(())

@@ -168,6 +168,13 @@ pub struct GraphNode {
     pub end_line: Option<u32>,
     pub signature: Option<String>,
     pub language: Option<String>,
+    /// True when this symbol is TEST code independent of its file path — a Rust
+    /// inline unit test (`#[cfg(test)]` module or `#[test]`-family attribute).
+    /// Set from the chunk's `is_test` during extraction; lets call-graph
+    /// test-gap detection seed the BFS from inline tests that live in a
+    /// production `.rs` file. Stubs and file nodes are always `false`.
+    #[serde(default)]
+    pub is_test_symbol: bool,
 }
 
 impl GraphNode {
@@ -192,6 +199,7 @@ impl GraphNode {
             end_line: None,
             signature: None,
             language: None,
+            is_test_symbol: false,
         }
     }
 
@@ -215,6 +223,7 @@ impl GraphNode {
             end_line: None,
             signature: None,
             language: None,
+            is_test_symbol: false,
         }
     }
 }

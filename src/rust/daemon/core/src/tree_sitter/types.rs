@@ -112,6 +112,17 @@ pub struct SemanticChunk {
 
     /// Original file path
     pub file_path: String,
+
+    /// Whether this symbol is TEST code independent of its file path — a Rust
+    /// inline unit test: it carries a test attribute (`#[test]`, `#[tokio::test]`
+    /// and other `*::test`, `#[rstest]`, `#[test_case]`) or lives inside a
+    /// `#[cfg(test)]` module. Such symbols share a *production* `.rs` file, so a
+    /// file-path test check (`is_test_file`) misses them; the graph tags its
+    /// nodes with this so call-graph test-gap detection seeds from inline tests.
+    /// Set by the tree-sitter extractor (Rust only); `#[serde(default)]` keeps
+    /// older serialized chunks decodable.
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 impl SemanticChunk {
@@ -141,6 +152,7 @@ impl SemanticChunk {
             total_fragments: None,
             language: language.into(),
             file_path: file_path.into(),
+            is_test: false,
         }
     }
 
@@ -208,6 +220,12 @@ impl SemanticChunk {
     /// Add function calls.
     pub fn with_calls(mut self, calls: Vec<String>) -> Self {
         self.calls = calls;
+        self
+    }
+
+    /// Mark this chunk as test code (Rust inline unit test — see `is_test`).
+    pub fn with_test(mut self, is_test: bool) -> Self {
+        self.is_test = is_test;
         self
     }
 

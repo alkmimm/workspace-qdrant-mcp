@@ -130,7 +130,10 @@ fn split_chunk_with_overlap(chunk: &SemanticChunk, max_chunk_size: usize) -> Vec
             &chunk.language,
             &chunk.file_path,
         )
-        .as_fragment(fragment_index, total_fragments);
+        .as_fragment(fragment_index, total_fragments)
+        // All fragments share ONE graph node_id, so the inline-test flag must be
+        // identical across them — carry it on every fragment, not just the first.
+        .with_test(chunk.is_test);
 
         // Preserve metadata from original chunk
         if let Some(ref parent) = chunk.parent_symbol {
