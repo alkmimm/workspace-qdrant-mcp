@@ -33,15 +33,18 @@ function makeDaemon(
   daemon: DaemonClient;
   getProjectStatus: ReturnType<typeof vi.fn>;
   listProjects: ReturnType<typeof vi.fn>;
+  listFailedItems: ReturnType<typeof vi.fn>;
 } {
   const getProjectStatus = vi.fn().mockResolvedValue(makeStatus(projectId, statusOverrides));
   const listProjects = vi.fn().mockResolvedValue({
     projects: [{ project_id: 'fallback-active' }],
   });
+  const listFailedItems = vi.fn().mockResolvedValue({ items: [], total_failed: 0 });
   return {
-    daemon: { getProjectStatus, listProjects } as unknown as DaemonClient,
+    daemon: { getProjectStatus, listProjects, listFailedItems } as unknown as DaemonClient,
     getProjectStatus,
     listProjects,
+    listFailedItems,
   };
 }
 
@@ -319,6 +322,94 @@ describe('workspace_index status resolution', () => {
         }),
       ],
     });
+  });
+
+  it('surfaces the failing files (path + error + retry) plus a remediation hint', async () => {
+    const { daemon, listFailedItems } = makeDaemon('367157a01d98', {
+      failed_count: 2,
+      done_count: 1931,
+      total_count: 1933,
+    });
+    listFailedItems.mockResolvedValue({
+      items: [
+        {
+          queue_id: 'q1',
+          tenant_id: '367157a01d98',
+          branch: 'main',
+          collection: 'projects',
+          item_type: 'file',
+          op: 'Uplift',
+          file_path: 'src/broken.rs',
+          error_message: 'parse error at line 3',
+          retry_count: 4,
+          last_error_at: '2026-07-28T10:00:00Z',
+          updated_at: '2026-07-28T10:00:00Z',
+        },
+      ],
+      total_failed: 2,
+    });
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'indexing_status', projectId: '367157a01d98' },
+      daemon,
+      undefined
+    )) as Record<string, unknown>;
+
+    expect(listFailedItems).toHaveBeenCalledWith({ tenant_id: '367157a01d98', limit: 25 });
+    expect(result).toMatchObject({
+      success: true,
+      indexing: { failed: 2 },
+      failed_items: [
+        {
+          file_path: 'src/broken.rs',
+          op: 'Uplift',
+          error_message: 'parse error at line 3',
+          retry_count: 4,
+          last_error_at: '2026-07-28T10:00:00Z',
+        },
+      ],
+      // one shown of two → truncation flagged with the true total
+      failed_items_truncated: { shown: 1, total: 2 },
+    });
+    expect(result.remediation).toContain('wqm queue retry');
+    // compact projection — the queue/tenant/collection noise is dropped
+    const items = result.failed_items as Array<Record<string, unknown>>;
+    expect(items[0]).not.toHaveProperty('queue_id');
+    expect(items[0]).not.toHaveProperty('tenant_id');
+  });
+
+  it('omits failed_items and never calls ListFailedItems when nothing failed', async () => {
+    const { daemon, listFailedItems } = makeDaemon('367157a01d98');
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'indexing_status', projectId: '367157a01d98' },
+      daemon,
+      undefined
+    )) as Record<string, unknown>;
+
+    expect(listFailedItems).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('failed_items');
+    expect(result).not.toHaveProperty('remediation');
+  });
+
+  it('keeps the status usable when ListFailedItems itself fails (advisory)', async () => {
+    const { daemon, listFailedItems } = makeDaemon('367157a01d98', {
+      failed_count: 1,
+      done_count: 1932,
+      total_count: 1933,
+    });
+    listFailedItems.mockRejectedValue(new Error('daemon RPC error'));
+
+    const result = (await handleWorkspaceIndex(
+      { action: 'indexing_status', projectId: '367157a01d98' },
+      daemon,
+      undefined
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ success: true, indexing: { failed: 1 } });
+    expect(result).not.toHaveProperty('failed_items');
+    // The remediation lever is still offered even without the detail list.
+    expect(result.remediation).toContain('wqm queue retry');
   });
 
   it('reports inactive watcher with pending indexing as an explicit state', async () => {

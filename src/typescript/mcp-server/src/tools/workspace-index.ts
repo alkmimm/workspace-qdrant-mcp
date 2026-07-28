@@ -434,6 +434,42 @@ async function handleIndexingStatus(
     } = { pending, in_progress: inProgress, failed, done, total, percent, state: indexingState };
     if (eta !== undefined) indexing.eta_seconds = eta;
 
+    // Surface WHICH files failed, not just the count. The count alone ("2 failed")
+    // gave no path or error to act on; the daemon already exposes the detail via
+    // ListFailedItems. Best-effort and bounded — a listing error must never break
+    // the status call, and the sample is capped so a large backlog stays cheap
+    // (total_failed still reports the true count).
+    let failedItems: Array<{
+      file_path: string;
+      op: string;
+      error_message: string;
+      retry_count: number;
+      last_error_at: string;
+    }> = [];
+    let failedItemsTruncated: { shown: number; total: number } | undefined;
+    if (failed > 0) {
+      try {
+        const FAILED_SAMPLE_LIMIT = 25;
+        const resp = await daemonClient.listFailedItems({
+          tenant_id: projectId,
+          limit: FAILED_SAMPLE_LIMIT,
+        });
+        failedItems = (resp.items ?? []).map((it) => ({
+          file_path: it.file_path,
+          op: it.op,
+          error_message: it.error_message,
+          retry_count: it.retry_count,
+          last_error_at: it.last_error_at,
+        }));
+        const trueTotal = resp.total_failed ?? failed;
+        if (trueTotal > failedItems.length) {
+          failedItemsTruncated = { shown: failedItems.length, total: trueTotal };
+        }
+      } catch {
+        // Listing is advisory — keep the count-based status if it fails.
+      }
+    }
+
     return {
       success: true,
       action: actionLabel,
@@ -451,6 +487,14 @@ async function handleIndexingStatus(
       indexing,
       summary,
       ...(statusReason !== undefined ? { status_reason: statusReason } : {}),
+      ...(failedItems.length > 0 ? { failed_items: failedItems } : {}),
+      ...(failedItemsTruncated ? { failed_items_truncated: failedItemsTruncated } : {}),
+      ...(failed > 0
+        ? {
+            remediation:
+              "Retry only the failed items with `wqm queue retry --all` (re-processes the failed queue rows, not a full re-embed); each item's error_message and retry_count tell you why it failed. If they keep failing, force a clean re-ingest via the admin reembed endpoint.",
+          }
+        : {}),
     };
   } catch (err) {
     return {
