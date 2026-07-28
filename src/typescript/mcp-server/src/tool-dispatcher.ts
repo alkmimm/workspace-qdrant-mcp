@@ -26,7 +26,12 @@ import { handleEmbedding } from './tools/embedding.js';
 import { handleWorkspaceIndex } from './tools/workspace-index.js';
 import { handleGraph } from './tools/graph.js';
 import { runSearchEval } from './tools/search-eval.js';
-import { ensureProjectFresh, registerProjectFromTool, sendHeartbeat } from './session-lifecycle.js';
+import {
+  ensureClientProjectActive,
+  ensureProjectFresh,
+  registerProjectFromTool,
+  sendHeartbeat,
+} from './session-lifecycle.js';
 import { withToolMetrics } from './telemetry/metrics.js';
 import mcpPublicConfig from './constants/mcp-public-config.json' with { type: 'json' };
 
@@ -256,6 +261,14 @@ export async function dispatchToolCall(
   // Refresh cached git state (branch + worktree flag) if stale. Cheap inside
   // the TTL window; ~3ms `git` invocation outside it.
   ensureProjectFresh(sessionState);
+
+  // Lazily activate the connecting client's project from THIS call's cwd (bound
+  // into the request context above by handleToolCall). Fire-and-forget: the
+  // resolve/register is off the tool's latency path, and the current call's
+  // scoping already uses the cwd directly. This is what lets a non-wqm client
+  // repo become `is_active` — see ensureClientProjectActive. `cwd` is captured
+  // synchronously inside it, before any await unwinds the request context.
+  void ensureClientProjectActive(sessionState, components.daemonClient, components.projectDetector);
 
   if (!KNOWN_TOOLS.includes(toolName as (typeof KNOWN_TOOLS)[number])) {
     logToolCall(toolName, Date.now() - startTime, false, { error: 'Unknown tool' });

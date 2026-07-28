@@ -172,7 +172,7 @@ export function logToolCall(
  * Log session lifecycle event
  */
 export function logSessionEvent(
-  event: 'start' | 'end' | 'heartbeat' | 'register' | 'deprioritize',
+  event: 'start' | 'end' | 'heartbeat' | 'register' | 'deprioritize' | 'client_activate',
   context?: Record<string, unknown>
 ): void {
   const log = createSessionLogger();
