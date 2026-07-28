@@ -3,31 +3,36 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
 #[test]
-fn graph_exclude_matches_by_segment_not_substring() {
+fn graph_exclude_matches_by_substring() {
     let patterns = vec![
         "old_project/".to_string(),
-        "/test/".to_string(),
+        "/tests/".to_string(),
         "Test.java".to_string(),
-        "build".to_string(),
     ];
-    // Slash-fragment patterns match a consecutive segment run (prefix/mid-path).
+    // Prefix, mid-path, and suffix path fragments all match via substring.
     assert!(is_graph_excluded("src/old_project/legacy.rs", &patterns));
-    assert!(is_graph_excluded("app/src/test/Helper.kt", &patterns));
-    // A filename-suffix pattern matches the final segment's suffix.
+    assert!(is_graph_excluded("app/src/tests/Helper.kt", &patterns));
     assert!(is_graph_excluded("api/UserTest.java", &patterns));
-    // A bare token matches a whole path segment (a `/build/` dir).
-    assert!(is_graph_excluded("app/build/outputs/App.kt", &patterns));
-
     // Real, current source is kept.
     assert!(!is_graph_excluded("src/core/user.rs", &patterns));
-    // #294 lesson: a bare token must NOT match as a raw substring —
-    // `build` must not exclude `rebuilder.rs`, `test` must not hit `attestation`.
-    assert!(!is_graph_excluded("src/rebuilder.rs", &patterns));
-    assert!(!is_graph_excluded("src/attestation/verify.rs", &vec!["test".to_string()]));
-    // A slash-fragment must be a real segment, not a substring of one.
-    assert!(!is_graph_excluded("src/old_project_v2/legacy.rs", &patterns));
     // An empty pattern list never excludes.
     assert!(!is_graph_excluded("src/old_project/legacy.rs", &[]));
+
+    // Substring is DELIBERATE (not the #294 segment matcher): the reference config
+    // excludes generated code via filename-INFIX markers a segment/suffix matcher
+    // would silently miss.
+    let generated = vec![
+        "OuterClass".to_string(),
+        ".pb.".to_string(),
+        "_pb2".to_string(),
+        ".g.dart".to_string(),
+    ];
+    assert!(is_graph_excluded("gen/java/UserOuterClass.java", &generated));
+    assert!(is_graph_excluded("lib/api/user.pb.dart", &generated));
+    assert!(is_graph_excluded("proto/user_pb2.py", &generated));
+    assert!(is_graph_excluded("lib/models/user.g.dart", &generated));
+    // Hand-written code with the same base name is NOT generated → kept.
+    assert!(!is_graph_excluded("lib/api/user.dart", &generated));
 }
 
 #[test]

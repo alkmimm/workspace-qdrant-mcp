@@ -112,7 +112,7 @@ claude mcp list
 | `WQM_SEARCH_RERANK_WEIGHT` | `0.10` | Blend weight 0–1 for the rerank score (1 = pure cross-encoder order) |
 | `WQM_SEARCH_DERANK` | (none) | Comma-separated path SUBSTRINGS to DEMOTE in semantic ranking, e.g. `old_project/,/generated/`. Sinks matches without hiding them |
 | `WQM_SEARCH_DERANK_PENALTY` | `0.2` | Ranking-score multiplier (0–1) applied to a de-ranked path |
-| `WQM_GRAPH_EXCLUDE` | (none) | Path patterns excluded from ALL graph analysis — centrality (PageRank/betweenness/community) AND cycle detection — but not `search`/`grep`/`relations`/`impact`. Matched by path-SEGMENT / filename-suffix (not raw substring): `old_project/` (segment), `Test.java`/`.spec.ts` (suffix), `build` (whole segment). Legacy alias `WQM_GRAPH_CENTRALITY_EXCLUDE` still read and unioned |
+| `WQM_GRAPH_EXCLUDE` | (none) | Path SUBSTRINGS excluded from ALL graph analysis — centrality (PageRank/betweenness/community) AND cycle detection — but not `search`/`grep`/`relations`/`impact`. Curated list; substring lets filename-infix markers exclude generated code (`OuterClass`, `.pb.`, `_pb2`). Legacy alias `WQM_GRAPH_CENTRALITY_EXCLUDE` still read and unioned |
 
 > The full set of daemon/search knobs (embedding provider, RRF weights, path boost, rerank backend URL) is documented in `docker/.env.example`.
 

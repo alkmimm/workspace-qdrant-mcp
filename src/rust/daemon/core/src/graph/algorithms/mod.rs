@@ -50,9 +50,9 @@ pub(super) struct AdjacencyGraph {
 ///
 /// Set via `WQM_GRAPH_EXCLUDE` (comma-separated), unioned with the legacy
 /// `WQM_GRAPH_CENTRALITY_EXCLUDE` name for back-compat. Persist a default by
-/// putting it in `docker/.env`. Matching is PATH-SEGMENT / suffix aware (see
-/// `is_graph_excluded`), not raw substring. Empty/unset = no exclusion. Parsed
-/// once per process.
+/// putting it in `docker/.env`. Matched by SUBSTRING (see `is_graph_excluded` for
+/// why — curated infix markers like `OuterClass`/`.pb.`/`_pb2`). Empty/unset = no
+/// exclusion. Parsed once per process.
 fn graph_exclude_patterns() -> &'static [String] {
     static PATTERNS: OnceLock<Vec<String>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -70,34 +70,19 @@ fn graph_exclude_patterns() -> &'static [String] {
     })
 }
 
-/// True if `file_path` matches any graph-exclude pattern, matched at PATH-SEGMENT
-/// / filename-suffix boundaries rather than as a raw substring — the #294 lesson
-/// (a bare `out` must not exclude `RouteDefinition.java`). Patterns here are
-/// user-typed path fragments, a richer vocabulary than the exclusion engine's
-/// bare `build_outputs` tokens (so `patterns::exclusion::segment_or_suffix_match`
-/// does not fit — this handles slash-fragments and arbitrary filename suffixes):
-///   - contains `/` (`old_project/`, `/test/`, `src/generated/`): the trimmed
-///     segment sequence must appear as CONSECUTIVE path segments.
-///   - a bare filename/suffix with `.` (`Test.java`, `.pb.dart`): the final
-///     segment (the filename) must END WITH it.
-///   - a bare token (`test`, `build`): some path segment must EQUAL it exactly
-///     (so `test` matches a `/test/` dir but never `attestation.rs`).
-/// Case-sensitive, matching the prior behaviour.
+/// True if `file_path` CONTAINS any graph-exclude pattern (substring match).
+///
+/// Deliberately substring, NOT the path-segment matcher `patterns::exclusion::
+/// segment_or_suffix_match` uses (#294). That fix was for AUTO-derived, short,
+/// generic `build_outputs` tokens (`out`) that over-matched unrelated words
+/// (`Route`). This list is user-CURATED and leans on filename-INFIX markers where
+/// substring is exactly what's wanted — the reference config excludes generated
+/// code via `OuterClass` (`*OuterClass.java`), `.pb.` (`*.pb.dart`/`*.pb.go`),
+/// `_pb2` (`*_pb2.py`), which a segment/suffix matcher would silently STOP
+/// excluding. A power user who wants a short token treated as a whole directory
+/// should write it with slashes (`/out/`). Case-sensitive.
 fn is_graph_excluded(file_path: &str, patterns: &[String]) -> bool {
-    let segs: Vec<&str> = file_path.split(|c: char| c == '/' || c == '\\').collect();
-    patterns.iter().any(|p| {
-        if p.contains('/') {
-            let pat: Vec<&str> = p
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .collect();
-            !pat.is_empty() && segs.windows(pat.len()).any(|w| w == pat.as_slice())
-        } else if p.contains('.') {
-            segs.last().is_some_and(|last| last.ends_with(p.as_str()))
-        } else {
-            segs.iter().any(|s| s == p)
-        }
-    })
+    patterns.iter().any(|p| file_path.contains(p.as_str()))
 }
 
 /// OPTIONAL manual override: symbol names to exclude from CENTRALITY regardless of
