@@ -3,20 +3,31 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
 #[test]
-fn centrality_exclude_matches_substrings() {
+fn graph_exclude_matches_by_segment_not_substring() {
     let patterns = vec![
         "old_project/".to_string(),
         "/test/".to_string(),
         "Test.java".to_string(),
+        "build".to_string(),
     ];
-    // Prefix, mid-path, and suffix patterns all match via substring.
-    assert!(is_centrality_excluded("src/old_project/legacy.rs", &patterns));
-    assert!(is_centrality_excluded("app/src/test/Helper.kt", &patterns));
-    assert!(is_centrality_excluded("api/UserTest.java", &patterns));
+    // Slash-fragment patterns match a consecutive segment run (prefix/mid-path).
+    assert!(is_graph_excluded("src/old_project/legacy.rs", &patterns));
+    assert!(is_graph_excluded("app/src/test/Helper.kt", &patterns));
+    // A filename-suffix pattern matches the final segment's suffix.
+    assert!(is_graph_excluded("api/UserTest.java", &patterns));
+    // A bare token matches a whole path segment (a `/build/` dir).
+    assert!(is_graph_excluded("app/build/outputs/App.kt", &patterns));
+
     // Real, current source is kept.
-    assert!(!is_centrality_excluded("src/core/user.rs", &patterns));
+    assert!(!is_graph_excluded("src/core/user.rs", &patterns));
+    // #294 lesson: a bare token must NOT match as a raw substring —
+    // `build` must not exclude `rebuilder.rs`, `test` must not hit `attestation`.
+    assert!(!is_graph_excluded("src/rebuilder.rs", &patterns));
+    assert!(!is_graph_excluded("src/attestation/verify.rs", &vec!["test".to_string()]));
+    // A slash-fragment must be a real segment, not a substring of one.
+    assert!(!is_graph_excluded("src/old_project_v2/legacy.rs", &patterns));
     // An empty pattern list never excludes.
-    assert!(!is_centrality_excluded("src/old_project/legacy.rs", &[]));
+    assert!(!is_graph_excluded("src/old_project/legacy.rs", &[]));
 }
 
 #[test]
