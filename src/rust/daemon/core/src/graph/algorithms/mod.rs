@@ -58,7 +58,8 @@ pub(super) struct AdjacencyGraph {
 /// `WQM_GRAPH_CENTRALITY_EXCLUDE` name for back-compat. Persist a default by
 /// putting it in `docker/.env`. Matched by SUBSTRING (see `is_graph_excluded` for
 /// why — curated infix markers like `OuterClass`/`.pb.`/`_pb2`). Empty/unset = no
-/// exclusion. Parsed once per process.
+/// user-configured exclusion; built-in dependency/VCS exclusions still apply.
+/// Parsed once per process.
 fn graph_exclude_patterns() -> &'static [String] {
     static PATTERNS: OnceLock<Vec<String>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -76,7 +77,20 @@ fn graph_exclude_patterns() -> &'static [String] {
     })
 }
 
-/// True if `file_path` CONTAINS any graph-exclude pattern (substring match).
+/// Dependency/VCS trees that must never influence graph-wide analysis. These
+/// paths are normally rejected before indexing, but the graph database can
+/// retain historical nodes from older indexer versions. Filtering at read time
+/// keeps hotspots/bridges/modules/cycles correct without requiring a wipe.
+const BUILTIN_GRAPH_EXCLUDED_SEGMENTS: &[&str] = &[
+    "/node_modules/",
+    "/site-packages/",
+    "/.venv/",
+    "/venv/",
+    "/.git/",
+];
+
+/// True if `file_path` belongs to a built-in dependency/VCS tree or CONTAINS
+/// any user-configured graph-exclude pattern (substring match).
 ///
 /// Deliberately substring, NOT the path-segment matcher `patterns::exclusion::
 /// segment_or_suffix_match` uses (#294). That fix was for AUTO-derived, short,
@@ -86,9 +100,14 @@ fn graph_exclude_patterns() -> &'static [String] {
 /// code via `OuterClass` (`*OuterClass.java`), `.pb.` (`*.pb.dart`/`*.pb.go`),
 /// `_pb2` (`*_pb2.py`), which a segment/suffix matcher would silently STOP
 /// excluding. A power user who wants a short token treated as a whole directory
-/// should write it with slashes (`/out/`). Case-sensitive.
+/// should write it with slashes (`/out/`). User patterns are case-sensitive;
+/// built-in dependency/VCS segments are normalized across slash styles.
 fn is_graph_excluded(file_path: &str, patterns: &[String]) -> bool {
-    patterns.iter().any(|p| file_path.contains(p.as_str()))
+    let normalized = format!("/{}/", file_path.replace('\\', "/").trim_matches('/'));
+    BUILTIN_GRAPH_EXCLUDED_SEGMENTS
+        .iter()
+        .any(|segment| normalized.contains(segment))
+        || patterns.iter().any(|p| file_path.contains(p.as_str()))
 }
 
 /// OPTIONAL manual override: symbol names to exclude from CENTRALITY regardless of

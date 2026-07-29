@@ -339,12 +339,18 @@ export function runCleanupOrphans(args: BaseArgs, mutate: boolean): unknown {
 // ── Lookup helpers ──────────────────────────────────────────────────────────
 
 function normalizeProject(p: RegistryProject): RegistryProject {
+  const daemonEndpoint = process.env['WQM_DAEMON_ENDPOINT'] ?? process.env['MEMEXD_GRPC_URL'];
   return {
     ...p,
     root: toAbs(p.root),
-    qdrantUrl: p.qdrantUrl ?? DEFAULT_CONFIG.qdrant.url,
+    // Observation probes run inside the MCP process, so runtime env overrides
+    // must win over generated host defaults (`localhost`). In Docker the
+    // reachable service names are typically `qdrant` and `memexd`.
+    qdrantUrl: p.qdrantUrl ?? process.env['QDRANT_URL'] ?? DEFAULT_CONFIG.qdrant.url,
     daemonEndpoint:
-      p.daemonEndpoint ?? `${DEFAULT_CONFIG.daemon.grpcHost}:${DEFAULT_CONFIG.daemon.grpcPort}`,
+      p.daemonEndpoint ??
+      daemonEndpoint ??
+      `${DEFAULT_CONFIG.daemon.grpcHost}:${DEFAULT_CONFIG.daemon.grpcPort}`,
     defaultBranch: p.defaultBranch ?? 'main',
     tenantStrategy: p.tenantStrategy ?? 'project',
     enabled: p.enabled ?? true,
@@ -694,45 +700,7 @@ export async function runStatusAll(
   args: BaseArgs,
   daemonClient: DaemonClient | null | undefined
 ): Promise<unknown> {
-  const registry = readRegistry(args.registryPath);
-  const projects: RegistryProject[] = registry.projects
-    .map(normalizeProjectExport)
-    .filter((p) => p.enabled);
-
-  // Surface daemon-indexed projects that are absent from indexed-projects.json
-  // (the example-monorepo case) so status_all reflects what the daemon actually serves,
-  // not a stale/polluted registry. Mirrors runListProjects' daemon
-  // cross-reference and the incremental_check synthesized-project fallback.
-  // Best-effort: if the daemon is unreachable, fall back to the registry-only
-  // listing (prior behavior).
-  if (daemonClient) {
-    try {
-      const list = await daemonClient.listProjects({});
-      const knownRoots = new Set(projects.map((p) => toAbs(p.root).toLowerCase()));
-      const knownNames = new Set(projects.map((p) => p.name));
-      for (const dp of list.projects ?? []) {
-        const root = toAbs(dp.project_root);
-        if (knownRoots.has(root.toLowerCase()) || knownNames.has(dp.project_name)) continue;
-        // Route through normalizeProject so synthesized daemon-only projects get
-        // the same qdrantUrl / daemonEndpoint defaults as registry projects —
-        // otherwise newObservation's qdrant/daemonTcp probes report "not
-        // configured" for every synthesized project (the 11-of-12 case).
-        projects.push(
-          normalizeProject({
-            name: dp.project_name,
-            projectId: dp.project_id,
-            root,
-            defaultBranch: getCurrentBranch(root) ?? 'main',
-            tenantStrategy: 'project',
-            enabled: true,
-            branches: [],
-          })
-        );
-      }
-    } catch {
-      // Daemon unavailable — registry-only status.
-    }
-  }
+  const projects = await enabledProjectsIncludingDaemon(args.registryPath, daemonClient);
 
   // The unified ingestion queue is daemon-WIDE: GetQueueStats(Empty) has no
   // tenant filter and every project shares the `projects` collection, so a
@@ -760,7 +728,14 @@ export async function runObserveProject(
   daemonClient: DaemonClient | null | undefined
 ): Promise<unknown> {
   const registry = readRegistry(args.registryPath);
-  const project = findProject(registry, args);
+  let project: RegistryProject;
+  try {
+    project = findProject(registry, args);
+  } catch (err) {
+    const synth = daemonClient ? await synthesizeProjectFromDaemon(daemonClient, args) : null;
+    if (!synth) throw err;
+    project = synth;
+  }
   const observation = await newObservation(project, daemonClient);
   const savedTo = saveObservation(args.registryPath, observation);
   return {
@@ -775,8 +750,7 @@ export async function runObserveAll(
   args: BaseArgs,
   daemonClient: DaemonClient | null | undefined
 ): Promise<unknown> {
-  const registry = readRegistry(args.registryPath);
-  const enabled = registry.projects.map(normalizeProjectExport).filter((p) => p.enabled);
+  const enabled = await enabledProjectsIncludingDaemon(args.registryPath, daemonClient);
   const observations = await Promise.all(
     enabled.map(async (p) => {
       const obs = await newObservation(p, daemonClient);
@@ -906,10 +880,16 @@ async function synthesizeProjectFromDaemon(
 ): Promise<RegistryProject | null> {
   const dp = await findDaemonProject(daemonClient, sel);
   if (!dp) return null;
+  return registryProjectFromDaemon(dp);
+}
+
+function registryProjectFromDaemon(
+  dp: Awaited<ReturnType<DaemonClient['listProjects']>>['projects'][number]
+): RegistryProject {
   const root = toAbs(dp.project_root);
   const branchName = getCurrentBranch(root) ?? 'main';
   const now = utcNow();
-  return {
+  return normalizeProject({
     name: dp.project_name,
     projectId: dp.project_id,
     root,
@@ -929,15 +909,54 @@ async function synthesizeProjectFromDaemon(
         note: 'Synthesized from daemon ListProjects.',
       },
     ],
-  };
+  });
+}
+
+/**
+ * Return one consistent project universe for every `*_all` observation action:
+ * enabled registry entries plus daemon-indexed projects missing from the local
+ * registry. The daemon merge is best-effort so registry-only/offline usage
+ * retains its prior behavior.
+ */
+async function enabledProjectsIncludingDaemon(
+  registryPath: string,
+  daemonClient: DaemonClient | null | undefined
+): Promise<RegistryProject[]> {
+  const registry = readRegistry(registryPath);
+  const projects = registry.projects.map(normalizeProjectExport).filter((p) => p.enabled);
+  if (!daemonClient) return projects;
+
+  try {
+    const list = await daemonClient.listProjects({});
+    const knownRoots = new Set(projects.map((p) => toAbs(p.root).toLowerCase()));
+    const knownIds = new Set(
+      projects
+        .map((p) => p.projectId)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0)
+    );
+    const knownNames = new Set(projects.map((p) => p.name));
+    for (const dp of list.projects ?? []) {
+      const root = toAbs(dp.project_root);
+      if (
+        knownRoots.has(root.toLowerCase()) ||
+        knownIds.has(dp.project_id) ||
+        knownNames.has(dp.project_name)
+      ) {
+        continue;
+      }
+      projects.push(registryProjectFromDaemon(dp));
+    }
+  } catch {
+    // Daemon unavailable — registry-only result.
+  }
+  return projects;
 }
 
 export async function runIncrementalCheckAll(
   args: BaseArgs,
   daemonClient: DaemonClient | null | undefined
 ): Promise<unknown> {
-  const registry = readRegistry(args.registryPath);
-  const enabled = registry.projects.map(normalizeProjectExport).filter((p) => p.enabled);
+  const enabled = await enabledProjectsIncludingDaemon(args.registryPath, daemonClient);
   const all: IncrementalBranchResult[] = [];
   for (const project of enabled) {
     all.push(...(await checkBranchesForProject(project, daemonClient, /* includeWatch */ false)));

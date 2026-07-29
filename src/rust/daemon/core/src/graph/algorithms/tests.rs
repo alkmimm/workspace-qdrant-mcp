@@ -36,6 +36,21 @@ fn graph_exclude_matches_by_substring() {
 }
 
 #[test]
+fn graph_exclude_always_drops_dependency_and_vcs_trees() {
+    assert!(is_graph_excluded(
+        "src/typescript/mcp-server/node_modules/prom-client/index.d.ts",
+        &[]
+    ));
+    assert!(is_graph_excluded(
+        r"src\python\.venv\Lib\site-packages\pkg\module.py",
+        &[]
+    ));
+    assert!(is_graph_excluded(".git/objects/pack/file", &[]));
+    assert!(!is_graph_excluded("src/vendor/client.rs", &[]));
+    assert!(!is_graph_excluded("src/node_modules_adapter.ts", &[]));
+}
+
+#[test]
 fn centrality_generic_filter_is_dynamic_not_hardcoded() {
     // There is NO built-in/per-language stoplist — genericity is frequency-derived,
     // so nothing needs curating or updating per language. The env var is an optional
