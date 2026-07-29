@@ -18,6 +18,7 @@ import {
   patternAbsentUnderPathFilterMessage,
   branchNotIndexedMessage,
   caseSensitivityMessage,
+  indexLagCaveat,
 } from '../../src/tools/empty-diagnosis.js';
 import type { DaemonClient } from '../../src/clients/daemon-client.js';
 import type { SqliteStateManager } from '../../src/clients/sqlite-state-manager.js';
@@ -199,8 +200,10 @@ describe('GrepTool — empty-result diagnosis', () => {
 
     expect(res.matches).toHaveLength(0);
     expect(res.message).not.toMatch(/0 files indexed under its own name/i);
-    // Falls back to the generic scope-opt-in hint.
+    // Falls back to the generic scope-opt-in hint — which now also names local
+    // index lag ("verify on disk") as a likelier cause than another repository.
     expect(res.message).toMatch(/scope:"all"/i);
+    expect(res.message).toMatch(/verify on disk/i);
   });
 });
 
@@ -310,5 +313,22 @@ describe('grep empty-diagnosis message helpers', () => {
     expect(msg).toContain('caseSensitive:false');
     // Probe-cap marker parity with the other helpers.
     expect(caseSensitivityMessage({ count: 50 }, 'x')).toContain('50+');
+  });
+
+  it('indexLagCaveat names the concrete backlog when indexing is in flight', () => {
+    const msg = indexLagCaveat({ pending: 5, in_progress: 2 });
+    expect(msg).toMatch(/catching up/i);
+    expect(msg).toContain('5 pending');
+    expect(msg).toContain('2 in progress');
+    expect(msg).toMatch(/verify on disk/i);
+  });
+
+  it('indexLagCaveat gives the generic verify-on-disk caveat when idle or unknown', () => {
+    for (const p of [null, undefined, { pending: 0, in_progress: 0 }]) {
+      const msg = indexLagCaveat(p);
+      expect(msg).toMatch(/recently/i);
+      expect(msg).toMatch(/verify on disk/i);
+      expect(msg).not.toMatch(/catching up/i);
+    }
   });
 });

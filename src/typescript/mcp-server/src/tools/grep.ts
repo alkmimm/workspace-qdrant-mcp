@@ -28,9 +28,14 @@ import {
   resolveFallbackBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
-import { diagnoseEmptyResult, EMPTY_DIAGNOSIS_PROBE_LIMIT } from './empty-diagnosis.js';
+import {
+  diagnoseEmptyResult,
+  EMPTY_DIAGNOSIS_PROBE_LIMIT,
+  indexLagCaveat,
+} from './empty-diagnosis.js';
 import { whitespaceSensitivityHint } from './exact-hints.js';
 import { lookupTestFlags } from './test-flag.js';
+import { fetchIndexingProgress } from './search-helpers.js';
 
 /**
  * Conservative proxy for the size of the files that contain a grep match.
@@ -146,6 +151,16 @@ export interface GrepMatch {
    * "not a test, or unknown" — never false.
    */
   is_test?: boolean;
+  /**
+   * Branch this match is indexed under (the daemon's `file_metadata.branch`).
+   * Populated whenever the daemon reports it; omitted only when it is absent.
+   * Lets a `branch:"*"` sweep tell apart what would otherwise read as duplicate
+   * paths — the same file indexed under two branches (e.g. a feature branch's
+   * snapshot plus the base branch's) shows up as two matches with DIFFERENT
+   * `branch` values (and often different `file_size`). Parity with the
+   * exact-search surface, whose results already carry the matched branch.
+   */
+  branch?: string;
 }
 
 export interface GrepResponse {
@@ -275,6 +290,10 @@ export function mapGrepMatches(matches: TextSearchMatch[]): GrepMatch[] {
     // optional decodes to undefined (coerced to the 0 fallback).
     const fileSize = int64ToNumber(m.file_size);
     if (fileSize > 0) out.file_size = fileSize;
+    // Carry the daemon's branch through so a branch:"*" sweep can tell apart
+    // the same path indexed under different branches (which otherwise reads as
+    // an unexplained duplicate). Skip empty strings — absence means "unknown".
+    if (m.branch) out.branch = m.branch;
     return out;
   });
 }
@@ -290,12 +309,13 @@ function branchWideningMessage(branch: string): string {
   );
 }
 
-function grepScopeOptInHint(pattern: string): string {
+function grepScopeOptInHint(pattern: string, staleness: string): string {
   return (
-    `No matches for "${pattern}" in the current project. It may live in another indexed ` +
-    'repository — pass scope:"all" to search across every repository (opt-in; this crosses ' +
-    'project boundaries). For a concept rather than a literal, use the `search` tool (semantic); ' +
-    'otherwise broaden the pattern or drop any pathGlob filter.'
+    `No matches for "${pattern}" in the current project — the pattern may be genuinely absent. ` +
+    `${staleness} If it is truly absent here, it may live in another indexed repository — pass ` +
+    'scope:"all" to search across every repository (opt-in; this crosses project boundaries). ' +
+    'For a concept rather than a literal, use the `search` tool (semantic); otherwise broaden ' +
+    'the pattern or drop any pathGlob filter.'
   );
 }
 
@@ -606,7 +626,16 @@ export class GrepTool {
         if (diagnosis) {
           message = diagnosis;
         } else {
-          message = tenantId ? grepScopeOptInHint(pattern) : grepEmptyRecoveryHint(pattern);
+          if (tenantId) {
+            // A project-scoped miss is far more often local index lag (the daemon
+            // trailing recent commits) than the pattern living in another repo, so
+            // probe the queue and lead the hint with that instead of scope:"all"
+            // (field feedback 2026-07-28; wording shared via indexLagCaveat).
+            const progress = await fetchIndexingProgress(this.daemonClient, tenantId);
+            message = grepScopeOptInHint(pattern, indexLagCaveat(progress));
+          } else {
+            message = grepEmptyRecoveryHint(pattern);
+          }
           // A literal multi-token miss is often just a spacing / type-annotation
           // mismatch, not a true absence — nudge toward a whitespace-tolerant regex.
           if (!regex) {
