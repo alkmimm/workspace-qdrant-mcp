@@ -37,16 +37,38 @@ export function matchesGlob(value: string, glob: string): boolean {
 }
 
 /**
+ * Expand a wildcard-free path literal into the globs that let it scope to a
+ * DIRECTORY, not just an equally-named file. `matchesGlob('**\/tool-builders')`
+ * only matches a path ENDING in `tool-builders`, so a bare directory literal
+ * (`integrator-events`, `tool-builders/`) matched nothing — the field-reported
+ * `pathGlob` friction, and the same end-anchoring gap the daemon's
+ * `normalize_path_glob` closes. A trailing slash is unambiguously a directory
+ * (subtree only); an un-suffixed literal may be a file OR a directory, so it
+ * matches the exact path OR its subtree. Patterns that already carry a wildcard
+ * (`* ? [ {`) keep their exact meaning.
+ */
+function directoryAwareGlobs(glob: string): string[] {
+  if (/[*?[{]/.test(glob)) return [glob];
+  const dir = glob.replace(/\/+$/, '');
+  if (dir.length === 0) return [glob];
+  return glob.endsWith('/') ? [`${dir}/**`] : [glob, `${glob}/**`];
+}
+
+/**
  * Floating glob match: matches the glob at the repo root AND at any nested
  * depth. `matchesGlob` anchors both ends, so a bare `old_project/**` would only
  * hit the root copy; also testing `**\/<glob>` lets a nested `pkg/old_project/x`
  * match too. Absolute paths (the metadata `file_path`) match via the same
  * floated form. Patterns already floating (`**\/…`) stay correct — the extra
- * prefix is a no-op there. Single source of truth for both the exclude and
- * include matchers so their semantics can never drift apart.
+ * prefix is a no-op there. A wildcard-free literal is additionally expanded via
+ * {@link directoryAwareGlobs} so it scopes to a directory subtree, mirroring the
+ * daemon-side `normalize_path_glob`. Single source of truth for both the exclude
+ * and include matchers so their semantics can never drift apart.
  */
 function matchesFloatingGlob(value: string, glob: string): boolean {
-  return matchesGlob(value, glob) || matchesGlob(value, `**/${glob}`);
+  return directoryAwareGlobs(glob).some(
+    (g) => matchesGlob(value, g) || matchesGlob(value, `**/${g}`)
+  );
 }
 
 /**

@@ -77,6 +77,50 @@ describe('matchesPathInclude (semantic pathGlob — floats, parity with exclude)
   });
 });
 
+describe('directory-shaped literal (bare name / trailing slash) scopes to the subtree', () => {
+  it('a bare directory name matches files UNDER it (the field-reported friction)', () => {
+    // Previously `**/tool-builders` end-anchored, so a bare directory matched nothing.
+    expect(matchesPathInclude('src/typescript/tool-builders/search.ts', 'tool-builders')).toBe(
+      true
+    );
+    expect(
+      matchesPathInclude('/home/u/repo/src/tool-builders/search.ts', 'tool-builders')
+    ).toBe(true);
+  });
+
+  it('a bare literal still matches an exact file of that name (file OR subtree)', () => {
+    expect(matchesPathInclude('scripts/tool-builders', 'tool-builders')).toBe(true);
+  });
+
+  it('does not over-match a sibling directory', () => {
+    expect(matchesPathInclude('src/typescript/other/search.ts', 'tool-builders')).toBe(false);
+  });
+
+  it('a trailing slash is directory-only (subtree yes, same-named file no)', () => {
+    expect(matchesPathInclude('src/tool-builders/x.ts', 'tool-builders/')).toBe(true);
+    expect(matchesPathInclude('scripts/tool-builders', 'tool-builders/')).toBe(false);
+  });
+
+  it('a multi-segment literal scopes to its subtree at the root AND nested', () => {
+    expect(matchesPathInclude('src/tools/x.ts', 'src/tools')).toBe(true);
+    expect(matchesPathInclude('pkg/src/tools/x.ts', 'src/tools')).toBe(true);
+    expect(matchesPathInclude('src/toolsX/x.ts', 'src/tools')).toBe(false);
+  });
+
+  it('exclude gets the same directory scoping (shared matcher)', () => {
+    expect(matchesPathExclude('a/node_modules/react/index.js', 'node_modules')).toBe(true);
+    expect(matchesPathExclude('node_modules/react/index.js', 'node_modules')).toBe(true);
+    expect(matchesPathExclude('src/node_modules_shim.ts', 'node_modules')).toBe(false);
+  });
+
+  it('regression: a wildcard form keeps its exact meaning (no subtree widening)', () => {
+    // `tool-builders/**` is an explicit subtree glob — it must NOT match a bare
+    // same-named file, unlike the wildcard-free literal above.
+    expect(matchesPathInclude('src/tool-builders/x.ts', 'tool-builders/**')).toBe(true);
+    expect(matchesPathInclude('scripts/tool-builders', 'tool-builders/**')).toBe(false);
+  });
+});
+
 describe('filterResultsByPathExclude', () => {
   it('drops matching results and keeps the rest', () => {
     const results = [
