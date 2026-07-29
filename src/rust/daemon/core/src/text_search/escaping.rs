@@ -125,11 +125,32 @@ pub(crate) fn compile_glob_matcher(
 /// prefix (`doc-backend/domain/`) used to become a `file_path LIKE 'doc-backend/domain/%'`
 /// condition that matched nothing against absolute paths. After prefixing with
 /// `**/`, `extract_glob_prefix` returns `None`, so no bogus SQL prefix is applied.
+///
+/// A wildcard-free literal (`integrator-events`, `src/tools`, `tool-builders/`)
+/// is a PATH the caller wants to scope to — a directory far more often than an
+/// exact file. Anchored as `**/<lit>` it can only match a path ENDING in `<lit>`
+/// (a file of that name), so a bare directory name silently matched nothing —
+/// the exact field-reported `pathGlob` friction. Such a literal is expanded to
+/// match the exact path OR its whole subtree: a trailing slash is unambiguously
+/// a directory (`<lit>/**`); otherwise a brace form (`**/<lit>{,/**}`) that
+/// [`compile_glob_matcher`] ORs and [`extract_glob_prefix`] still collapses to
+/// no SQL prefix. Patterns that already carry a wildcard keep their exact meaning.
 pub(crate) fn normalize_path_glob(glob: &str) -> String {
+    // Absolute or already-floating patterns: the caller was explicit — leave as-is.
     if glob.starts_with('/') || glob.starts_with("**") {
-        glob.to_string()
-    } else {
-        format!("**/{glob}")
+        return glob.to_string();
+    }
+    // A relative pattern that carries a wildcard is anchored to any directory
+    // boundary with a leading `**/` (unchanged behavior).
+    let has_wildcard =
+        glob.contains('*') || glob.contains('?') || glob.contains('[') || glob.contains('{');
+    if has_wildcard {
+        return format!("**/{glob}");
+    }
+    // Wildcard-free literal → match the exact path OR its subtree at any depth.
+    match glob.strip_suffix('/') {
+        Some(dir) => format!("**/{dir}/**"),
+        None => format!("**/{glob}{{,/**}}"),
     }
 }
 
@@ -224,13 +245,63 @@ mod tests {
 
     #[test]
     fn test_normalize_path_glob_relative_gets_anchored() {
-        // Relative patterns (literal first segment) get a `**/` prefix.
+        // Relative patterns WITH a wildcard get a plain `**/` prefix.
         assert_eq!(
             normalize_path_glob("doc-backend/domain/**/*.java"),
             "**/doc-backend/domain/**/*.java"
         );
-        assert_eq!(normalize_path_glob("src/main.rs"), "**/src/main.rs");
         assert_eq!(normalize_path_glob("dir/**"), "**/dir/**");
+    }
+
+    #[test]
+    fn test_normalize_path_glob_directory_literal_matches_subtree() {
+        // A wildcard-free literal expands to match the exact path OR its subtree,
+        // so a bare directory name is no longer end-anchored to nothing.
+        assert_eq!(
+            normalize_path_glob("integrator-events"),
+            "**/integrator-events{,/**}"
+        );
+        assert_eq!(normalize_path_glob("src/main.rs"), "**/src/main.rs{,/**}");
+        assert_eq!(normalize_path_glob("src/tools"), "**/src/tools{,/**}");
+        // A trailing slash is unambiguously a directory → subtree only.
+        assert_eq!(normalize_path_glob("tool-builders/"), "**/tool-builders/**");
+    }
+
+    #[test]
+    fn test_directory_literal_glob_matches_files_under_it() {
+        // Regression for the field-reported friction: a bare directory `pathGlob`
+        // must match the files UNDER it (absolute paths), not just a same-named file.
+        let under = "/home/u/repo/src/typescript/tool-builders/search.ts";
+        let exact_file = "/home/u/repo/scripts/tool-builders";
+        let unrelated = "/home/u/repo/src/typescript/other/search.ts";
+
+        // Un-normalized bare literal used to match nothing under the directory.
+        let raw = compile_glob_matcher("tool-builders").unwrap();
+        assert!(!raw(under), "un-normalized bare literal should not match subtree");
+
+        let bare = compile_glob_matcher(&normalize_path_glob("tool-builders")).unwrap();
+        assert!(bare(under), "normalized literal matches files under the directory");
+        assert!(bare(exact_file), "normalized literal still matches an exact file of that name");
+        assert!(!bare(unrelated), "and does not over-match a sibling directory");
+
+        // Trailing slash: subtree only (a file literally named `tool-builders` is a dir miss).
+        let dir = compile_glob_matcher(&normalize_path_glob("tool-builders/")).unwrap();
+        assert!(dir(under), "trailing-slash directory matches its subtree");
+        assert!(!dir(exact_file), "trailing-slash form does not match a same-named file");
+    }
+
+    #[test]
+    fn test_directory_literal_glob_has_no_sql_prefix() {
+        // The brace/subtree forms must not yield a bogus absolute SQL prefix
+        // (they start with `**`, so `extract_glob_prefix` returns None).
+        assert_eq!(
+            extract_glob_prefix(&normalize_path_glob("integrator-events")),
+            None
+        );
+        assert_eq!(
+            extract_glob_prefix(&normalize_path_glob("tool-builders/")),
+            None
+        );
     }
 
     #[test]
