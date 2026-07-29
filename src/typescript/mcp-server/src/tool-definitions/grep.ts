@@ -10,7 +10,7 @@ export const grepToolDefinition = {
     openWorldHint: false,
   },
   description:
-    'Exact substring or regex search over the FTS5 trigram index the daemon builds across the whole indexed project — branch-aware and covering files you have not opened, complementing a native working-tree grep. Use it for a known literal: identifier, import path, env var, or error string. Matches from test-classified files carry is_test:true (project scope). For concept/meaning queries use the search tool; for caller/impact relationships use the graph tool.',
+    'Exact substring or regex search over the FTS5 trigram index the daemon builds across the whole indexed project — branch-aware and covering files you have not opened, complementing a native working-tree grep. Use it for a known literal: identifier, import path, env var, or error string. Matches from test-classified files carry is_test:true (project scope), and each match reports the branch it is indexed under, so a branch:"*" sweep can tell apart the same path indexed under different branches. For concept/meaning queries use the search tool; for caller/impact relationships use the graph tool.',
   inputSchema: {
     type: 'object' as const,
     properties: {

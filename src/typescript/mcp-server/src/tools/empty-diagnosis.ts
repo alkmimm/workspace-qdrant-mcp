@@ -137,9 +137,7 @@ export function caseSensitivityMessage(probe: CaseProbeResult, retryHint: string
     sampleLine.length > CASE_SAMPLE_MAX_CHARS
       ? `${sampleLine.slice(0, CASE_SAMPLE_MAX_CHARS)}…`
       : sampleLine;
-  const example = probe.sample
-    ? ` — e.g. \`${truncatedSample}\` in ${probe.sample.file}`
-    : '';
+  const example = probe.sample ? ` — e.g. \`${truncatedSample}\` in ${probe.sample.file}` : '';
   return (
     `No case-sensitive matches, but ${withCapMarker(probe.count)} case-INSENSITIVE match(es) ` +
     `exist (any branch)${example}. CamelCase hides identifiers inside wrappers ` +
@@ -165,6 +163,41 @@ export function branchNotIndexedMessage(branch: string, indexedBranches: string[
     'not-yet-indexed branch — or its files are still tagged under the branch they were last ' +
     'modified on). The pattern was also not found on any other indexed branch. Indexed branches ' +
     `for this project: ${list}. If this branch was just created, let the daemon index it and retry.`
+  );
+}
+
+/**
+ * Index-lag caveat for an empty project-scoped FTS result, shared by grep and
+ * exact search. A literal miss is NOT proof of absence when the daemon's index
+ * trails recent commits: a file created or modified moments ago has not been
+ * ingested yet, so the FTS index legitimately cannot see it. Field feedback
+ * (2026-07-28): a grep for a symbol added in same-day commits returned 0 and the
+ * hint sent the caller cross-repository (`scope:"all"`) instead of naming the far
+ * more likely local cause — the index being a few commits behind.
+ *
+ * When `progress` shows in-flight work we state the concrete backlog (a firm
+ * signal the index is mid-catch-up); otherwise we give the generic "verify on
+ * disk" caveat. `pending` can be 0 while a brand-new file is still invisible
+ * because the watcher has not enqueued it yet, so a drained queue does NOT prove
+ * the index is current for a just-touched file — the caveat holds either way,
+ * only its confidence changes. Structurally typed so any `IndexingProgress`
+ * (or `null` when the probe could not run) is accepted without a hard dependency.
+ */
+export function indexLagCaveat(
+  progress: { pending: number; in_progress: number } | null | undefined
+): string {
+  const inFlight = progress ? progress.pending + progress.in_progress : 0;
+  if (progress && inFlight > 0) {
+    return (
+      `The index is still catching up (${progress.pending} pending, ` +
+      `${progress.in_progress} in progress) — a file created or changed moments ago may not ` +
+      'be searchable yet, so this zero does NOT prove the pattern is absent; verify on disk, ' +
+      'or retry once indexing settles.'
+    );
+  }
+  return (
+    'If a matching file was created or changed very recently, the index may not have caught ' +
+    'up yet — this zero would then be index lag, not true absence, so verify on disk.'
   );
 }
 

@@ -15,7 +15,7 @@ import type {
   SearchScope,
 } from './search-types.js';
 import { PROJECTS_COLLECTION } from './search-types.js';
-import { attachIndexingProgress } from './search-helpers.js';
+import { attachIndexingProgress, fetchIndexingProgress } from './search-helpers.js';
 import { buildFilter } from './search-filters.js';
 import { filterResultsByPathExclude } from './search-path-filters.js';
 import { FIELD_CONTENT, FIELD_TITLE } from '../common/native-bridge.js';
@@ -26,7 +26,11 @@ import {
   resolveFallbackBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
-import { diagnoseEmptyResult, EMPTY_DIAGNOSIS_PROBE_LIMIT } from './empty-diagnosis.js';
+import {
+  diagnoseEmptyResult,
+  EMPTY_DIAGNOSIS_PROBE_LIMIT,
+  indexLagCaveat,
+} from './empty-diagnosis.js';
 import { whitespaceSensitivityHint } from './exact-hints.js';
 import { lookupTestFlags } from './test-flag.js';
 
@@ -542,8 +546,11 @@ async function executeAndLogSearch(
       successResponse.hint = diagnosis;
     } else if (dedupedResults.length === 0 && tenantId) {
       // Project-scoped miss. Do NOT auto-search other repos (that would cross the
-      // tenant data boundary silently); offer the explicit opt-in instead.
-      successResponse.hint = `No exact matches for "${options.query}" in the current project. It may live in another indexed repository — pass scope:"all" to search across every repository (opt-in; this crosses project boundaries). For a concept rather than a literal, use the search tool (semantic).`;
+      // tenant data boundary silently). Lead with the far more likely local cause
+      // — the index trailing recent commits — before offering the cross-repo
+      // opt-in (field feedback 2026-07-28; wording shared with grep via indexLagCaveat).
+      const progress = await fetchIndexingProgress(daemonClient, tenantId);
+      successResponse.hint = `No exact matches for "${options.query}" in the current project — the literal may be genuinely absent. ${indexLagCaveat(progress)} If it is truly absent here, it may live in another indexed repository — pass scope:"all" to search across every repository (opt-in; this crosses project boundaries). For a concept rather than a literal, use the search tool (semantic).`;
     } else if (dedupedResults.length === 0) {
       successResponse.hint = `No exact matches for "${options.query}" in any indexed project. If you are looking for a concept rather than a literal string, use the search tool (semantic); otherwise broaden it or drop filters. Retrying the same query verbatim returns the same empty result.`;
     }

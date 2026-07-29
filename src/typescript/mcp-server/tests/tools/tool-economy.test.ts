@@ -80,9 +80,7 @@ describe('computeGrepEconomy', () => {
   it('falls back to bytesOut when summed-content exceeds the file proxy', () => {
     // One match in one file but with an enormous content. bytesIn must
     // never report less than what we actually shipped out.
-    const matches: GrepMatch[] = [
-      grepMatch({ file: 'a.ts', content: 'q'.repeat(20_000) }),
-    ];
+    const matches: GrepMatch[] = [grepMatch({ file: 'a.ts', content: 'q'.repeat(20_000) })];
     const { bytesIn, bytesOut } = computeGrepEconomy(matches);
     expect(bytesOut).toBe(20_000);
     expect(bytesIn).toBeGreaterThanOrEqual(bytesOut);
@@ -93,9 +91,7 @@ describe('computeGrepEconomy', () => {
       // 12 KiB file — bigger than the 8 KiB proxy, smaller than two
       // proxies. The result must match the reported size, proving the
       // proxy was bypassed.
-      const matches: GrepMatch[] = [
-        grepMatch({ file: 'a.ts', content: 'x', file_size: 12_000 }),
-      ];
+      const matches: GrepMatch[] = [grepMatch({ file: 'a.ts', content: 'x', file_size: 12_000 })];
       const { bytesIn } = computeGrepEconomy(matches);
       expect(bytesIn).toBe(12_000);
     });
@@ -114,9 +110,7 @@ describe('computeGrepEconomy', () => {
     it('treats file_size === 0 as missing and falls back to the proxy', () => {
       // Proto3 defaults unset non-optional int64 to 0 — we must not
       // treat that as "this file is empty".
-      const matches: GrepMatch[] = [
-        grepMatch({ file: 'a.ts', content: 'x', file_size: 0 }),
-      ];
+      const matches: GrepMatch[] = [grepMatch({ file: 'a.ts', content: 'x', file_size: 0 })];
       const { bytesIn } = computeGrepEconomy(matches);
       expect(bytesIn).toBe(GREP_BYTES_IN_PER_FILE_PROXY);
     });
@@ -188,6 +182,43 @@ describe('mapGrepMatches int64 coercion (proto-loader longs:String)', () => {
     ];
     const { bytesIn } = computeGrepEconomy(mapGrepMatches(raw));
     expect(bytesIn).toBe(4096 + 8192 + 16384);
+  });
+});
+
+describe('mapGrepMatches branch passthrough', () => {
+  it('carries the daemon branch through to the match', () => {
+    const [out] = mapGrepMatches([textSearchMatch({ branch: 'feature/x' })]);
+    expect(out.branch).toBe('feature/x');
+  });
+
+  it('omits branch when the daemon did not report one (or it is empty)', () => {
+    const mapped = mapGrepMatches([
+      textSearchMatch({ branch: undefined }),
+      textSearchMatch({ branch: '' }),
+    ]);
+    for (const m of mapped) expect(m.branch).toBeUndefined();
+  });
+
+  it('surfaces distinct branches for the same path (the branch:"*" disambiguation)', () => {
+    // The field-reported confusion: branch:"*" returned the same path twice with
+    // different file_size (two branch snapshots) but no branch to tell them apart.
+    const mapped = mapGrepMatches([
+      textSearchMatch({
+        file_path: 'src/a.ts',
+        line_number: 4,
+        content: 'a',
+        branch: 'main',
+        file_size: '8900',
+      }),
+      textSearchMatch({
+        file_path: 'src/a.ts',
+        line_number: 4,
+        content: 'a',
+        branch: 'feature/x',
+        file_size: '7804',
+      }),
+    ]);
+    expect(mapped.map((m) => m.branch)).toEqual(['main', 'feature/x']);
   });
 });
 
