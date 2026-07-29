@@ -169,25 +169,59 @@ const FILE_TYPE_EXTENSIONS: Record<string, string[]> = {
 };
 
 /**
- * Append a floated `NOT GLOB` exclusion for `excludeGlob` on `column`, mirroring
- * the include-glob float below: it drops the pattern at the repo root AND at any
- * nested depth (negation of `(GLOB ? OR GLOB * /?)`). SQLite GLOB has no `**` —
- * collapse it to `*`, which already crosses `/`.
+ * Append a floating SQLite GLOB path filter on `column` — the single source of
+ * truth for both the include (`glob`) and the exclude (`excludeGlob`) so their
+ * semantics can never drift. Mirrors the daemon's `normalize_path_glob`
+ * (src/rust/.../text_search/escaping.rs) and the TS `matchesFloatingGlob`
+ * (src/.../utils/path-glob.ts):
+ *
+ *   - Already-floating (leading `*`) or absolute (leading `/`) → matched verbatim.
+ *   - A pattern that still carries a wildcard after `**`→`*` collapse (`V*.sql`,
+ *     `src/*.rs`) floats at the repo root AND at any nested depth.
+ *   - A WILDCARD-FREE literal (`tool-builders`, `src/main.rs`) is a PATH the
+ *     caller wants to scope to: match the exact path OR its whole subtree at any
+ *     depth. A trailing slash is unambiguously a directory (subtree only).
+ *     Without this a bare directory name floated only as a same-named FILE at
+ *     any depth, so `glob:"pkg"` selected nothing and `excludeGlob:"node_modules"`
+ *     dropped nothing — the files live UNDER the directory, not AT it.
+ *
+ * SQLite GLOB anchors both ends and its `*` crosses `/`, so `dir/*` already spans
+ * an arbitrarily deep subtree. `negate` turns each `GLOB` into `NOT GLOB` and
+ * every `OR` into `AND`, making the exclude the exact complement of the include.
  */
-function pushExcludeGlobClause(
+function pushGlobClause(
   conditions: string[],
   params: (string | number)[],
   column: string,
-  excludeGlob: string
+  glob: string,
+  negate = false
 ): void {
-  const collapsed = excludeGlob.replace(/\*\*/g, '*');
+  const op = negate ? 'NOT GLOB' : 'GLOB';
+  const join = negate ? ' AND ' : ' OR ';
+  const collapsed = glob.replace(/\*\*/g, '*');
+
+  // Explicit floating (leading `*`) or absolute (leading `/`) → matched verbatim.
   if (collapsed.startsWith('*') || collapsed.startsWith('/')) {
-    conditions.push(`${column} NOT GLOB ?`);
+    conditions.push(`${column} ${op} ?`);
     params.push(collapsed);
-  } else {
-    conditions.push(`(${column} NOT GLOB ? AND ${column} NOT GLOB ?)`);
-    params.push(collapsed, `*/${collapsed}`);
+    return;
   }
+
+  // A relative pattern that still carries a wildcard floats at root + any depth.
+  if (/[*?[]/.test(collapsed)) {
+    conditions.push(`(${column} ${op} ?${join}${column} ${op} ?)`);
+    params.push(collapsed, `*/${collapsed}`);
+    return;
+  }
+
+  // Wildcard-free literal → exact path OR whole subtree at any depth; a trailing
+  // slash is directory-only.
+  const dir = collapsed.replace(/\/+$/, '');
+  const globs: string[] = [];
+  if (!collapsed.endsWith('/')) globs.push(dir, `*/${dir}`); // the exact file, root or nested
+  globs.push(`${dir}/*`, `*/${dir}/*`); // its subtree, root or nested
+  conditions.push(`(${globs.map(() => `${column} ${op} ?`).join(join)})`);
+  params.push(...globs);
 }
 
 /** Build WHERE conditions and params from filter options. */
@@ -254,27 +288,10 @@ function buildFilterClause(options: Omit<ListTrackedFilesOptions, 'limit'>): Fil
     params.push(branch);
   }
   if (glob) {
-    // SQLite GLOB matches the ENTIRE relative_path (anchored at both ends) and its
-    // `*` crosses `/`. `**` is collapsed to `*` since SQLite GLOB has no `**`.
-    //
-    // A *relative* pattern ("V*.sql", "src/main.rs", "db/migration/V*.sql") is thus
-    // anchored at the repo root and silently matches nothing when the file is nested
-    // — the same false-empty trap the daemon's grep path already fixed via
-    // `normalize_path_glob` (see src/rust/.../text_search/escaping.rs). Mirror that
-    // here: float a relative pattern so it matches at the repo root AND at any nested
-    // depth. Patterns that are already floating (leading `*`) or absolute (leading
-    // `/`) are matched verbatim.
-    const collapsed = glob.replace(/\*\*/g, '*');
-    if (collapsed.startsWith('*') || collapsed.startsWith('/')) {
-      conditions.push('relative_path GLOB ?');
-      params.push(collapsed);
-    } else {
-      conditions.push('(relative_path GLOB ? OR relative_path GLOB ?)');
-      params.push(collapsed, `*/${collapsed}`);
-    }
+    pushGlobClause(conditions, params, 'relative_path', glob);
   }
   if (excludeGlob) {
-    pushExcludeGlobClause(conditions, params, 'relative_path', excludeGlob);
+    pushGlobClause(conditions, params, 'relative_path', excludeGlob, true);
   }
   if (componentBasePaths && componentBasePaths.length > 0) {
     // Build OR clause: each base path matches exact or prefix (with /)
@@ -632,11 +649,10 @@ function buildSearchMetadataFilterClause(
     params.push(options.branch);
   }
   if (options.glob) {
-    conditions.push('m.relative_path GLOB ?');
-    params.push(options.glob.replace(/\*\*/g, '*'));
+    pushGlobClause(conditions, params, 'm.relative_path', options.glob);
   }
   if (options.excludeGlob) {
-    pushExcludeGlobClause(conditions, params, 'm.relative_path', options.excludeGlob);
+    pushGlobClause(conditions, params, 'm.relative_path', options.excludeGlob, true);
   }
   if (options.componentBasePaths && options.componentBasePaths.length > 0) {
     const clauses = options.componentBasePaths.map(

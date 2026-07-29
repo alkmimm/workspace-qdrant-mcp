@@ -386,4 +386,73 @@ describe('listTrackedFiles', () => {
       expect(count).toBe(1);
     });
   });
+
+  // ── Directory-shaped glob / excludeGlob scoping (regression) ──────────────
+  // A wildcard-free literal is a PATH the caller scopes to. Before the fix it
+  // floated only as a same-named FILE (`*/dir`), so a bare directory name
+  // selected/excluded nothing — the files live UNDER it. It must now match the
+  // whole subtree, mirroring the daemon `normalize_path_glob` / TS
+  // `matchesFloatingGlob`. A trailing slash is directory-only.
+  describe('directory-shaped glob / excludeGlob scoping', () => {
+    it('a bare directory name (include) matches its whole subtree', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'src' });
+      expect(result.status).toBe('ok');
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual([
+        'src/lib.rs',
+        'src/main.rs',
+        'src/server.ts',
+        'src/utils/helpers.rs',
+      ]);
+    });
+
+    it('a nested bare directory name floats to any depth', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'utils' });
+      expect(result.data.map((f) => f.relativePath)).toEqual(['src/utils/helpers.rs']);
+    });
+
+    it('a trailing slash is directory-only (subtree yes, same-named file no)', () => {
+      seedFile(db, 'src', { fileType: 'text', extension: '' }); // a FILE literally named "src"
+      const dirOnly = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'src/' });
+      expect(dirOnly.data.map((f) => f.relativePath).sort()).toEqual([
+        'src/lib.rs',
+        'src/main.rs',
+        'src/server.ts',
+        'src/utils/helpers.rs',
+      ]);
+      // ...whereas the un-suffixed literal also matches the same-named file.
+      const withFile = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'src' });
+      expect(withFile.data.map((f) => f.relativePath)).toContain('src');
+    });
+
+    it('does not over-match a sibling with a shared prefix', () => {
+      seedFile(db, 'srcgen/out.ts', { language: 'typescript' });
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'src' });
+      expect(result.data.map((f) => f.relativePath)).not.toContain('srcgen/out.ts');
+    });
+
+    it('excludeGlob with a bare directory name drops its whole subtree', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, excludeGlob: 'src' });
+      expect(result.status).toBe('ok');
+      // All four src/** files gone; the four non-src files remain.
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual([
+        'Cargo.toml',
+        'README.md',
+        'config.yaml',
+        'tests/test_main.rs',
+      ]);
+    });
+
+    it('excludeGlob for a nested directory drops only that subtree', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, excludeGlob: 'utils' });
+      expect(result.data.map((f) => f.relativePath)).not.toContain('src/utils/helpers.rs');
+      expect(result.data.map((f) => f.relativePath)).toContain('src/main.rs');
+    });
+
+    it('countTrackedFiles agrees for a directory-shaped glob', () => {
+      const list = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'src' });
+      const count = countTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'src' });
+      expect(count).toBe(list.data.length);
+      expect(count).toBe(4);
+    });
+  });
 });
