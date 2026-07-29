@@ -265,6 +265,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib remote_monitor -- --test-threads=4
 
+# pathGlob normalization tests run here, same rationale: hermetic (pure glob /
+# string assertions, no FTS5 trigram DB or timing dependence) and they guard the
+# field-reported behavior that a wildcard-free `pathGlob` (a bare directory name
+# or trailing-slash form) must scope to its whole subtree, not end-anchor to a
+# same-named file.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib text_search::escaping -- --test-threads=4
+
 # ─────────────────────────────────────────────
 # Stage 3a: rust-analyzer binary download
 # Ships as a single statically-linked release archive on GitHub. Downloaded
