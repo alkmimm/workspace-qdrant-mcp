@@ -38,6 +38,15 @@ CODEX_BIN ?= codex
 CODEX_MCP_NAME ?= workspace-qdrant
 CODEX_MCP_URL ?= http://localhost:$(MCP_HTTP_PORT)/mcp
 CODEX_BEARER_TOKEN_ENV_VAR ?= MCP_HTTP_TOKEN
+# Claude CODE client config (~/.claude.json) — the file Claude Code AND its
+# spawned "chips" read. NOT claude_desktop_config.json (that one is the Claude
+# Desktop app only; a server registered solely there is invisible to chips).
+CLAUDE_CODE_CONFIG ?= $(HOME)/.claude.json
+CLAUDE_CODE_MCP_NAME ?= workspace-qdrant
+CLAUDE_CODE_MCP_URL ?= http://localhost:$(MCP_HTTP_PORT)/mcp
+CLAUDE_CODE_TRANSPORT ?= http
+CLAUDE_CODE_TOKEN_MODE ?= ref
+CLAUDE_BEARER_TOKEN_ENV_VAR ?= MCP_HTTP_TOKEN
 LOG_TAIL ?= 50
 MARKER ?=
 
@@ -76,7 +85,7 @@ DB_BACKUP_KEEP ?= 2
 	stack-up stack-down stack-restart stack-status stack-logs verify-deploy \
 	build-images mcp-rebuild memexd-recreate \
 	backup-db rehearse-migrations \
-	codex-register \
+	codex-register claude-register \
 	health-quick scan register-all watch reindex reindex-status hooks-install clean \
 	mem-watch-start mem-watch mem-watch-stop
 
@@ -105,6 +114,10 @@ help:
 	@echo "Codex integration:"
 	@echo "  codex-register   create/update the workspace-qdrant HTTP MCP in Codex"
 	@echo "                   (config: $(CODEX_HOME)/config.toml)"
+	@echo "------------------------------------------------------------"
+	@echo "Claude Code integration (chips read ~/.claude.json, NOT the desktop config):"
+	@echo "  claude-register  create/update workspace-qdrant in the Claude Code config"
+	@echo "                   (config: $(CLAUDE_CODE_CONFIG); TRANSPORT=$(CLAUDE_CODE_TRANSPORT), TOKEN_MODE=$(CLAUDE_CODE_TOKEN_MODE))"
 	@echo "------------------------------------------------------------"
 	@echo "Observability / indexing:"
 	@echo "  health-quick     curl the MCP /admin/api/health endpoint"
@@ -260,6 +273,22 @@ codex-register:
 		--server-name "$(CODEX_MCP_NAME)" \
 		--url "$(CODEX_MCP_URL)" \
 		--bearer-token-env-var "$(CODEX_BEARER_TOKEN_ENV_VAR)"
+
+# Register the containerized Streamable HTTP server in the Claude CODE client
+# config (~/.claude.json) — the file Claude Code AND its spawned "chips" read.
+# This is a DIFFERENT file from claude_desktop_config.json (Claude Desktop app):
+# a server registered only in the desktop config is invisible to Claude Code /
+# chips, which is the exact gap this target closes. Idempotent; backs up the
+# previous config to ~/.claude.json.bak-register-<ts>. Override the shape with
+# e.g. CLAUDE_CODE_TRANSPORT=mcp-remote CLAUDE_CODE_TOKEN_MODE=literal.
+claude-register:
+	@python3 "$(REPO)/scripts/register-claude-code-mcp.py" \
+		--config "$(CLAUDE_CODE_CONFIG)" \
+		--server-name "$(CLAUDE_CODE_MCP_NAME)" \
+		--url "$(CLAUDE_CODE_MCP_URL)" \
+		--transport "$(CLAUDE_CODE_TRANSPORT)" \
+		--token-mode "$(CLAUDE_CODE_TOKEN_MODE)" \
+		--bearer-token-env-var "$(CLAUDE_BEARER_TOKEN_ENV_VAR)"
 
 # ── Observability / indexing ─────────────────────────────────────────────────
 #

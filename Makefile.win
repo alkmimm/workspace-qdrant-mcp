@@ -37,6 +37,14 @@ QDRANT_GRPC_PORT ?= 6334
 MCP_HTTP_PORT ?= 6335
 QDRANT_URL ?= http://localhost:$(QDRANT_HTTP_PORT)
 DAEMON_ENDPOINT ?= http://localhost:50051
+# Claude CODE client config (%USERPROFILE%\.claude.json) — the file Claude Code
+# AND the background "chips" it spawns read. This is NOT claude_desktop_config.json
+# (Claude Desktop app only); a server registered solely there is invisible to
+# chips. See target `apply-config-claude-code`.
+CLAUDE_CODE_CONFIG ?= $(USERPROFILE)\.claude.json
+CLAUDE_CODE_TRANSPORT ?= http
+CLAUDE_CODE_TOKEN_MODE ?= ref
+CLAUDE_BEARER_TOKEN_ENV_VAR ?= MCP_HTTP_TOKEN
 # TOOLS list lives in src/typescript/mcp-server/src/constants/mcp-public-config.json.
 # Override here only for ad-hoc experiments; otherwise leave unset so gen-mcp-config.ps1
 # reads from the JSON (single source of truth, verified by config-drift.test.ts).
@@ -104,7 +112,7 @@ FASTEMBED_DAEMON_ARGS = -RepoDir "$(REPO)" -CacheDir "$(FASTEMBED_CACHE_DIR)" -Q
 	build-ts test-ts typecheck-ts build-rust \
 	start-daemon start-daemon-fastembed \
 	config config-fastembed config-claude-http \
-	apply-config apply-config-fastembed apply-config-claude-http \
+	apply-config apply-config-fastembed apply-config-claude-http apply-config-claude-code \
 	codex-open register \
 	smoke smoke-full semantic-smoke semantic-search-library-smoke semantic-search-project-smoke \
 	status clean \
@@ -157,6 +165,7 @@ help:
 	@Write-Host "  build-ts            - instala deps e compila MCP TypeScript"
 	@Write-Host "  config/apply-config - gera/aplica configs Claude Desktop (http://localhost:50051) e Codex HTTP (http://localhost:6335/mcp)"
 	@Write-Host "  config-claude-http/apply-config-claude-http - Claude Desktop via mcp-remote bridge para o container HTTP (:6335/mcp). Requer: npm install -g mcp-remote"
+	@Write-Host "  apply-config-claude-code - registra workspace-qdrant no config do Claude CODE (%USERPROFILE%\.claude.json) que os CHIPS leem (NAO e o claude_desktop_config.json)"
 	@Write-Host "  config-fastembed/apply-config-fastembed - mesma base, com Codex/Claude no fluxo FastEmbed local (http://localhost:55151)"
 	@Write-Host "  codex-open          - abre o Codex carregando MCP_HTTP_TOKEN de docker/.env"
 	@Write-Host "  register            - registra PROJECT no wqm"
@@ -551,6 +560,15 @@ config-claude-http:
 
 apply-config-claude-http:
 	.\scripts\windows\gen-mcp-config.ps1 -RepoDir "$(REPO)" -ServerName "$(SERVER_NAME)" -QdrantUrl "$(QDRANT_URL)" -DaemonEndpoint "$(DAEMON_ENDPOINT)" -ClaudeTransport http -ClaudeHttpUrl http://localhost:$(MCP_HTTP_PORT)/mcp -CodexTransport http -ToolCsv "$(TOOLS)" -ApplyClaude -ApplyCodex
+
+# Register workspace-qdrant in the Claude CODE config (%USERPROFILE%\.claude.json)
+# that Claude Code AND its spawned "chips" read. `apply-config*` above target
+# claude_desktop_config.json (the Claude Desktop app), which chips do NOT read —
+# so a server only there is invisible to them. Idempotent; backs up the previous
+# config to .claude.json.bak-register-<ts>. Override the shape with e.g.
+# CLAUDE_CODE_TRANSPORT=mcp-remote CLAUDE_CODE_TOKEN_MODE=literal.
+apply-config-claude-code:
+	@$$py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' } elseif (Get-Command py -ErrorAction SilentlyContinue) { 'py' } else { Write-Error 'python nao encontrado no PATH; instale Python 3 ou rode scripts\register-claude-code-mcp.py manualmente'; exit 1 }; & $$py "$(REPO)\scripts\register-claude-code-mcp.py" --config "$(CLAUDE_CODE_CONFIG)" --server-name "$(SERVER_NAME)" --url "http://localhost:$(MCP_HTTP_PORT)/mcp" --transport "$(CLAUDE_CODE_TRANSPORT)" --token-mode "$(CLAUDE_CODE_TOKEN_MODE)" --bearer-token-env-var "$(CLAUDE_BEARER_TOKEN_ENV_VAR)"
 
 apply-config-fastembed:
 	.\scripts\windows\gen-mcp-config.ps1 -RepoDir "$(REPO)" -ServerName "$(SERVER_NAME)" -QdrantUrl "$(QDRANT_URL)" -DaemonEndpoint "$(FASTEMBED_DAEMON_ENDPOINT)" -CodexTransport stdio -ToolCsv "$(TOOLS)" -ConfigSuffix ".fastembed" -ApplyClaude -ApplyCodex
