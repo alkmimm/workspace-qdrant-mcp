@@ -319,6 +319,13 @@ Write-Host "Gerado:"
 Write-Host "  $claudeOut"
 Write-Host "  $codexOut"
 
+# NOTE: -ApplyClaude writes to the Claude DESKTOP app config
+# (%APPDATA%\Claude\claude_desktop_config.json). That is a DIFFERENT file from
+# the Claude CODE client config (%USERPROFILE%\.claude.json), which Claude Code
+# AND the background "chips" it spawns read. A server registered only here is
+# invisible to Claude Code / chips. To register for Claude Code, use:
+#   make -f Makefile.win apply-config-claude-code
+#   (or: python scripts\register-claude-code-mcp.py)
 if ($ApplyClaude) {
   $dir = Split-Path -Parent $ClaudeConfigPath
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
