@@ -39,4 +39,4 @@ pub use diff_tree::{diff_tree, parse_diff_tree_output, FileChange, FileChangeSta
 pub use tree_ops::{get_blob_hash, ls_tree_submodules};
 
 // Re-export from worktree
-pub use worktree::find_main_worktree_path;
+pub use worktree::{find_main_worktree_path, list_linked_worktrees, LinkedWorktree};

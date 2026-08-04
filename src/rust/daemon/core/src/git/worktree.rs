@@ -67,6 +67,77 @@ pub fn find_main_worktree_path(worktree_git_dir: &Path) -> Option<PathBuf> {
     canonical.parent().map(Path::to_path_buf)
 }
 
+/// A linked git worktree of a main repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedWorktree {
+    /// The worktree's working-tree root, exactly as git recorded it in
+    /// `.git/worktrees/<name>/gitdir`. This may be a host/UNC form (e.g. a
+    /// worktree created from a Windows host over `\\wsl.localhost\...`); the
+    /// caller folds it to the daemon's native view before touching disk.
+    pub root: PathBuf,
+    /// The branch the worktree has checked out, or `None` for a detached HEAD.
+    pub branch: Option<String>,
+}
+
+/// Enumerate the linked worktrees of a **main** repository.
+///
+/// Filesystem-only (no `git` binary), mirroring [`find_main_worktree_path`]:
+/// reads `<git_dir>/worktrees/<name>/{gitdir,HEAD}` for each registered linked
+/// worktree. `gitdir` points at the worktree's `.git` file, whose parent is the
+/// worktree root; `HEAD` names the checked-out branch (`ref: refs/heads/<b>`),
+/// or is a raw SHA for a detached HEAD (reported as `branch: None`).
+///
+/// Expects `main_repo_root` to be a real main working tree (its `.git` is a
+/// directory). Returns an empty vec when the repo has no linked worktrees (no
+/// `worktrees/` dir) or its git dir can't be resolved — callers treat that as
+/// "nothing to do", never an error.
+pub fn list_linked_worktrees(main_repo_root: &Path) -> Vec<LinkedWorktree> {
+    // The `worktrees/` admin dir lives under the common git dir. For a main
+    // repo that is simply `<root>/.git`; only when `.git` is a gitlink file
+    // (the root is itself a linked worktree) do we resolve indirectly.
+    let dot_git = main_repo_root.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        match super::resolve_git_dir(main_repo_root) {
+            Some(d) => d,
+            None => return Vec::new(),
+        }
+    };
+
+    let entries = match std::fs::read_dir(git_dir.join("worktrees")) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let admin = entry.path();
+        if !admin.is_dir() {
+            continue;
+        }
+        // `gitdir` holds an absolute path to the worktree's `.git` file; the
+        // worktree root is that file's parent directory.
+        let gitdir_raw = match std::fs::read_to_string(admin.join("gitdir")) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let root = match Path::new(gitdir_raw.trim()).parent() {
+            Some(p) => p.to_path_buf(),
+            None => continue,
+        };
+        let branch = std::fs::read_to_string(admin.join("HEAD"))
+            .ok()
+            .and_then(|h| {
+                h.trim()
+                    .strip_prefix("ref: refs/heads/")
+                    .map(str::to_string)
+            });
+        out.push(LinkedWorktree { root, branch });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +261,67 @@ mod tests {
         // retains canonicalize() as Category B (git-internal). See spec §16 §3.2.2.
         let expected = main_repo.canonicalize().unwrap();
         assert_eq!(result.unwrap(), expected);
+    }
+
+    /// Parse both a branch worktree and a detached-HEAD worktree from the
+    /// `.git/worktrees/*` admin dirs.
+    #[test]
+    fn test_list_linked_worktrees_parses_branch_and_detached() {
+        let temp = TempDir::new().unwrap();
+        let main_repo = temp.path().join("main");
+        let main_git = main_repo.join(".git");
+        fs::create_dir_all(&main_git).unwrap();
+
+        // A linked worktree checked out on a branch.
+        let wt_feature = temp.path().join("wt-feature");
+        fs::create_dir_all(&wt_feature).unwrap();
+        let admin_a = main_git.join("worktrees").join("wt-feature");
+        fs::create_dir_all(&admin_a).unwrap();
+        fs::write(
+            admin_a.join("gitdir"),
+            format!("{}/.git\n", wt_feature.display()),
+        )
+        .unwrap();
+        fs::write(admin_a.join("HEAD"), "ref: refs/heads/feature/x\n").unwrap();
+
+        // A linked worktree in detached HEAD (HEAD is a raw SHA).
+        let wt_detached = temp.path().join("wt-detached");
+        fs::create_dir_all(&wt_detached).unwrap();
+        let admin_b = main_git.join("worktrees").join("wt-detached");
+        fs::create_dir_all(&admin_b).unwrap();
+        fs::write(
+            admin_b.join("gitdir"),
+            format!("{}/.git", wt_detached.display()),
+        )
+        .unwrap();
+        fs::write(
+            admin_b.join("HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+
+        let got = list_linked_worktrees(&main_repo);
+        assert_eq!(got.len(), 2, "both worktrees should be listed");
+
+        let feature = got
+            .iter()
+            .find(|w| w.root == wt_feature)
+            .expect("feature worktree present");
+        assert_eq!(feature.branch.as_deref(), Some("feature/x"));
+
+        let detached = got
+            .iter()
+            .find(|w| w.root == wt_detached)
+            .expect("detached worktree present");
+        assert_eq!(detached.branch, None, "detached HEAD has no branch");
+    }
+
+    /// A repo with no `worktrees/` admin dir yields an empty list, not an error.
+    #[test]
+    fn test_list_linked_worktrees_empty_without_worktrees_dir() {
+        let temp = TempDir::new().unwrap();
+        let main_repo = temp.path().join("main");
+        fs::create_dir_all(main_repo.join(".git")).unwrap();
+        assert!(list_linked_worktrees(&main_repo).is_empty());
     }
 }
