@@ -208,7 +208,12 @@ pub(crate) async fn fetch_watch_folder_by_path(
 /// `global_ignore_path` — if `Some` and the file exists on disk, its patterns
 /// are applied as a base-level ignore layer across the entire walk (equivalent
 /// to a project-root `.wqmignore` but sourced from outside the project tree).
-fn walk_eligible_files(
+/// Pass `None` to walk a subtree that itself lives under a globally-ignored
+/// path (a linked worktree under `.claude/worktrees/`): the global layer matches
+/// absolute paths and their parents, so it would otherwise self-exclude the
+/// whole worktree even when the walk is rooted inside it — see
+/// `branch_switch::worktree_membership`.
+pub(crate) fn walk_eligible_files(
     project_root: &Path,
     global_ignore_path: Option<&Path>,
 ) -> Result<HashSet<String>, String> {

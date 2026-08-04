@@ -94,14 +94,25 @@ impl FileStrategy {
         let (watch_folder_id, base_path) =
             resolve_watch_folder(pool, item, payload.file_path.as_str()).await?;
 
+        // Storage stays keyed to the resolved (main) watch_folder, but a
+        // worktree-membership "new-on-branch" item reads its bytes from the
+        // worktree tree — that content has no copy under the main root. The
+        // item carries `read_root` (the worktree's on-disk root); anchor the
+        // absolute read path there while `watch_folder_id` / `base_path`
+        // (storage, component detection, .gitattributes) stay on the main
+        // folder. The storage key (watch_folder_id, relative_path, file_hash)
+        // never sees the read root, so cross-branch dedup is unaffected.
+        let read_root = worktree_read_root(item);
+        let read_base: &str = read_root.as_deref().unwrap_or(base_path.as_str());
+
         // Reconstruct the absolute filesystem path by anchoring the
-        // relative payload path to the watch_folder root. The relative
+        // relative payload path to the read root. The relative
         // form (already validated by serde + the type system) is what we
         // pass downstream as `relative_path`.
-        let base_canonical = CanonicalPath::from_user_input(&base_path).map_err(|e| {
+        let base_canonical = CanonicalPath::from_user_input(read_base).map_err(|e| {
             UnifiedProcessorError::InvalidPayload(format!(
-                "watch_folder.path is not canonical for tenant_id={}: {}",
-                item.tenant_id, e
+                "read root '{}' is not canonical for tenant_id={}: {}",
+                read_base, item.tenant_id, e
             ))
         })?;
         let abs_canonical = payload.file_path.to_absolute(&base_canonical);
@@ -114,8 +125,15 @@ impl FileStrategy {
         // .wqmignore). Without this re-check, a stale Add/Update burns the
         // full parse+embed cost on a now-excluded path and the result has to
         // be reconciled away afterwards. Deletes are exempt — they are how
-        // excluded files leave the index.
-        if item.op != QueueOperation::Delete && is_ignored_at_dequeue(&base_path, file_path) {
+        // excluded files leave the index. A `read_root` item is exempt too:
+        // the reconcile already applied the worktree's own ignore cascade at
+        // discovery, and re-checking the worktree-anchored path here would hit
+        // the `.claude/worktrees/` global rule (which matches absolute paths
+        // and their parents) and wrongly drop every branch-only file.
+        if item.op != QueueOperation::Delete
+            && read_root.is_none()
+            && is_ignored_at_dequeue(&base_path, file_path)
+        {
             info!(
                 "Skipping now-ignored file (dequeue gate): {}",
                 relative_path
@@ -303,6 +321,26 @@ fn is_worktree_membership(item: &UnifiedQueueItem) -> bool {
         .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
         .and_then(|v| v.get("worktree_membership").and_then(|b| b.as_bool()))
         .unwrap_or(false)
+}
+
+/// The worktree tree root a worktree-membership item must read its bytes from,
+/// or `None` to read from the resolved (main) watch_folder.
+///
+/// Set only for "new-on-branch" items — files that exist solely on the worktree
+/// branch, whose content has no copy under the main root. The processor anchors
+/// its reads at this root while storage stays keyed to the main watch_folder,
+/// and skips the dequeue ignore-gate (the reconcile already applied the
+/// worktree's own ignore cascade at discovery). See
+/// `branch_switch::worktree_membership`.
+fn worktree_read_root(item: &UnifiedQueueItem) -> Option<String> {
+    item.metadata
+        .as_deref()
+        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+        .and_then(|v| {
+            v.get("read_root")
+                .and_then(|r| r.as_str())
+                .map(str::to_string)
+        })
 }
 
 /// The branch an ingest-type op must write under, or `None` to keep the
@@ -707,6 +745,15 @@ async fn resolve_watch_folder(
     // Fall back using source_project_id from metadata when the primary lookup fails.
     match watch_info {
         Some((wid, bp)) => {
+            // A worktree-membership new-on-branch item (carrying `read_root`)
+            // must anchor storage to the resolved MAIN folder: its file lives
+            // only in the unregistered worktree, so it exists under no
+            // registered watch_folder's root and disambiguation could only
+            // mis-point it (or churn stats). Keep the primary resolution and
+            // let the caller's read_root override handle the read side.
+            if worktree_read_root(item).is_some() {
+                return Ok((wid, bp));
+            }
             // Multi-clone disambiguation: `lookup_watch_folder` keys on
             // tenant_id alone, so for a tenant with sibling working copies it
             // can return a different (or stale) clone's path. If THIS file
@@ -829,6 +876,58 @@ mod tests {
         assert!(!strategy.handles(&ItemType::Folder, &QueueOperation::Add));
         assert!(!strategy.handles(&ItemType::Tenant, &QueueOperation::Add));
         assert!(!strategy.handles(&ItemType::Url, &QueueOperation::Add));
+    }
+
+    fn item_with_metadata(metadata: Option<&str>) -> UnifiedQueueItem {
+        UnifiedQueueItem {
+            queue_id: "q".to_string(),
+            idempotency_key: "k".to_string(),
+            item_type: ItemType::File,
+            op: QueueOperation::Add,
+            tenant_id: "t".to_string(),
+            collection: COLLECTION_PROJECTS.to_string(),
+            status: crate::unified_queue_schema::QueueStatus::Pending,
+            branch: "feat".to_string(),
+            payload_json: r#"{"file_path":"src/only_feat.rs"}"#.to_string(),
+            metadata: metadata.map(str::to_string),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            lease_until: None,
+            worker_id: None,
+            retry_count: 0,
+            error_message: None,
+            last_error_at: None,
+            file_path: None,
+            qdrant_status: None,
+            search_status: None,
+            decision_json: None,
+        }
+    }
+
+    #[test]
+    fn worktree_read_root_and_membership_parse_metadata() {
+        // Shared baseline: flagged, but no read_root → read from the main tree.
+        let baseline = item_with_metadata(Some(r#"{"worktree_membership":true}"#));
+        assert!(is_worktree_membership(&baseline));
+        assert_eq!(worktree_read_root(&baseline), None);
+
+        // New-on-branch: read_root present → read from the worktree tree.
+        let new_on_branch = item_with_metadata(Some(
+            r#"{"worktree_membership":true,"read_root":"/repo/.claude/worktrees/wt-feat"}"#,
+        ));
+        assert!(is_worktree_membership(&new_on_branch));
+        assert_eq!(
+            worktree_read_root(&new_on_branch).as_deref(),
+            Some("/repo/.claude/worktrees/wt-feat")
+        );
+
+        // Ordinary items: neither flag.
+        let plain = item_with_metadata(None);
+        assert!(!is_worktree_membership(&plain));
+        assert_eq!(worktree_read_root(&plain), None);
+        let other = item_with_metadata(Some(r#"{"source_project_id":"abc"}"#));
+        assert!(!is_worktree_membership(&other));
+        assert_eq!(worktree_read_root(&other), None);
     }
 
     #[test]
