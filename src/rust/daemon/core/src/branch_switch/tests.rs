@@ -657,12 +657,21 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
     let main_git = main_repo.join(".git");
     std::fs::create_dir_all(&main_git).unwrap();
 
-    // Worktree on branch "feat": one shared file (also tracked under main) and
-    // one file that lives ONLY on this branch (no tracked_files row anywhere).
+    // A project .wqmignore at the MAIN root excludes `generated/`. This is what
+    // the main-anchored eligibility gate consults — a worktree file under
+    // generated/ must be dropped even though the worktree tree has no ignore
+    // file of its own.
+    std::fs::write(main_repo.join(".wqmignore"), "generated/\n").unwrap();
+
+    // Worktree on branch "feat": one shared file (also tracked under main), one
+    // file that lives ONLY on this branch (no tracked_files row anywhere), and
+    // one branch-only file under generated/ that the main gate must exclude.
     let wt = main_repo.join(".claude").join("worktrees").join("wt-feat");
     std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::create_dir_all(wt.join("generated")).unwrap();
     std::fs::write(wt.join("src/a.rs"), b"fn a() {}").unwrap();
     std::fs::write(wt.join("src/only_feat.rs"), b"fn only() {}").unwrap();
+    std::fs::write(wt.join("generated/gen.rs"), b"// generated").unwrap();
     let admin = main_git.join("worktrees").join("wt-feat");
     std::fs::create_dir_all(&admin).unwrap();
     std::fs::write(admin.join("gitdir"), format!("{}/.git\n", wt.display())).unwrap();
@@ -679,7 +688,7 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
     let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str).await;
     assert_eq!(
         n, 2,
-        "shared baseline (src/a.rs) + new-on-branch (src/only_feat.rs)"
+        "shared baseline (src/a.rs) + new-on-branch (src/only_feat.rs); generated/gen.rs excluded"
     );
 
     let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
@@ -720,6 +729,14 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
     assert!(
         meta.contains("wt-feat"),
         "read_root points at the worktree root: {meta}"
+    );
+
+    // The main-anchored eligibility gate must have dropped generated/gen.rs
+    // (excluded by the main .wqmignore) — a worktree branch never indexes files
+    // the main scan omits.
+    assert!(
+        !rows.iter().any(|r| r.2.contains("generated/gen.rs")),
+        "generated/gen.rs must be excluded by the main-anchored gate"
     );
 }
 

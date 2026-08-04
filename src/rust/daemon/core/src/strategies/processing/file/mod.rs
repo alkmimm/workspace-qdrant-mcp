@@ -98,25 +98,37 @@ impl FileStrategy {
         // worktree-membership "new-on-branch" item reads its bytes from the
         // worktree tree — that content has no copy under the main root. The
         // item carries `read_root` (the worktree's on-disk root); anchor the
-        // absolute read path there while `watch_folder_id` / `base_path`
+        // absolute READ path there while `watch_folder_id` / `base_path`
         // (storage, component detection, .gitattributes) stay on the main
         // folder. The storage key (watch_folder_id, relative_path, file_hash)
         // never sees the read root, so cross-branch dedup is unaffected.
         let read_root = worktree_read_root(item);
-        let read_base: &str = read_root.as_deref().unwrap_or(base_path.as_str());
 
-        // Reconstruct the absolute filesystem path by anchoring the
-        // relative payload path to the read root. The relative
-        // form (already validated by serde + the type system) is what we
-        // pass downstream as `relative_path`.
-        let base_canonical = CanonicalPath::from_user_input(read_base).map_err(|e| {
+        // Main-anchored absolute path: the storage/eligibility identity and the
+        // path the dequeue ignore-gate is evaluated against.
+        let main_canonical = CanonicalPath::from_user_input(&base_path).map_err(|e| {
             UnifiedProcessorError::InvalidPayload(format!(
-                "read root '{}' is not canonical for tenant_id={}: {}",
-                read_base, item.tenant_id, e
+                "watch_folder.path is not canonical for tenant_id={}: {}",
+                item.tenant_id, e
             ))
         })?;
-        let abs_canonical = payload.file_path.to_absolute(&base_canonical);
-        let abs_file_path: String = abs_canonical.as_str().to_string();
+        let main_abs_path: String = payload.file_path.to_absolute(&main_canonical).as_str().to_string();
+
+        // Read-anchored absolute path: the worktree tree for a new-on-branch
+        // item, else the main folder. The relative form (already validated by
+        // serde + the type system) is what we pass downstream as `relative_path`.
+        let abs_file_path: String = match read_root.as_deref() {
+            Some(root) => {
+                let read_canonical = CanonicalPath::from_user_input(root).map_err(|e| {
+                    UnifiedProcessorError::InvalidPayload(format!(
+                        "read root '{}' is not canonical for tenant_id={}: {}",
+                        root, item.tenant_id, e
+                    ))
+                })?;
+                payload.file_path.to_absolute(&read_canonical).as_str().to_string()
+            }
+            None => main_abs_path.clone(),
+        };
         let file_path = Path::new(abs_file_path.as_str());
         let relative_path: &str = payload.file_path.as_str();
 
@@ -125,14 +137,17 @@ impl FileStrategy {
         // .wqmignore). Without this re-check, a stale Add/Update burns the
         // full parse+embed cost on a now-excluded path and the result has to
         // be reconciled away afterwards. Deletes are exempt — they are how
-        // excluded files leave the index. A `read_root` item is exempt too:
-        // the reconcile already applied the worktree's own ignore cascade at
-        // discovery, and re-checking the worktree-anchored path here would hit
-        // the `.claude/worktrees/` global rule (which matches absolute paths
-        // and their parents) and wrongly drop every branch-only file.
+        // excluded files leave the index.
+        //
+        // The gate is ALWAYS evaluated against the MAIN-anchored path, even for
+        // a read_root item: that applies `global.wqmignore` to the rel path
+        // exactly as the main scan would (so a worktree branch never indexes
+        // generated/globally-excluded files the main folder omits), while the
+        // main anchor keeps the global `.claude/worktrees/` rule — which matches
+        // absolute paths AND their parents — from self-excluding the worktree
+        // (we test `main_root/rel`, never `worktree_root/rel`).
         if item.op != QueueOperation::Delete
-            && read_root.is_none()
-            && is_ignored_at_dequeue(&base_path, file_path)
+            && is_ignored_at_dequeue(&base_path, Path::new(main_abs_path.as_str()))
         {
             info!(
                 "Skipping now-ignored file (dequeue gate): {}",
@@ -328,10 +343,10 @@ fn is_worktree_membership(item: &UnifiedQueueItem) -> bool {
 ///
 /// Set only for "new-on-branch" items — files that exist solely on the worktree
 /// branch, whose content has no copy under the main root. The processor anchors
-/// its reads at this root while storage stays keyed to the main watch_folder,
-/// and skips the dequeue ignore-gate (the reconcile already applied the
-/// worktree's own ignore cascade at discovery). See
-/// `branch_switch::worktree_membership`.
+/// its reads at this root while storage stays keyed to the main watch_folder;
+/// the dequeue ignore-gate is still applied, but against the main-anchored path
+/// so `global.wqmignore` filters the rel path without self-excluding the
+/// worktree. See `branch_switch::worktree_membership`.
 fn worktree_read_root(item: &UnifiedQueueItem) -> Option<String> {
     item.metadata
         .as_deref()

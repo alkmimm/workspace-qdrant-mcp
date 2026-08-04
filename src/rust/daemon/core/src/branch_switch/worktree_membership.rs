@@ -160,6 +160,7 @@ pub async fn reconcile_worktree_branches(
             tenant_id,
             collection,
             &wt_root,
+            main_project_root,
             &branch,
         )
         .await;
@@ -246,14 +247,20 @@ async fn enqueue_worktree_membership(
 /// The shared-baseline reconcile ([`enqueue_worktree_membership`]) can only tag
 /// paths the main folder already tracks, because it reads from the main tree;
 /// a file added on the worktree branch has no main-tree copy, so its content
-/// must come from the worktree. Discovery walks the worktree working tree with
-/// the project `.gitignore`/`.wqmignore` cascade only (no `global.wqmignore`:
-/// its `.claude/worktrees/` rule matches absolute paths and their parents, so it
-/// would self-exclude the whole worktree even rooted inside it) and subtracts
-/// every path already tracked under the main folder. What remains is
-/// branch-only content; each item carries `read_root` so the processor anchors
-/// its reads at the worktree tree while storage stays keyed to the main
-/// watch_folder (cross-branch dedup + branch-scoped idempotency unchanged).
+/// must come from the worktree. Discovery enumerates the worktree working tree
+/// with the project `.gitignore`/`.wqmignore` cascade only — passing `None`
+/// global to the walk, because `global.wqmignore`'s `.claude/worktrees/` rule
+/// matches absolute paths and their parents and would self-exclude the whole
+/// worktree even rooted inside it. It then subtracts every path already tracked
+/// under the main folder and applies the MAIN folder's full eligibility (project
+/// + `global.wqmignore`) to each survivor, anchored at the main root: that
+/// re-adds the global layer the walk had to drop, so a worktree branch never
+/// indexes generated / globally-excluded files the main scan omits, while the
+/// main anchor (`main_root/rel`, never `worktree_root/rel`) keeps the
+/// `.claude/worktrees/` rule from self-excluding. What remains is branch-only
+/// content; each item carries `read_root` so the processor anchors its reads at
+/// the worktree tree while storage stays keyed to the main watch_folder
+/// (cross-branch dedup + branch-scoped idempotency unchanged).
 ///
 /// Subtracting the full `tracked_files` set keeps this disjoint from the
 /// baseline path: a shared file (baseline, read from main) and a branch-only
@@ -268,9 +275,12 @@ async fn enqueue_worktree_new_on_branch(
     tenant_id: &str,
     collection: &str,
     wt_root: &str,
+    main_project_root: &str,
     branch: &str,
 ) -> usize {
-    // Walk with project-cascade ignore only (`None` global) — see doc above.
+    // Enumerate the worktree working tree with the project-cascade ignore only
+    // (`None` global — see doc above); the global layer is re-applied below via
+    // the main-anchored gate.
     let walked = match crate::startup::reconciliation::ignore_sync::walk_eligible_files(
         Path::new(wt_root),
         None,
@@ -299,11 +309,29 @@ async fn enqueue_worktree_new_on_branch(
         }
     };
 
+    // The MAIN folder's eligibility gate (project cascade + `global.wqmignore`),
+    // anchored at the main root. Testing `main_root/rel` applies every global
+    // rule to the rel path as the main scan would — dropping generated /
+    // globally-excluded files — without the `.claude/worktrees/` self-exclusion
+    // a worktree-anchored test would trigger.
+    let main_root = Path::new(main_project_root);
+    let global = crate::patterns::global_ignore::resolve_global_ignore_path();
+    let gate = crate::patterns::ignore_gate::IgnoreGate::for_dir(
+        main_root,
+        Some(main_root),
+        global.as_deref(),
+    );
+
     let mut enqueued = 0usize;
     for rel_str in walked {
         // Skip anything the main folder already tracks (shared baseline or a
         // path tagged on another branch) — not a branch-only candidate.
         if tracked.contains(&rel_str) {
+            continue;
+        }
+        // Skip anything the main scan itself would exclude (generated code,
+        // build output, vendored trees), so the branch mirrors main eligibility.
+        if gate.is_ignored_with_ancestors(main_root, &main_root.join(&rel_str)) {
             continue;
         }
         let rel = match RelativePath::from_user_input(&rel_str) {
@@ -345,10 +373,11 @@ async fn enqueue_worktree_new_on_branch(
 /// `read_root` selects where the processor reads the bytes: `None` for a shared
 /// baseline file (read from the main tree — cross-branch dedup merges), or
 /// `Some(worktree_root)` for a branch-only file whose content lives solely in
-/// the worktree tree. When set, the processor anchors its reads there and skips
-/// the dequeue ignore-gate (the daemon-curated path already applied the
-/// worktree's own ignore cascade at discovery). The stored `read_root` is the
-/// worktree's on-disk root; the item's `file_path` stays repo-relative so the
+/// the worktree tree. When set, the processor anchors its reads there; the
+/// dequeue ignore-gate still runs, but against the main-anchored path so
+/// `global.wqmignore` filters the rel path without self-excluding the worktree.
+/// The stored `read_root` is the worktree's on-disk root; the item's
+/// `file_path` stays repo-relative so the
 /// storage key (`watch_folder_id`, `relative_path`, `file_hash`) is unaffected.
 async fn enqueue_worktree_file(
     queue_manager: &QueueManager,
