@@ -128,6 +128,10 @@ pub async fn reconcile_worktree_branches(
                 "worktree membership: enqueued {} baseline file(s) under branch '{}' (worktree {})",
                 n, branch, wt_root
             );
+            crate::monitoring::metrics_core::METRICS
+                .worktree_membership_enqueued_total
+                .with_label_values(&[tenant_id, branch.as_str()])
+                .inc_by(n as u64);
         }
         total += n;
     }
