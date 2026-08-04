@@ -292,6 +292,19 @@ enum UpdateAction {
     Proceed,
 }
 
+/// Whether a File item is a worktree-membership tag enqueued by
+/// `branch_switch::reconcile_worktree_branches`. Such an item carries an
+/// AUTHORITATIVE worktree branch: its bytes are read from the shared main tree
+/// (the worktree's baseline), but the tag belongs to the worktree's branch, so
+/// the process-time branch-restamp must NOT rewrite it to the main HEAD.
+fn is_worktree_membership(item: &UnifiedQueueItem) -> bool {
+    item.metadata
+        .as_deref()
+        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+        .and_then(|v| v.get("worktree_membership").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
 /// The branch an ingest-type op must write under, or `None` to keep the
 /// enqueue-time branch.
 ///
@@ -306,6 +319,12 @@ fn effective_ingest_branch(item: &UnifiedQueueItem, base_path: &str) -> Option<S
     // Only `projects` rows carry git-branch semantics; libraries keep their
     // enqueue-time label untouched.
     if item.collection != COLLECTION_PROJECTS {
+        return None;
+    }
+    // Worktree-membership items tag the shared main-tree baseline under an
+    // authoritative worktree branch; re-stamping would rewrite that back to the
+    // main HEAD and the worktree tag would never land. Keep the enqueue branch.
+    if is_worktree_membership(item) {
         return None;
     }
     let head = crate::watching_queue::get_current_branch_opt(Path::new(base_path));

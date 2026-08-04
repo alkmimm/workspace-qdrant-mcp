@@ -16,9 +16,11 @@ mod db;
 mod handlers;
 mod queue;
 mod types;
+mod worktree_membership;
 
 #[cfg(test)]
 mod tests;
 
 pub use handlers::{handle_git_event, reconcile_branch_membership};
 pub use types::BranchSwitchStats;
+pub use worktree_membership::reconcile_worktree_branches;

@@ -573,6 +573,22 @@ async fn handle_project_scan(
             &item.branch,
         )
         .await;
+
+        // B1: extend branch membership to this repo's linked worktrees. A
+        // worktree checked out on branch X tags the shared baseline under X via
+        // the SAME (main) watch_folder — the dedup fast-path, so no duplicate
+        // points. Registration is session-triggered and misses worktrees that
+        // never opened a session (e.g. parallel `/batch` trees); this makes
+        // their baseline searchable on every scan. `projects`-only, idempotent.
+        crate::branch_switch::reconcile_worktree_branches(
+            ctx.queue_manager.pool(),
+            &ctx.queue_manager,
+            &wid,
+            &item.tenant_id,
+            &item.collection,
+            &payload.project_root,
+        )
+        .await;
     }
 
     Ok(())

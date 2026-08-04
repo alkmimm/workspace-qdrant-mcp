@@ -37,6 +37,7 @@ async fn fetch_unchanged_paths(
 use super::handlers::enqueue_unchanged_files;
 use super::queue::{enqueue_branch_membership_bulk, enqueue_file_op, enqueue_unchanged_file};
 use super::reconcile_branch_membership;
+use super::reconcile_worktree_branches;
 use super::types::BranchSwitchStats;
 
 async fn create_test_pool() -> SqlitePool {
@@ -560,4 +561,115 @@ async fn test_reconcile_noop_when_all_tagged() {
         .await
         .unwrap();
     assert_eq!(count, 0);
+}
+
+/// B1: a linked worktree's branch tags the shared baseline via the MAIN
+/// watch_folder. Exercises the full path: enumerate `.git/worktrees/*` → fold
+/// the recorded path → enqueue a `File/Add` on the worktree branch flagged
+/// `worktree_membership` (so the process-time restamp keeps the worktree branch
+/// instead of rewriting it to the main HEAD). A detached-HEAD worktree is
+/// skipped; a file present in the worktree tree but missing the branch is the
+/// only candidate enqueued.
+#[tokio::test]
+async fn test_reconcile_worktree_branches_tags_baseline() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Main repo with a real `.git` directory.
+    let main_repo = tmp.path().join("main");
+    let main_git = main_repo.join(".git");
+    std::fs::create_dir_all(&main_git).unwrap();
+
+    // A linked worktree on branch "feat", UNDER the main root (the `/batch`
+    // layout `.claude/worktrees/<name>`), whose tree holds the tracked file.
+    let wt = main_repo.join(".claude").join("worktrees").join("wt-feat");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(wt.join("src/a.rs"), b"fn a() {}").unwrap();
+    let admin = main_git.join("worktrees").join("wt-feat");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(admin.join("gitdir"), format!("{}/.git\n", wt.display())).unwrap();
+    std::fs::write(admin.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+
+    // A second linked worktree in detached HEAD — must be skipped entirely.
+    let wt_det = main_repo.join(".claude").join("worktrees").join("wt-detached");
+    std::fs::create_dir_all(wt_det.join("src")).unwrap();
+    std::fs::write(wt_det.join("src/a.rs"), b"fn a() {}").unwrap();
+    let admin_det = main_git.join("worktrees").join("wt-detached");
+    std::fs::create_dir_all(&admin_det).unwrap();
+    std::fs::write(
+        admin_det.join("gitdir"),
+        format!("{}/.git\n", wt_det.display()),
+    )
+    .unwrap();
+    std::fs::write(
+        admin_det.join("HEAD"),
+        "0123456789abcdef0123456789abcdef01234567\n",
+    )
+    .unwrap();
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let main_str = main_repo.to_string_lossy().to_string();
+    insert_watch_folder(&pool, "w1", "t1", &main_str).await;
+    // Baseline file tracked under the MAIN folder, tagged only `main`.
+    insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await;
+
+    let qm = QueueManager::new(pool.clone());
+    let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str).await;
+    assert_eq!(
+        n, 1,
+        "only the branch worktree tags the baseline (detached skipped)"
+    );
+
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT op, branch, payload_json, metadata FROM unified_queue WHERE tenant_id = 't1'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "exactly one enqueue, from the 'feat' worktree"
+    );
+    assert_eq!(rows[0].0, "add"); // Add op → cross-branch dedup fast-path, no re-embed
+    assert_eq!(rows[0].1, "feat"); // tagged under the WORKTREE's branch
+    assert!(rows[0].2.contains("src/a.rs"));
+    // The `worktree_membership` flag tells the processor to keep 'feat' (skip the
+    // #224 restamp that would otherwise rewrite it to the main HEAD).
+    let meta = rows[0].3.as_deref().unwrap_or("");
+    assert!(
+        meta.contains("worktree_membership"),
+        "metadata flags worktree_membership: {meta}"
+    );
+}
+
+/// A non-`projects` collection is never worktree-reconciled (branch tags only
+/// exist for projects), and a repo with no linked worktrees is a clean no-op.
+#[tokio::test]
+async fn test_reconcile_worktree_branches_gated_and_noop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_repo = tmp.path().join("main");
+    std::fs::create_dir_all(main_repo.join(".git")).unwrap();
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let main_str = main_repo.to_string_lossy().to_string();
+    insert_watch_folder(&pool, "w1", "t1", &main_str).await;
+    insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await;
+
+    let qm = QueueManager::new(pool.clone());
+
+    // Non-projects collection → gated out.
+    let n_lib = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "libraries", &main_str).await;
+    assert_eq!(n_lib, 0);
+
+    // Projects but no `.git/worktrees` → nothing to do.
+    let n_none = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str).await;
+    assert_eq!(n_none, 0);
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unified_queue")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "no enqueues in either gated/no-op case");
 }
