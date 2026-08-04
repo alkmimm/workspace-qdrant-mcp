@@ -5,6 +5,7 @@ use std::time::Duration;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
+use crate::allowed_extensions::AllowedExtensions;
 use crate::queue_operations::QueueManager;
 use crate::tracked_files_schema::{
     CREATE_TRACKED_FILES_V41_INDEXES_SQL, CREATE_TRACKED_FILES_V41_SQL,
@@ -614,7 +615,7 @@ async fn test_reconcile_worktree_branches_tags_baseline() {
     insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await;
 
     let qm = QueueManager::new(pool.clone());
-    let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str).await;
+    let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str, &AllowedExtensions::default()).await;
     assert_eq!(
         n, 1,
         "only the branch worktree tags the baseline (detached skipped)"
@@ -643,6 +644,112 @@ async fn test_reconcile_worktree_branches_tags_baseline() {
     );
 }
 
+/// B1.1: a file that exists ONLY on the worktree branch (no `tracked_files`
+/// row under the main folder) is discovered by walking the worktree tree and
+/// enqueued with a `read_root` so the processor reads its bytes from the
+/// worktree. The shared baseline (a path already tracked under main) is enqueued
+/// too, but WITHOUT a `read_root` — it reads from the main tree. The two sets
+/// stay disjoint via `tracked_files` membership.
+#[tokio::test]
+async fn test_reconcile_worktree_branches_tags_new_on_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let main_repo = tmp.path().join("main");
+    let main_git = main_repo.join(".git");
+    std::fs::create_dir_all(&main_git).unwrap();
+
+    // A project .wqmignore at the MAIN root excludes `generated/`. This is what
+    // the main-anchored eligibility gate consults — a worktree file under
+    // generated/ must be dropped even though the worktree tree has no ignore
+    // file of its own.
+    std::fs::write(main_repo.join(".wqmignore"), "generated/\n").unwrap();
+
+    // Worktree on branch "feat": one shared file (also tracked under main), one
+    // file that lives ONLY on this branch (no tracked_files row anywhere), and
+    // one branch-only file under generated/ that the main gate must exclude.
+    let wt = main_repo.join(".claude").join("worktrees").join("wt-feat");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::create_dir_all(wt.join("generated")).unwrap();
+    std::fs::write(wt.join("src/a.rs"), b"fn a() {}").unwrap();
+    std::fs::write(wt.join("src/only_feat.rs"), b"fn only() {}").unwrap();
+    std::fs::write(wt.join("generated/gen.rs"), b"// generated").unwrap();
+    // A branch-only cert the extension allowlist rejects (mirrors the main
+    // scan): passes the ignore gate but must not be enqueued or churned.
+    std::fs::write(wt.join("deploy.pem"), b"-----BEGIN-----").unwrap();
+    let admin = main_git.join("worktrees").join("wt-feat");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(admin.join("gitdir"), format!("{}/.git\n", wt.display())).unwrap();
+    std::fs::write(admin.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let main_str = main_repo.to_string_lossy().to_string();
+    insert_watch_folder(&pool, "w1", "t1", &main_str).await;
+    // Only src/a.rs is tracked under main — src/only_feat.rs is branch-only.
+    insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await;
+
+    let qm = QueueManager::new(pool.clone());
+    let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str, &AllowedExtensions::default()).await;
+    assert_eq!(
+        n, 2,
+        "shared baseline (src/a.rs) + new-on-branch (src/only_feat.rs); generated/gen.rs excluded"
+    );
+
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT op, branch, payload_json, metadata FROM unified_queue WHERE tenant_id = 't1'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "two enqueues from the 'feat' worktree");
+    for r in &rows {
+        assert_eq!(r.0, "add", "Add op → dedup fast-path / novel-content ingest");
+        assert_eq!(r.1, "feat", "tagged under the WORKTREE branch");
+        assert!(
+            r.3.as_deref().unwrap_or("").contains("worktree_membership"),
+            "both items flag worktree_membership: {:?}",
+            r.3
+        );
+    }
+
+    // The shared baseline reads from the MAIN tree → NO read_root.
+    let baseline = rows
+        .iter()
+        .find(|r| r.2.contains("src/a.rs"))
+        .expect("baseline enqueue present");
+    assert!(
+        !baseline.3.as_deref().unwrap_or("").contains("read_root"),
+        "shared baseline must not carry read_root: {:?}",
+        baseline.3
+    );
+
+    // The branch-only file reads from the WORKTREE tree → carries read_root.
+    let new_on_branch = rows
+        .iter()
+        .find(|r| r.2.contains("only_feat.rs"))
+        .expect("new-on-branch enqueue present");
+    let meta = new_on_branch.3.as_deref().unwrap_or("");
+    assert!(meta.contains("read_root"), "new-on-branch carries read_root: {meta}");
+    assert!(
+        meta.contains("wt-feat"),
+        "read_root points at the worktree root: {meta}"
+    );
+
+    // The main-anchored eligibility gate must have dropped generated/gen.rs
+    // (excluded by the main .wqmignore) — a worktree branch never indexes files
+    // the main scan omits.
+    assert!(
+        !rows.iter().any(|r| r.2.contains("generated/gen.rs")),
+        "generated/gen.rs must be excluded by the main-anchored gate"
+    );
+    // The extension allowlist must have dropped deploy.pem (would otherwise be
+    // enqueued only to skip at the process guard, re-churning every scan).
+    assert!(
+        !rows.iter().any(|r| r.2.contains("deploy.pem")),
+        "deploy.pem must be excluded by the extension allowlist"
+    );
+}
+
 /// A non-`projects` collection is never worktree-reconciled (branch tags only
 /// exist for projects), and a repo with no linked worktrees is a clean no-op.
 #[tokio::test]
@@ -660,11 +767,11 @@ async fn test_reconcile_worktree_branches_gated_and_noop() {
     let qm = QueueManager::new(pool.clone());
 
     // Non-projects collection → gated out.
-    let n_lib = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "libraries", &main_str).await;
+    let n_lib = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "libraries", &main_str, &AllowedExtensions::default()).await;
     assert_eq!(n_lib, 0);
 
     // Projects but no `.git/worktrees` → nothing to do.
-    let n_none = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str).await;
+    let n_none = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str, &AllowedExtensions::default()).await;
     assert_eq!(n_none, 0);
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unified_queue")

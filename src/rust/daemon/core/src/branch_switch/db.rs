@@ -1,6 +1,8 @@
 //! Database operations for branch switch: unchanged-file discovery and commit
 //! hash tracking.
 
+use std::collections::HashSet;
+
 use sqlx::SqlitePool;
 use wqm_common::timestamps;
 
@@ -83,6 +85,33 @@ pub async fn fetch_paths_missing_branch(
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Failed to fetch paths missing branch: {}", e))?;
+
+    Ok(rows.into_iter().map(|(p,)| p).collect())
+}
+
+/// Every `relative_path` tracked under `watch_folder_id`, regardless of branch.
+///
+/// The worktree new-on-branch discovery walks the worktree's working tree and
+/// subtracts this set: any path the main folder already tracks (under any
+/// branch) is either the shared baseline the membership reconcile tags by
+/// reading from the main tree (`fetch_paths_missing_branch`) or a file already
+/// tagged elsewhere — never a candidate for the worktree read-root path. What
+/// remains is content that exists ONLY on the worktree branch, whose bytes live
+/// solely in the worktree tree. Keeping the two candidate sets disjoint by
+/// membership in `tracked_files` avoids an idempotency-key collision between a
+/// baseline item (read from main) and a new-on-branch item (read from the
+/// worktree) for the same `(path, branch)`.
+pub async fn fetch_all_tracked_paths(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+) -> Result<HashSet<String>, String> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT relative_path FROM tracked_files WHERE watch_folder_id = ?1",
+    )
+    .bind(watch_folder_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch all tracked paths: {}", e))?;
 
     Ok(rows.into_iter().map(|(p,)| p).collect())
 }

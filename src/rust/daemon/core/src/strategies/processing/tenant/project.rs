@@ -587,6 +587,7 @@ async fn handle_project_scan(
             &item.tenant_id,
             &item.collection,
             &payload.project_root,
+            ctx.allowed_extensions.as_ref(),
         )
         .await;
     }
