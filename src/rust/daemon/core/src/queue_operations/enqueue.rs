@@ -55,13 +55,30 @@ impl QueueManager {
         let (tenant_id, collection, payload) =
             Self::validate_enqueue_params(tenant_id, collection, payload_json, item_type, op)?;
 
-        let key_payload = Self::idempotency_payload_json(item_type, payload_json);
-        let idempotency_key =
-            generate_unified_idempotency_key(item_type, op, tenant_id, collection, &key_payload)
-                .map_err(|e| QueueError::InvalidOperation(e.to_string()))?;
-
         let branch = branch.unwrap_or("main");
         let metadata = metadata.unwrap_or("{}");
+
+        // The idempotency key is a cross-producer contract — the SAME algorithm in
+        // the TS server, the daemon, and the CLI: SHA256(item_type|op|tenant|
+        // collection|payload_json), with NO branch. That is correct for normal
+        // ingestion (one branch checked out at a time, so a file maps to one
+        // pending item), but the worktree-membership reconcile enqueues the SAME
+        // file under SEVERAL worktree branches in a single pass — with a
+        // branch-less key those collide on the idempotency UNIQUE index and only
+        // one branch tags per scan. Those items are daemon-only, so mix the branch
+        // into the key ONLY for them; every other producer/item keeps the identical
+        // shared key. (The file_path composite index is already branch-scoped —
+        // F-009 — so only the idempotency key needed this.)
+        let key_payload = Self::idempotency_payload_json(item_type, payload_json);
+        let key_input = if Self::metadata_wants_branch_scoped_key(metadata) {
+            std::borrow::Cow::Owned(format!("{key_payload}\x00wt_branch={branch}"))
+        } else {
+            key_payload
+        };
+        let idempotency_key =
+            generate_unified_idempotency_key(item_type, op, tenant_id, collection, &key_input)
+                .map_err(|e| QueueError::InvalidOperation(e.to_string()))?;
+
         let file_path = Self::extract_file_path(item_type, &payload);
 
         let (is_new, _) = self
@@ -184,6 +201,23 @@ impl QueueManager {
             }
             Err(_) => std::borrow::Cow::Borrowed(payload_json),
         }
+    }
+
+    /// Whether an item's metadata opts into a branch-scoped idempotency key.
+    ///
+    /// Set only by the worktree-membership reconcile
+    /// (`{"worktree_membership": true}`) — the one producer that enqueues the
+    /// same file under multiple branches in a single pass. Every other producer
+    /// and item type keeps the branch-less shared key, so the TS/daemon/CLI
+    /// idempotency contract is unchanged for all normal ingestion.
+    fn metadata_wants_branch_scoped_key(metadata: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(metadata)
+            .ok()
+            .and_then(|v| {
+                v.get("worktree_membership")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false)
     }
 
     /// Bulk-enqueue `(item_type, op, tenant_id, collection, payload_json)` tuples
