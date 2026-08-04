@@ -5,6 +5,7 @@ use std::time::Duration;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
+use crate::allowed_extensions::AllowedExtensions;
 use crate::queue_operations::QueueManager;
 use crate::tracked_files_schema::{
     CREATE_TRACKED_FILES_V41_INDEXES_SQL, CREATE_TRACKED_FILES_V41_SQL,
@@ -614,7 +615,7 @@ async fn test_reconcile_worktree_branches_tags_baseline() {
     insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await;
 
     let qm = QueueManager::new(pool.clone());
-    let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str).await;
+    let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str, &AllowedExtensions::default()).await;
     assert_eq!(
         n, 1,
         "only the branch worktree tags the baseline (detached skipped)"
@@ -672,6 +673,9 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
     std::fs::write(wt.join("src/a.rs"), b"fn a() {}").unwrap();
     std::fs::write(wt.join("src/only_feat.rs"), b"fn only() {}").unwrap();
     std::fs::write(wt.join("generated/gen.rs"), b"// generated").unwrap();
+    // A branch-only cert the extension allowlist rejects (mirrors the main
+    // scan): passes the ignore gate but must not be enqueued or churned.
+    std::fs::write(wt.join("deploy.pem"), b"-----BEGIN-----").unwrap();
     let admin = main_git.join("worktrees").join("wt-feat");
     std::fs::create_dir_all(&admin).unwrap();
     std::fs::write(admin.join("gitdir"), format!("{}/.git\n", wt.display())).unwrap();
@@ -685,7 +689,7 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
     insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await;
 
     let qm = QueueManager::new(pool.clone());
-    let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str).await;
+    let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str, &AllowedExtensions::default()).await;
     assert_eq!(
         n, 2,
         "shared baseline (src/a.rs) + new-on-branch (src/only_feat.rs); generated/gen.rs excluded"
@@ -738,6 +742,12 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
         !rows.iter().any(|r| r.2.contains("generated/gen.rs")),
         "generated/gen.rs must be excluded by the main-anchored gate"
     );
+    // The extension allowlist must have dropped deploy.pem (would otherwise be
+    // enqueued only to skip at the process guard, re-churning every scan).
+    assert!(
+        !rows.iter().any(|r| r.2.contains("deploy.pem")),
+        "deploy.pem must be excluded by the extension allowlist"
+    );
 }
 
 /// A non-`projects` collection is never worktree-reconciled (branch tags only
@@ -757,11 +767,11 @@ async fn test_reconcile_worktree_branches_gated_and_noop() {
     let qm = QueueManager::new(pool.clone());
 
     // Non-projects collection → gated out.
-    let n_lib = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "libraries", &main_str).await;
+    let n_lib = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "libraries", &main_str, &AllowedExtensions::default()).await;
     assert_eq!(n_lib, 0);
 
     // Projects but no `.git/worktrees` → nothing to do.
-    let n_none = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str).await;
+    let n_none = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str, &AllowedExtensions::default()).await;
     assert_eq!(n_none, 0);
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unified_queue")

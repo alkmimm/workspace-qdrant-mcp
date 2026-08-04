@@ -54,6 +54,7 @@ use tracing::{debug, info, warn};
 use wqm_common::constants::COLLECTION_PROJECTS;
 use wqm_common::paths::RelativePath;
 
+use crate::allowed_extensions::AllowedExtensions;
 use crate::queue_operations::QueueManager;
 use crate::unified_queue_schema::{FilePayload, ItemType, QueueOperation};
 
@@ -91,6 +92,7 @@ pub async fn reconcile_worktree_branches(
     tenant_id: &str,
     collection: &str,
     main_project_root: &str,
+    allowed_extensions: &AllowedExtensions,
 ) -> usize {
     if collection != COLLECTION_PROJECTS {
         return 0;
@@ -162,6 +164,7 @@ pub async fn reconcile_worktree_branches(
             &wt_root,
             main_project_root,
             &branch,
+            allowed_extensions,
         )
         .await;
         if n_new > 0 {
@@ -252,12 +255,14 @@ async fn enqueue_worktree_membership(
 /// global to the walk, because `global.wqmignore`'s `.claude/worktrees/` rule
 /// matches absolute paths and their parents and would self-exclude the whole
 /// worktree even rooted inside it. It then subtracts every path already tracked
-/// under the main folder and applies the MAIN folder's full eligibility (project
-/// + `global.wqmignore`) to each survivor, anchored at the main root: that
-/// re-adds the global layer the walk had to drop, so a worktree branch never
-/// indexes generated / globally-excluded files the main scan omits, while the
-/// main anchor (`main_root/rel`, never `worktree_root/rel`) keeps the
-/// `.claude/worktrees/` rule from self-excluding. What remains is branch-only
+/// under the main folder and applies the MAIN folder's full eligibility to each
+/// survivor: the ignore gate (project cascade + `global.wqmignore`) anchored at
+/// the main root — which re-adds the global layer the walk had to drop, so a
+/// worktree branch never indexes generated / globally-excluded files the main
+/// scan omits, while the main anchor (`main_root/rel`, never `worktree_root/rel`)
+/// keeps the `.claude/worktrees/` rule from self-excluding — plus the
+/// extension/filename allowlist, so disallowed types (certs, keystores, lock
+/// files) are dropped at discovery instead of enqueued only to skip at ingest. What remains is branch-only
 /// content; each item carries `read_root` so the processor anchors its reads at
 /// the worktree tree while storage stays keyed to the main watch_folder
 /// (cross-branch dedup + branch-scoped idempotency unchanged).
@@ -277,6 +282,7 @@ async fn enqueue_worktree_new_on_branch(
     wt_root: &str,
     main_project_root: &str,
     branch: &str,
+    allowed_extensions: &AllowedExtensions,
 ) -> usize {
     // Enumerate the worktree working tree with the project-cascade ignore only
     // (`None` global — see doc above); the global layer is re-applied below via
@@ -332,6 +338,13 @@ async fn enqueue_worktree_new_on_branch(
         // Skip anything the main scan itself would exclude (generated code,
         // build output, vendored trees), so the branch mirrors main eligibility.
         if gate.is_ignored_with_ancestors(main_root, &main_root.join(&rel_str)) {
+            continue;
+        }
+        // Mirror the scan's extension/filename allowlist: the process-time
+        // ingestion guard rejects disallowed types (certs, keystores, `.properties`,
+        // `gradlew`, …) anyway, so enqueuing them only to skip them re-churns the
+        // full worktree every scan — once per worktree branch. Filter at discovery.
+        if !allowed_extensions.is_allowed(&rel_str, collection) {
             continue;
         }
         let rel = match RelativePath::from_user_input(&rel_str) {
