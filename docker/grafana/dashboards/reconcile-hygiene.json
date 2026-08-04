@@ -231,6 +231,45 @@
         }
       ],
       "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true, "dedupStrategy": "none", "prettifyLogMessage": false, "showCommonLabels": false, "showLabels": false }
+    },
+    {
+      "type": "row", "title": "Worktree branch membership (linked-worktree indexing)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 }, "collapsed": false, "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Worktree membership enqueues (1h)",
+      "description": "Baseline-file enqueues the worktree-membership reconcile made in the last hour, tagging a linked worktree's branch onto the shared main index. 0 is normal for repos with no linked worktrees; a value means worktree branches are being (re)tagged on a scan/reindex.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 33 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({container=\"wqm-memexd\"} |= \"worktree membership: enqueued\" [1h]))", "queryType": "instant" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "area", "orientation": "auto" },
+      "fieldConfig": { "defaults": { "noValue": "0", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "blue", "value": 1 } ] } }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Baseline files tagged per interval — by branch (Prometheus counter)",
+      "description": "increase() of memexd_worktree_membership_enqueued_total{tenant_id,branch} — the daemon counter bumped once per reconcile pass with the number of baseline files enqueued for that worktree branch. Each series is one worktree branch; flat zero when no worktrees are active.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 33 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (branch) (increase(memexd_worktree_membership_enqueued_total[$__rate_interval]))", "legendFormat": "{{branch}}" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } }, "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "type": "logs",
+      "title": "Worktree membership events (raw)",
+      "description": "One line per (worktree, branch) reconcile: how many baseline files were enqueued, under which branch, from which worktree path. The source behind the panels above.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 41 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "{container=\"wqm-memexd\"} |= \"worktree membership: enqueued\"" }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true, "dedupStrategy": "none", "prettifyLogMessage": false, "showCommonLabels": false, "showLabels": false }
     }
   ],
   "refresh": "1m",
@@ -242,6 +281,6 @@
   "timezone": "browser",
   "title": "WQM — Reconciliation & Index Hygiene",
   "uid": "wqm-reconcile-hygiene",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

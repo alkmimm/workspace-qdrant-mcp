@@ -17,7 +17,7 @@ use super::metrics_factories::{
     create_per_tenant_eta_metric, create_per_tenant_indexing_metric, create_queue_metrics,
     create_search_adoption_metrics, create_session_metrics, create_system_metrics,
     create_telemetry_extension_metrics, create_tenant_metrics, create_token_economy_metrics,
-    create_unified_queue_metrics, create_watch_metrics, register_all,
+    create_unified_queue_metrics, create_watch_metrics, int_counter_vec, register_all,
 };
 
 /// Global metrics registry
@@ -56,6 +56,11 @@ pub struct DaemonMetrics {
     /// Total items processed by priority and status
     /// Labels: priority, status (success, failure, skipped)
     pub queue_items_processed_total: IntCounterVec,
+
+    /// Baseline files enqueued under a worktree's branch by the
+    /// worktree-membership reconcile (linked-worktree indexing).
+    /// Labels: tenant_id, branch
+    pub worktree_membership_enqueued_total: IntCounterVec,
 
     // Per-tenant metrics
     /// Total documents per tenant and collection
@@ -307,6 +312,7 @@ struct CreatedMetrics {
     queue_depth: IntGaugeVec,
     queue_processing_time_seconds: HistogramVec,
     queue_items_processed_total: IntCounterVec,
+    worktree_membership_enqueued_total: IntCounterVec,
     tenant_documents_total: IntGaugeVec,
     tenant_search_requests_total: IntCounterVec,
     tenant_storage_bytes: GaugeVec,
@@ -377,6 +383,11 @@ fn create_all_metrics() -> CreatedMetrics {
     let (active_sessions, total_sessions, session_duration_seconds) = create_session_metrics();
     let (queue_depth, queue_processing_time_seconds, queue_items_processed_total) =
         create_queue_metrics();
+    let worktree_membership_enqueued_total = int_counter_vec(
+        "worktree_membership_enqueued_total",
+        "Baseline files enqueued under a worktree's branch by the membership reconcile",
+        &["tenant_id", "branch"],
+    );
     let (tenant_documents_total, tenant_search_requests_total, tenant_storage_bytes) =
         create_tenant_metrics();
     let (
@@ -490,6 +501,7 @@ fn create_all_metrics() -> CreatedMetrics {
         queue_depth,
         queue_processing_time_seconds,
         queue_items_processed_total,
+        worktree_membership_enqueued_total,
         tenant_documents_total,
         tenant_search_requests_total,
         tenant_storage_bytes,
@@ -567,6 +579,7 @@ fn register_metrics(registry: &Registry, m: &CreatedMetrics) {
             Box::new(m.queue_depth.clone()),
             Box::new(m.queue_processing_time_seconds.clone()),
             Box::new(m.queue_items_processed_total.clone()),
+            Box::new(m.worktree_membership_enqueued_total.clone()),
             Box::new(m.tenant_documents_total.clone()),
             Box::new(m.tenant_search_requests_total.clone()),
             Box::new(m.tenant_storage_bytes.clone()),
@@ -649,6 +662,7 @@ impl DaemonMetrics {
             queue_depth: m.queue_depth,
             queue_processing_time_seconds: m.queue_processing_time_seconds,
             queue_items_processed_total: m.queue_items_processed_total,
+            worktree_membership_enqueued_total: m.worktree_membership_enqueued_total,
             tenant_documents_total: m.tenant_documents_total,
             tenant_search_requests_total: m.tenant_search_requests_total,
             tenant_storage_bytes: m.tenant_storage_bytes,

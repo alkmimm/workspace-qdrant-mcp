@@ -64,6 +64,84 @@ async fn test_unified_queue_enqueue_dequeue() {
     assert_eq!(items[0].worker_id, Some("worker-1".to_string()));
 }
 
+/// Worktree-membership items mix the branch into the idempotency key, so the
+/// SAME file enqueued under different worktree branches in one scan does not
+/// collide — while normal items keep the branch-less shared key contract.
+#[tokio::test]
+async fn test_worktree_membership_idempotency_key_is_branch_scoped() {
+    let temp_dir = tempdir().unwrap();
+    let db_path = temp_dir.path().join("wt_idem.db");
+    let config = QueueConnectionConfig::with_database_path(&db_path);
+    let pool = config.create_pool().await.unwrap();
+    apply_sql_script(&pool, include_str!("../../schema/watch_folders_schema.sql"))
+        .await
+        .unwrap();
+    let manager = QueueManager::new(pool);
+    manager.init_unified_queue().await.unwrap();
+
+    let wt_meta = Some(r#"{"worktree_membership":true}"#);
+    let payload = r#"{"file_path":"/test/file.rs"}"#;
+
+    // Same file, two different worktree branches → distinct keys → both enqueue.
+    let (id_a, new_a) = manager
+        .enqueue_unified(
+            ItemType::File,
+            UnifiedOp::Add,
+            "t",
+            "c",
+            payload,
+            Some("wt/a"),
+            wt_meta,
+        )
+        .await
+        .unwrap();
+    let (id_b, new_b) = manager
+        .enqueue_unified(
+            ItemType::File,
+            UnifiedOp::Add,
+            "t",
+            "c",
+            payload,
+            Some("wt/b"),
+            wt_meta,
+        )
+        .await
+        .unwrap();
+    assert!(new_a);
+    assert!(new_b, "different worktree branch → different key → not deduped");
+    assert_ne!(id_a, id_b);
+
+    // Same worktree branch again → still deduped (idempotent, no double-enqueue).
+    let (id_a2, new_a2) = manager
+        .enqueue_unified(
+            ItemType::File,
+            UnifiedOp::Add,
+            "t",
+            "c",
+            payload,
+            Some("wt/a"),
+            wt_meta,
+        )
+        .await
+        .unwrap();
+    assert!(!new_a2);
+    assert_eq!(id_a, id_a2);
+
+    // A NORMAL File Add (no flag) keeps the branch-LESS shared key: the same file
+    // on two branches dedups, so the TS/daemon/CLI contract is unchanged.
+    let payload2 = r#"{"file_path":"/test/other.rs"}"#;
+    let (_n1, new_n1) = manager
+        .enqueue_unified(ItemType::File, UnifiedOp::Add, "t", "c", payload2, Some("main"), None)
+        .await
+        .unwrap();
+    let (_n2, new_n2) = manager
+        .enqueue_unified(ItemType::File, UnifiedOp::Add, "t", "c", payload2, Some("dev"), None)
+        .await
+        .unwrap();
+    assert!(new_n1);
+    assert!(!new_n2, "normal items keep the branch-less shared idempotency key");
+}
+
 /// Test FIFO ordering: priority_descending=true -> created_at ASC (oldest first)
 #[tokio::test]
 async fn test_dequeue_fifo_ordering() {
@@ -325,8 +403,16 @@ async fn test_enqueue_unified_batch_is_single_transaction() {
     let manager = QueueManager::new(pool.clone());
     manager.init_unified_queue().await.unwrap();
 
+    // PRAGMA data_version does NOT advance for writes made on the SAME SQLite
+    // connection, and a read taken from the manager's pool can land on the
+    // batch's own connection (delta 0). Probe from a SEPARATE connection to the
+    // same file so the batch's single external commit is always observed.
+    let probe = QueueConnectionConfig::with_database_path(&db_path)
+        .create_pool()
+        .await
+        .unwrap();
     let before: i64 = sqlx::query_scalar("PRAGMA data_version")
-        .fetch_one(&pool)
+        .fetch_one(&probe)
         .await
         .unwrap();
 
@@ -347,7 +433,7 @@ async fn test_enqueue_unified_batch_is_single_transaction() {
         .unwrap();
 
     let after: i64 = sqlx::query_scalar("PRAGMA data_version")
-        .fetch_one(&pool)
+        .fetch_one(&probe)
         .await
         .unwrap();
 
