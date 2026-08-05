@@ -36,6 +36,7 @@ import {
 import { whitespaceSensitivityHint } from './exact-hints.js';
 import { lookupTestFlags } from './test-flag.js';
 import { fetchIndexingProgress } from './search-helpers.js';
+import { worktreeReadNote } from './worktree-note.js';
 
 /**
  * Conservative proxy for the size of the files that contain a grep match.
@@ -711,9 +712,13 @@ export class GrepTool {
       // so a widened next_offset would dangle — page the widened set by
       // passing branch:"*" explicitly instead.
       const moreRemain = !widenedFired && (truncated || shaped.dropped > 0);
+      // Worktree callers get MAIN-anchored paths; tell them how to Read their own
+      // copy once (only worth saying when there are paths to translate).
+      const wtNote = shaped.matches.length > 0 ? worktreeReadNote() : undefined;
       return {
         success: true,
         matches: shaped.matches,
+        ...(wtNote ? { worktree: wtNote } : {}),
         // Report the deduped count. When the daemon truncated, its
         // total_matches is an upper bound over the (duplicated) full set —
         // discount the duplicates seen on this page as a best effort. An
@@ -833,6 +838,8 @@ export class GrepTool {
   ): Promise<string | undefined> {
     return diagnoseEmptyResult({
       tenantId,
+      // Lead with the metacharacter verdict when a literal grep carries one.
+      ...(regex ? {} : { literalPattern: pattern, regexRetryHint: 'Retry with regex:true.' }),
       branch,
       pathGlob,
       pathExclude,

@@ -63,6 +63,25 @@ export function getEffectiveCwd(): string {
   return process.cwd();
 }
 
+/**
+ * If the caller's effective cwd is inside a linked git worktree
+ * (`…/.claude/worktrees/<name>[/…]`), return the worktree `name` and its `root`.
+ *
+ * The worktree-membership model indexes a worktree's content under the MAIN
+ * repo's folder, so `search`/`grep` results carry MAIN-anchored paths — a caller
+ * working in a worktree must `Read` `${root}/${relativePath}` (its own copy, which
+ * for a divergent file differs from main), not the returned main path. Surfacing
+ * this once lets the response say so instead of the caller translating every path
+ * by hand (field feedback). Path-shape only — no disk/DB lookup; matches `/`
+ * and `\` separators (a Windows-host cwd over UNC).
+ */
+export function getWorktreeContext(): { name: string; root: string } | undefined {
+  const cwd = getEffectiveCwd();
+  const m = /^(.*[/\\]\.claude[/\\]worktrees[/\\]([^/\\]+))(?:[/\\].*)?$/.exec(cwd);
+  if (!m || !m[1] || !m[2]) return undefined;
+  return { root: m[1], name: m[2] };
+}
+
 /** Outcome of {@link resolveStickyCwd}. */
 export interface StickyCwdResolution {
   /**

@@ -118,6 +118,31 @@ async function resolveTenant(args: JsonObject, projectDetector: ProjectDetector)
   );
 }
 
+/**
+ * Caveat for an EMPTY `usages`/`impact`/`relations` result. The graph is built
+ * from edges extracted at ingest — CALLS, USES_TYPE, IMPORTS, inheritance — over
+ * CALLABLE symbols, so a 0 means "no such edge was extracted", NOT "unused".
+ * Field feedback (multiple worktree sessions): `usages`/`impact` on a Dart class
+ * field / Riverpod provider returned 0 while a plain grep found 17 real sites —
+ * the graph does not index field/property access, dynamic dispatch, string-keyed
+ * DI, or generated-code references. Leading a caller to "nobody uses X" from a
+ * graph 0 is the exact failure this prevents.
+ */
+function graphNoEdgesHint(kind: 'usages' | 'impact' | 'relations'): string {
+  const what =
+    kind === 'relations'
+      ? 'no outgoing dependency edges'
+      : kind === 'usages'
+        ? 'no direct references'
+        : 'no dependents';
+  return (
+    `Graph shows ${what} here, but it only has CALL / USES_TYPE / IMPORTS / inheritance edges over ` +
+    `callable symbols. Field/property/provider access, dynamic dispatch, string-keyed DI, and ` +
+    `generated-code references are NOT edges — this 0 does NOT prove the symbol is unused. Confirm ` +
+    `with the grep tool before concluding "no callers/usages".`
+  );
+}
+
 export async function handleGraph(
   rawArgs: Record<string, unknown> | undefined,
   daemonClient: DaemonClient | undefined,
@@ -176,9 +201,19 @@ export async function handleGraph(
           ...r,
           impacted_nodes: direct,
           total_impacted: direct.length,
+          ...(direct.length === 0 ? { hint: graphNoEdgesHint('usages') } : {}),
         };
       }
-      return { success: true, action, tenant_id: tenant, symbol, ...r };
+      return {
+        success: true,
+        action,
+        tenant_id: tenant,
+        symbol,
+        ...r,
+        ...((r.total_impacted ?? (r.impacted_nodes ?? []).length) === 0
+          ? { hint: graphNoEdgesHint('impact') }
+          : {}),
+      };
     }
 
     case 'hotspots': {
@@ -313,7 +348,17 @@ export async function handleGraph(
         file_path: filePath,
       };
       const r = await daemonClient.queryRelated(req);
-      return { success: true, action, tenant_id: tenant, symbol, node_id: nodeId, ...r };
+      return {
+        success: true,
+        action,
+        tenant_id: tenant,
+        symbol,
+        node_id: nodeId,
+        ...r,
+        ...((r.total ?? (r.nodes ?? []).length) === 0
+          ? { hint: graphNoEdgesHint('relations') }
+          : {}),
+      };
     }
 
     default:

@@ -8,6 +8,7 @@ import {
   COLLECTION_LIBRARIES,
   COLLECTION_SCRATCHPAD,
 } from '../common/native-bridge.js';
+import type { WorktreeReadNote } from './worktree-note.js';
 export const PROJECTS_COLLECTION = COLLECTION_PROJECTS;
 export const LIBRARIES_COLLECTION = COLLECTION_LIBRARIES;
 export const SCRATCHPAD_COLLECTION = COLLECTION_SCRATCHPAD;
@@ -281,6 +282,10 @@ export interface SearchResponse {
   /** Attached only when `scope === 'project'` and the daemon queue
    *  still has work for the current tenant. Absent otherwise. */
   indexing?: IndexingProgress;
+  /** Attached only when the caller's cwd is inside a linked worktree and there
+   *  are results: result `file_path`s are MAIN-anchored, so this tells the caller
+   *  how to Read the worktree's own copy. Absent otherwise. */
+  worktree?: WorktreeReadNote;
   /** Attached only when the global response byte budget dropped trailing hits:
    *  `dropped` is how many were cut (the kept set always has >=1). The agent can
    *  narrow the query, raise `maxResponseBytes`, or use `summary` for the rest. */
