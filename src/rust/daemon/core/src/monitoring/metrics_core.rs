@@ -67,6 +67,11 @@ pub struct DaemonMetrics {
     /// Labels: tenant_id, branch
     pub worktree_membership_new_on_branch_enqueued_total: IntCounterVec,
 
+    /// Shared files whose content DIVERGES on a worktree's branch (git-Modified
+    /// vs main) enqueued by the membership reconcile, read from the worktree tree.
+    /// Labels: tenant_id, branch
+    pub worktree_membership_divergent_enqueued_total: IntCounterVec,
+
     // Per-tenant metrics
     /// Total documents per tenant and collection
     /// Labels: tenant_id, collection
@@ -319,6 +324,7 @@ struct CreatedMetrics {
     queue_items_processed_total: IntCounterVec,
     worktree_membership_enqueued_total: IntCounterVec,
     worktree_membership_new_on_branch_enqueued_total: IntCounterVec,
+    worktree_membership_divergent_enqueued_total: IntCounterVec,
     tenant_documents_total: IntGaugeVec,
     tenant_search_requests_total: IntCounterVec,
     tenant_storage_bytes: GaugeVec,
@@ -397,6 +403,11 @@ fn create_all_metrics() -> CreatedMetrics {
     let worktree_membership_new_on_branch_enqueued_total = int_counter_vec(
         "worktree_membership_new_on_branch_enqueued_total",
         "Branch-only files (absent from the main folder) enqueued from the worktree tree by the membership reconcile",
+        &["tenant_id", "branch"],
+    );
+    let worktree_membership_divergent_enqueued_total = int_counter_vec(
+        "worktree_membership_divergent_enqueued_total",
+        "Shared files divergent on the worktree branch (git-Modified vs main) enqueued from the worktree tree by the membership reconcile",
         &["tenant_id", "branch"],
     );
     let (tenant_documents_total, tenant_search_requests_total, tenant_storage_bytes) =
@@ -514,6 +525,7 @@ fn create_all_metrics() -> CreatedMetrics {
         queue_items_processed_total,
         worktree_membership_enqueued_total,
         worktree_membership_new_on_branch_enqueued_total,
+        worktree_membership_divergent_enqueued_total,
         tenant_documents_total,
         tenant_search_requests_total,
         tenant_storage_bytes,
@@ -593,6 +605,7 @@ fn register_metrics(registry: &Registry, m: &CreatedMetrics) {
             Box::new(m.queue_items_processed_total.clone()),
             Box::new(m.worktree_membership_enqueued_total.clone()),
             Box::new(m.worktree_membership_new_on_branch_enqueued_total.clone()),
+            Box::new(m.worktree_membership_divergent_enqueued_total.clone()),
             Box::new(m.tenant_documents_total.clone()),
             Box::new(m.tenant_search_requests_total.clone()),
             Box::new(m.tenant_storage_bytes.clone()),
@@ -678,6 +691,8 @@ impl DaemonMetrics {
             worktree_membership_enqueued_total: m.worktree_membership_enqueued_total,
             worktree_membership_new_on_branch_enqueued_total: m
                 .worktree_membership_new_on_branch_enqueued_total,
+            worktree_membership_divergent_enqueued_total: m
+                .worktree_membership_divergent_enqueued_total,
             tenant_documents_total: m.tenant_documents_total,
             tenant_search_requests_total: m.tenant_search_requests_total,
             tenant_storage_bytes: m.tenant_storage_bytes,

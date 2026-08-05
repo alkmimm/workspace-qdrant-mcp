@@ -750,6 +750,99 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
     );
 }
 
+/// B2: a shared file whose content DIVERGES on the worktree branch (git-Modified
+/// between the main HEAD and the branch tip) is enqueued with a `read_root` (read
+/// from the worktree, indexing the branch's OWN bytes), and the baseline SKIPS it
+/// (no read-from-main). Needs a real git repo so the commit-to-commit diff runs.
+#[tokio::test]
+async fn test_reconcile_worktree_branches_tags_divergent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_repo = tmp.path().join("main");
+    std::fs::create_dir_all(&main_repo).unwrap();
+
+    // Real git repo: shared.rs committed on main, then diverges on branch "feat".
+    let repo = git2::Repository::init(&main_repo).unwrap();
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("user.name", "T").unwrap();
+    cfg.set_str("user.email", "t@e").unwrap();
+    let sig = repo.signature().unwrap();
+
+    std::fs::write(main_repo.join("shared.rs"), b"fn v1() {}").unwrap();
+    let mut idx = repo.index().unwrap();
+    idx.add_path(std::path::Path::new("shared.rs")).unwrap();
+    idx.write().unwrap();
+    let tree1 = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+    let c1 = repo
+        .commit(Some("HEAD"), &sig, &sig, "c1", &tree1, &[])
+        .unwrap();
+    let commit1 = repo.find_commit(c1).unwrap();
+
+    // feat: shared.rs diverges (HEAD stays on main → head-vs-feat = {shared.rs}).
+    std::fs::write(main_repo.join("shared.rs"), b"fn v2() {}").unwrap();
+    let mut idx = repo.index().unwrap();
+    idx.add_path(std::path::Path::new("shared.rs")).unwrap();
+    idx.write().unwrap();
+    let tree2 = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+    repo.commit(Some("refs/heads/feat"), &sig, &sig, "c2", &tree2, &[&commit1])
+        .unwrap();
+
+    // Linked worktree on branch feat, holding feat's (divergent) content.
+    let wt = main_repo.join(".claude").join("worktrees").join("wt-feat");
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(wt.join("shared.rs"), b"fn v2() {}").unwrap();
+    let admin = main_repo.join(".git").join("worktrees").join("wt-feat");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(admin.join("gitdir"), format!("{}/.git\n", wt.display())).unwrap();
+    std::fs::write(admin.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let main_str = main_repo.to_string_lossy().to_string();
+    insert_watch_folder(&pool, "w1", "t1", &main_str).await;
+    // shared.rs tracked under main only — the divergence candidate.
+    insert_tracked_file(&pool, "w1", &["main"], "h_shared_main", "shared.rs").await;
+
+    let qm = QueueManager::new(pool.clone());
+    let n = reconcile_worktree_branches(
+        &pool,
+        &qm,
+        "w1",
+        "t1",
+        "projects",
+        &main_str,
+        &AllowedExtensions::default(),
+    )
+    .await;
+    assert_eq!(n, 1, "only the divergent shared.rs is enqueued (once)");
+
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT op, branch, payload_json, metadata FROM unified_queue WHERE tenant_id = 't1'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows.iter().filter(|r| r.2.contains("shared.rs")).count(),
+        1,
+        "baseline skipped the divergent file — exactly one enqueue"
+    );
+    let shared = rows
+        .iter()
+        .find(|r| r.2.contains("shared.rs"))
+        .expect("shared.rs enqueued");
+    assert_eq!(shared.0, "add");
+    assert_eq!(shared.1, "feat", "tagged under the worktree branch");
+    let meta = shared.3.as_deref().unwrap_or("");
+    assert!(
+        meta.contains("read_root"),
+        "divergent file reads from the worktree (read_root): {meta}"
+    );
+    assert!(
+        meta.contains("wt-feat"),
+        "read_root points at the worktree root: {meta}"
+    );
+}
+
 /// A non-`projects` collection is never worktree-reconciled (branch tags only
 /// exist for projects), and a repo with no linked worktrees is a clean no-op.
 #[tokio::test]
