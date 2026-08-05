@@ -201,9 +201,64 @@ export function indexLagCaveat(
   );
 }
 
+/**
+ * A `regex:false` pattern carrying regex metacharacters was matched as a LITERAL
+ * substring — so `a|b` looked for the 3-char string "a|b", not "a" OR "b", and a
+ * total-zero is the near-inevitable result. Returns the offending token (so the
+ * message can name it), or `undefined` when the pattern reads as a plain literal.
+ *
+ * High-precision by design — only STRONG regex signals, so a literal search that
+ * merely contains a `.` or a lone `(` is never misflagged: alternation `|`, a
+ * regex character-class escape (`\s \b \d \w \S \B \D \W`), a quantified wildcard
+ * (`.*` / `.+`), or a group opener (`(?:` / `(?=` / `(?!`).
+ */
+export function regexMetacharInLiteral(pattern: string): string | undefined {
+  if (pattern.includes('|')) return '|';
+  const cls = /\\[sSbBdDwW]/.exec(pattern);
+  if (cls) return cls[0];
+  if (pattern.includes('.*')) return '.*';
+  if (pattern.includes('.+')) return '.+';
+  const group = /\(\?[:=!]/.exec(pattern);
+  if (group) return group[0];
+  return undefined;
+}
+
+/**
+ * The pattern contains a regex metacharacter but ran as a literal substring
+ * (`regex:false`). This is the single most common cause of a confusing total
+ * zero (field feedback across 3 worktree sessions): a grep for `a|b` returned 0
+ * and the generic index-lag caveat nearly sent the caller to conclude the code
+ * was "not indexed", when `regex:true` returned 22 matches on an up-to-date
+ * index. Lead with the metacharacter, not absence/lag.
+ */
+export function regexMetacharInLiteralMessage(
+  pattern: string,
+  token: string,
+  regexRetryHint: string
+): string {
+  return (
+    `No matches — but the pattern \`${pattern}\` contains \`${token}\` and ran as a LITERAL substring ` +
+    `(regex disabled), so it searched for those exact characters, not a regex. A zero here is almost ` +
+    `always the metacharacter, NOT true absence or index lag: e.g. \`a|b\` looks for the 3-char string ` +
+    `"a|b", not "a" OR "b". ${regexRetryHint}`
+  );
+}
+
 /** Inputs for {@link diagnoseEmptyResult}. */
 export interface EmptyDiagnosisInput {
   tenantId: string;
+  /**
+   * The pattern IF it was matched as a literal substring (`regex:false`). When
+   * set and it carries a regex metacharacter, that is reported FIRST — the most
+   * common cause of a confusing zero. Omit for regex or semantic calls (there is
+   * no literal to misinterpret).
+   */
+  literalPattern?: string;
+  /**
+   * Tool-specific remedy appended to the metacharacter message — grep:
+   * "Retry with regex:true."; exact search has no regex knob and points at grep.
+   */
+  regexRetryHint?: string;
   /** Effective branch on the query (may be `"*"`/undefined — those skip the branch probe). */
   branch: string | undefined;
   pathGlob: string | undefined;
@@ -242,8 +297,12 @@ export interface EmptyDiagnosisInput {
 }
 
 /**
- * Diagnose a still-empty project-scoped FTS result. Three cheap probes, most
- * specific first:
+ * Diagnose a still-empty project-scoped FTS result. Cheap probes, most specific
+ * first:
+ *   0. **A regex metacharacter ran as a literal** — `literalPattern` carries a
+ *      `|`, `\s`, `.*`, `(?:`, … under `regex:false`. A pure string check (no
+ *      query), and the likeliest cause of the zero, so it leads →
+ *      {@link regexMetacharInLiteralMessage}.
  *   1. **A path filter is responsible** — only when `pathGlob`/`pathExclude` is
  *      set and the unfiltered scope has hits. This splits into two verdicts by a
  *      second probe (does the filter select any indexed file?):
@@ -268,6 +327,19 @@ export interface EmptyDiagnosisInput {
 export async function diagnoseEmptyResult(input: EmptyDiagnosisInput): Promise<string | undefined> {
   const { tenantId, branch, pathGlob, pathExclude, searchDbReader, countWithoutPathFilter } = input;
   const mode = input.mode ?? 'literal';
+
+  // (0) Regex metacharacter in a literal-substring pattern — the dominant cause
+  // of a confusing total zero, and a pure string check (no query), so it leads.
+  if (input.literalPattern) {
+    const token = regexMetacharInLiteral(input.literalPattern);
+    if (token) {
+      return regexMetacharInLiteralMessage(
+        input.literalPattern,
+        token,
+        input.regexRetryHint ?? 'Retry with regex:true.'
+      );
+    }
+  }
 
   // (1) Is a path filter responsible for the empty result?
   if (pathGlob || pathExclude) {

@@ -53,6 +53,7 @@ import {
   concreteBranchFilter,
   resolveFallbackBranch,
 } from './branch-scope.js';
+import { worktreeReadNote } from './worktree-note.js';
 
 import { determineCollections } from './search-filters.js';
 import { diagnoseEmptyResult, EMPTY_DIAGNOSIS_PROBE_LIMIT } from './empty-diagnosis.js';
@@ -253,6 +254,12 @@ export class SearchTool {
       }
     }
     effectivenessTracker.noteHits(eventId, hitRefs);
+    // Worktree callers get MAIN-anchored paths; tell them how to Read their own
+    // copy once (only when there are results to translate).
+    if (shaped.results.length > 0) {
+      const wtNote = worktreeReadNote();
+      if (wtNote) shaped.worktree = wtNote;
+    }
     return shaped;
   }
 

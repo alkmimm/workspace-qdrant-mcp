@@ -477,6 +477,12 @@ async function executeAndLogSearch(
       dedupedResults.length === 0 && tenantId
         ? await diagnoseEmptyResult({
             tenantId,
+            // Exact search always matches a literal substring — a metacharacter
+            // in the query is the likeliest cause of a zero. No regex knob here,
+            // so point at grep.
+            literalPattern: options.query,
+            regexRetryHint:
+              'Exact search matches literal substrings only — use the grep tool with regex:true.',
             branch: options.branch,
             pathGlob: options.pathGlob,
             pathExclude: options.pathExclude,
