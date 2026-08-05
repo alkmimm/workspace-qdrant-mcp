@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use super::watcher_types::GitWatcherError;
@@ -42,6 +43,59 @@ pub fn diff_tree(
 
     let diff = build_diff(&repo, old_sha, new_sha)?;
     collect_changes(diff)
+}
+
+/// Repo-relative paths that DIFFER between the repo's current HEAD tree and
+/// `branch`'s tip tree — the *committed* divergence of a worktree branch from
+/// the main tree.
+///
+/// Used by the worktree-membership reconcile (B2): a shared file whose content
+/// diverges on a worktree branch must be indexed FROM the worktree tree under
+/// that branch, not inherited from the main tree (baseline). Only `Modified` /
+/// `TypeChanged` deltas qualify — `Added` files are new-on-branch (handled by
+/// the walk-minus-tracked path) and `Deleted` files are absent on the branch.
+/// Rename/copy deltas are intentionally excluded: their new path is an addition
+/// on the branch, covered by the new-on-branch path.
+///
+/// Returns an EMPTY set (never an error) when the repo, HEAD, or `branch` ref
+/// can't be resolved, or HEAD == branch tip — the caller then routes nothing to
+/// the worktree read, keeping the safe baseline inheritance. Paths are
+/// forward-slash, matching `tracked_files.relative_path`. Uncommitted worktree
+/// edits are NOT captured (commit-to-commit diff); the live watcher covers an
+/// active worktree session.
+pub fn modified_paths_head_vs_branch(repo_root: &Path, branch: &str) -> HashSet<String> {
+    let repo = match git2::Repository::open(repo_root) {
+        Ok(r) => r,
+        Err(_) => return HashSet::new(),
+    };
+    let head_sha = match repo.head().ok().and_then(|h| h.target()) {
+        Some(oid) => oid.to_string(),
+        None => return HashSet::new(),
+    };
+    let branch_sha = match repo.refname_to_id(&format!("refs/heads/{branch}")) {
+        Ok(oid) => oid.to_string(),
+        Err(_) => return HashSet::new(),
+    };
+    if head_sha == branch_sha {
+        return HashSet::new();
+    }
+    let diff = match build_diff(&repo, &head_sha, &branch_sha) {
+        Ok(d) => d,
+        Err(_) => return HashSet::new(),
+    };
+    match collect_changes(diff) {
+        Ok(changes) => changes
+            .into_iter()
+            .filter(|c| {
+                matches!(
+                    c.status,
+                    FileChangeStatus::Modified | FileChangeStatus::TypeChanged
+                )
+            })
+            .map(|c| c.path)
+            .collect(),
+        Err(_) => HashSet::new(),
+    }
 }
 
 fn build_diff<'a>(
@@ -363,6 +417,54 @@ mod tests {
 
         let added = changes.iter().find(|c| c.path == "new.txt").unwrap();
         assert_eq!(added.status, FileChangeStatus::Added);
+    }
+
+    #[test]
+    fn modified_paths_head_vs_branch_returns_only_modified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+        let sig = repo.signature().unwrap();
+
+        // c1 on HEAD (main): shared="v1", identical="same".
+        std::fs::write(tmp.path().join("shared.txt"), "v1").unwrap();
+        std::fs::write(tmp.path().join("identical.txt"), "same").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("shared.txt")).unwrap();
+        index.add_path(Path::new("identical.txt")).unwrap();
+        index.write().unwrap();
+        let tree1 = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let c1 = repo
+            .commit(Some("HEAD"), &sig, &sig, "c1", &tree1, &[])
+            .unwrap();
+        let commit1 = repo.find_commit(c1).unwrap();
+
+        // c2 on refs/heads/feat (parent c1): shared diverges, identical unchanged.
+        // HEAD stays on main, so head-vs-feat sees only shared.txt.
+        std::fs::write(tmp.path().join("shared.txt"), "v2").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("shared.txt")).unwrap();
+        index.add_path(Path::new("identical.txt")).unwrap();
+        index.write().unwrap();
+        let tree2 = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        repo.commit(Some("refs/heads/feat"), &sig, &sig, "c2", &tree2, &[&commit1])
+            .unwrap();
+
+        let modified = modified_paths_head_vs_branch(tmp.path(), "feat");
+        assert!(
+            modified.contains("shared.txt"),
+            "divergent file returned: {modified:?}"
+        );
+        assert!(
+            !modified.contains("identical.txt"),
+            "unchanged file excluded: {modified:?}"
+        );
+        assert_eq!(modified.len(), 1);
+
+        // Unknown branch / clean repo → empty set, never an error.
+        assert!(modified_paths_head_vs_branch(tmp.path(), "nonexistent").is_empty());
     }
 
     #[test]

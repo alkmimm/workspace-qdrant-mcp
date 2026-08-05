@@ -33,7 +33,9 @@ pub use reflog::{
 };
 
 // Re-export from diff_tree
-pub use diff_tree::{diff_tree, parse_diff_tree_output, FileChange, FileChangeStatus};
+pub use diff_tree::{
+    diff_tree, modified_paths_head_vs_branch, parse_diff_tree_output, FileChange, FileChangeStatus,
+};
 
 // Re-export from tree_ops
 pub use tree_ops::{get_blob_hash, ls_tree_submodules};

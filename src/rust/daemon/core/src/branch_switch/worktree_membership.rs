@@ -26,26 +26,33 @@
 //!
 //! ## Scope
 //!
-//! Two candidate sets, kept disjoint by membership in `tracked_files`:
+//! Three candidate sets per worktree branch, kept mutually disjoint:
 //!
-//! - **Shared baseline** (B1) — every path the main folder already tracks that
-//!   also exists in the worktree tree, read from the MAIN tree.
-//! - **New-on-branch** (B1.1) — files that exist ONLY on the worktree branch
-//!   (no `tracked_files` row under the main folder), read from the WORKTREE
-//!   tree via a `read_root` on the item. Their bytes have no main-tree copy, so
-//!   the baseline path cannot reach them.
+//! - **Shared baseline** (B1) — paths the main folder tracks that also exist in
+//!   the worktree tree AND are byte-identical to main (not in the divergent
+//!   set), read from the MAIN tree (cross-branch dedup merges — no new vectors).
+//! - **New-on-branch** (B1.1) — files that exist ONLY on the worktree branch (no
+//!   `tracked_files` row under the main folder), read from the WORKTREE tree via
+//!   a `read_root` on the item. Their bytes have no main-tree copy, so the
+//!   baseline path cannot reach them.
+//! - **Divergent** (B2) — shared files whose content DIFFERS on the branch (git
+//!   reports them `Modified` between the main HEAD and the branch tip), read from
+//!   the WORKTREE tree via `read_root`. The ingest writes a new content-row
+//!   `(relative_path, file_hash)` tagged with the branch; the main content-row is
+//!   a different hash, left untouched. The baseline SKIPS these (reading from
+//!   main would tag the branch with main's bytes and collide on the shared
+//!   `(path, branch)` idempotency key).
 //!
-//! Still deferred: a file that *diverges* on the worktree branch (tracked under
-//! the main folder but edited on the branch) is tagged with the main tree's
-//! bytes (baseline inheritance, matching the read-side #151 auto-widen);
-//! capturing that delta needs the shared-baseline read to move to the worktree
-//! tree too (B2). The live file-watcher still captures edits in an *active*
-//! worktree session.
+//! Disjointness: baseline = shared ∧ identical; divergent = shared ∧ Modified;
+//! new-on-branch = untracked (git `Added`). Only *committed* divergence is
+//! captured (commit-to-commit diff); the live file-watcher covers an *active*
+//! worktree session's uncommitted edits.
 //!
 //! Runs on every tenant scan (startup, periodic, reindex), right after the main
 //! branch's own `reconcile_branch_membership`. Idempotent: once a worktree's
-//! baseline and branch-only files are tagged, both candidate sets are empty.
+//! files are tagged with their correct content, all three candidate sets settle.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use sqlx::SqlitePool;
@@ -63,21 +70,24 @@ use super::db::fetch_paths_missing_branch;
 /// Reconcile branch membership for every linked worktree of a main repository.
 ///
 /// Enumerates the main repo's linked worktrees and, for each one on a concrete
-/// branch, enqueues two candidate sets under that branch, both flagged
+/// branch, enqueues three disjoint candidate sets under that branch, all flagged
 /// `worktree_membership` so the process-time branch-restamp (#224) does NOT
 /// rewrite the authoritative worktree branch back to the main HEAD (without the
 /// flag, every worktree file re-stamps to main and the tag never lands):
 ///
-/// 1. **Shared baseline** — paths the main folder already tracks that also
-///    exist in the worktree tree, read from the SHARED main tree (storage stays
-///    keyed to the main watch_folder, so cross-branch dedup merges identical
-///    content — no duplicate point). A file that DIVERGES on the branch is
-///    tagged with the main tree's content (baseline inheritance, matching the
-///    read-side #151 auto-widen — a follow-up moves this to the worktree tree).
+/// 1. **Shared baseline** — paths the main folder tracks that also exist in the
+///    worktree tree AND are byte-identical to main (not in the divergent set),
+///    read from the SHARED main tree (storage stays keyed to the main
+///    watch_folder, so cross-branch dedup merges identical content — no
+///    duplicate point).
 /// 2. **New-on-branch** — files with no `tracked_files` row under the main
 ///    folder (content that exists only on the worktree branch), read from the
 ///    worktree tree via a `read_root` on the item; storage is still keyed to
 ///    the main watch_folder.
+/// 3. **Divergent** — shared files whose content DIFFERS on the branch (git
+///    `Modified` between the main HEAD and the branch tip), read from the
+///    worktree tree via `read_root` so the branch is indexed with its OWN bytes
+///    (a new content-generation), not main's. The baseline skips these.
 ///
 /// Both sets intersect the worktree's working tree, so a path deleted on the
 /// worktree branch is never tagged.
@@ -126,8 +136,16 @@ pub async fn reconcile_worktree_branches(
             continue;
         }
 
+        // Committed divergence: paths git reports as Modified between the main
+        // HEAD and this branch's tip. The baseline SKIPS these (reading them from
+        // the main tree would tag the branch with main's bytes); (c) below reads
+        // them from the worktree so the branch is indexed with its OWN content.
+        let divergent =
+            crate::git::modified_paths_head_vs_branch(Path::new(main_project_root), &branch);
+
         // (a) Shared baseline: paths the main folder already tracks that also
-        // exist in the worktree tree, read from the MAIN tree (dedup merges).
+        // exist in the worktree tree AND are byte-identical to main (not in
+        // `divergent`), read from the MAIN tree (dedup merges — no new vectors).
         let n_baseline = enqueue_worktree_membership(
             pool,
             queue_manager,
@@ -136,6 +154,7 @@ pub async fn reconcile_worktree_branches(
             collection,
             &wt_root,
             &branch,
+            &divergent,
         )
         .await;
         if n_baseline > 0 {
@@ -178,7 +197,34 @@ pub async fn reconcile_worktree_branches(
                 .inc_by(n_new as u64);
         }
 
-        total += n_baseline + n_new;
+        // (c) Divergent: shared files whose content DIFFERS on the worktree
+        // branch (the `divergent` set), read from the worktree tree so the branch
+        // is indexed with its own bytes instead of inheriting main's (baseline
+        // inheritance / #151 auto-widen). Creates a new content-generation tagged
+        // with the branch; the main generation (a different hash) is untouched.
+        let n_div = enqueue_worktree_divergent(
+            queue_manager,
+            tenant_id,
+            collection,
+            &wt_root,
+            main_project_root,
+            &branch,
+            &divergent,
+            allowed_extensions,
+        )
+        .await;
+        if n_div > 0 {
+            info!(
+                "worktree membership: enqueued {} divergent file(s) under branch '{}' (worktree {})",
+                n_div, branch, wt_root
+            );
+            crate::monitoring::metrics_core::METRICS
+                .worktree_membership_divergent_enqueued_total
+                .with_label_values(&[tenant_id, branch.as_str()])
+                .inc_by(n_div as u64);
+        }
+
+        total += n_baseline + n_new + n_div;
     }
     total
 }
@@ -200,6 +246,7 @@ async fn enqueue_worktree_membership(
     collection: &str,
     wt_root: &str,
     branch: &str,
+    divergent: &HashSet<String>,
 ) -> usize {
     let candidates = match fetch_paths_missing_branch(pool, main_watch_folder_id, branch).await {
         Ok(v) => v,
@@ -218,6 +265,12 @@ async fn enqueue_worktree_membership(
     let wt = Path::new(wt_root);
     let mut enqueued = 0usize;
     for rel_str in candidates {
+        // Divergent files are handled by `enqueue_worktree_divergent` (read from
+        // the worktree); reading them from main here would tag the branch with
+        // main's bytes and collide on the shared `(path, branch)` idempotency key.
+        if divergent.contains(&rel_str) {
+            continue;
+        }
         if !wt.join(&rel_str).exists() {
             continue;
         }
@@ -315,18 +368,7 @@ async fn enqueue_worktree_new_on_branch(
         }
     };
 
-    // The MAIN folder's eligibility gate (project cascade + `global.wqmignore`),
-    // anchored at the main root. Testing `main_root/rel` applies every global
-    // rule to the rel path as the main scan would — dropping generated /
-    // globally-excluded files — without the `.claude/worktrees/` self-exclusion
-    // a worktree-anchored test would trigger.
-    let main_root = Path::new(main_project_root);
-    let global = crate::patterns::global_ignore::resolve_global_ignore_path();
-    let gate = crate::patterns::ignore_gate::IgnoreGate::for_dir(
-        main_root,
-        Some(main_root),
-        global.as_deref(),
-    );
+    let gate = main_eligibility_gate(main_project_root);
 
     let mut enqueued = 0usize;
     for rel_str in walked {
@@ -335,16 +377,11 @@ async fn enqueue_worktree_new_on_branch(
         if tracked.contains(&rel_str) {
             continue;
         }
-        // Skip anything the main scan itself would exclude (generated code,
-        // build output, vendored trees), so the branch mirrors main eligibility.
-        if gate.is_ignored_with_ancestors(main_root, &main_root.join(&rel_str)) {
-            continue;
-        }
-        // Mirror the scan's extension/filename allowlist: the process-time
-        // ingestion guard rejects disallowed types (certs, keystores, `.properties`,
-        // `gradlew`, …) anyway, so enqueuing them only to skip them re-churns the
-        // full worktree every scan — once per worktree branch. Filter at discovery.
-        if !allowed_extensions.is_allowed(&rel_str, collection) {
+        // Mirror the main scan's eligibility (ignore gate + extension allowlist)
+        // so a worktree branch never indexes generated / globally-excluded /
+        // disallowed-type files the main scan omits (see `worktree_path_eligible`).
+        if !worktree_path_eligible(main_project_root, &gate, allowed_extensions, collection, &rel_str)
+        {
             continue;
         }
         let rel = match RelativePath::from_user_input(&rel_str) {
@@ -376,6 +413,116 @@ async fn enqueue_worktree_new_on_branch(
         }
     }
     enqueued
+}
+
+/// Enqueue shared files whose content DIVERGES on the worktree branch, reading
+/// their bytes from the worktree tree so the branch is indexed with its OWN
+/// content instead of inheriting the main tree's (B2).
+///
+/// The baseline path reads shared files from the main tree — correct for files
+/// byte-identical across branches (dedup merges), but for a file edited on the
+/// branch it would tag the branch with the MAIN content (the branch would search
+/// stale bytes; baseline inheritance / read-side #151 auto-widen). `divergent` is
+/// the set git reports as `Modified` between the main HEAD and the branch tip
+/// ([`crate::git::modified_paths_head_vs_branch`]); the baseline is told to SKIP
+/// them and they are enqueued here with a `read_root`, so the processor reads the
+/// worktree copy. The ingest computes the worktree bytes' hash and writes a NEW
+/// `(relative_path, file_hash)` content-generation tagged with the branch; the
+/// main generation is a different hash → a different row, left untouched (the
+/// branch-scoped, reference-counted delete never GCs content another branch still
+/// holds — see `update_preamble`). Each candidate is filtered through the main
+/// folder's eligibility (gate + allowlist), so a modified generated / disallowed
+/// file the diff surfaces is not indexed. Returns the number of files enqueued.
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_worktree_divergent(
+    queue_manager: &QueueManager,
+    tenant_id: &str,
+    collection: &str,
+    wt_root: &str,
+    main_project_root: &str,
+    branch: &str,
+    divergent: &HashSet<String>,
+    allowed_extensions: &AllowedExtensions,
+) -> usize {
+    if divergent.is_empty() {
+        return 0;
+    }
+    let gate = main_eligibility_gate(main_project_root);
+    let wt = Path::new(wt_root);
+    let mut enqueued = 0usize;
+    for rel_str in divergent {
+        // A `Modified` delta is present in the worktree tree, but stay defensive.
+        if !wt.join(rel_str).exists() {
+            continue;
+        }
+        // Mirror the main scan's eligibility so a modified generated / disallowed
+        // file the diff surfaces is never indexed under the branch.
+        if !worktree_path_eligible(main_project_root, &gate, allowed_extensions, collection, rel_str)
+        {
+            continue;
+        }
+        let rel = match RelativePath::from_user_input(rel_str) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    "worktree membership: skipping invalid relative path {:?}: {}",
+                    rel_str, e
+                );
+                continue;
+            }
+        };
+        // Divergent content reads from the WORKTREE tree → carry `read_root`.
+        match enqueue_worktree_file(
+            queue_manager,
+            tenant_id,
+            collection,
+            &rel,
+            branch,
+            Some(wt_root),
+        )
+        .await
+        {
+            Ok(()) => enqueued += 1,
+            Err(e) => warn!(
+                "worktree membership: enqueue divergent {} on '{}' failed: {}",
+                rel_str, branch, e
+            ),
+        }
+    }
+    enqueued
+}
+
+/// The MAIN folder's eligibility gate (project `.gitignore`/`.wqmignore` cascade
+/// + `global.wqmignore`), anchored at the main root.
+///
+/// Worktree-read items (new-on-branch, divergent) test each candidate as
+/// `main_root/rel` so every global rule applies to the rel path exactly as the
+/// main scan would — dropping generated / globally-excluded files — WITHOUT the
+/// `.claude/worktrees/` self-exclusion a worktree-anchored test would trigger
+/// (that rule matches absolute paths and their parents, so anchoring inside the
+/// worktree does not save it). Build once per worktree; reuse across candidates.
+fn main_eligibility_gate(main_project_root: &str) -> crate::patterns::ignore_gate::IgnoreGate {
+    let main_root = Path::new(main_project_root);
+    let global = crate::patterns::global_ignore::resolve_global_ignore_path();
+    crate::patterns::ignore_gate::IgnoreGate::for_dir(main_root, Some(main_root), global.as_deref())
+}
+
+/// Whether `rel` passes the MAIN folder's full eligibility — the ignore `gate`
+/// (from [`main_eligibility_gate`]) plus the extension/filename allowlist — the
+/// exact filter the folder scan applies. Worktree-read items run every candidate
+/// through this so a worktree branch never indexes files the main scan omits, and
+/// disallowed types are dropped at discovery instead of enqueued only to be
+/// skipped at the ingest guard and re-churned every scan.
+fn worktree_path_eligible(
+    main_project_root: &str,
+    gate: &crate::patterns::ignore_gate::IgnoreGate,
+    allowed_extensions: &AllowedExtensions,
+    collection: &str,
+    rel: &str,
+) -> bool {
+    let main_root = Path::new(main_project_root);
+    !gate.is_ignored_with_ancestors(main_root, &main_root.join(rel))
+        && allowed_extensions.is_allowed(rel, collection)
 }
 
 /// Enqueue a single `File/Add` for a worktree file, flagged
