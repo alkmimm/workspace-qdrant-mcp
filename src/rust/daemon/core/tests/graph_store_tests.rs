@@ -625,6 +625,59 @@ async fn test_delete_file_nodes_clears_incoming_cross_file_edge() {
     assert_eq!(stats.total_edges, 0, "the dangling bar -> foo edge is gone");
 }
 
+/// The re-ingest hot path (partial keep, NOT a full file delete) must still clear
+/// a dropped symbol's INCOMING cross-file edge. This is the exact production
+/// scenario the graph_edges OR-delete split guards: a file re-ingest that drops
+/// one of several symbols, where the dropped symbol was the target of another
+/// file's edge. `delete_file_nodes_except` runs with a NON-EMPTY keep list here
+/// (unlike the full-delete case above), so the stale set is a subset — the split
+/// `target_node_id IN (…)` DELETE must remove exactly the edge into the dropped
+/// symbol and leave the kept symbol's incoming edge intact.
+#[tokio::test]
+async fn test_reingest_partial_keep_clears_incoming_edge_to_dropped_symbol() {
+    let dir = tempdir().unwrap();
+    let store = create_factory_store(dir.path()).await;
+
+    // File A defines `foo` and `bar`; file B's `caller` calls BOTH (two incoming
+    // edges into A's symbols, owned by B so A's re-ingest does not touch them).
+    let foo = GraphNode::new(TENANT, "src/a.rs", "foo", NodeType::Function);
+    let bar = GraphNode::new(TENANT, "src/a.rs", "bar", NodeType::Function);
+    let caller = GraphNode::new(TENANT, "src/b.rs", "caller", NodeType::Function);
+    store
+        .reingest_file(TENANT, "src/a.rs", &[foo.clone(), bar.clone()], &[])
+        .await
+        .unwrap();
+    store
+        .reingest_file(
+            TENANT,
+            "src/b.rs",
+            &[caller.clone()],
+            &[
+                GraphEdge::new(TENANT, &caller.node_id, &foo.node_id, EdgeType::Calls, "src/b.rs"),
+                GraphEdge::new(TENANT, &caller.node_id, &bar.node_id, EdgeType::Calls, "src/b.rs"),
+            ],
+        )
+        .await
+        .unwrap();
+    let stats = store.stats(Some(TENANT)).await.unwrap();
+    assert_eq!(stats.total_nodes, 3, "foo, bar, caller present after setup");
+    assert_eq!(stats.total_edges, 2, "caller -> foo and caller -> bar present");
+
+    // Re-ingest A keeping only `foo` (bar dropped). `bar` is an incoming-edge
+    // target from B, so its now-dangling edge must go; `foo` and its incoming
+    // edge survive.
+    store
+        .reingest_file(TENANT, "src/a.rs", &[foo.clone()], &[])
+        .await
+        .unwrap();
+    let stats = store.stats(Some(TENANT)).await.unwrap();
+    assert_eq!(stats.total_nodes, 2, "bar dropped; foo + caller remain");
+    assert_eq!(
+        stats.total_edges, 1,
+        "only the dangling caller -> bar edge is cleared; caller -> foo survives"
+    );
+}
+
 /// The file-less tree-sitter stub nodes (`file_path = ''`) must never be wiped
 /// by a per-file node delete — they belong to no file and are pruned elsewhere.
 #[tokio::test]

@@ -317,6 +317,24 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib db_retry -- --test-threads=4
 
+# graph_edges reingest edge-cleanup DELETE tests run here, same rationale:
+# hermetic (on-disk tempdir SQLite graph store, no FTS5 trigram or timing
+# dependence). Guards the field-observed multi-second file deletes — a single
+# `source_node_id IN (…) OR target_node_id IN (…)` cannot use an index in SQLite,
+# so it full-scanned the tenant's edges (up to ~19s live). The fix is two-part:
+# split the disjunction into two single-column DELETEs, AND add the graph.db v6
+# composite indexes (tenant_id, source/target_node_id) so the planner probes
+# instead of scanning the tenant. The lib filter runs the v6 migration test
+# (applies + idempotent); the integration filters cover the incoming cross-file
+# edge cleanup on both the full-delete and partial-keep (re-ingest hot) paths.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib graph::schema::tests::migrations -- --test-threads=4 \
+ && cargo test -p workspace-qdrant-core --test graph_store_tests -- \
+        clears_incoming clears_ghost_and_stale --test-threads=4
+
 # ─────────────────────────────────────────────
 # Stage 3a: rust-analyzer binary download
 # Ships as a single statically-linked release archive on GitHub. Downloaded

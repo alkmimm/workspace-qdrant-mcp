@@ -11,7 +11,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 /// Current schema version for graph.db.
-pub const GRAPH_SCHEMA_VERSION: i32 = 5;
+pub const GRAPH_SCHEMA_VERSION: i32 = 6;
 
 /// Default graph database filename.
 pub const GRAPH_DB_FILENAME: &str = "graph.db";
@@ -168,6 +168,7 @@ impl GraphDbManager {
             3 => self.migrate_v3().await,
             4 => self.migrate_v4().await,
             5 => self.migrate_v5().await,
+            6 => self.migrate_v6().await,
             _ => Err(GraphDbError::Migration(format!(
                 "Unknown graph migration version: {}",
                 version
@@ -319,6 +320,34 @@ impl GraphDbManager {
         .await?;
         Ok(())
     }
+
+    /// v6: composite indexes for the per-file edge cleanup that runs on every
+    /// re-ingest (`delete_file_nodes_except` in sqlite_store.rs). Those deletes
+    /// filter `tenant_id = ? AND source_node_id IN (…)` (and the same on
+    /// `target_node_id`), but the only candidate indexes were single-column
+    /// (`idx_edges_source` / `idx_edges_target`, no tenant) and `idx_edges_tenant`
+    /// (tenant only). With no ANALYZE stats the planner picked `idx_edges_tenant`
+    /// and SCANNED every edge of the tenant on each delete — measured ~1–19s on
+    /// the live graph (largest tenant ~4M edges, the recurring "slow statement").
+    /// These composites let it probe `(tenant_id, node_id)` directly, turning the
+    /// scan into a handful of lookups. Same shape of fix as v2; `IF NOT EXISTS`
+    /// keeps the migration idempotent on a partially-applied DB.
+    async fn migrate_v6(&self) -> GraphDbResult<()> {
+        info!("Graph migration v6: adding composite indexes idx_edges_tenant_source / idx_edges_tenant_target");
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_edges_tenant_source \
+             ON graph_edges(tenant_id, source_node_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_edges_tenant_target \
+             ON graph_edges(tenant_id, target_node_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 impl Clone for GraphDbManager {
@@ -348,7 +377,7 @@ mod tests {
             .await
             .expect("read schema version");
         assert_eq!(version, GRAPH_SCHEMA_VERSION);
-        assert_eq!(version, 5, "v5 must be applied");
+        assert_eq!(version, 6, "v6 must be applied");
 
         // v5 adds the is_test_symbol column to graph_nodes.
         let has_is_test: i64 = sqlx::query_scalar(
@@ -389,6 +418,19 @@ mod tests {
         .await
         .expect("query sqlite_master");
         assert_eq!(idx_file.as_deref(), Some("idx_nodes_file"));
+
+        // v6 adds the composite indexes that make the per-file edge-cleanup
+        // delete probe (tenant_id, node_id) instead of scanning the tenant.
+        for idx in ["idx_edges_tenant_source", "idx_edges_tenant_target"] {
+            let found: Option<String> = sqlx::query_scalar(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            )
+            .bind(idx)
+            .fetch_optional(&mgr.pool)
+            .await
+            .expect("query sqlite_master");
+            assert_eq!(found.as_deref(), Some(idx), "v6 must create {idx}");
+        }
 
         // Re-running migrations on an up-to-date DB is a no-op (no error, no
         // duplicate-index failure thanks to IF NOT EXISTS / early return).
