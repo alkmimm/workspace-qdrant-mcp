@@ -79,7 +79,15 @@ impl LanguageServerManager {
                 .filter(|s| matches!(s.status, ServerStatus::Running | ServerStatus::Initializing))
                 .count();
             if running >= self.config.max_global_servers {
-                tracing::warn!(
+                // DEBUG, not WARN: reaching the global cap is the safety valve
+                // working as designed, not an anomaly — on a multi-project host
+                // it is the expected steady state and fired ~180×/h at WARN,
+                // drowning real signal. The typed `Err(ServerUnavailable)` below
+                // carries the outcome to the caller, which decides severity (the
+                // interactive activation path already logs it at DEBUG as
+                // "non-critical"; the backfill loop treats it as expected), and
+                // the `memexd_lsp_active_servers` gauge surfaces saturation.
+                tracing::debug!(
                     project_id = project_id,
                     language = ?language,
                     running,

@@ -1467,7 +1467,13 @@ pub fn start_graph_lsp_backfill(
                             .await
                     };
                     if let Err(e) = started {
-                        warn!(tenant = %tenant, language = ?language, error = %e,
+                        // DEBUG, not WARN: backfill is opportunistic and the
+                        // global LSP cap (or an unsupported language) refusing a
+                        // start is the expected outcome, not an incident — at
+                        // WARN this paired with the lifecycle cap log to spam
+                        // ~200 lines/h. The `memexd_lsp_active_servers` gauge is
+                        // the durable signal for cap saturation.
+                        debug!(tenant = %tenant, language = ?language, error = %e,
                             "LSP backfill: could not start server (cap/unsupported) — skipping language");
                         continue;
                     }
