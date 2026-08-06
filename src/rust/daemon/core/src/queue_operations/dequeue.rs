@@ -87,8 +87,24 @@ impl QueueManager {
         let age_warning_seconds = age_promotion_warning_seconds.unwrap_or(300);
         let age_critical_seconds = age_promotion_critical_seconds.unwrap_or(900);
 
-        // Wrap SELECT→UPDATE→SELECT in a single transaction to reduce lock churn
-        let mut tx = self.pool.begin().await.map_err(QueueError::Database)?;
+        // Wrap SELECT→UPDATE→SELECT in a single transaction to reduce lock churn.
+        //
+        // Use BEGIN IMMEDIATE (not sqlx's default deferred BEGIN): this transaction
+        // READS first (`select_queue_ids`) and only then WRITES (`lease_items`). A
+        // deferred BEGIN takes a read snapshot on the first SELECT and must upgrade
+        // to the write lock at the UPDATE; if another writer committed in between,
+        // SQLite fails the upgrade with SQLITE_BUSY (5) / SQLITE_BUSY_SNAPSHOT (517)
+        // *immediately*, WITHOUT invoking the busy handler — so `busy_timeout` does
+        // not cover it and the whole dequeue transaction is lost, surfacing as a
+        // "database is locked" that the processing loop retries wholesale. Taking the
+        // write lock up front (covered by `busy_timeout` + jittered retry) turns that
+        // collide-and-retry into a brief wait-and-proceed, and makes the row claim
+        // atomic against the concurrent item-processing writers (finalize, keyword
+        // persist, tracked-files updates) and enqueue paths. See `db_retry` and the
+        // search.db conversion in PRs #329/#330.
+        let mut tx = crate::db_retry::begin_immediate(&self.pool)
+            .await
+            .map_err(QueueError::Database)?;
 
         // Select queue_ids with calculated priority (Task 20)
         let queue_ids = select_queue_ids(

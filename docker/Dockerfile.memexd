@@ -304,6 +304,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib busy_timeout -- --test-threads=4
 
+# db_retry BEGIN IMMEDIATE tests run here, same rationale: hermetic (tempdir
+# file-backed WAL SQLite, no FTS5 trigram or timing dependence). Guards the
+# read-then-write write-lock hardening — a deferred BEGIN that reads then writes
+# hits SQLITE_BUSY/517 on the lock upgrade (uncovered by busy_timeout), so the
+# hot queue dequeue path (and the search.db paths in #329/#330) must take the
+# write lock up front. The concurrency case asserts N concurrent read-then-write
+# txs all commit with no lost updates and no "database is locked".
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib db_retry -- --test-threads=4
+
 # ─────────────────────────────────────────────
 # Stage 3a: rust-analyzer binary download
 # Ships as a single statically-linked release archive on GitHub. Downloaded
