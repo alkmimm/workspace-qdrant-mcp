@@ -276,6 +276,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib text_search::escaping -- --test-threads=4
 
+# file_metadata branch-mirror reconcile tests run here, same rationale: hermetic
+# (in-memory / tempdir SQLite, no FTS5 trigram or timing dependence) and they
+# guard the field-reported duplicate-grep-hit fix — the search.db
+# `file_metadata.branches` mirror must stay in EXACT sync with the tracked_files
+# authority (a base_point-keyed bulk re-key leaked tags onto sibling worktrees'
+# generations, so a branch-scoped grep returned stale content generations). The
+# filters cover: the startup/idle reconcile (branch_mirror, branch_reconcile) and
+# the file_id-scoped write-path tagger (add_branch_to_file_metadata_by_file_ids).
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        branch_mirror branch_reconcile add_branch_to_file_metadata_by_file_ids branch_bulk \
+        --test-threads=4
+
 # ─────────────────────────────────────────────
 # Stage 3a: rust-analyzer binary download
 # Ships as a single statically-linked release archive on GitHub. Downloaded

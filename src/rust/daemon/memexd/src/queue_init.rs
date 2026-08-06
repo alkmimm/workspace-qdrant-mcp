@@ -466,6 +466,17 @@ pub async fn start_processor(
         warn!("Failed to GC orphaned search-db content: {}", e);
     }
 
+    // Re-key search.db `file_metadata.branches` down to the `tracked_files`
+    // authority. A base_point-keyed bulk re-key (fixed forward) leaked branch
+    // tags onto sibling clones'/worktrees' generations, drifting the mirror
+    // WIDER than the authority; a branch-scoped `grep` then returned those stale
+    // generations as duplicate hits. The additive idle reconcile can never
+    // remove a stale tag, so this one-time sweep heals the backlog. Same
+    // pre-start window as the GC above: no FTS5 work in flight.
+    if let Err(e) = uqp.reconcile_file_metadata_branches().await {
+        warn!("Failed to reconcile file_metadata branch tags: {}", e);
+    }
+
     let warmup_delay_secs = daemon_config.startup.warmup_delay_secs;
     if warmup_delay_secs > 0 {
         info!(

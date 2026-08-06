@@ -233,14 +233,23 @@ function buildGrepRequest(
 /**
  * Collapse duplicate matches that point at the same (file, line).
  *
- * search.db keys `file_metadata` by `file_id` (no unique constraint on
- * tenant/branch/file_path), so a re-embed — which clears `tracked_files` and
- * lets re-ingestion allocate NEW file_ids — orphans the previous generation's
- * `file_metadata`/`code_lines` rows instead of replacing them. The FTS query
- * then returns the same line once per surviving generation, inflating
- * `total_matches` (e.g. 4 for 2 real files). Dedupe by `file:line` so the agent
- * sees each real hit once. (Root-cause GC — the re-embed clearing search.db —
- * is tracked separately; this keeps the surfaced result honest meanwhile.)
+ * The daemon FTS branch filter matches EVERY generation whose
+ * `file_metadata.branches` contains the queried branch. Under Layer 2 a path has
+ * one content-row per (path, file_hash), and `file_metadata.branches` is meant
+ * to MIRROR the `tracked_files` authority (1:1 by `file_id`) — one generation
+ * per branch. When the mirror drifted WIDER than the authority (a base_point-
+ * keyed bulk re-key stamped a branch onto sibling clones'/worktrees' generations
+ * that shared the base_point), a branch-scoped query returned several stale
+ * content generations of the SAME file — inflating `total_matches` and letting
+ * an agent "confirm" an already-fixed bug from a stale generation. That mirror
+ * drift is now fixed daemon-side: `file_metadata` is tagged by `file_id`, and a
+ * startup sweep + idle exact-mirror re-key `file_metadata.branches` back to the
+ * authority (`search_db::branch_mirror`). This dedupe stays as a belt-and-
+ * suspenders — it collapses identical `file:line:content` rows (e.g. a
+ * `branch:"*"` sweep that legitimately returns one path under several branches,
+ * or the transient window before a reconcile runs) so the agent sees each real
+ * hit once. Divergent-content generations no longer leak once the mirror is in
+ * sync, since only the current generation carries the queried branch.
  */
 export function dedupGrepMatches(matches: GrepMatch[]): GrepMatch[] {
   const seen = new Set<string>();
