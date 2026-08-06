@@ -40,6 +40,24 @@
 //! read is a failure, not truth. Rows whose `file_id` is absent from
 //! `tracked_files` are left to [`super::orphan_gc`] (which deletes them
 //! wholesale); this pass only re-keys rows the authority still knows.
+//!
+//! ## Why REMOVING a tag here is safe (not just adding)
+//!
+//! The mirror can never legitimately be WIDER than the authority: `file_id` is
+//! the `AUTOINCREMENT` PK allocated BY the `tracked_files` INSERT
+//! (`store_track::upsert_and_track` returns it), so a `file_metadata` row cannot
+//! exist before its authority row,
+//! and every branch-ADD writes `tracked_files.branches` BEFORE the search.db
+//! mirror (dedup insert → FTS enqueue; the bulk re-key updates state.db then
+//! search.db; ingest sets the tracked row before `full_rewrite`). A crash
+//! therefore leaves authority ⊇ mirror, never the reverse. The delete path in
+//! turn drops the `tracked_files` tag FIRST, so a mirror still carrying a tag
+//! the authority dropped is either drift (the bug this heals) or a branch-move
+//! whose search.db removal has not landed yet — in BOTH cases removing the
+//! surplus tag is the correct outcome. Hence exact-mirror (add missing AND
+//! remove stale) is safe given only the empty-authority guard above. If a future
+//! change ever wrote `file_metadata.branches` before `tracked_files.branches`,
+//! that invariant — and this removal — would break.
 
 use std::collections::HashMap;
 
