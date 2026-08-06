@@ -406,6 +406,30 @@ impl UnifiedQueueProcessor {
         Ok(stats.files_deleted)
     }
 
+    /// Re-key `file_metadata.branches` back down to the `tracked_files`
+    /// authority for any row whose search.db branch set drifted from it.
+    ///
+    /// `file_metadata.file_id` is 1:1 with `tracked_files.file_id`, so a file's
+    /// mirror MUST equal its authority; a stale WIDER tag makes a branch-scoped
+    /// `grep` return that dead content generation as a duplicate hit (a
+    /// base_point-keyed bulk re-key leaked branches onto sibling clones/worktrees
+    /// — fixed forward, this is the backlog sweep). Like
+    /// [`Self::gc_orphaned_search_content`], MUST run before
+    /// [`start`](Self::start): no FTS5 write in flight, so the read-then-write
+    /// cannot race the batch writer. Returns the number of rows resynced.
+    pub async fn reconcile_file_metadata_branches(&self) -> UnifiedProcessorResult<u64> {
+        let Some(ref search_db) = self.search_db else {
+            return Ok(0);
+        };
+        let stats = crate::search_db::branch_mirror::reconcile_file_metadata_branches(
+            search_db,
+            self.queue_manager.pool(),
+        )
+        .await
+        .map_err(|e| UnifiedProcessorError::QueueOperation(e.to_string()))?;
+        Ok(stats.rows_resynced)
+    }
+
     /// Start the background processing loop
     pub fn start(&mut self) -> UnifiedProcessorResult<()> {
         if self.task_handle.is_some() {

@@ -8,6 +8,7 @@
 //! WAL mode is enabled for concurrent read access during writes.
 
 pub mod batch_writer;
+pub mod branch_mirror;
 mod code_lines;
 mod fts;
 mod migrations;
@@ -197,8 +198,8 @@ impl SearchDbManager {
         Ok(())
     }
 
-    /// Append `branch` to the `branches` set of every `file_metadata` row whose
-    /// `base_point` is in `base_points` and that does not already carry it.
+    /// Append `branch` to the `branches` set of every `file_metadata` row in
+    /// `file_ids` that does not already carry it.
     ///
     /// The BULK counterpart of the per-file FTS5 re-key the cross-branch dedup
     /// fast-path enqueues: the branch-switch bulk-membership op uses it so a
@@ -206,24 +207,35 @@ impl SearchDbManager {
     /// time. Idempotent (the `NOT EXISTS` guard); `code_lines` are untouched
     /// (they are keyed by `file_id` and shared across branches). No-op on an
     /// empty list.
-    pub async fn add_branch_to_file_metadata_by_base_points(
+    ///
+    /// Keyed by `file_id` — NOT `base_point`. A `base_point`
+    /// (`SHA256(tenant|relative_path|file_hash)`) is shared by every clone /
+    /// worktree of a project holding that exact content, but each has its own
+    /// `tracked_files`/`file_metadata` row (its own `file_id`). Tagging by
+    /// `base_point` therefore stamped this branch onto SIBLING worktrees'
+    /// generations, whose authority never carried it — the `file_metadata`
+    /// branch-set drifted WIDER than `tracked_files` and a branch-scoped `grep`
+    /// returned those stale generations as duplicate hits. The caller resolves
+    /// the exact `file_id`s from the authority (watch-folder scoped) so the
+    /// mirror stays in lockstep with `tracked_files`.
+    pub async fn add_branch_to_file_metadata_by_file_ids(
         &self,
-        base_points: &[String],
+        file_ids: &[i64],
         branch: &str,
     ) -> Result<()> {
-        if base_points.is_empty() {
+        if file_ids.is_empty() {
             return Ok(());
         }
-        let placeholders = vec!["?"; base_points.len()].join(", ");
+        let placeholders = vec!["?"; file_ids.len()].join(", ");
         let sql = format!(
             "UPDATE file_metadata
              SET branches = json_insert(branches, '$[#]', ?)
-             WHERE base_point IN ({placeholders})
+             WHERE file_id IN ({placeholders})
                AND NOT EXISTS (SELECT 1 FROM json_each(file_metadata.branches) WHERE value = ?)"
         );
         let mut q = sqlx::query(&sql).bind(branch);
-        for bp in base_points {
-            q = q.bind(bp);
+        for id in file_ids {
+            q = q.bind(id);
         }
         q.bind(branch).execute(&self.pool).await?;
         Ok(())

@@ -14,36 +14,43 @@
 //! silently misses the file (the #151 auto-widen fires only on a *total*-zero
 //! result, not a partial miss inside a larger hit set).
 //!
-//! The SAME inverse drift lives in the third store: search.db
-//! `file_metadata.branches` (the branch filter behind grep / exact FTS reads).
-//! Measured live (2026-07-15, this repo): the CURRENT generation of a
-//! multi-generation file carried every branch in `tracked_files` EXCEPT
-//! `main`, so a main-scoped grep missed it — and the empty-result auto-widen
-//! then surfaced the STALE cross-branch generations instead (reported from the
-//! field as "167 matches for ~2 real lines"). The original #257 pass repaired
-//! only Qdrant; this task now applies the same additive merge to
-//! `file_metadata` keyed by `file_id` (shared id space with `tracked_files`).
+//! The SAME drift lives in the third store: search.db `file_metadata.branches`
+//! (the branch filter behind grep / exact FTS reads). It drifts BOTH ways:
+//! * NARROWER than authority — the CURRENT generation missing a tag the
+//!   authority holds (measured 2026-07-15: a file carried every branch EXCEPT
+//!   `main`, so a main-scoped grep missed it and the auto-widen surfaced STALE
+//!   generations, "167 matches for ~2 real lines").
+//! * WIDER than authority — a STALE generation still carrying a tag the
+//!   authority moved to a newer generation (measured 2026-08-05: 109 rows,
+//!   incl. `main` on 3 generations of one file). A branch-scoped grep then
+//!   returns those dead generations as duplicate hits.
 //!
-//! `reconcile_branch_membership` (branch-switch) only closes the OPPOSITE
-//! direction — it adds a branch where the AUTHORITY lacks it. Nothing repairs a
-//! base_point whose Qdrant array is a strict subset of the authority. This task
-//! is that missing pass.
+//! Because `file_metadata.file_id` is 1:1 with `tracked_files.file_id`, a file's
+//! mirror MUST EQUAL its authority — so this task keeps `file_metadata.branches`
+//! an EXACT MIRROR of the authority (add missing AND remove stale), via the
+//! shared [`crate::search_db::branch_mirror::target_branches`]. The one-time
+//! backlog sweep lives in `search_db::branch_mirror`; this is the ongoing net.
+//!
+//! `reconcile_branch_membership` (branch-switch) only closes the ADD direction.
+//! This task is the missing exact-sync pass for `file_metadata`.
 //!
 //! ## What it does
 //!
-//! For EVERY tracked file with a usable authority it merges missing branches
-//! into search.db `file_metadata.branches` (one cheap indexed SELECT each —
-//! including single-branch files, which is what heals a corrupt/`[]` set).
-//! For base_points the authority marks with 2+ branches — the only shape where
-//! Qdrant-side inverse drift can exist, since a single-branch file was ingested
-//! on that branch and already carries the tag — it additionally reads the live
-//! Qdrant `branch` set and, if the authority holds branches Qdrant lacks,
-//! merges them in via the daemon-owned `merge_branches_into_base_point`.
-//! ADDITIVE ONLY — it
-//! never removes a tag (the forward-drift #224 direction, Qdrant-tagged-but-no-
-//! row, is untouched) — and idempotent (a synced base_point is a no-op). A
-//! base_point with zero live points is skipped: that is a missing-points /
-//! empty-`[]` case for re-ingest, not a tag reconcile.
+//! For EVERY tracked file with a usable authority it syncs search.db
+//! `file_metadata.branches` to exactly the authority set (one cheap indexed
+//! SELECT each — including single-branch files, which is what heals a
+//! corrupt/`[]` set). An EMPTY authority is a guard-skip, never a wipe.
+//!
+//! The Qdrant side is DIFFERENT and stays ADDITIVE ONLY: a base_point is SHARED
+//! across generations/clones, so removing a tag there is the dangerous
+//! forward-drift #224 direction. For base_points the authority marks with 2+
+//! branches — the only shape where Qdrant-side inverse drift can exist, since a
+//! single-branch file was ingested on that branch and already carries the tag —
+//! it reads the live Qdrant `branch` set and, if the authority holds branches
+//! Qdrant lacks, merges them in via the daemon-owned
+//! `merge_branches_into_base_point`. Idempotent (a synced base_point is a
+//! no-op). A base_point with zero live points is skipped: that is a
+//! missing-points / empty-`[]` case for re-ingest, not a tag reconcile.
 //!
 //! Runs only in `FullIdle` (needs both Qdrant and SQLite), batched with a keyset
 //! cursor on `file_id`, resumable and cancellable — same shape as
@@ -55,6 +62,7 @@ use tracing::{debug, info, warn};
 
 use crate::idle::task::{MaintenanceContext, MaintenanceResult, MaintenanceTask};
 use crate::idle::IdleState;
+use crate::search_db::branch_mirror::target_branches;
 
 /// One candidate row: `(file_id, base_point, branches_json, collection)`.
 type CandidateRow = (i64, String, String, String);
@@ -67,8 +75,8 @@ pub struct BranchReconcileTask {
     total_checked: u64,
     base_points_repaired: u64,
     tags_added: u64,
-    /// search.db `file_metadata` rows whose `branches` set was merged up to
-    /// the authority this cycle.
+    /// search.db `file_metadata` rows whose `branches` set was synced to the
+    /// authority this cycle (missing tags added AND stale tags removed).
     file_metadata_repaired: u64,
 }
 
@@ -173,9 +181,10 @@ impl MaintenanceTask for BranchReconcileTask {
 }
 
 impl BranchReconcileTask {
-    /// Merge the authority's branches into the search.db `file_metadata.branches`
-    /// set for this file (additive only — same contract as the Qdrant side).
-    /// Skipped when the context carries no search.db handle (e.g. tests).
+    /// Sync the search.db `file_metadata.branches` set for this file to EXACTLY
+    /// the authority (add missing AND remove stale) — the mirror is 1:1 with the
+    /// authority by `file_id`. Skipped when the context carries no search.db
+    /// handle (e.g. tests).
     async fn reconcile_file_metadata(
         &mut self,
         ctx: &MaintenanceContext<'_>,
@@ -185,17 +194,17 @@ impl BranchReconcileTask {
         let Some(search_db) = ctx.search_db else {
             return;
         };
-        match merge_authority_into_file_metadata(search_db.pool(), file_id, authority).await {
+        match sync_authority_into_file_metadata(search_db.pool(), file_id, authority).await {
             Ok(0) => {}
-            Ok(added) => {
+            Ok(changed) => {
                 self.file_metadata_repaired += 1;
                 debug!(
-                    "branch reconcile: added {} branch tag(s) to file_metadata for file_id {}",
-                    added, file_id
+                    "branch reconcile: synced file_metadata for file_id {} to authority ({} tag(s) changed)",
+                    file_id, changed
                 );
             }
             Err(e) => warn!(
-                "branch reconcile: file_metadata merge failed for file_id {}: {}",
+                "branch reconcile: file_metadata sync failed for file_id {}: {}",
                 file_id, e
             ),
         }
@@ -268,15 +277,17 @@ impl BranchReconcileTask {
     }
 }
 
-/// Merge `authority` branches into the search.db `file_metadata.branches` set
-/// for `file_id` — ADDITIVE ONLY and idempotent, mirroring the Qdrant-side
-/// contract. Returns the number of branch tags added (0 when the row is
-/// absent or already carries every authority branch). An unparsable stored
-/// array is treated as empty, so the repair also heals a corrupt/`[]` set.
+/// Sync the search.db `file_metadata.branches` set for `file_id` to EXACTLY the
+/// `authority` set — adds missing tags AND removes stale ones, so the mirror
+/// (1:1 with the authority by `file_id`) can never be wider or narrower. Returns
+/// the number of tags changed (0 when the row is absent, already in sync, or the
+/// authority is empty). An empty authority is a guard-skip, never a wipe (see
+/// [`target_branches`]); an unparsable stored array is treated as empty, so the
+/// repair also heals a corrupt/`[]` set toward a non-empty authority.
 ///
 /// Read-then-write without a transaction is safe here: the task only runs in
-/// `FullIdle`, so no ingest upsert can interleave with the merge.
-pub(crate) async fn merge_authority_into_file_metadata(
+/// `FullIdle`, so no ingest upsert can interleave with the sync.
+pub(crate) async fn sync_authority_into_file_metadata(
     pool: &sqlx::SqlitePool,
     file_id: i64,
     authority: &[String],
@@ -290,17 +301,17 @@ pub(crate) async fn merge_authority_into_file_metadata(
         return Ok(0);
     };
     let current: Vec<String> = serde_json::from_str(&stored_json).unwrap_or_default();
-    let missing = missing_branches(authority, &current);
-    if missing.is_empty() {
+    let Some(target) = target_branches(authority, &current) else {
         return Ok(0);
-    }
-    let merged: Vec<String> = current.into_iter().chain(missing.iter().cloned()).collect();
+    };
+    let changed = current.iter().filter(|b| !target.contains(b)).count()
+        + target.iter().filter(|b| !current.contains(b)).count();
     sqlx::query("UPDATE file_metadata SET branches = ?1 WHERE file_id = ?2")
-        .bind(serde_json::json!(merged).to_string())
+        .bind(serde_json::json!(target).to_string())
         .bind(file_id)
         .execute(pool)
         .await?;
-    Ok(missing.len())
+    Ok(changed)
 }
 
 /// Branches the authority holds that the Qdrant `branch` array lacks — the tags
@@ -347,7 +358,7 @@ async fn fetch_candidate_batch(
 #[cfg(test)]
 mod tests {
     use super::super::orphan_cleanup::tests_support::{seed_file, test_pool};
-    use super::{fetch_candidate_batch, merge_authority_into_file_metadata, missing_branches};
+    use super::{fetch_candidate_batch, missing_branches, sync_authority_into_file_metadata};
 
     /// Temp search.db with one seeded `file_metadata` row (branches as given).
     async fn search_db_with_row(
@@ -385,23 +396,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_metadata_merge_adds_missing_authority_branches() {
-        // The live drift shape: the current generation's file_metadata carries
-        // the feature branches but NOT `main`, while the authority does — a
-        // main-scoped grep then misses the CURRENT content and the auto-widen
+    async fn file_metadata_sync_adds_missing_authority_branches() {
+        // The narrower-drift shape: the current generation's file_metadata
+        // carries the feature branches but NOT `main`, while the authority does —
+        // a main-scoped grep then misses the CURRENT content and the auto-widen
         // surfaces stale generations instead.
         let (_d, db) = search_db_with_row(7, "feat/x").await;
         let authority = vec!["feat/x".to_string(), "main".to_string()];
 
-        let added = merge_authority_into_file_metadata(db.pool(), 7, &authority)
+        let changed = sync_authority_into_file_metadata(db.pool(), 7, &authority)
             .await
             .unwrap();
 
-        assert_eq!(added, 1);
+        assert_eq!(changed, 1);
         assert_eq!(stored_branches(&db, 7).await, vec!["feat/x", "main"]);
 
         // Idempotent: a synced row is a no-op.
-        let again = merge_authority_into_file_metadata(db.pool(), 7, &authority)
+        let again = sync_authority_into_file_metadata(db.pool(), 7, &authority)
             .await
             .unwrap();
         assert_eq!(again, 0);
@@ -409,27 +420,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_metadata_merge_is_additive_only() {
-        // A stored branch the authority lacks must survive — removal is the
-        // guarded #224 stage-3 direction, not this task's contract.
+    async fn file_metadata_sync_removes_stale_wider_tag() {
+        // A stored branch the authority DROPPED must be removed — this is the
+        // duplicate-grep-hit direction (the mirror is 1:1 with the authority by
+        // file_id, so it may not be wider). The target is exactly the authority.
         let (_d, db) = search_db_with_row(7, "feat/extra").await;
-        let authority = vec!["main".to_string()];
+        // Seed the drifted state: fm carries a stale `main` the authority lacks.
+        sqlx::query(r#"UPDATE file_metadata SET branches = '["feat/extra","main"]' WHERE file_id = 7"#)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let authority = vec!["feat/extra".to_string()];
 
-        let added = merge_authority_into_file_metadata(db.pool(), 7, &authority)
+        let changed = sync_authority_into_file_metadata(db.pool(), 7, &authority)
             .await
             .unwrap();
 
-        assert_eq!(added, 1);
-        assert_eq!(stored_branches(&db, 7).await, vec!["feat/extra", "main"]);
+        assert_eq!(changed, 1, "the stale `main` tag is removed");
+        assert_eq!(stored_branches(&db, 7).await, vec!["feat/extra"]);
     }
 
     #[tokio::test]
-    async fn file_metadata_merge_noop_without_row() {
+    async fn file_metadata_sync_empty_authority_never_wipes() {
+        // Guard: an empty authority must NOT blank the mirror (that would hide
+        // the file from every branch-scoped grep).
         let (_d, db) = search_db_with_row(7, "main").await;
-        let added = merge_authority_into_file_metadata(db.pool(), 999, &["main".to_string()])
+        let changed = sync_authority_into_file_metadata(db.pool(), 7, &[])
             .await
             .unwrap();
-        assert_eq!(added, 0);
+        assert_eq!(changed, 0);
+        assert_eq!(stored_branches(&db, 7).await, vec!["main"]);
+    }
+
+    #[tokio::test]
+    async fn file_metadata_sync_noop_without_row() {
+        let (_d, db) = search_db_with_row(7, "main").await;
+        let changed = sync_authority_into_file_metadata(db.pool(), 999, &["main".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(changed, 0);
     }
 
     #[test]

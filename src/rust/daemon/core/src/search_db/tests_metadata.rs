@@ -26,69 +26,80 @@ async fn test_file_metadata_table_exists() {
 }
 
 #[tokio::test]
-async fn test_add_branch_to_file_metadata_by_base_points() {
+async fn test_add_branch_to_file_metadata_by_file_ids() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("search.db");
     let manager = SearchDbManager::new(&db_path).await.unwrap();
 
-    // One file_metadata row on "main" with a known base_point.
-    sqlx::query(crate::code_lines_schema::UPSERT_FILE_METADATA_SQL)
-        .bind(1_i64)
-        .bind("project-abc")
-        .bind("main")
-        .bind("/src/lib.rs")
-        .bind(None::<&str>)
-        .bind(None::<&str>)
-        .bind(None::<&str>)
-        .bind(None::<i64>)
-        .bind(0_i64)
-        .execute(manager.pool())
-        .await
-        .unwrap();
-    sqlx::query("UPDATE file_metadata SET base_point = 'bp1' WHERE file_id = 1")
+    // Two generations on "main" that SHARE a base_point — the shape produced by
+    // two clones/worktrees of a project holding identical content. Each has its
+    // own file_id (and its own tracked_files authority row).
+    for file_id in [1_i64, 2_i64] {
+        sqlx::query(crate::code_lines_schema::UPSERT_FILE_METADATA_SQL)
+            .bind(file_id)
+            .bind("project-abc")
+            .bind("main")
+            .bind("/src/lib.rs")
+            .bind(None::<&str>)
+            .bind(None::<&str>)
+            .bind(None::<&str>)
+            .bind(None::<i64>)
+            .bind(0_i64)
+            .execute(manager.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE file_metadata SET base_point = 'bp1' WHERE file_id IN (1, 2)")
         .execute(manager.pool())
         .await
         .unwrap();
 
-    async fn read_branches(m: &SearchDbManager) -> Vec<String> {
+    async fn read_branches(m: &SearchDbManager, file_id: i64) -> Vec<String> {
         let raw: String =
-            sqlx::query_scalar("SELECT branches FROM file_metadata WHERE file_id = 1")
+            sqlx::query_scalar("SELECT branches FROM file_metadata WHERE file_id = ?1")
+                .bind(file_id)
                 .fetch_one(m.pool())
                 .await
                 .unwrap();
         serde_json::from_str::<Vec<String>>(&raw).unwrap()
     }
 
-    // Append "feature" by base_point → merged into the set, not replaced.
+    // Tag "feature" onto file_id 1 only → merged into that row's set.
     manager
-        .add_branch_to_file_metadata_by_base_points(&["bp1".to_string()], "feature")
+        .add_branch_to_file_metadata_by_file_ids(&[1], "feature")
         .await
         .unwrap();
     assert_eq!(
-        read_branches(&manager).await,
+        read_branches(&manager, 1).await,
         vec!["main".to_string(), "feature".to_string()]
+    );
+
+    // Regression: the base_point-sharing SIBLING (file_id 2) must be untouched.
+    // Keying by base_point instead of file_id leaked the tag onto it, drifting
+    // file_metadata wider than the authority and duplicating grep hits.
+    assert_eq!(
+        read_branches(&manager, 2).await,
+        vec!["main".to_string()],
+        "a base_point-sharing sibling generation must NOT be cross-tagged"
     );
 
     // Idempotent: re-running does not duplicate the branch.
     manager
-        .add_branch_to_file_metadata_by_base_points(&["bp1".to_string()], "feature")
+        .add_branch_to_file_metadata_by_file_ids(&[1], "feature")
         .await
         .unwrap();
     assert_eq!(
-        read_branches(&manager).await,
+        read_branches(&manager, 1).await,
         vec!["main".to_string(), "feature".to_string()],
         "second append is idempotent"
     );
 
-    // A base_point with no matching row is a no-op (and must not error).
+    // A file_id with no matching row is a no-op (and must not error).
     manager
-        .add_branch_to_file_metadata_by_base_points(&["nonexistent".to_string()], "x")
+        .add_branch_to_file_metadata_by_file_ids(&[999], "x")
         .await
         .unwrap();
-    assert_eq!(
-        read_branches(&manager).await,
-        vec!["main".to_string(), "feature".to_string()]
-    );
+    assert_eq!(read_branches(&manager, 1).await, vec!["main".to_string(), "feature".to_string()]);
 
     manager.close().await;
 }

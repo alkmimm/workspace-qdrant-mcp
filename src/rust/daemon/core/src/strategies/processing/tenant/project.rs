@@ -240,6 +240,14 @@ pub(crate) async fn select_branch_bulk_candidates(
 /// `file_id`, so nothing is re-written there). Idempotent via the `branch NOT
 /// EXISTS` guard.
 ///
+/// The `tracked_files` update is scoped to `watch_folder_id`; the `file_metadata`
+/// mirror is scoped to the SAME rows by resolving their `file_id`s first, NOT by
+/// `base_point`. A `base_point` is shared across every clone/worktree of a
+/// project holding that content, so a base_point-keyed `file_metadata` tag
+/// leaked this branch onto sibling worktrees' generations (whose authority never
+/// carried it) — the mirror drifted wider than `tracked_files` and a
+/// branch-scoped `grep` surfaced those stale generations as duplicate hits.
+///
 /// The bulk handler calls this PER base_point so that each Qdrant `set_payload`
 /// is immediately checkpointed: a lease expiry leaves committed work behind and
 /// the op resumes from the next un-tagged base_point.
@@ -274,8 +282,25 @@ pub(crate) async fn persist_branch_tag_for_base_points(
         .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("branch bulk update: {e}")))?;
 
     if let Some(search_db) = search_db {
+        // Resolve the EXACT file_ids the tracked_files tag above targeted — this
+        // watch folder's generations of these base_points — and mirror the
+        // branch onto those rows only. See the fn-level note: keying search.db
+        // by file_id (not base_point) keeps the mirror in lockstep with the
+        // watch-folder-scoped authority instead of leaking onto sibling clones.
+        let bp_ph = vec!["?"; base_points.len()].join(", ");
+        let select_ids = format!(
+            "SELECT file_id FROM tracked_files
+             WHERE watch_folder_id = ? AND base_point IN ({bp_ph})"
+        );
+        let mut sel = sqlx::query_scalar::<_, i64>(&select_ids).bind(watch_folder_id);
+        for bp in base_points {
+            sel = sel.bind(bp);
+        }
+        let file_ids = sel.fetch_all(pool).await.map_err(|e| {
+            UnifiedProcessorError::ProcessingFailed(format!("branch bulk file_id resolve: {e}"))
+        })?;
         search_db
-            .add_branch_to_file_metadata_by_base_points(base_points, branch)
+            .add_branch_to_file_metadata_by_file_ids(&file_ids, branch)
             .await
             .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("branch bulk fts5: {e}")))?;
     }
