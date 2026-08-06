@@ -402,6 +402,136 @@ async fn test_branch_bulk_persist_checkpoints_and_resumes() {
     assert_eq!(branches_a2.matches("feat").count(), 1, "feat tagged once: {branches_a2}");
 }
 
+/// Cross-worktree isolation for the bulk branch re-key's search.db mirror.
+///
+/// Two sibling worktrees/clones of ONE project (same tenant) holding identical
+/// content share a `base_point` but keep DISTINCT `file_id`s. Tagging branch
+/// `feat` onto w1 must touch ONLY w1's rows in BOTH stores. Keying the
+/// `file_metadata` half by `base_point` (the old bug) leaked the tag onto the
+/// sibling — its authority never carried `feat`, so a branch-scoped grep
+/// returned the sibling's generation as a duplicate hit. The watch-folder-scoped
+/// `file_id` resolution in `persist_branch_tag_for_base_points` is the fix; this
+/// guards it end-to-end through a real `SearchDbManager` (the existing
+/// checkpoint test passes `None` and never exercises the mirror write).
+#[tokio::test]
+async fn test_branch_bulk_search_db_mirror_scopes_to_watch_folder() {
+    use super::project::persist_branch_tag_for_base_points;
+    use crate::search_db::SearchDbManager;
+    use crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("in-memory pool");
+    sqlx::query(CREATE_WATCH_FOLDERS_SQL).execute(&pool).await.unwrap();
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL).execute(&pool).await.unwrap();
+
+    let now = "2025-01-01T00:00:00Z";
+    // Two sibling worktrees of the SAME project (tenant t1). base_point =
+    // SHA256(tenant|relative_path|file_hash) — identical content ⇒ identical
+    // base_point across the two watch folders, distinct AUTOINCREMENT file_ids.
+    for wf in ["w1", "w2"] {
+        sqlx::query(
+            "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled, created_at, updated_at)
+             VALUES (?1, ?2, 'projects', 't1', 1, ?3, ?3)",
+        )
+        .bind(wf)
+        .bind(format!("/tmp/{wf}"))
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let bp = wqm_common::hashing::compute_base_point("t1", "src/a.rs", "h_a");
+    for wf in ["w1", "w2"] {
+        sqlx::query(
+            "INSERT INTO tracked_files
+             (watch_folder_id, relative_path, branches, file_mtime, file_hash, collection, base_point, created_at, updated_at)
+             VALUES (?1, 'src/a.rs', '[\"main\"]', ?2, 'h_a', 'projects', ?3, ?2, ?2)",
+        )
+        .bind(wf)
+        .bind(now)
+        .bind(&bp)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let fid_w1: i64 =
+        sqlx::query_scalar("SELECT file_id FROM tracked_files WHERE watch_folder_id = 'w1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let fid_w2: i64 =
+        sqlx::query_scalar("SELECT file_id FROM tracked_files WHERE watch_folder_id = 'w2'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_ne!(fid_w1, fid_w2, "sibling worktrees must have distinct file_ids");
+
+    // Seed the search.db mirror: one file_metadata row per file_id, both on main.
+    let dir = tempfile::tempdir().unwrap();
+    let sdb = Arc::new(
+        SearchDbManager::new(dir.path().join("search.db"))
+            .await
+            .unwrap(),
+    );
+    for (fid, wf) in [(fid_w1, "w1"), (fid_w2, "w2")] {
+        sqlx::query(crate::code_lines_schema::UPSERT_FILE_METADATA_SQL)
+            .bind(fid)
+            .bind("t1")
+            .bind("main")
+            .bind(format!("/tmp/{wf}/src/a.rs"))
+            .bind(&bp)
+            .bind("src/a.rs")
+            .bind("h_a")
+            .bind(None::<i64>)
+            .bind(0_i64)
+            .execute(sdb.pool())
+            .await
+            .unwrap();
+    }
+
+    // Bulk re-key: tag `feat` onto w1's base_point only.
+    persist_branch_tag_for_base_points(&pool, Some(&sdb), "w1", "feat", std::slice::from_ref(&bp))
+        .await
+        .unwrap();
+
+    let w1_tf: String =
+        sqlx::query_scalar("SELECT branches FROM tracked_files WHERE watch_folder_id = 'w1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let w2_tf: String =
+        sqlx::query_scalar("SELECT branches FROM tracked_files WHERE watch_folder_id = 'w2'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let w1_fm: String =
+        sqlx::query_scalar("SELECT branches FROM file_metadata WHERE file_id = ?1")
+            .bind(fid_w1)
+            .fetch_one(sdb.pool())
+            .await
+            .unwrap();
+    let w2_fm: String =
+        sqlx::query_scalar("SELECT branches FROM file_metadata WHERE file_id = ?1")
+            .bind(fid_w2)
+            .fetch_one(sdb.pool())
+            .await
+            .unwrap();
+
+    // w1: authority AND mirror both gained `feat`.
+    assert!(w1_tf.contains("feat"), "w1 tracked_files re-keyed: {w1_tf}");
+    assert!(w1_fm.contains("feat"), "w1 file_metadata mirror re-keyed: {w1_fm}");
+    // w2 (sibling sharing the base_point): UNTOUCHED in BOTH stores — the leak fix.
+    assert!(!w2_tf.contains("feat"), "w2 tracked_files must be untouched: {w2_tf}");
+    assert!(
+        !w2_fm.contains("feat"),
+        "sibling worktree's file_metadata must NOT be cross-tagged: {w2_fm}"
+    );
+}
+
 /// Build a synthetic `UnifiedQueueItem` for a Tenant/Add of `project_root`.
 fn make_tenant_add_item(tenant_id: &str, project_root: &str) -> UnifiedQueueItem {
     let payload = ProjectPayload {
