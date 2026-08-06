@@ -200,15 +200,17 @@ impl Fts5BatchWriter {
         let n = items.len();
         let start = std::time::Instant::now();
 
-        // Force batch mode: pass queue_depth=usize::MAX so the processor
-        // always picks the single-transaction path regardless of the
-        // configured burst_threshold.
+        // This writer already accumulated a deliberate batch, so force the
+        // single-transaction path (the size guard can still fall back to
+        // single-file for an oversized change). `flush_forced_batch` replaces
+        // the old `flush(usize::MAX)` sentinel, which leaked into logs as the
+        // raw `18446744073709551615` queue_depth.
         let mut processor = FtsBatchProcessor::new(&self.search_db, FtsBatchConfig::default());
         for item in &items {
             processor.add_change(item.change.clone());
         }
 
-        match processor.flush(usize::MAX).await {
+        match processor.flush_forced_batch().await {
             Ok(stats) => {
                 debug!(
                     "FTS5 batch committed: {} files, {} inserted/{} updated/{} deleted lines in {}ms",

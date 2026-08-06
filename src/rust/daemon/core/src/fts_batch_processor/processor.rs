@@ -83,19 +83,48 @@ impl<'a> FtsBatchProcessor<'a> {
         true
     }
 
-    /// Flush all pending changes, choosing single-file or batch mode.
+    /// Flush all pending changes, choosing single-file or batch mode from the
+    /// observed unified-queue depth.
     ///
-    /// - If `queue_depth > burst_threshold`, uses batch mode (single transaction).
+    /// - If `queue_depth > burst_threshold` (and no pending change trips the
+    ///   size guard), uses batch mode (single transaction).
     /// - Otherwise, processes each file individually.
     ///
     /// Returns statistics about the processing run.
     pub async fn flush(&mut self, queue_depth: usize) -> Result<BatchStats, SearchDbError> {
+        // Decide before `flush_inner` takes `self.pending`: the size guard in
+        // `should_use_batch_mode` inspects the pending changes.
+        let batch_mode = self.should_use_batch_mode(queue_depth);
+        self.flush_inner(batch_mode, Some(queue_depth)).await
+    }
+
+    /// Flush already-accumulated changes as a single batch transaction, without
+    /// consulting a queue depth. Callers that deliberately batched their work
+    /// (e.g. the FTS5 batch writer) use this instead of passing a synthetic
+    /// `usize::MAX` depth, which used to surface in logs as the raw
+    /// `18446744073709551615` sentinel.
+    ///
+    /// The pending-size guard still applies: if a pending change is large enough
+    /// to spike Phase 1's in-RAM diff set, it falls back to single-file mode.
+    /// `should_use_batch_mode(usize::MAX)` keeps that guard as the single source
+    /// of truth while forcing the queue-depth side of the decision on.
+    pub async fn flush_forced_batch(&mut self) -> Result<BatchStats, SearchDbError> {
+        let batch_mode = self.should_use_batch_mode(usize::MAX);
+        self.flush_inner(batch_mode, None).await
+    }
+
+    /// Shared flush body. `queue_depth_log` is `Some(depth)` for the
+    /// depth-driven path and `None` for a forced batch (logged as `forced`).
+    async fn flush_inner(
+        &mut self,
+        batch_mode: bool,
+        queue_depth_log: Option<usize>,
+    ) -> Result<BatchStats, SearchDbError> {
         if self.pending.is_empty() {
             return Ok(BatchStats::default());
         }
 
         let start = std::time::Instant::now();
-        let batch_mode = self.should_use_batch_mode(queue_depth);
         let changes = std::mem::take(&mut self.pending);
 
         // Collapse duplicate file_ids, keeping the LAST change per file.
@@ -117,18 +146,22 @@ impl<'a> FtsBatchProcessor<'a> {
         // ends up correctly indexed by the surviving change).
         let changes = dedup_changes_keep_last(changes);
 
+        let depth_log = match queue_depth_log {
+            Some(d) => d.to_string(),
+            None => "forced".to_string(),
+        };
         let mut stats = if batch_mode {
             info!(
                 "FTS5 batch mode: processing {} file changes in single transaction (queue_depth={})",
                 changes.len(),
-                queue_depth
+                depth_log
             );
             self.process_batch(changes).await?
         } else {
             debug!(
                 "FTS5 single-file mode: processing {} file changes individually (queue_depth={})",
                 changes.len(),
-                queue_depth
+                depth_log
             );
             self.process_individually(changes).await?
         };
