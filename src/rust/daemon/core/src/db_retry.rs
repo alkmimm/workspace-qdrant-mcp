@@ -87,7 +87,8 @@ pub async fn begin_immediate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+    use std::str::FromStr;
 
     #[test]
     fn backoff_grows_and_is_bounded() {
@@ -121,5 +122,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// Concurrency regression for the read-then-write hazard `begin_immediate`
+    /// exists to fix (queue dequeue path; PRs #329/#330 did the same for the
+    /// search.db). A DEFERRED `pool.begin()` that SELECTs first and then UPDATEs
+    /// takes a read snapshot and must upgrade the lock at the write; under
+    /// contention SQLite fails that upgrade with `SQLITE_BUSY` (5) /
+    /// `SQLITE_BUSY_SNAPSHOT` (517) *immediately*, without invoking the busy
+    /// handler — so `busy_timeout` does NOT cover it and the transaction is lost.
+    ///
+    /// This must use a FILE-backed WAL pool: `sqlite::memory:` gives each pooled
+    /// connection its own private database, so it cannot reproduce cross-
+    /// connection write contention. Each task runs a genuine read-then-write
+    /// (`SELECT v` → `UPDATE v = v+1`) with a data dependency, so a dropped or
+    /// lost transaction shows up as BOTH a surfaced error AND a final count below
+    /// the expected total. With `begin_immediate` every task takes the write lock
+    /// up front, serializes cleanly, and all increments land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_read_then_write_txs_all_commit_without_lock_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db_retry_concurrency.db");
+
+        // Mirror the state.db pool's contention-relevant settings: WAL + a
+        // per-connection busy_timeout (see queue_config.rs). `begin_immediate`
+        // layers its own jittered retry on top of this.
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path.display()))
+            .unwrap()
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(30))
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(8)
+            .connect_with(opts)
+            .await
+            .unwrap();
+
+        sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t (id, v) VALUES (1, 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        const N_TASKS: i64 = 8;
+        const N_ITERS: i64 = 10;
+
+        let mut handles = Vec::new();
+        for _ in 0..N_TASKS {
+            let pool = pool.clone();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..N_ITERS {
+                    let mut tx = begin_immediate(&pool).await?;
+                    // READ first — this is what makes a deferred BEGIN vulnerable.
+                    let v: i64 = sqlx::query_scalar("SELECT v FROM t WHERE id = 1")
+                        .fetch_one(&mut *tx)
+                        .await?;
+                    // ...then WRITE a value derived from the read.
+                    sqlx::query("UPDATE t SET v = ?1 WHERE id = 1")
+                        .bind(v + 1)
+                        .execute(&mut *tx)
+                        .await?;
+                    tx.commit().await?;
+                }
+                Ok::<(), sqlx::Error>(())
+            }));
+        }
+
+        for handle in handles {
+            handle
+                .await
+                .expect("task panicked")
+                .expect("every read-then-write tx must commit (no database is locked / 517)");
+        }
+
+        let final_v: i64 = sqlx::query_scalar("SELECT v FROM t WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        // Exact total proves serialized isolation — no lost updates, no dropped tx.
+        assert_eq!(final_v, N_TASKS * N_ITERS);
     }
 }
