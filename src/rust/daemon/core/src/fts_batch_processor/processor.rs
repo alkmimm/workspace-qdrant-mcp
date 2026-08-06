@@ -203,7 +203,7 @@ impl<'a> FtsBatchProcessor<'a> {
         }
 
         // Phase 2: Apply all changes in a single transaction
-        let mut tx = pool.begin().await?;
+        let mut tx = crate::db_retry::begin_immediate(pool).await?;
 
         for (change, diff) in &file_diffs {
             let file_stats =
@@ -240,7 +240,7 @@ impl<'a> FtsBatchProcessor<'a> {
         for change in changes {
             let diff = compute_line_diff(&change.old_content, &change.new_content);
 
-            let mut tx = pool.begin().await?;
+            let mut tx = crate::db_retry::begin_immediate(pool).await?;
 
             let file_stats =
                 apply_diff_to_code_lines(&mut tx, change.file_id, &diff, &change.new_content)
@@ -300,7 +300,7 @@ impl<'a> FtsBatchProcessor<'a> {
         let normalized = normalize_line_endings(content);
         let lines: Vec<&str> = normalized.split('\n').collect();
 
-        let mut tx = pool.begin().await?;
+        let mut tx = crate::db_retry::begin_immediate(pool).await?;
 
         // Delete old FTS5 entries incrementally
         delete_old_fts5_entries(&mut tx, file_id).await?;
@@ -357,7 +357,14 @@ impl<'a> FtsBatchProcessor<'a> {
             return Ok(0);
         }
 
-        let mut tx = pool.begin().await?;
+        // BEGIN IMMEDIATE, not the default deferred BEGIN: this delete reads
+        // (the FTS5 rows above) then writes, and a deferred tx that upgrades
+        // read->write while the batch writer holds the lock gets SQLITE_BUSY
+        // *immediately* (SQLite's upgrade deadlock-avoidance skips the busy
+        // handler, so busy_timeout does not apply) — the field-observed
+        // "FTS5: failed to delete code_lines ... database is locked" at startup.
+        // Taking the write lock up front makes busy_timeout wait for it instead.
+        let mut tx = crate::db_retry::begin_immediate(pool).await?;
 
         // Delete FTS5 entries incrementally
         for (line_id, old_content) in &old_rows {
@@ -401,7 +408,7 @@ impl<'a> FtsBatchProcessor<'a> {
             return Ok(0);
         }
 
-        let mut tx = pool.begin().await?;
+        let mut tx = crate::db_retry::begin_immediate(pool).await?;
         let mut total_deleted = 0usize;
 
         for file_id in &file_ids {

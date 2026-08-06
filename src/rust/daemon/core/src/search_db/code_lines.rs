@@ -213,7 +213,7 @@ impl SearchDbManager {
             });
         }
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = crate::db_retry::begin_immediate(&self.pool).await?;
 
         // Phase 1: Set all seqs to negative line_id (unique, avoids constraint violations)
         for line_id in &line_ids {
@@ -261,7 +261,7 @@ impl SearchDbManager {
             return Ok(());
         }
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = crate::db_retry::begin_immediate(&self.pool).await?;
         for (i, line_id) in line_ids.iter().enumerate() {
             sqlx::query("UPDATE code_lines SET line_number = ?1 WHERE line_id = ?2")
                 .bind((i + 1) as i64)
