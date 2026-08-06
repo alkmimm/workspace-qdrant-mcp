@@ -62,6 +62,46 @@ async fn test_flush_empty() {
 }
 
 #[tokio::test]
+async fn test_flush_forced_batch_forces_batch_mode() {
+    // The FTS5 batch writer accumulates its own batch and calls
+    // `flush_forced_batch` (formerly `flush(usize::MAX)`). Even a single pending
+    // change — which the depth-driven `flush(1)` processes in single-file mode
+    // (see `test_single_file_new_ingestion`) — must take the batch path here.
+    let (_tmp, db) = setup_db().await;
+    let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
+
+    processor.add_change(test_change(
+        1,
+        "",
+        "fn only() {}\nfn one() {}",
+        "proj-a",
+        Some("main"),
+        "/src/only.rs",
+    ));
+
+    let stats = processor.flush_forced_batch().await.unwrap();
+    assert_eq!(stats.files_processed, 1);
+    assert!(
+        stats.batch_mode,
+        "flush_forced_batch must use batch mode regardless of queue depth"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn test_flush_forced_batch_empty_is_noop() {
+    let (_tmp, db) = setup_db().await;
+    let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
+
+    let stats = processor.flush_forced_batch().await.unwrap();
+    assert_eq!(stats.files_processed, 0);
+    assert_eq!(stats.total_affected(), 0);
+
+    db.close().await;
+}
+
+#[tokio::test]
 async fn test_single_file_new_ingestion() {
     let (_tmp, db) = setup_db().await;
     let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
