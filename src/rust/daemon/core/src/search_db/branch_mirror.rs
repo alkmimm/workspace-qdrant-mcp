@@ -182,7 +182,7 @@ pub async fn reconcile_file_metadata_branches(
     }
 
     let mut stats = BranchMirrorStats::default();
-    let mut tx = search_pool.begin().await?;
+    let mut tx = crate::db_retry::begin_immediate(search_pool).await?;
     for u in &updates {
         sqlx::query("UPDATE file_metadata SET branches = ?1 WHERE file_id = ?2")
             .bind(&u.new_json)

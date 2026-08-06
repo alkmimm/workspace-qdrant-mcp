@@ -169,7 +169,7 @@ async fn bulk_delete(
     let pool = search_db.pool();
     let mut stats = OrphanGcStats::default();
 
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db_retry::begin_immediate(pool).await?;
     for chunk in orphans.chunks(ID_CHUNK) {
         let placeholders = vec!["?"; chunk.len()].join(",");
 
