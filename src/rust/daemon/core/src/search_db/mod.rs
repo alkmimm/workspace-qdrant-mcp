@@ -73,21 +73,32 @@ impl SearchDbManager {
         let path = database_path.as_ref().to_path_buf();
         info!("Initializing search database: {}", path.display());
 
+        // busy_timeout and synchronous are connection-level PRAGMAs, so they
+        // must be set on `SqliteConnectOptions` — sqlx re-applies those on EVERY
+        // connection the pool opens. Setting busy_timeout via a one-shot
+        // `PRAGMA busy_timeout` on the built pool only lands on whichever single
+        // connection served that query; the other `max_connections - 1` stay at
+        // busy_timeout=0 and hit `database is locked` the instant an FTS5 batch
+        // write holds the write lock (observed in the field). This mirrors the
+        // canonical state.db pool in `queue_config.rs`.
         let connect_options = SqliteConnectOptions::new()
             .filename(&path)
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            // NORMAL is safe under WAL and skips the per-commit full fsync.
+            // search.db is a rebuildable derived index, so the only cost of the
+            // WAL/NORMAL trade-off (losing the last commit on an OS-level crash)
+            // is a re-index, and it shortens how long a batch write holds the
+            // write lock — directly easing the contention this pool sees.
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+            // 30s matches state.db: a contending writer waits out the FTS5 batch
+            // write lock instead of erroring immediately with SQLITE_BUSY.
+            .busy_timeout(std::time::Duration::from_secs(30))
             .foreign_keys(true);
 
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(connect_options)
-            .await?;
-
-        // Set busy_timeout to match state.db (30 seconds) — prevents immediate
-        // SQLITE_BUSY errors when FTS5 batch writes hold the write lock.
-        sqlx::query("PRAGMA busy_timeout = 30000")
-            .execute(&pool)
             .await?;
 
         // Verify WAL mode is active

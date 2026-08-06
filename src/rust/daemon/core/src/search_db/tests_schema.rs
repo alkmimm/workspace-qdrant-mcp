@@ -53,6 +53,40 @@ async fn test_foreign_keys_enabled() {
 }
 
 #[tokio::test]
+async fn test_busy_timeout_applied_to_every_pooled_connection() {
+    // Regression: busy_timeout is a per-connection PRAGMA. When it was set via a
+    // one-shot `PRAGMA busy_timeout` on the already-built pool it only landed on
+    // whichever single connection served that query; the other pooled
+    // connections defaulted to 0 and hit `database is locked` immediately under
+    // FTS5 batch-write contention. Setting it on SqliteConnectOptions makes sqlx
+    // re-apply it on every connection the pool opens.
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("search.db");
+
+    let manager = SearchDbManager::new(&db_path).await.unwrap();
+
+    // Hold every connection the pool can open at once (max_connections = 5) so
+    // the pool is forced to open distinct connections, then assert each carries
+    // the 30s busy_timeout — not just the first one.
+    let mut conns = Vec::new();
+    for _ in 0..5 {
+        conns.push(manager.pool().acquire().await.unwrap());
+    }
+    for mut conn in conns {
+        let timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout, 30_000,
+            "every pooled connection must carry the 30s busy_timeout"
+        );
+    }
+
+    manager.close().await;
+}
+
+#[tokio::test]
 async fn test_schema_version_after_init() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("search.db");
