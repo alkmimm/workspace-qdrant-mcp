@@ -21,7 +21,7 @@ import {
   buildGrepOptions,
   buildListOptions,
 } from './tool-builders/index.js';
-import { storeUrl, storeScratchpad } from './store-handlers.js';
+import { storeUrl, storeScratchpad, storeFeedback } from './store-handlers.js';
 import { handleEmbedding } from './tools/embedding.js';
 import { handleWorkspaceIndex } from './tools/workspace-index.js';
 import { handleGraph } from './tools/graph.js';
@@ -172,6 +172,7 @@ async function dispatchStore(
   if (storeType === 'url') return storeUrl(args, components.stateManager, sessionState);
   if (storeType === 'scratchpad')
     return storeScratchpad(args, components.stateManager, components.projectDetector, sessionState);
+  if (storeType === 'feedback') return storeFeedback(args, components.stateManager, sessionState);
   return components.storeTool.store(buildStoreOptions(args, sessionState));
 }
 

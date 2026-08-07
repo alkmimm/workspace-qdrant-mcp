@@ -15,3 +15,15 @@
 export const TENANT_GLOBAL = 'global' as const;
 
 export type TenantGlobal = typeof TENANT_GLOBAL;
+
+/**
+ * Dedicated `tenant_id` bucket for agent tool-usage feedback (store type:"feedback").
+ *
+ * A synthetic tenant (no project maps to it) so feedback about the workspace-qdrant
+ * tooling aggregates in ONE place and is automatically isolated from every
+ * project-scoped surface: the semantic recall lane and `scratchpad list` are
+ * tenant-strict, so a note under this tenant never leaks into code search or a
+ * project's scratchpad. `/feedback-review` targets it explicitly. TS-only — the
+ * daemon treats it as an opaque tenant_id, exactly like the 'global' sentinel.
+ */
+export const TENANT_FEEDBACK = 'workspace-qdrant-feedback' as const;
