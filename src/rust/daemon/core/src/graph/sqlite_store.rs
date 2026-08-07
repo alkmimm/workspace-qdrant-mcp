@@ -345,14 +345,25 @@ impl GraphStore for SqliteGraphStore {
         // edges are already gone (delete_edges_by_file ran first in reingest_file);
         // this clears the INCOMING edges from other files that pointed at a symbol
         // this file no longer defines — those are now dangling and must go too.
-        let del_edges = format!(
-            "DELETE FROM graph_edges WHERE tenant_id = ? \
-             AND (source_node_id IN ({ph}) OR target_node_id IN ({ph}))"
-        );
-        let mut eq = sqlx::query(&del_edges).bind(tenant_id);
+        //
+        // Two single-column DELETEs, NOT one `... source_node_id IN (…) OR
+        // target_node_id IN (…)`. SQLite cannot use an index for a disjunction
+        // across two columns, so the combined form fell back to scanning every
+        // edge of the tenant on each file delete — measured up to ~19s on the
+        // live graph. Split, each statement uses its own index (idx_edges_source
+        // / idx_edges_target). Semantically identical for a DELETE: a row matching
+        // both predicates is simply removed by the first statement.
+        let del_out =
+            format!("DELETE FROM graph_edges WHERE tenant_id = ? AND source_node_id IN ({ph})");
+        let mut eq = sqlx::query(&del_out).bind(tenant_id);
         for id in &stale {
             eq = eq.bind(*id);
         }
+        eq.execute(&mut *tx).await?;
+
+        let del_in =
+            format!("DELETE FROM graph_edges WHERE tenant_id = ? AND target_node_id IN ({ph})");
+        let mut eq = sqlx::query(&del_in).bind(tenant_id);
         for id in &stale {
             eq = eq.bind(*id);
         }
