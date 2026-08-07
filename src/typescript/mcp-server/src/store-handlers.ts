@@ -281,11 +281,12 @@ function isFeedbackCategory(value: unknown): value is FeedbackCategory {
  * Store agent feedback ABOUT the workspace-qdrant tooling itself (store
  * type:"feedback").
  *
- * A feedback note is a scratchpad-family entry (`source_type:'feedback'`) written
- * to the dedicated synthetic `TENANT_FEEDBACK` bucket, NOT a new collection — so it
- * respects the 4-canonical-collection invariant (ADR-001) while staying isolated
- * from every project-scoped read surface (the recall lane and `scratchpad list` are
- * tenant-strict). It reuses the scratchpad provenance stamp
+ * A feedback note is a scratchpad-family entry written to the dedicated synthetic
+ * `TENANT_FEEDBACK` bucket, NOT a new collection — so it respects the
+ * 4-canonical-collection invariant (ADR-001) while staying isolated from every
+ * project-scoped read surface (the recall lane and `scratchpad list` are
+ * tenant-strict). `category`/`refTool` are recorded as tags (the daemon drops extra
+ * payload fields — see the tags comment below). It reuses the scratchpad provenance stamp
  * (origin_branch/cwd/worktree) so a note records where the friction was hit, and is
  * reviewed/triaged via the `/feedback-review` skill.
  *
@@ -321,19 +322,16 @@ export async function storeFeedback(
     sessionState,
   });
 
-  // Tags mirror the structured fields so /feedback-review (which reads scratchpad
-  // list entries, where tags are surfaced) can group without a payload re-read.
+  // category + refTool are recorded as TAGS (`category:<c>` / `tool:<t>`), NOT as
+  // dedicated payload fields: the daemon's scratchpad write (ScratchpadPayload +
+  // strategies/processing/text.rs) only persists content/title/tags/provenance and
+  // hardcodes source_type="scratchpad", so any extra payload field is silently
+  // dropped. The tags survive and are exactly what /feedback-review groups on;
+  // isolation is by the dedicated TENANT_FEEDBACK, not a payload discriminator.
   const tags = ['feedback', `category:${category}`];
   if (refTool) tags.push(`tool:${refTool}`);
 
-  const payload: Record<string, unknown> = {
-    content: content.trim(),
-    source_type: 'feedback',
-    category,
-    tags,
-    ...origin,
-  };
-  if (refTool) payload['ref_tool'] = refTool;
+  const payload: Record<string, unknown> = { content: content.trim(), tags, ...origin };
   if (title?.trim()) payload['title'] = title.trim();
 
   try {
@@ -355,6 +353,8 @@ export async function storeFeedback(
         message: result.message ?? 'Failed to enqueue feedback',
         collection: COLLECTION_SCRATCHPAD,
       };
+    // Advisory mirror for Qdrant-down rebuild recovery, same as storeScratchpad.
+    writeScratchpadMirror(stateManager, content, title, tags, TENANT_FEEDBACK);
     return {
       success: true,
       message: `Feedback recorded (category=${category}${refTool ? `, tool=${refTool}` : ''}). Triage it with the /feedback-review skill.`,

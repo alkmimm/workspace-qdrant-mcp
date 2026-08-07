@@ -3,9 +3,11 @@
  *
  * Feedback is a scratchpad-family note written to a dedicated synthetic tenant
  * (TENANT_FEEDBACK) so it aggregates in one bucket and stays isolated from every
- * project-scoped read surface. It requires a `category` and records the optional
- * `refTool`; both are mirrored into tags so /feedback-review can group without a
- * payload re-read. Unlike scratchpad it ignores projectId/cwd for tenanting.
+ * project-scoped read surface. `category` and `refTool` are recorded as TAGS
+ * (`category:<c>` / `tool:<t>`) — NOT dedicated payload fields — because the
+ * daemon's scratchpad write drops unknown fields and hardcodes source_type; the
+ * tags are what /feedback-review groups on. Feedback ignores projectId/cwd for
+ * tenanting and writes the advisory scratchpad mirror like storeScratchpad.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -31,7 +33,7 @@ function arg(sm: SqliteStateManager, i: number): unknown {
 }
 
 describe('storeFeedback', () => {
-  it('records a valid feedback note to the dedicated feedback tenant', async () => {
+  it('records feedback to the dedicated tenant, with category/tool in TAGS (not payload fields)', async () => {
     const sm = mockStateManager();
 
     const res = await storeFeedback(
@@ -44,13 +46,18 @@ describe('storeFeedback', () => {
     expect(arg(sm, 2)).toBe(TENANT_FEEDBACK); // tenant_id (3rd positional)
     expect(res.collection).toBe(arg(sm, 3)); // enqueued to the scratchpad collection
     const payload = arg(sm, 4) as Record<string, unknown>;
-    expect(payload['source_type']).toBe('feedback');
-    expect(payload['category']).toBe('win');
-    expect(payload['ref_tool']).toBe('grep');
-    expect(payload['tags']).toEqual(
-      expect.arrayContaining(['feedback', 'category:win', 'tool:grep'])
-    );
+    // category / refTool / source_type live in TAGS, not as payload fields — the
+    // daemon drops unknown fields and hardcodes source_type, so persisting them as
+    // fields would be dead weight.
+    expect(payload['category']).toBeUndefined();
+    expect(payload['ref_tool']).toBeUndefined();
+    expect(payload['source_type']).toBeUndefined();
+    expect(payload['tags']).toEqual(['feedback', 'category:win', 'tool:grep']);
     expect(payload['content']).toContain('round trip');
+    // Advisory mirror is written to the same feedback tenant (rebuild recovery).
+    expect(sm.upsertScratchpadMirror).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: TENANT_FEEDBACK })
+    );
   });
 
   it('ignores projectId — feedback always aggregates in the one bucket', async () => {
@@ -59,12 +66,13 @@ describe('storeFeedback', () => {
     expect(arg(sm, 2)).toBe(TENANT_FEEDBACK);
   });
 
-  it('omits ref_tool / tool tag when refTool is not given', async () => {
+  it('omits the tool tag when refTool is not given', async () => {
     const sm = mockStateManager();
     await storeFeedback({ content: 'x', category: 'missing-rule' }, sm, session());
-    const payload = arg(sm, 4) as Record<string, unknown>;
-    expect(payload['ref_tool']).toBeUndefined();
-    expect(payload['tags']).toEqual(['feedback', 'category:missing-rule']);
+    expect((arg(sm, 4) as Record<string, unknown>)['tags']).toEqual([
+      'feedback',
+      'category:missing-rule',
+    ]);
   });
 
   it('rejects missing content without enqueuing', async () => {
@@ -85,12 +93,12 @@ describe('storeFeedback', () => {
     expect(sm.enqueueUnified).not.toHaveBeenCalled();
   });
 
-  it('accepts every declared category', async () => {
+  it('accepts every declared category (recorded in the category tag)', async () => {
     for (const category of FEEDBACK_CATEGORIES) {
       const sm = mockStateManager();
       const res = await storeFeedback({ content: 'x', category }, sm, session());
       expect(res.success).toBe(true);
-      expect((arg(sm, 4) as Record<string, unknown>)['category']).toBe(category);
+      expect((arg(sm, 4) as Record<string, unknown>)['tags']).toContain(`category:${category}`);
     }
   });
 });
