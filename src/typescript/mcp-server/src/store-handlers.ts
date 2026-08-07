@@ -8,7 +8,7 @@ import type { SqliteStateManager } from './clients/sqlite-state-manager.js';
 import type { ProjectDetector } from './utils/project-detector.js';
 import type { SessionState } from './server-types.js';
 import { COLLECTION_SCRATCHPAD, PRIORITY_HIGH } from './common/native-bridge.js';
-import { TENANT_GLOBAL } from './constants/tenants.js';
+import { TENANT_GLOBAL, TENANT_FEEDBACK } from './constants/tenants.js';
 import { utcNow } from './utils/timestamps.js';
 import { resolveProjectIdentity } from './tools/branch-scope.js';
 import { resolveScratchpadOrigin, type ScratchpadOrigin } from './tools/scratchpad-origin.js';
@@ -262,6 +262,109 @@ async function enqueueScratchpadEntry(
     return {
       success: false,
       message: `Failed to queue scratchpad entry: ${error instanceof Error ? error.message : String(error)}`,
+      collection: COLLECTION_SCRATCHPAD,
+    };
+  }
+}
+
+// ── Feedback (store type:"feedback") ──────────────────────────────────────────
+
+/** Feedback categories — the kind of tool-usage feedback being recorded. */
+export const FEEDBACK_CATEGORIES = ['win', 'friction', 'trap', 'missing-rule', 'other'] as const;
+export type FeedbackCategory = (typeof FEEDBACK_CATEGORIES)[number];
+
+function isFeedbackCategory(value: unknown): value is FeedbackCategory {
+  return typeof value === 'string' && (FEEDBACK_CATEGORIES as readonly string[]).includes(value);
+}
+
+/**
+ * Store agent feedback ABOUT the workspace-qdrant tooling itself (store
+ * type:"feedback").
+ *
+ * A feedback note is a scratchpad-family entry written to the dedicated synthetic
+ * `TENANT_FEEDBACK` bucket, NOT a new collection — so it respects the
+ * 4-canonical-collection invariant (ADR-001) while staying isolated from every
+ * project-scoped read surface (the recall lane and `scratchpad list` are
+ * tenant-strict). `category`/`refTool` are recorded as tags (the daemon drops extra
+ * payload fields — see the tags comment below). It reuses the scratchpad provenance stamp
+ * (origin_branch/cwd/worktree) so a note records where the friction was hit, and is
+ * reviewed/triaged via the `/feedback-review` skill.
+ *
+ * Unlike scratchpad, feedback ignores `projectId`/`cwd` for tenanting — it ALWAYS
+ * aggregates in the one bucket (that is the whole point; scattering it per project
+ * defeats the aggregation the review step relies on).
+ */
+export async function storeFeedback(
+  args: Record<string, unknown> | undefined,
+  stateManager: SqliteStateManager,
+  sessionState: Pick<SessionState, 'projectId' | 'currentBranch' | 'isWorktree'>
+): Promise<StoreResult> {
+  const content = args?.['content'] as string;
+  if (!content?.trim())
+    return {
+      success: false,
+      message: 'content is required when type is "feedback" — the feedback itself.',
+      collection: COLLECTION_SCRATCHPAD,
+    };
+
+  const category = args?.['category'];
+  if (!isFeedbackCategory(category))
+    return {
+      success: false,
+      message: `category is required when type is "feedback" — one of: ${FEEDBACK_CATEGORIES.join(', ')}.`,
+      collection: COLLECTION_SCRATCHPAD,
+    };
+
+  const refTool = (args?.['refTool'] as string | undefined)?.trim();
+  const title = args?.['title'] as string | undefined;
+  const origin = await resolveScratchpadOrigin({
+    explicitBranch: args?.['branch'] as string | undefined,
+    sessionState,
+  });
+
+  // category + refTool are recorded as TAGS (`category:<c>` / `tool:<t>`), NOT as
+  // dedicated payload fields: the daemon's scratchpad write (ScratchpadPayload +
+  // strategies/processing/text.rs) only persists content/title/tags/provenance and
+  // hardcodes source_type="scratchpad", so any extra payload field is silently
+  // dropped. The tags survive and are exactly what /feedback-review groups on;
+  // isolation is by the dedicated TENANT_FEEDBACK, not a payload discriminator.
+  const tags = ['feedback', `category:${category}`];
+  if (refTool) tags.push(`tool:${refTool}`);
+
+  const payload: Record<string, unknown> = { content: content.trim(), tags, ...origin };
+  if (title?.trim()) payload['title'] = title.trim();
+
+  try {
+    // branch stays "main" (like scratchpad): the point id derives from
+    // (tenant, branch, document_id); provenance travels in origin_* instead.
+    const result = await stateManager.enqueueUnified(
+      'text',
+      'add',
+      TENANT_FEEDBACK,
+      COLLECTION_SCRATCHPAD,
+      payload,
+      PRIORITY_HIGH,
+      'main',
+      { source: 'mcp_store_feedback' }
+    );
+    if (result.status !== 'ok' || !result.data)
+      return {
+        success: false,
+        message: result.message ?? 'Failed to enqueue feedback',
+        collection: COLLECTION_SCRATCHPAD,
+      };
+    // Advisory mirror for Qdrant-down rebuild recovery, same as storeScratchpad.
+    writeScratchpadMirror(stateManager, content, title, tags, TENANT_FEEDBACK);
+    return {
+      success: true,
+      message: `Feedback recorded (category=${category}${refTool ? `, tool=${refTool}` : ''}). Triage it with the /feedback-review skill.`,
+      queue_id: result.data.queueId,
+      collection: COLLECTION_SCRATCHPAD,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message: `Failed to queue feedback: ${error instanceof Error ? error.message : String(error)}`,
       collection: COLLECTION_SCRATCHPAD,
     };
   }
