@@ -136,6 +136,27 @@ pub async fn reconcile_worktree_branches(
             continue;
         }
 
+        // Guard: the root must be a genuine linked-worktree *checkout*, not a
+        // stale/malformed admin entry whose `gitdir` resolved to a non-worktree
+        // directory. Observed 2026-08-06: an admin entry whose gitdir parent was
+        // the `.claude/worktrees` *container* (an ancestor of every sub-worktree)
+        // passed both guards above — `is_dir()` is true and it is not the main
+        // root — so the walk below enumerated EVERY file of EVERY sub-worktree,
+        // enqueuing ~89k phantom "new-on-branch" items (relative paths prefixed
+        // with the worktree name, which can never match the main tracked set)
+        // under one wrong branch. A real linked worktree always has a `.git`
+        // gitlink FILE (`gitdir: <main>/.git/worktrees/<name>`); the container
+        // has no `.git`, and a main repo has `.git` as a directory — so
+        // `is_leaf_worktree_root` rejects both.
+        if !is_leaf_worktree_root(Path::new(&wt_root)) {
+            warn!(
+                "worktree membership: {} for branch '{}' is not a leaf worktree checkout \
+                 (no `.git` gitlink file); skipping to avoid a container-wide phantom walk",
+                wt_root, branch
+            );
+            continue;
+        }
+
         // Committed divergence: paths git reports as Modified between the main
         // HEAD and this branch's tip. The baseline SKIPS these (reading them from
         // the main tree would tag the branch with main's bytes); (c) below reads
@@ -577,6 +598,23 @@ async fn enqueue_worktree_file(
         .map_err(|e| format!("enqueue: {e}"))
 }
 
+/// Whether `wt_root` is a genuine linked-worktree *checkout* rather than a
+/// stale/malformed admin entry that resolved to a non-worktree directory.
+///
+/// A linked worktree checkout always carries a `.git` gitlink **file** whose
+/// content is `gitdir: <main>/.git/worktrees/<name>`. Two non-worktree cases
+/// this rejects:
+/// - the `.claude/worktrees` *container* (an ancestor of every sub-worktree):
+///   no `.git` entry at all — the 2026-08-06 phantom-walk root cause;
+/// - a main repository root: `.git` is a **directory**, not a gitlink file.
+///
+/// Uses `is_file()` (not `exists()`) so a `.git` directory (a main repo) is
+/// rejected too. This is the source-level guard against a bogus worktree root
+/// being walked whole; see the call site in [`reconcile_worktree_branches`].
+fn is_leaf_worktree_root(wt_root: &Path) -> bool {
+    wt_root.join(".git").is_file()
+}
+
 /// Fold a host-reported path to the daemon's native POSIX view.
 ///
 /// Mirrors the WSL-UNC arm of the TypeScript `canonicalizeHostPath`
@@ -635,7 +673,47 @@ fn collapse_slashes(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_host_path, collapse_slashes};
+    use super::{canonicalize_host_path, collapse_slashes, is_leaf_worktree_root};
+    use std::path::Path;
+
+    /// Regression (2026-08-06 phantom-walk): a real linked worktree has a `.git`
+    /// gitlink FILE and is accepted; the `.claude/worktrees` container (no
+    /// `.git`) and a main repo (`.git` DIRECTORY) are both rejected, so neither
+    /// is ever walked whole.
+    #[test]
+    fn leaf_worktree_root_accepts_gitlink_rejects_container_and_main() {
+        let temp = tempfile::TempDir::new().unwrap();
+
+        // A linked worktree checkout: `.git` is a gitlink file.
+        let wt = temp.path().join(".claude/worktrees/wt-feat");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), "gitdir: /main/.git/worktrees/wt-feat\n").unwrap();
+        assert!(
+            is_leaf_worktree_root(&wt),
+            "a `.git` gitlink file marks a real leaf worktree"
+        );
+
+        // The container that holds the worktrees: no `.git` at all → rejected
+        // (this is the exact root that produced the phantom walk).
+        let container = temp.path().join(".claude/worktrees");
+        assert!(
+            !is_leaf_worktree_root(&container),
+            "the worktrees container must never be treated as a worktree root"
+        );
+
+        // A main repository root: `.git` is a directory, not a gitlink → rejected.
+        let main_repo = temp.path().join("main");
+        std::fs::create_dir_all(main_repo.join(".git")).unwrap();
+        assert!(
+            !is_leaf_worktree_root(&main_repo),
+            "a `.git` directory (main repo) is not a linked-worktree gitlink"
+        );
+
+        // A bare directory with nothing: rejected.
+        let bare = temp.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert!(!is_leaf_worktree_root(Path::new(&bare)));
+    }
 
     #[test]
     fn wsl_unc_folds_to_native_posix() {
