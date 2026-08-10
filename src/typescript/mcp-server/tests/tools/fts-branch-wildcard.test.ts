@@ -152,8 +152,12 @@ describe('searchExact — branch "*" wildcard', () => {
     expect((daemon.textSearch as ReturnType<typeof vi.fn>).mock.calls[1][0].branch).toBe('main');
     expect(result.results).toHaveLength(1);
     expect(result.results[0].metadata.file_path).toBe('/repo/src/example.ts');
-    expect(result.results[0].metadata.branch).toBe('feature/current');
-    expect(result.results[0].metadata._matched_branch).toBe('main');
+    // The hit is indexed under the base branch "main" (the file is unchanged on
+    // feature/current). We surface that real branch — it differs from the queried
+    // branch, so it carries signal — and no longer the redundant queried label or
+    // the separate _matched_branch mirror (collapsed via the shared helper).
+    expect(result.results[0].metadata.branch).toBe('main');
+    expect(result.results[0].metadata._matched_branch).toBeUndefined();
   });
 
   it('deduplicates exact-search hits returned from branch and base-branch fallbacks', async () => {

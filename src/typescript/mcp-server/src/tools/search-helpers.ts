@@ -45,6 +45,7 @@ import { expandGraphContext } from './search-graph-context.js';
 import { logDebug } from '../utils/logger.js';
 import { matchesPathInclude } from '../utils/path-glob.js';
 import {
+  collapseResultBranchFields,
   concreteBranchFilter,
   resolveEffectiveBranch,
   resolveProjectIdentity,
@@ -1353,6 +1354,15 @@ export async function finalizeResults(
     scratchpadHits.length > 0 && !params.collectionsToSearch.includes(SCRATCHPAD_COLLECTION)
       ? [...params.collectionsToSearch, SCRATCHPAD_COLLECTION]
       : params.collectionsToSearch;
+
+  // Collapse the per-hit `branch` metadata AFTER all branch filtering, dedup and
+  // context expansion are done (so nothing downstream reads the full set) and
+  // BEFORE response shaping (so bytes reflect what ships). The Qdrant payload
+  // spread in hitToResult carries `file_metadata.branches` as a ~60-name array
+  // in a many-branch repo — the same noise the grep/exact surfaces collapse via
+  // the shared helper (CLAUDE.md shared-behavior rule). `params.options.branch`
+  // is the effectiveBranch (applyEffectiveBranch upstream; "*" on an auto-widen).
+  collapseResultBranchFields(combinedResults, concreteBranchFilter(params.options.branch));
 
   const response = recordAndBuildResponse(
     stateManager,

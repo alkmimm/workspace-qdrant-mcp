@@ -23,7 +23,9 @@ import { effectivenessTracker } from '../clients/effectiveness-signals.js';
 import { int64ToNumber } from '../clients/daemon-client/system-methods.js';
 import { SERVER_VERSION as MCP_SERVER_VERSION } from '../server-types.js';
 import {
+  collapseBranchSet,
   concreteBranchFilter,
+  normalizeBranchList,
   resolveEffectiveBranch,
   resolveFallbackBranch,
   resolveProjectIdentity,
@@ -153,15 +155,30 @@ export interface GrepMatch {
    */
   is_test?: boolean;
   /**
-   * Branch this match is indexed under (the daemon's `file_metadata.branch`).
-   * Populated whenever the daemon reports it; omitted only when it is absent.
-   * Lets a `branch:"*"` sweep tell apart what would otherwise read as duplicate
-   * paths — the same file indexed under two branches (e.g. a feature branch's
-   * snapshot plus the base branch's) shows up as two matches with DIFFERENT
-   * `branch` values (and often different `file_size`). Parity with the
-   * exact-search surface, whose results already carry the matched branch.
+   * Branch(es) this match is indexed under, COLLAPSED for signal (see
+   * {@link collapseGrepBranchField}). The daemon returns the full
+   * `file_metadata.branches` mirror — for a many-branch repo that is a 60-name,
+   * ~1.5 KB comma list repeated on every hit, which drowns the content the
+   * caller actually wants (field feedback 2026-08-10). So:
+   *   - On a concrete-branch grep (the default: your current branch), a hit that
+   *     carries the queried branch is trivially on it — the field just repeats
+   *     the query, so it is OMITTED entirely.
+   *   - A hit that does NOT carry the queried branch (came from the base/fallback
+   *     branch, or an auto-widen across all branches) keeps `branch` as signal.
+   *   - When the branch set is small (<= BRANCH_SMALL_SET_MAX) the comma list is
+   *     shown verbatim — that IS the disambiguation payload of a `branch:"*"`
+   *     sweep (which paths are branch-exclusive).
+   *   - When it fans out wider, `branch` collapses to `"*"` and `branch_count`
+   *     carries the real number — "shared across N branches, not branch-specific"
+   *     without the dump.
    */
   branch?: string;
+  /**
+   * Number of branches this match is indexed under, present ONLY when the set
+   * was too wide to list and `branch` collapsed to `"*"` (see the `branch`
+   * doc above). Absent when `branch` carries the concrete name(s) or was omitted.
+   */
+  branch_count?: number;
 }
 
 export interface GrepResponse {
@@ -306,6 +323,38 @@ export function mapGrepMatches(matches: TextSearchMatch[]): GrepMatch[] {
     if (m.branch) out.branch = m.branch;
     return out;
   });
+}
+
+/**
+ * Collapse the per-match `branch` field so it carries signal, not noise — a thin
+ * adapter over the shared {@link collapseBranchSet} (grep matches carry `branch`
+ * as a top-level string, not inside a metadata record). The daemon returns the
+ * FULL `file_metadata.branches` mirror comma-joined; on a many-branch repo that
+ * is a ~60-name dump on EVERY hit that drove agents back to native grep (field
+ * feedback 2026-08-10). See the {@link GrepMatch.branch} doc for the rules.
+ *
+ * Mutates and returns `matches`. `queriedBranch` is the concrete branch the grep
+ * was scoped to (`concreteBranchFilter(effectiveBranch)`), or `undefined` for a
+ * cross-branch sweep (`branch:"*"`) — where nothing is redundant, so nothing is
+ * dropped.
+ */
+export function collapseGrepBranchField(
+  matches: GrepMatch[],
+  queriedBranch: string | undefined
+): GrepMatch[] {
+  for (const m of matches) {
+    if (m.branch === undefined) continue;
+    const collapsed = collapseBranchSet(normalizeBranchList(m.branch), queriedBranch);
+    if (collapsed.branch === undefined) {
+      delete m.branch;
+      delete m.branch_count;
+      continue;
+    }
+    m.branch = collapsed.branch;
+    if (collapsed.branch_count !== undefined) m.branch_count = collapsed.branch_count;
+    else delete m.branch_count;
+  }
+  return matches;
 }
 
 function branchWideningMessage(branch: string): string {
@@ -654,6 +703,13 @@ export class GrepTool {
           }
         }
       }
+      // Collapse the per-match branch field BEFORE shaping so the byte budget
+      // and economy reflect what actually ships: the daemon returns the full
+      // `file_metadata.branches` mirror, a ~60-name comma dump per hit in a
+      // many-branch repo. Redundant on a concrete-branch grep (every hit is on
+      // your branch), noise on a sweep unless the set is small. `branch` here is
+      // the effectiveBranch; concreteBranchFilter maps a "*" sweep to undefined.
+      collapseGrepBranchField(matches, concreteBranchFilter(branch));
       // Shaping (spec 20 §3.2): per-line cap + global response byte budget,
       // applied BEFORE the economy is computed so bytes_out reflects what
       // actually ships. Grep matches are line-scoped, but minified/generated
