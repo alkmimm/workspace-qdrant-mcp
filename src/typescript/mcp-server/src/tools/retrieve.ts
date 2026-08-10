@@ -36,6 +36,7 @@ import {
   resolveEffectiveBranch,
   resolveFallbackBranch,
   concreteBranchFilter,
+  collapseResultBranchFields,
 } from './branch-scope.js';
 import { branchFilterClause } from './search-filters.js';
 
@@ -660,6 +661,9 @@ export class RetrieveTool {
         content: (point.payload?.[FIELD_CONTENT] as string) ?? '',
         metadata: extractMetadata(point.payload),
       };
+      // Collapse the branch payload array (parity with search/grep — CLAUDE.md
+      // shared-behavior rule) so a many-branch repo does not ship a ~60-name dump.
+      collapseResultBranchFields([document], concreteBranchFilter(branchScope?.branch));
 
       return { success: true, documents: [document], total: 1, hasMore: false };
     } catch (error) {
@@ -740,6 +744,9 @@ export class RetrieveTool {
         content: (point.payload?.[FIELD_CONTENT] as string) ?? '',
         metadata: extractMetadata(point.payload),
       }));
+      // Collapse the branch payload array (parity with search/grep — CLAUDE.md
+      // shared-behavior rule) so a many-branch repo does not ship a ~60-name dump.
+      collapseResultBranchFields(documents, concreteBranchFilter(branch));
 
       return { success: true, documents, total: documents.length, hasMore };
     } catch (error) {

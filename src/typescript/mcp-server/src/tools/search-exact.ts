@@ -21,6 +21,7 @@ import { filterResultsByPathExclude } from './search-path-filters.js';
 import { FIELD_CONTENT, FIELD_TITLE } from '../common/native-bridge.js';
 import {
   applyEffectiveBranch,
+  collapseResultBranchFields,
   concreteBranchFilter,
   resolveEffectiveBranch,
   resolveFallbackBranch,
@@ -79,8 +80,7 @@ function mapExactResults(
     branch?: string;
     context_before?: string[];
     context_after?: string[];
-  }>,
-  requestedBranch?: string
+  }>
 ): SearchResult[] {
   return matches.map((m, idx) => ({
     id: `${m.file_path}:${m.line_number}`,
@@ -91,8 +91,11 @@ function mapExactResults(
       file_path: m.file_path,
       line_number: m.line_number,
       tenant_id: m.tenant_id,
-      branch: requestedBranch ?? m.branch,
-      _matched_branch: m.branch,
+      // The branch(es) the hit is actually indexed under (daemon mirror).
+      // collapseResultBranchFields below trims it to signal: omitted when it
+      // equals the queried branch, collapsed to "*"+count when it fans out. A
+      // fallback/base-branch hit keeps its real branch (differs from the query).
+      ...(m.branch ? { branch: m.branch } : {}),
       context_before: m.context_before,
       context_after: m.context_after,
       _search_type: 'exact',
@@ -381,14 +384,14 @@ async function executeAndLogSearch(
     const primaryResponse = await daemonClient.textSearch(request);
     const responses = [primaryResponse];
     const resultGroups: SearchResult[][] = [
-      mapExactResults(primaryResponse.matches, requestedBranch),
+      mapExactResults(primaryResponse.matches),
     ];
     if (fallbackBranch) {
       const fallbackResponse = await daemonClient.textSearch(
         buildExactSearchRequest({ ...options, branch: fallbackBranch }, tenantId)
       );
       responses.push(fallbackResponse);
-      resultGroups.push(mapExactResults(fallbackResponse.matches, requestedBranch));
+      resultGroups.push(mapExactResults(fallbackResponse.matches));
     }
     const rawResults = resultGroups.flat();
     let dedupedResults = dedupeExactResults(rawResults);
@@ -407,7 +410,7 @@ async function executeAndLogSearch(
       const widenedResponse = await daemonClient.textSearch(
         buildExactSearchRequest({ ...options, branch: '*' }, tenantId)
       );
-      const widenedRaw = mapExactResults(widenedResponse.matches, undefined);
+      const widenedRaw = mapExactResults(widenedResponse.matches);
       const widened = dedupeExactResults(widenedRaw);
       if (widened.length > 0) {
         responses.push(widenedResponse);
@@ -458,6 +461,13 @@ async function executeAndLogSearch(
       resultCount: results.length,
       latencyMs: Date.now() - startTime,
     });
+    // Collapse the per-hit branch metadata (`branch` + the always-full
+    // `_matched_branch` mirror) via the shared helper — the FTS surface returns
+    // the full `file_metadata.branches` list, a ~60-name dump per hit in a
+    // many-branch repo (field feedback 2026-08-10; parity with grep/semantic).
+    // `requestedBranch` is undefined on a branch:"*" sweep or after a widen, so
+    // those keep the disambiguating branch; a concrete read drops the redundant.
+    collapseResultBranchFields(results, requestedBranch);
     const effectiveScope: SearchScope = options.scope ?? 'project';
     const successResponse: SearchResponse = {
       results,
@@ -499,7 +509,7 @@ async function executeAndLogSearch(
                 buildExactSearchRequest(probeOptions, tenantId)
               );
               // No pathExclude post-filter either — probe the unfiltered scope.
-              return dedupeExactResults(mapExactResults(probe.matches, undefined)).length;
+              return dedupeExactResults(mapExactResults(probe.matches)).length;
             },
             // Exact search always runs case-sensitively, so the case probe is
             // always meaningful here: same pattern + path filters, case
@@ -515,7 +525,7 @@ async function executeAndLogSearch(
                 buildExactSearchRequest(probeOptions, tenantId, false)
               );
               const deduped = filterResultsByPathExclude(
-                dedupeExactResults(mapExactResults(probe.matches, undefined)),
+                dedupeExactResults(mapExactResults(probe.matches)),
                 options.pathExclude
               );
               const first = deduped[0];

@@ -71,6 +71,92 @@ export function concreteBranchFilter(branch: string | undefined): string | undef
 }
 
 /**
+ * At or below this many branches the concrete list is shown verbatim (it IS the
+ * disambiguation payload of a `branch:"*"` sweep — which paths are branch-
+ * exclusive). Above it the field collapses to `"*"` + a count.
+ */
+export const BRANCH_SMALL_SET_MAX = 3;
+
+export interface CollapsedBranch {
+  /** The value to show, or `undefined` to OMIT the field (redundant with the
+   *  queried branch). `"*"` means "wide fan-out — see branch_count". */
+  branch?: string;
+  /** Present only when `branch === "*"`: the real number of branches. */
+  branch_count?: number;
+}
+
+/**
+ * Normalize the daemon's branch representation to a clean list. The FTS surfaces
+ * (grep, exact) hand back a comma-joined STRING; the Qdrant payload (semantic,
+ * retrieve) hands back an ARRAY. Accept both, plus a bare scalar.
+ */
+export function normalizeBranchList(value: unknown): string[] {
+  const raw = Array.isArray(value)
+    ? value.map((v) => String(v))
+    : typeof value === 'string'
+      ? value.split(',')
+      : [];
+  return raw.map((b) => b.trim()).filter((b) => b.length > 0);
+}
+
+/**
+ * Collapse a branch set into a compact, high-signal form — the SINGLE source of
+ * truth shared by grep, exact search, semantic search and retrieve.
+ *
+ * The daemon returns the FULL `file_metadata.branches` mirror (every branch the
+ * content is byte-identical on). Most files are identical across every branch,
+ * so in a many-branch repo that is a ~60-name, ~1.5 KB list on EVERY hit — noise
+ * that buried the content and drove agents off the tools (field feedback
+ * 2026-08-10). Rules:
+ *   - `queriedBranch` set (a concrete-branch read — the default) AND present in
+ *     the set → the field just repeats the query → OMIT it.
+ *   - Otherwise it carries signal: `<= BRANCH_SMALL_SET_MAX` names show verbatim
+ *     (branch-exclusive hits — the point of a `branch:"*"` sweep); a wider set
+ *     collapses to `"*"` + `branch_count`.
+ * `queriedBranch` is `concreteBranchFilter(effectiveBranch)`, i.e. `undefined`
+ * for a `branch:"*"` sweep — where nothing is redundant, so nothing is omitted.
+ */
+export function collapseBranchSet(
+  branches: string[],
+  queriedBranch: string | undefined
+): CollapsedBranch {
+  if (branches.length === 0) return {};
+  if (queriedBranch !== undefined && branches.includes(queriedBranch)) return {};
+  if (branches.length <= BRANCH_SMALL_SET_MAX) return { branch: branches.join(',') };
+  return { branch: '*', branch_count: branches.length };
+}
+
+/**
+ * Apply {@link collapseBranchSet} to a result metadata record in place. Handles
+ * the `branch` field whether the daemon handed it back as a payload array
+ * (semantic, retrieve) or an FTS comma-string (exact). No-op when absent.
+ */
+export function collapseMetadataBranchField(
+  metadata: Record<string, unknown>,
+  queriedBranch: string | undefined
+): void {
+  if (!('branch' in metadata)) return;
+  const c = collapseBranchSet(normalizeBranchList(metadata['branch']), queriedBranch);
+  if (c.branch === undefined) delete metadata['branch'];
+  else metadata['branch'] = c.branch;
+  if (c.branch_count !== undefined) metadata['branch_count'] = c.branch_count;
+  else delete metadata['branch_count'];
+}
+
+/**
+ * Collapse the branch fields of every result's metadata in place. Structural
+ * over the result shape so branch-scope.ts stays free of a SearchResult import.
+ */
+export function collapseResultBranchFields(
+  results: Array<{ metadata?: Record<string, unknown> | null }>,
+  queriedBranch: string | undefined
+): void {
+  for (const r of results) {
+    if (r.metadata) collapseMetadataBranchField(r.metadata, queriedBranch);
+  }
+}
+
+/**
  * Decide the base branch to fall back to for files unchanged on the caller's
  * feature branch. The daemon only tags CHANGED files under a feature branch
  * (unchanged files stay under the project's base branch), so a branch-scoped
