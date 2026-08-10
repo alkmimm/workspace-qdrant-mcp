@@ -461,12 +461,12 @@ async function executeAndLogSearch(
       resultCount: results.length,
       latencyMs: Date.now() - startTime,
     });
-    // Collapse the per-hit branch metadata (`branch` + the always-full
-    // `_matched_branch` mirror) via the shared helper — the FTS surface returns
-    // the full `file_metadata.branches` list, a ~60-name dump per hit in a
-    // many-branch repo (field feedback 2026-08-10; parity with grep/semantic).
-    // `requestedBranch` is undefined on a branch:"*" sweep or after a widen, so
-    // those keep the disambiguating branch; a concrete read drops the redundant.
+    // Collapse the per-hit `branch` metadata via the shared helper — the FTS
+    // surface returns the full `file_metadata.branches` list, a ~60-name dump
+    // per hit in a many-branch repo (field feedback 2026-08-10; parity with
+    // grep/semantic). `requestedBranch` is undefined on a branch:"*" sweep or
+    // after a widen, so those keep the disambiguating branch; a concrete read
+    // drops the redundant.
     collapseResultBranchFields(results, requestedBranch);
     const effectiveScope: SearchScope = options.scope ?? 'project';
     const successResponse: SearchResponse = {
