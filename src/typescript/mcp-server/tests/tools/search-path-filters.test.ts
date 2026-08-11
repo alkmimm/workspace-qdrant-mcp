@@ -132,9 +132,13 @@ describe('filterResultsByPathExclude', () => {
     expect(kept.map((r) => r.metadata['relative_path'])).toEqual(['src/main.rs']);
   });
 
-  it('is a no-op when pathExclude is unset', () => {
+  it('preserves non-worktree results when pathExclude is unset', () => {
+    // No pathExclude no longer means a strict identity return: a main-tenant
+    // caller still has other-worktree `.claude/worktrees/**` paths dropped
+    // (see worktree-path-exclude.test.ts), so the array is rebuilt. A normal
+    // path is preserved by value.
     const results = [result('old_project/a.php')];
-    expect(filterResultsByPathExclude(results, undefined)).toBe(results);
+    expect(filterResultsByPathExclude(results, undefined)).toEqual(results);
   });
 
   it('KEEPS a result with no resolvable path (cannot match → never a false drop)', () => {

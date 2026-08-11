@@ -91,3 +91,19 @@ export function matchesPathExclude(value: string, glob: string): boolean {
 export function matchesPathInclude(value: string, glob: string): boolean {
   return matchesFloatingGlob(value, glob);
 }
+
+/**
+ * The linked-worktree subtree of a repo. Worktree branch content is stored
+ * MAIN-ANCHORED (the daemon ignore-gates this subtree), so a read result whose
+ * path is a LITERAL `.claude/worktrees/<wt>/…` is a leaked/stale generation that
+ * is never the intended representation — and, worse, points into ANOTHER
+ * worktree's checkout, so reading or editing it touches the wrong tree (field
+ * feedback 2026-08-10, DOC-V2). The read surfaces drop these by default for a
+ * main-tenant caller; see {@link isWorktreeSubtreePath}.
+ */
+export const WORKTREE_SUBTREE_GLOB = '.claude/worktrees/**';
+
+/** True when a path lies inside any repo's `.claude/worktrees/<wt>/` subtree. */
+export function isWorktreeSubtreePath(value: string): boolean {
+  return matchesPathExclude(value, WORKTREE_SUBTREE_GLOB);
+}
