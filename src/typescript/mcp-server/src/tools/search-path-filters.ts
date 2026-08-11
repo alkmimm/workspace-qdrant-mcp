@@ -12,7 +12,8 @@
  */
 
 import type { SearchResult, DerankConfig } from './search-types.js';
-import { matchesPathExclude } from '../utils/path-glob.js';
+import { matchesPathExclude, isWorktreeSubtreePath } from '../utils/path-glob.js';
+import { getWorktreeContext } from '../utils/request-context.js';
 
 /** Prefer the repo-relative path (stable, what the caller reasons about); fall
  *  back to the absolute `file_path` when a result carries no relative path. */
@@ -25,20 +26,26 @@ function resultPath(result: SearchResult): string | undefined {
 }
 
 /**
- * Drop every result whose path matches the `pathExclude` glob. A result with no
- * resolvable path is KEPT (it cannot match the exclude, so excluding it would be
- * a silent false-drop). Floats like the include filter — see
+ * Drop every result whose path matches the `pathExclude` glob, PLUS — for a
+ * main-tenant caller — any result under another worktree's `.claude/worktrees/`
+ * subtree (see {@link isWorktreeSubtreePath}): a leaked/stale path that points
+ * into the wrong checkout. The worktree drop is skipped when the caller itself
+ * works inside a worktree (then those paths are legitimately its own). A result
+ * with no resolvable path is KEPT (it cannot match, so dropping it would be a
+ * silent false-drop). Floats like the include filter — see
  * {@link matchesPathExclude}.
  */
 export function filterResultsByPathExclude(
   results: SearchResult[],
   pathExclude: string | undefined
 ): SearchResult[] {
-  if (!pathExclude) return results;
+  const dropOtherWorktrees = getWorktreeContext() === undefined;
+  if (!pathExclude && !dropOtherWorktrees) return results;
   return results.filter((result) => {
     const path = resultPath(result);
     if (path === undefined) return true;
-    return !matchesPathExclude(path, pathExclude);
+    if (dropOtherWorktrees && isWorktreeSubtreePath(path)) return false;
+    return pathExclude ? !matchesPathExclude(path, pathExclude) : true;
   });
 }
 

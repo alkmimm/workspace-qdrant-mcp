@@ -11,7 +11,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { matchesPathExclude } from '../utils/path-glob.js';
+import { matchesPathExclude, isWorktreeSubtreePath } from '../utils/path-glob.js';
+import { getWorktreeContext } from '../utils/request-context.js';
 import { shapeGrepMatches, type GrepShapingOptions } from './grep-shaping.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
@@ -286,14 +287,22 @@ export function dedupGrepMatches(matches: GrepMatch[]): GrepMatch[] {
  * per-call exclude, applied in TS on the mapped matches (the daemon FTS query
  * itself only knows the `pathGlob` include). Floats like the include filter, so
  * `old_project/**` silences that tree at the repo root and any nested depth.
- * No-op when `pathExclude` is unset.
+ *
+ * Also drops, for a main-tenant caller, any match under another worktree's
+ * `.claude/worktrees/` subtree (see {@link isWorktreeSubtreePath}) — a
+ * leaked/stale path that points into the wrong checkout (field feedback
+ * 2026-08-10, DOC-V2); skipped when the caller itself works inside a worktree.
  */
 export function filterGrepMatchesByExclude(
   matches: GrepMatch[],
   pathExclude: string | undefined
 ): GrepMatch[] {
-  if (!pathExclude) return matches;
-  return matches.filter((m) => !matchesPathExclude(m.file, pathExclude));
+  const dropOtherWorktrees = getWorktreeContext() === undefined;
+  if (!pathExclude && !dropOtherWorktrees) return matches;
+  return matches.filter((m) => {
+    if (dropOtherWorktrees && isWorktreeSubtreePath(m.file)) return false;
+    return pathExclude ? !matchesPathExclude(m.file, pathExclude) : true;
+  });
 }
 
 /** Map daemon TextSearchMatch array to GrepMatch array. */
