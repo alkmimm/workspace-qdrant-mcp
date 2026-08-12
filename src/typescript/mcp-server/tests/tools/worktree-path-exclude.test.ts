@@ -86,3 +86,70 @@ describe('filterResultsByPathExclude — other-worktree drop', () => {
     expect(out).toHaveLength(2);
   });
 });
+
+/**
+ * The shape the tests above never built, and the reason the drop shipped as a
+ * no-op on the semantic lane: a worktree-origin point is indexed with the
+ * worktree prefix STRIPPED, so its `relative_path` is byte-identical to the main
+ * tree's file and ONLY the absolute path carries `.claude/worktrees/<name>/`.
+ * Every case above sets `relative_path` to the worktree path — which the daemon
+ * never produces for these points.
+ *
+ * Measured 2026-08-12 (DOC-V2): `pathExclude: ".claude/worktrees/**"` returned
+ * hits from three foreign worktrees. It works in `grep` only because grep
+ * matches carry the absolute path alone.
+ */
+describe('filterResultsByPathExclude — worktree-origin shape (stripped relative)', () => {
+  /** relative_path as the daemon stores it (main-anchored) + worktree absolute. */
+  const worktreeOrigin = (): SearchResult => ({
+    id: 'wt-origin',
+    score: 1,
+    collection: 'projects',
+    content: '',
+    metadata: {
+      relative_path: MAIN,
+      file_path: `/repo/${WT}`,
+      absolute_path: `/repo/${WT}`,
+    },
+  });
+
+  const mainOrigin = (): SearchResult => ({
+    id: 'main-origin',
+    score: 1,
+    collection: 'projects',
+    content: '',
+    metadata: {
+      relative_path: MAIN,
+      file_path: `/repo/${MAIN}`,
+      absolute_path: `/repo/${MAIN}`,
+    },
+  });
+
+  it('drops it under an explicit worktree pathExclude', () => {
+    const out = asMainCaller(() =>
+      filterResultsByPathExclude([worktreeOrigin(), mainOrigin()], '.claude/worktrees/**')
+    );
+    expect(out.map((r) => r.id)).toEqual(['main-origin']);
+  });
+
+  it('drops it by default for a main-tenant caller', () => {
+    const out = asMainCaller(() =>
+      filterResultsByPathExclude([worktreeOrigin(), mainOrigin()], undefined)
+    );
+    expect(out.map((r) => r.id)).toEqual(['main-origin']);
+  });
+
+  it('keeps it when the caller itself works inside a worktree', () => {
+    const out = asWorktreeCaller(() =>
+      filterResultsByPathExclude([worktreeOrigin(), mainOrigin()], undefined)
+    );
+    expect(out).toHaveLength(2);
+  });
+
+  it('does not over-drop: a main-tree result survives the worktree exclude', () => {
+    const out = asMainCaller(() =>
+      filterResultsByPathExclude([mainOrigin()], '.claude/worktrees/**')
+    );
+    expect(out).toHaveLength(1);
+  });
+});

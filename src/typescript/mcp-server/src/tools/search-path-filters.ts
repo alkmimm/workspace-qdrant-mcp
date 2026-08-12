@@ -26,6 +26,32 @@ function resultPath(result: SearchResult): string | undefined {
 }
 
 /**
+ * EVERY path a result is known by — relative first, then absolute.
+ *
+ * The exclude has to test both, because a worktree-origin point is indexed with
+ * the worktree prefix STRIPPED: its `relative_path` is byte-identical to the
+ * main tree's file at that path, and only `file_path`/`absolute_path` carries
+ * the `.claude/worktrees/<name>/` segment. Testing `resultPath()` alone
+ * therefore checked the one field that can never distinguish them, so
+ * `pathExclude: ".claude/worktrees/**"` returned foreign-session hits — and the
+ * default worktree drop below was a silent no-op on the semantic lane for the
+ * same reason (it works in `grep`, whose matches carry only the absolute path).
+ *
+ * This mirrors the include filter, which already ORs the two
+ * (`filterResultsByPathGlob`).
+ */
+function resultPaths(result: SearchResult): string[] {
+  const paths: string[] = [];
+  for (const key of ['relative_path', 'file_path', 'absolute_path'] as const) {
+    const value = result.metadata[key];
+    if (typeof value === 'string' && value.length > 0 && !paths.includes(value)) {
+      paths.push(value);
+    }
+  }
+  return paths;
+}
+
+/**
  * Drop every result whose path matches the `pathExclude` glob, PLUS — for a
  * main-tenant caller — any result under another worktree's `.claude/worktrees/`
  * subtree (see {@link isWorktreeSubtreePath}): a leaked/stale path that points
@@ -34,6 +60,15 @@ function resultPath(result: SearchResult): string | undefined {
  * with no resolvable path is KEPT (it cannot match, so dropping it would be a
  * silent false-drop). Floats like the include filter — see
  * {@link matchesPathExclude}.
+ *
+ * A match on ANY known path drops the result (see {@link resultPaths}). Note the
+ * consequence for content that is byte-identical in the main tree and a
+ * worktree: cross-branch dedup collapses it onto ONE point whose stored absolute
+ * path belongs to whichever ingest ran first, so such a point can be excluded
+ * via its worktree path even though the same content also lives in main. That is
+ * the correct trade — the caller asked not to be shown worktree paths, and the
+ * alternative (the measured behaviour) is presenting another session's checkout
+ * as if it were the main tree, which is the failure this filter exists to stop.
  */
 export function filterResultsByPathExclude(
   results: SearchResult[],
@@ -42,10 +77,10 @@ export function filterResultsByPathExclude(
   const dropOtherWorktrees = getWorktreeContext() === undefined;
   if (!pathExclude && !dropOtherWorktrees) return results;
   return results.filter((result) => {
-    const path = resultPath(result);
-    if (path === undefined) return true;
-    if (dropOtherWorktrees && isWorktreeSubtreePath(path)) return false;
-    return pathExclude ? !matchesPathExclude(path, pathExclude) : true;
+    const paths = resultPaths(result);
+    if (paths.length === 0) return true;
+    if (dropOtherWorktrees && paths.some(isWorktreeSubtreePath)) return false;
+    return pathExclude ? !paths.some((p) => matchesPathExclude(p, pathExclude)) : true;
   });
 }
 
