@@ -277,6 +277,15 @@ impl UnifiedQueueProcessor {
     /// The actor lives for the lifetime of the process; the per-item file
     /// handler routes all FTS5 writes through it to eliminate SQLITE_BUSY
     /// contention on search.db.
+    /// The configured search.db handle, if one was installed.
+    ///
+    /// Startup maintenance tasks (the worktree-path backfill) need to repair
+    /// `file_metadata` alongside Qdrant, and they are spawned from the same
+    /// place that owns this processor.
+    pub fn search_db(&self) -> Option<Arc<SearchDbManager>> {
+        self.search_db.clone()
+    }
+
     pub fn with_search_db(mut self, search_db: Arc<SearchDbManager>) -> Self {
         let sender = crate::search_db::batch_writer::spawn(
             Arc::clone(&search_db),

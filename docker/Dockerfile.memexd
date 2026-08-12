@@ -299,6 +299,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 exits 0 when a positional filter matches nothing, so renaming or moving the \
 module would silently un-gate the search.db clear"; exit 1; }
 
+# The worktree-path backfill's path arithmetic. It REWRITES stored paths across
+# every point of every tenant, so a transform bug is a mass corruption, and the
+# refuse-on-malformed and idempotence cases are the ones that keep a second run
+# (or a half-finished first one) from compounding the damage. Pure string
+# functions — no DB, no network.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib worktree_path_backfill \
+        -- --test-threads=4 2>&1 | tee /tmp/wt-backfill.log; \
+    grep -q "^test result: ok\. 5 passed" /tmp/wt-backfill.log \
+    || { echo "GATE: expected exactly 5 worktree-path-backfill tests to run and \
+pass — a filter that matches nothing exits 0, which would un-gate the path \
+rewrite that touches every stored point"; exit 1; }
+
 # Issue #299 cascade-rename guard tests run here too, same rationale: hermetic
 # (in-memory SQLite + tempdir git fixtures, no FTS5/timing dependence) and they
 # guard the tenant-rename suppression + orphan prune that prevents the silent-

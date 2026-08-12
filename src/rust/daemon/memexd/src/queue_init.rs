@@ -502,6 +502,7 @@ pub fn spawn_recovery_tasks(
     spawn_startup_recovery(uqp, allowed_extensions, daemon_config);
     spawn_rules_mirror_backfill(uqp, mirror_storage);
     spawn_component_backfill(uqp);
+    spawn_worktree_path_backfill(uqp, mirror_storage);
     spawn_stale_lease_reaper(uqp);
 }
 
@@ -596,6 +597,29 @@ fn spawn_rules_mirror_backfill(uqp: &UnifiedQueueProcessor, mirror_storage: &Arc
                 }
             }
             Err(e) => warn!("Rules mirror backfill failed (non-fatal): {}", e),
+        }
+    });
+}
+
+/// Re-anchor stored paths that were persisted against a worktree read root.
+///
+/// PR #347 fixed the write path; nothing rewrites what is already stored, and
+/// the dedup fast-path never refreshes a path, so these points would never heal
+/// on their own. Detached and non-fatal like the other startup backfills:
+/// the predicate is the presence of the worktree segment in the stored path, so
+/// a partial run simply finishes on the next start.
+fn spawn_worktree_path_backfill(uqp: &UnifiedQueueProcessor, storage: &Arc<StorageClient>) {
+    let storage = Arc::clone(storage);
+    let search_db = uqp.search_db();
+    tokio::spawn(async move {
+        let pool = search_db.as_ref().map(|db| db.pool().clone());
+        let stats =
+            workspace_qdrant_core::startup::backfill_worktree_paths(&storage, pool.as_ref()).await;
+        if stats.points_repaired == 0 && stats.search_rows_repaired == 0 {
+            debug!(
+                "Worktree-path backfill: nothing to repair ({} points scanned)",
+                stats.points_scanned
+            );
         }
     });
 }
