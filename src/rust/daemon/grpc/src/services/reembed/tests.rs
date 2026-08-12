@@ -349,11 +349,21 @@ async fn flush_clears_search_db_for_watch_folder_tenants() {
     .await
     .unwrap();
     assert_eq!(tenants, vec!["tenant-c".to_string()]);
-    let lines: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM code_lines")
-        .fetch_one(search_db.pool())
+    // Assert the surviving CONTENT, not just a row count. "keep other tenant\n"
+    // is stored verbatim, and `split('\n')` on a file that ends in a newline
+    // yields TWO lines — the text and the trailing empty one. The original
+    // count-of-1 expectation missed that, but the test never ran to reveal it:
+    // every gate filter targeted `workspace-qdrant-core`, so this package had
+    // none, and the assertion sat behind an earlier hard failure anyway.
+    let lines: Vec<String> = sqlx::query_scalar("SELECT content FROM code_lines ORDER BY seq")
+        .fetch_all(search_db.pool())
         .await
         .unwrap();
-    assert_eq!(lines, 1, "only the non-watch-folder tenant should remain");
+    assert_eq!(
+        lines,
+        vec!["keep other tenant".to_string(), String::new()],
+        "only the non-watch-folder tenant's lines should remain"
+    );
 }
 
 /// Regression for the "reembed completes but re-ingests nothing" bug: the
