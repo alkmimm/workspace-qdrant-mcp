@@ -59,7 +59,8 @@ export const rulesToolDefinition = {
       },
       limit: {
         type: 'number',
-        description: 'Max rules to return for list (default: 50)',
+        description:
+          'Max rules to FETCH for list (default: 200). This caps the scroll above the byte budget — passing a value below your rule count silently hides the excess from the drop accounting, so leave it unset unless you want fewer.',
       },
       summary: {
         type: 'boolean',
@@ -69,7 +70,7 @@ export const rulesToolDefinition = {
       maxResponseBytes: {
         type: 'number',
         description:
-          'For list: cap on the rendered rules payload (default ~24000, the same budget as search/grep/scratchpad). Trailing rules beyond it are dropped (>=1 kept), budget_truncated.dropped reports how many, and next_cursor resumes at the first dropped rule — lossless. 0 disables.',
+          'For list: cap on the rendered rules payload (default 40000 — HIGHER than the shared ~24000 of search/grep/scratchpad, because this is the session-start "load the conventions" call where a dropped rule is a convention silently never learned, not a paging round-trip). Trailing rules beyond it are dropped (>=1 kept), budget_truncated.dropped reports how many, and next_cursor resumes at the first dropped rule — lossless. 0 disables.',
       },
       cursor: {
         type: 'string',

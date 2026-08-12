@@ -20,6 +20,11 @@ vi.mock('@qdrant/js-client-rest', () => ({
             scope: 'global',
             title: 'TypeScript Rule',
             priority: '10',
+            // Present in the payload so the summary-omission assertions bite:
+            // without these, `createdAt`/`updatedAt` are undefined in BOTH the
+            // shaped and unshaped forms and the test proves nothing.
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-02T00:00:00Z',
           },
         },
         {
@@ -29,6 +34,8 @@ vi.mock('@qdrant/js-client-rest', () => ({
             scope: 'project',
             project_id: 'test-project',
             tags: 'testing,quality',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-02T00:00:00Z',
           },
         },
       ],
@@ -298,23 +305,47 @@ describe('RulesTool', () => {
       expect(result.next_cursor).toBe('rule-2');
     });
 
-    it('summary omits timestamps and a redundant owner (the per-entry cost)', async () => {
+    it('summary omits timestamps but keeps the owner discriminator', async () => {
       const result = await rulesTool.execute({
         action: 'list',
-        scope: 'global',
+        scope: 'project',
+        projectId: 'test-project',
+        includeGlobal: true,
         summary: true,
       });
 
+      // Timestamps: in the payload (see the fixtures), surfaced by the FULL
+      // form, and dropped by the summary — ~100 chars per entry as two ISO
+      // strings that nothing ranks or filters on. Asserted on BOTH rules,
+      // unconditionally; a guard like `if (projectId !== undefined)` on the
+      // global rule made the first version of this test pass against the
+      // pre-change code (review finding).
       const r1 = result.rules?.find((r) => r.id === 'rule-1');
-      // Not ranked or filtered on, ~100 chars per entry as two ISO strings.
-      // Still present in the full form and via retrieve.
+      const r2 = result.rules?.find((r) => r.id === 'rule-2');
+      expect(r1).toBeDefined();
+      expect(r2).toBeDefined();
       expect(r1?.createdAt).toBeUndefined();
       expect(r1?.updatedAt).toBeUndefined();
-      // `owner` equals `projectId` for project rules — emitting both repeats the
-      // same tenant hash. It must survive when it genuinely differs.
-      if (r1?.projectId !== undefined) {
-        expect(r1.owner).not.toBe(r1.projectId);
-      }
+      expect(r2?.createdAt).toBeUndefined();
+      expect(r2?.updatedAt).toBeUndefined();
+
+      // `owner` is the documented always-set discriminator; it SURVIVES the
+      // summary even where it duplicates projectId (the project-rule case).
+      expect(r1?.owner).toBe('global');
+      expect(r2?.owner).toBe('test-project');
+      expect(r2?.projectId).toBe('test-project');
+
+      // The full form still carries the timestamps.
+      const full = await rulesTool.execute({
+        action: 'list',
+        scope: 'project',
+        projectId: 'test-project',
+        includeGlobal: true,
+        summary: false,
+      });
+      const f2 = full.rules?.find((r) => r.id === 'rule-2');
+      expect(f2?.createdAt).toBe('2026-01-01T00:00:00Z');
+      expect(f2?.updatedAt).toBe('2026-01-02T00:00:00Z');
     });
   });
 

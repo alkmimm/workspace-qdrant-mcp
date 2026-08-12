@@ -3,6 +3,7 @@
  */
 
 import { DEFAULT_RULES_MAX_RESPONSE_BYTES } from '../tools/search-types.js';
+import { RULES_SESSION_FETCH_LIMIT } from '../tools/rules-list.js';
 
 export type RuleOptions = {
   action: 'add' | 'update' | 'remove' | 'list';
@@ -60,6 +61,10 @@ export function buildRuleOptions(args: Record<string, unknown> | undefined): Rul
   if (action === 'list') {
     const summary = args?.['summary'];
     options.summary = typeof summary === 'boolean' ? summary : true;
+    // Fetch cap above the byte budget — the surface default lives HERE with the
+    // other two (summary, budget), not in core listRules, so internal callers
+    // (admin REST, seeder) keep their behaviour. See RULES_SESSION_FETCH_LIMIT.
+    if (options.limit === undefined) options.limit = RULES_SESSION_FETCH_LIMIT;
     // Rules get a HIGHER default budget than the other read surfaces. Everything
     // else is a query whose next page is one call away; this is the call an
     // agent makes once, at session start, to learn how it must work. Truncating

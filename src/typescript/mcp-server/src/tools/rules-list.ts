@@ -13,6 +13,18 @@ import { resolveProjectIdentity } from './branch-scope.js';
 import { applyByteBudget } from './response-budget.js';
 
 /**
+ * Fetch cap for the SESSION-START surfaces (MCP list + system-prompt
+ * injection). It bounds the Qdrant SCROLL, one layer ABOVE the byte budget, so
+ * it decides how many rules exist before shaping can drop any: with the old 50,
+ * a 61-rule set returned `total: 61` while only 50 were ever fetched — the
+ * missing 11 were invisible in the drop accounting (46 kept + 4 dropped = 50).
+ * Lives here (not in the builder) so the MCP surface and `agent-rules` share
+ * one value; `listRules` itself keeps its 50 default for internal callers
+ * (admin REST, seeder), whose behaviour this fix must not silently change.
+ */
+export const RULES_SESSION_FETCH_LIMIT = 200;
+
+/**
  * Preview length (chars) for summary-mode list entries.
  *
  * Rules are behavioural config an agent loads ONCE at session start, so a
@@ -176,10 +188,11 @@ function shapeRuleForList(rule: Rule, summary: boolean): Rule {
   };
   if (rule.label) shaped.label = rule.label;
   if (rule.projectId) shaped.projectId = rule.projectId;
-  // `owner` is the tenant hash and equals `projectId` for every project rule
-  // (see the assignment in `mapPointToRule`), so emitting both spends ~40 chars
-  // per entry repeating the same value. Keep it only when it actually differs.
-  if (rule.owner && rule.owner !== rule.projectId) shaped.owner = rule.owner;
+  // `owner` stays even though it duplicates `projectId` for project rules:
+  // it is the documented discriminator ("always set on list output",
+  // rules-types.ts) and both the response message and the tool schema tell
+  // agents to read it. ~40 chars/entry is not worth breaking that contract.
+  if (rule.owner) shaped.owner = rule.owner;
   if (rule.title) shaped.title = rule.title;
   if (rule.tags) shaped.tags = rule.tags;
   if (rule.priority !== undefined) shaped.priority = rule.priority;
@@ -254,14 +267,7 @@ export async function listRules(
   projectDetector: ProjectDetector,
   options: RuleOptions
 ): Promise<RuleResponse> {
-  // 200, not 50: this limit caps the Qdrant SCROLL, one layer above the byte
-  // budget, so it decides how many rules are fetched before shaping can drop
-  // any. With 50, a 61-rule set returned `total: 61` but only ever considered
-  // 50 of them — the missing 11 were invisible in the drop accounting (46 kept
-  // + 4 dropped = 50), and an agent had to page three times to load its own
-  // conventions. The rules collection is small and warm scrolls finish in
-  // milliseconds (see RULES_SCROLL_DEADLINE_MS).
-  const { scope = 'project', projectId, limit = 200, includeGlobal = false } = options;
+  const { scope = 'project', projectId, limit = 50, includeGlobal = false } = options;
 
   let resolvedProjectId = projectId;
   if (scope === 'project' && !resolvedProjectId) {

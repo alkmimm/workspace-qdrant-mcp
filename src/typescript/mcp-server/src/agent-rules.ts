@@ -3,6 +3,7 @@
  */
 
 import { loadConfig } from './config.js';
+import { RULES_SESSION_FETCH_LIMIT } from './tools/rules-list.js';
 import { SqliteStateManager } from './clients/sqlite-state-manager.js';
 import { DaemonClient } from './clients/daemon-client.js';
 import { ProjectDetector } from './utils/project-detector.js';
@@ -60,7 +61,7 @@ export async function fetchRules(
     const globalResponse = await rulesTool.execute({
       action: 'list',
       scope: TENANT_GLOBAL,
-      limit: 50,
+      limit: RULES_SESSION_FETCH_LIMIT,
     });
     if (globalResponse.success && globalResponse.rules) {
       rules.push(...globalResponse.rules);
@@ -72,7 +73,7 @@ export async function fetchRules(
         action: 'list',
         scope: 'project',
         projectId,
-        limit: 50,
+        limit: RULES_SESSION_FETCH_LIMIT,
       });
       if (projectResponse.success && projectResponse.rules) {
         rules.push(...projectResponse.rules);
