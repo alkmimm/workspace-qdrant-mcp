@@ -1237,7 +1237,11 @@ export async function finalizeResults(
   const includeScoped = filterResultsByPathGlob(params.allResults, params.options.pathGlob);
   // Hard per-call exclude (`pathExclude`) — drop anything under the excluded path
   // BEFORE fusion/pagination so page sizes and next_offset stay honest.
-  const scopedResults = filterResultsByPathExclude(includeScoped, params.options.pathExclude);
+  const scopedResults = filterResultsByPathExclude(
+    includeScoped,
+    params.options.pathExclude,
+    params.options.pathGlob
+  );
   const fusedResults = applyRRFFusion(scopedResults, params.mode);
   // Snapshot the pre-boost score per result (raw cosine for semantic, RRF for
   // hybrid) so it can be RESTORED for display after ranking. The path-relevance

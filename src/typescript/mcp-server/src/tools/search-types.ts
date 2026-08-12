@@ -155,9 +155,10 @@ export const DEFAULT_DERANK_PENALTY = 0.2;
 
 /** Resolved soft de-rank configuration (see {@link resolveDerankConfig}). */
 export interface DerankConfig {
-  /** Path substrings; a hit whose relative (else absolute) path CONTAINS any one
-   *  is de-ranked. Same match semantics as the daemon's
-   *  `WQM_GRAPH_CENTRALITY_EXCLUDE` so the two knobs can share a value. */
+  /** Path substrings; a hit whose relative OR absolute path CONTAINS any one
+   *  is de-ranked (both are tested — a worktree-origin point only carries the
+   *  distinguishing segment in its absolute path). Same match semantics as the
+   *  daemon's `WQM_GRAPH_CENTRALITY_EXCLUDE` so the two knobs can share a value. */
   substrings: string[];
   /** Ranking-score multiplier in [0,1) applied to a matched hit. >=1 or empty
    *  `substrings` ⇒ the de-rank is a no-op. */
