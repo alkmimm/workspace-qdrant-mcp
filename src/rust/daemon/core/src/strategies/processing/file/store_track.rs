@@ -46,6 +46,7 @@ pub(super) async fn upsert_and_track(
     base_point: &str,
     file_hash: &str,
     file_path: &Path,
+    store_path: &Path,
     document_content: &DocumentContent,
     lsp_status: ProcessingStatus,
     treesitter_status: ProcessingStatus,
@@ -145,6 +146,7 @@ pub(super) async fn upsert_and_track(
         base_point,
         file_hash,
         file_path,
+        store_path,
         document_content,
         lsp_status,
         treesitter_status,
@@ -277,6 +279,7 @@ struct FileTrackMeta<'a> {
 
 fn build_file_track_meta<'a>(
     file_path: &Path,
+    store_path: &Path,
     document_content: &DocumentContent,
     treesitter_status: ProcessingStatus,
 ) -> FileTrackMeta<'a> {
@@ -288,8 +291,14 @@ fn build_file_track_meta<'a>(
     } else {
         Some("text")
     };
-    let extension = get_extension_for_storage(file_path);
-    let is_test = is_test_file(file_path);
+    let extension = get_extension_for_storage(store_path);
+    // Classify from the STORE path, matching the Qdrant `tags` classification
+    // in chunk_embed. `is_test_file` walks EVERY ancestor segment, so a
+    // worktree whose slug is an exact test-directory name (`e2e`, `spec`,
+    // `integration`, …) classified one and the same file as a test here and as
+    // production there — `excludeTests` then dropped it from grep while keeping
+    // it in semantic results. The caller passes the main-anchored path.
+    let is_test = is_test_file(store_path);
     FileTrackMeta {
         file_mtime,
         language,
@@ -314,6 +323,7 @@ async fn run_tracking_transaction(
     base_point: &str,
     file_hash: &str,
     file_path: &Path,
+    store_path: &Path,
     document_content: &DocumentContent,
     lsp_status: ProcessingStatus,
     treesitter_status: ProcessingStatus,
@@ -321,7 +331,7 @@ async fn run_tracking_transaction(
     payload_file_type: Option<&str>,
     component: Option<&str>,
 ) -> Result<i64, UnifiedProcessorError> {
-    let meta = build_file_track_meta(file_path, document_content, treesitter_status);
+    let meta = build_file_track_meta(file_path, store_path, document_content, treesitter_status);
 
     // BEGIN IMMEDIATE (see db_retry): takes the SQLite write lock up front so the
     // read→write body can't hit SQLITE_BUSY_SNAPSHOT (517), and retries the BEGIN

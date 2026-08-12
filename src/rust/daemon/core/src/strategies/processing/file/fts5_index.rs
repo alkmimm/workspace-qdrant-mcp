@@ -46,6 +46,10 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
     state_pool: &SqlitePool,
     file_id: i64,
     file_path: &str,
+    // Where the BYTES are. Same as `file_path` for an ordinary item; the
+    // worktree tree for a `read_root` item. `file_path` stays the STORE
+    // identity that lands in `FileChange`/`file_metadata`.
+    read_path: &str,
     tenant_id: &str,
     branch: Option<&str>,
     base_point: Option<&str>,
@@ -60,6 +64,7 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
             state_pool,
             file_id,
             file_path,
+            read_path,
             tenant_id,
             branch,
             base_point,
@@ -74,7 +79,7 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
     // Batched path: do disk + hash + cache-lookup here so workers stay
     // parallel for that work, then `send` and return — the actor owns
     // every write after this point.
-    let new_content = match tokio::fs::read_to_string(file_path).await {
+    let new_content = match tokio::fs::read_to_string(read_path).await {
         // Normalize EOL up front so the content hash below — and the skip
         // decision it drives — is line-ending agnostic. Otherwise an existing
         // CRLF file's raw hash matches the cache and the code_lines rewrite
@@ -84,7 +89,7 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
         Err(e) => {
             debug!(
                 "FTS5: cannot read file for indexing (may be binary): {}: {}",
-                file_path, e
+                read_path, e
             );
             return Ok(Fts5Outcome::Skipped);
         }
@@ -167,6 +172,10 @@ pub(super) async fn update_fts5_for_file(
     state_pool: &SqlitePool,
     file_id: i64,
     file_path: &str,
+    // Where the BYTES are. Same as `file_path` for an ordinary item; the
+    // worktree tree for a `read_root` item. `file_path` stays the STORE
+    // identity that lands in `FileChange`/`file_metadata`.
+    read_path: &str,
     tenant_id: &str,
     branch: Option<&str>,
     base_point: Option<&str>,
@@ -177,14 +186,14 @@ pub(super) async fn update_fts5_for_file(
     let fts_start = std::time::Instant::now();
 
     // Read file content from disk
-    let new_content = match tokio::fs::read_to_string(file_path).await {
+    let new_content = match tokio::fs::read_to_string(read_path).await {
         // See update_fts5_for_file_or_enqueue: normalize EOL before hashing so
         // the raw-content skip can't strand an existing CRLF file's stale '\r'.
         Ok(content) => normalize_line_endings(&content).into_owned(),
         Err(e) => {
             debug!(
                 "FTS5: cannot read file for indexing (may be binary): {}: {}",
-                file_path, e
+                read_path, e
             );
             return Ok(false);
         }
