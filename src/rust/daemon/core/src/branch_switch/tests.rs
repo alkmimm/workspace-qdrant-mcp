@@ -589,6 +589,11 @@ async fn test_reconcile_worktree_branches_tags_baseline() {
     std::fs::create_dir_all(&admin).unwrap();
     std::fs::write(admin.join("gitdir"), format!("{}/.git\n", wt.display())).unwrap();
     std::fs::write(admin.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+    // The gitlink that makes this a LEAF worktree root. `is_leaf_worktree_root`
+    // requires `<wt>/.git` to be a FILE — that is what tells a real worktree
+    // apart from the `.claude/worktrees` CONTAINER directory, whose walk was the
+    // phantom-storm bug. Without it the reconcile correctly skips this fixture.
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
 
     // A second linked worktree in detached HEAD — must be skipped entirely.
     let wt_det = main_repo.join(".claude").join("worktrees").join("wt-detached");
@@ -606,6 +611,11 @@ async fn test_reconcile_worktree_branches_tags_baseline() {
         "0123456789abcdef0123456789abcdef01234567\n",
     )
     .unwrap();
+    // Deliberately NO gitlink here. `reconcile_worktree_branches` bails on
+    // `let Some(branch) = wt.branch else { continue }` BEFORE it ever reaches
+    // `is_leaf_worktree_root`, so a detached worktree cannot exercise the leaf
+    // check — writing one would be dead fixture code implying an ordering the
+    // loop does not have.
 
     let pool = create_test_pool().await;
     setup_tables(&pool).await;
@@ -680,6 +690,8 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
     std::fs::create_dir_all(&admin).unwrap();
     std::fs::write(admin.join("gitdir"), format!("{}/.git\n", wt.display())).unwrap();
     std::fs::write(admin.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+    // Leaf-worktree gitlink — see `is_leaf_worktree_root`.
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
 
     let pool = create_test_pool().await;
     setup_tables(&pool).await;
@@ -794,6 +806,8 @@ async fn test_reconcile_worktree_branches_tags_divergent() {
     std::fs::create_dir_all(&admin).unwrap();
     std::fs::write(admin.join("gitdir"), format!("{}/.git\n", wt.display())).unwrap();
     std::fs::write(admin.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+    // Leaf-worktree gitlink — see `is_leaf_worktree_root`.
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
 
     let pool = create_test_pool().await;
     setup_tables(&pool).await;
