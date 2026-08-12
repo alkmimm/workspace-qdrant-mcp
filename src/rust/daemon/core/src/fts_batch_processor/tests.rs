@@ -272,6 +272,107 @@ async fn test_mid_file_insert_does_not_collide_on_seq() {
     db.close().await;
 }
 
+/// A file's indexed lines in stored order — the shape a grep read sees.
+async fn fetch_indexed_lines(db: &SearchDbManager, file_id: i64) -> Vec<String> {
+    sqlx::query_scalar("SELECT content FROM code_lines WHERE file_id = ?1 ORDER BY seq")
+        .bind(file_id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap()
+}
+
+/// The lines a correctly indexed file must hold. Real files end in a newline, so
+/// `split('\n')` yields a trailing empty element — `insert_all_lines` stores it,
+/// and a re-ingest must keep it.
+fn expected_lines(content: &str) -> Vec<String> {
+    content.split('\n').map(str::to_string).collect()
+}
+
+#[tokio::test]
+async fn test_reingest_keeps_content_verbatim_single_file_mode() {
+    // Regression, measured live on the DOC-V2 tenant 2026-08-12: after a
+    // re-ingest the LAST code_lines row held a copy of the file's FIRST line
+    // instead of the trailing empty string. 322 of 324 sampled files (99.4%)
+    // carried that shape, so every grep for first-line content (`package …`,
+    // `name:`, a doc title) returned a phantom extra hit at a line number past
+    // the end of the file, with content from the wrong position.
+    //
+    // Two properties kept it invisible: the older tests assert only COUNT(*)
+    // (which the corruption satisfies — the row count stays right) and they all
+    // use content WITHOUT a trailing newline, so the terminal empty-line slot,
+    // the one that gets clobbered, is never exercised. Assert the full ordered
+    // content instead.
+    let (_tmp, db) = setup_db().await;
+    let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
+
+    let original = "package com.doc.model;\n\nimport java.util.List;\n\nclass A {\n    void m() {}\n}\n";
+    let updated = "package com.doc.model;\n\nimport java.util.List;\n\nclass A {\n    void m2() {}\n}\n";
+
+    processor.add_change(test_change(1, "", original, "proj-a", Some("main"), "/src/A.java"));
+    processor.flush(0).await.unwrap();
+    assert_eq!(
+        fetch_indexed_lines(&db, 1).await,
+        expected_lines(original),
+        "first ingest must store the file verbatim, trailing empty line included"
+    );
+
+    processor.add_change(test_change(1, original, updated, "proj-a", Some("main"), "/src/A.java"));
+    processor.flush(0).await.unwrap();
+    assert_eq!(
+        fetch_indexed_lines(&db, 1).await,
+        expected_lines(updated),
+        "re-ingest must leave the index byte-identical to the new content"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn test_reingest_with_desynced_old_content_keeps_content_verbatim() {
+    // THE reproduction of the live corruption. `old_content` is the caller's
+    // claim about what is indexed, read from the `indexed_content` cache in
+    // state.db — a DIFFERENT database from the code_lines rows in search.db.
+    // `fetch_old_content` yields an EMPTY string both when that cache has no
+    // entry and when reading it FAILS, and the batch/enqueue lane (unlike the
+    // single-file lane, which guards at execute_fts_update) hands that empty
+    // string straight to the differ while the file's rows are still present.
+    //
+    // The differ then reports every new line as Inserted and pairs the old
+    // side's lone "" with the new side's TRAILING "" as
+    // `Unchanged{old_index: 0, new_index: N}`. `existing_lines.get(0)` is the
+    // stored row for line 1, so that row is marked retained (escaping
+    // delete_orphaned_lines) and renumbered to the LAST position — the file's
+    // first line reappears at the end, where the empty final line belongs.
+    let (_tmp, db) = setup_db().await;
+    let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
+
+    let original = "name: http_auth_adapter\ndescription: adapter\nversion: 1.0.0\n\ndependencies:\n  dio: ^5.10.0\n";
+    let updated = "name: http_auth_adapter\ndescription: adapter\nversion: 1.0.1\n\ndependencies:\n  dio: ^5.11.0\n";
+
+    processor.add_change(test_change(7, "", original, "proj-a", Some("main"), "/pubspec.yaml"));
+    processor.flush(20).await.unwrap();
+    assert_eq!(fetch_indexed_lines(&db, 7).await, expected_lines(original));
+
+    // Re-ingest with a DESYNCED old side (empty cache), rows already present.
+    processor.add_change(test_change(7, "", updated, "proj-a", Some("main"), "/pubspec.yaml"));
+    processor.flush(20).await.unwrap();
+
+    let stored = fetch_indexed_lines(&db, 7).await;
+    // The defect's signature, asserted directly: the first line must not
+    // reappear anywhere after position 0.
+    assert!(
+        !stored[1..].contains(&"name: http_auth_adapter".to_string()),
+        "first line leaked into a later slot: {stored:?}"
+    );
+    assert_eq!(
+        stored,
+        expected_lines(updated),
+        "a desynced old_content must not corrupt the stored lines"
+    );
+
+    db.close().await;
+}
+
 #[tokio::test]
 async fn test_full_rewrite() {
     let (_tmp, db) = setup_db().await;

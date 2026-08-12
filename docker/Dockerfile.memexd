@@ -252,6 +252,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         pruned_branch corpus_election branch_file_counts \
         --test-threads=4
 
+# FTS re-ingest fidelity runs here for the same reason: hermetic (tempdir SQLite)
+# and it guards silent INDEX CORRUPTION. Measured live 2026-08-12 on the DOC-V2
+# tenant: after a re-ingest the last code_lines row held a copy of the file's
+# FIRST line instead of the trailing empty string, in 322 of 324 sampled files
+# (99.4%) — so every grep for first-line content returned a phantom hit at a
+# line number past the end of the file. The whole pre-existing suite passed
+# throughout, because it asserts only COUNT(*) and never uses content with a
+# trailing newline. These two assert the full ordered content.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        reingest_keeps_content_verbatim reingest_with_desynced_old_content \
+        --test-threads=4
+
 # Issue #299 cascade-rename guard tests run here too, same rationale: hermetic
 # (in-memory SQLite + tempdir git fixtures, no FTS5/timing dependence) and they
 # guard the tenant-rename suppression + orphan prune that prevents the silent-

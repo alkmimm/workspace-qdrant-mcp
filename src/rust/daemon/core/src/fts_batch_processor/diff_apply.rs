@@ -59,6 +59,29 @@ pub(super) async fn apply_diff_to_code_lines(
     }
 
     let existing_lines = fetch_existing_lines(tx, file_id).await?;
+
+    // `diff` is computed against the caller's `old_content` — a CLAIM about what
+    // is indexed, read from the `indexed_content` cache in state.db, a different
+    // database from these rows in search.db. Every old-side index in the diff
+    // (`DiffOp::Unchanged/Changed/Deleted.old_index`) is used below to subscript
+    // `existing_lines`, so the two must describe the same sequence. They do not
+    // when the cache misses or its read fails: `fetch_old_content` yields an
+    // EMPTY string for both, and the batch/enqueue lane hands it straight here
+    // while the file's rows are still present (the single-file lane guards at
+    // `execute_fts_update`). The differ then reports every new line as Inserted
+    // and pairs the old side's lone "" with the new side's TRAILING "" as
+    // `Unchanged{old_index: 0, new_index: N}` — retaining the row for line 1 and
+    // renumbering it to the LAST position, so the file's first line reappears
+    // where the empty final line belongs. Measured live 2026-08-12: 322 of 324
+    // sampled DOC-V2 files carried that shape, making every grep for first-line
+    // content return a phantom hit past the end of the file.
+    //
+    // The stored rows are the authority for what is indexed, so on any
+    // disagreement discard the diff and rebuild the file's lines from scratch.
+    if diff.old_line_count != existing_lines.len() {
+        return rebuild_all_lines(tx, file_id, &existing_lines, new_content).await;
+    }
+
     let mut stats = FileDiffStats::default();
     apply_diff_ops(tx, diff, &existing_lines, file_id, &mut stats).await?;
     let orphan_deleted = delete_orphaned_lines(
@@ -75,6 +98,37 @@ pub(super) async fn apply_diff_to_code_lines(
     stats.retained_ids.clear();
     stats.explicitly_deleted_ids.clear();
     stats.ordered_line_ids.clear();
+    Ok(stats)
+}
+
+/// Drop every stored line for a file and re-insert it from `new_content`.
+///
+/// The recovery path for a diff whose old side does not describe the stored rows
+/// (see the guard in `apply_diff_to_code_lines`). Costlier than an incremental
+/// apply, but it cannot corrupt: no old-side index is trusted. `existing_lines`
+/// is the already-fetched row set, needed to retire each FTS5 entry by its exact
+/// stored content — the external-content index cannot delete rows it no longer
+/// has the text for.
+async fn rebuild_all_lines(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    file_id: i64,
+    existing_lines: &[(i64, f64, String)],
+    new_content: &str,
+) -> Result<FileDiffStats, SearchDbError> {
+    for (line_id, _, old_content) in existing_lines {
+        sqlx::query(FTS5_DELETE_ROW_SQL)
+            .bind(*line_id)
+            .bind(old_content.as_str())
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM code_lines WHERE file_id = ?1")
+        .bind(file_id)
+        .execute(&mut **tx)
+        .await?;
+
+    let mut stats = insert_all_lines(tx, file_id, new_content).await?;
+    stats.lines_deleted = existing_lines.len();
     Ok(stats)
 }
 
