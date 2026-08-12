@@ -6,14 +6,23 @@ import type { QdrantClient } from '@qdrant/js-client-rest';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import type { RuleOptions, RuleResponse, Rule, RuleScope } from './rules-types.js';
-import { RULES_COLLECTION } from './rules-types.js';
+import { RULES_COLLECTION, RULES_LIST_FETCH_LIMIT } from './rules-types.js';
 import { FIELD_PROJECT_ID, FIELD_CONTENT, FIELD_TITLE } from '../common/native-bridge.js';
 import { TENANT_GLOBAL } from '../constants/tenants.js';
 import { resolveProjectIdentity } from './branch-scope.js';
 import { applyByteBudget } from './response-budget.js';
 
-/** Preview length (chars) for summary-mode list entries. */
-const RULES_LIST_PREVIEW_CHARS = 200;
+/**
+ * Preview length (chars) for summary-mode list entries.
+ *
+ * Rules are behavioural config an agent loads ONCE at session start, so a
+ * partial listing is a correctness problem, not just an ergonomic one — the
+ * agent silently operates without the conventions it never saw. 120 chars is
+ * enough to recognise a rule and decide whether to fetch its body; the label and
+ * title carry the identification. Measured 2026-08-12: at 200 chars a 61-rule
+ * set returned 46 entries with `dropped: 4`.
+ */
+const RULES_LIST_PREVIEW_CHARS = 120;
 
 /** Build Qdrant filter for list query based on scope. */
 function buildListFilter(
@@ -167,12 +176,18 @@ function shapeRuleForList(rule: Rule, summary: boolean): Rule {
   };
   if (rule.label) shaped.label = rule.label;
   if (rule.projectId) shaped.projectId = rule.projectId;
+  // `owner` stays even though it duplicates `projectId` for project rules:
+  // it is the documented discriminator ("always set on list output",
+  // rules-types.ts) and both the response message and the tool schema tell
+  // agents to read it. ~40 chars/entry is not worth breaking that contract.
   if (rule.owner) shaped.owner = rule.owner;
   if (rule.title) shaped.title = rule.title;
   if (rule.tags) shaped.tags = rule.tags;
   if (rule.priority !== undefined) shaped.priority = rule.priority;
-  if (rule.createdAt) shaped.createdAt = rule.createdAt;
-  if (rule.updatedAt) shaped.updatedAt = rule.updatedAt;
+  // Timestamps are dropped from the SUMMARY: two ISO-8601 strings cost ~100
+  // chars per entry and no caller ranks or filters rules by them — `priority`
+  // does that. They remain available in the full form (`summary: false`) and via
+  // `retrieve`. This is the largest single saving in the shape.
   return shaped;
 }
 
@@ -240,7 +255,15 @@ export async function listRules(
   projectDetector: ProjectDetector,
   options: RuleOptions
 ): Promise<RuleResponse> {
-  const { scope = 'project', projectId, limit = 50, includeGlobal = false } = options;
+  // ONE default for every caller — MCP surface, prompt injection, seeder dedup,
+  // admin REST. See RULES_LIST_FETCH_LIMIT for why splitting this per-surface
+  // was wrong (the internal callers are the ones completeness protects).
+  const {
+    scope = 'project',
+    projectId,
+    limit = RULES_LIST_FETCH_LIMIT,
+    includeGlobal = false,
+  } = options;
 
   let resolvedProjectId = projectId;
   if (scope === 'project' && !resolvedProjectId) {

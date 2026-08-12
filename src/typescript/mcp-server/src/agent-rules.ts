@@ -57,27 +57,32 @@ export async function fetchRules(
   try {
     const rulesTool = buildRulesTool(config);
 
-    const globalResponse = await rulesTool.execute({
-      action: 'list',
-      scope: TENANT_GLOBAL,
-      limit: 50,
-    });
-    if (globalResponse.success && globalResponse.rules) {
-      rules.push(...globalResponse.rules);
-      console.log(`[Agent] Fetched ${globalResponse.rules.length} global rule(s)`);
-    }
+    // The two scopes are independent — fetch them concurrently. Each list is a
+    // scroll behind a 2500ms cold-start deadline, so sequential fetches doubled
+    // the worst-case session-start stall; ruleComparator restores ordering.
+    const [globalResponse, projectResponse] = await Promise.all([
+      rulesTool.execute({ action: 'list', scope: TENANT_GLOBAL }),
+      projectId
+        ? rulesTool.execute({ action: 'list', scope: 'project', projectId })
+        : Promise.resolve(undefined),
+    ]);
 
-    if (projectId) {
-      const projectResponse = await rulesTool.execute({
-        action: 'list',
-        scope: 'project',
-        projectId,
-        limit: 50,
-      });
-      if (projectResponse.success && projectResponse.rules) {
-        rules.push(...projectResponse.rules);
-        console.log(
-          `[Agent] Fetched ${projectResponse.rules.length} project rule(s) for ${projectId}`
+    for (const [label, response] of [
+      ['global', globalResponse],
+      [`project ${projectId ?? ''}`, projectResponse],
+    ] as const) {
+      if (!response?.success || !response.rules) continue;
+      rules.push(...response.rules);
+      console.log(`[Agent] Fetched ${response.rules.length} ${label} rule(s)`);
+      // The fetch cap (RULES_LIST_FETCH_LIMIT) is a cliff, not a guarantee.
+      // If the listing indicates a tail we did not receive, say so — a silent
+      // partial injection is a convention the agent never learns, and this
+      // path has no user-visible drop accounting of its own.
+      if (response.next_cursor || (response.total ?? 0) > response.rules.length) {
+        console.warn(
+          `[Agent] WARNING: ${label} rules listing is TRUNCATED ` +
+            `(injected ${response.rules.length} of ${response.total ?? '?'}); ` +
+            `the remainder will not be in the system prompt`
         );
       }
     }

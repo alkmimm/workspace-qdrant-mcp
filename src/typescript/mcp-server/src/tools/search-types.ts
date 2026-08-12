@@ -43,6 +43,7 @@ export const DEFAULT_MAX_BYTES_PER_HIT = 1500;
  *  under the ~25k informal client budget. Set `maxResponseBytes: 0` to disable. */
 export const DEFAULT_MAX_RESPONSE_BYTES = 24000;
 
+
 // Tag expansion defaults
 export const DEFAULT_EXPANSION_WEIGHT = 0.5;
 export const DEFAULT_MAX_EXPANDED_KEYWORDS = 10;

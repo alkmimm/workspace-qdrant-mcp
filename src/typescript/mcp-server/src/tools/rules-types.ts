@@ -37,6 +37,31 @@ export interface Rule {
   updatedAt?: string;
 }
 
+/**
+ * Fetch cap for EVERY rules listing (MCP surface, system-prompt injection,
+ * seeder dedup, admin REST) — the single default `listRules` applies.
+ *
+ * One home, one value, deliberately: an earlier draft raised only the MCP
+ * surface and kept core at 50 "to protect internal callers", but the internal
+ * callers are precisely the ones a partial listing hurts most. The seeder
+ * builds its duplicate-prevention guards from this listing — a truncated set
+ * re-adds an edited default as a duplicate-label row on every boot — and the
+ * admin UI is the surface where a human curates the complete set. Measured
+ * 2026-08-12: 61 rules live; the old 50 cap made 11 of them invisible with the
+ * drop accounting self-consistent (46 kept + 4 dropped = 50).
+ */
+export const RULES_LIST_FETCH_LIMIT = 200;
+
+/**
+ * Byte budget for `rules` list responses on the MCP surface only.
+ *
+ * Higher than the shared ~24k of search/grep/scratchpad because this is the
+ * session-start "load the conventions" call: a dropped rule is not a paging
+ * round-trip, it is a convention the agent silently never learns. Internal
+ * callers pass no budget and get everything.
+ */
+export const DEFAULT_RULES_MAX_RESPONSE_BYTES = 40000;
+
 export interface RuleOptions {
   action: RuleAction;
   content?: string;
