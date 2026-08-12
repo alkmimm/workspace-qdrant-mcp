@@ -252,6 +252,28 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         pruned_branch corpus_election branch_file_counts \
         --test-threads=4
 
+# FTS re-ingest fidelity runs here for the same reason: hermetic (tempdir SQLite)
+# and it guards silent INDEX CORRUPTION. Measured live 2026-08-12 on the DOC-V2
+# tenant: after a re-ingest the last code_lines row held a copy of the file's
+# FIRST line instead of the trailing empty string, in 322 of 324 sampled files
+# (99.4%) — so every grep for first-line content returned a phantom hit at a
+# line number past the end of the file. The whole pre-existing suite passed
+# throughout, because it asserts only COUNT(*) and never uses content with a
+# trailing newline. These assert the full ordered content.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        reingest_keeps_content_verbatim reingest_with_desynced_old_content \
+        reingest_with_same_length_stale_old_content \
+        reingest_heals_an_already_corrupted_file \
+        --test-threads=4 2>&1 | tee /tmp/fts-reingest.log; \
+    grep -q "^test result: ok\. 4 passed" /tmp/fts-reingest.log \
+    || { echo "GATE: expected exactly 4 FTS re-ingest tests to run and pass — a \
+rename or move silently empties a positional filter, and libtest exits 0 when a \
+filter matches nothing (the v48 lesson, 30 lines above)"; exit 1; }
+
 # The reembed pipeline's search.db clear runs here — the FIRST gated test from
 # the `workspace-qdrant-grpc` package. `flush_clears_search_db_for_watch_folder_tenants`
 # already covered this path and already failed, but nothing ever executed it:

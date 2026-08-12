@@ -33,8 +33,19 @@ export const VALID_OPERATIONS: Record<QueueItemType, QueueOperation[]> = {
   url: ['add', 'update', 'delete', 'uplift'],
   website: ['add', 'update', 'delete', 'scan', 'uplift'],
   doc: ['delete', 'uplift'],
-  folder: ['delete', 'scan', 'rename'],
+  // `uplift` is the admin force re-embed's FULL rescan. The Rust authority
+  // (`common/src/queue_types/operation.rs`) has accepted (Folder, Uplift) since
+  // #162 — it was added precisely because the force re-embed errored "uplift not
+  // valid for item type folder" — but this mirror was never updated, so
+  // `validateEnqueueParams` still throws that same error on the TypeScript path.
+  folder: ['delete', 'scan', 'rename', 'uplift'],
   tenant: ['add', 'update', 'delete', 'scan', 'rename', 'uplift'],
+  // KNOWN DIVERGENCE, not fixed here: Rust also accepts (Collection, Reembed)
+  // (migration v35), but `QueueOperation` in types/state.ts has no 'reembed'
+  // member, so this row cannot be corrected without widening that union — a
+  // type-level change with its own blast radius. Tracked separately; the
+  // authoritative check is already exposed by the addon as
+  // `isValidOperationForType`, which would retire this hand-rolled table.
   collection: ['uplift', 'reset'],
 };
 

@@ -272,6 +272,208 @@ async fn test_mid_file_insert_does_not_collide_on_seq() {
     db.close().await;
 }
 
+/// A file's indexed lines in stored order — the shape a grep read sees.
+async fn fetch_indexed_lines(db: &SearchDbManager, file_id: i64) -> Vec<String> {
+    sqlx::query_scalar("SELECT content FROM code_lines WHERE file_id = ?1 ORDER BY seq")
+        .bind(file_id)
+        .fetch_all(db.pool())
+        .await
+        .unwrap()
+}
+
+/// The lines a correctly indexed file must hold. Real files end in a newline, so
+/// `split('\n')` yields a trailing empty element — `insert_all_lines` stores it,
+/// and a re-ingest must keep it.
+fn expected_lines(content: &str) -> Vec<String> {
+    content.split('\n').map(str::to_string).collect()
+}
+
+#[tokio::test]
+async fn test_reingest_keeps_content_verbatim_single_file_mode() {
+    // Regression, measured live on the DOC-V2 tenant 2026-08-12: after a
+    // re-ingest the LAST code_lines row held a copy of the file's FIRST line
+    // instead of the trailing empty string. 322 of 324 sampled files (99.4%)
+    // carried that shape, so every grep for first-line content (`package …`,
+    // `name:`, a doc title) returned a phantom extra hit at a line number past
+    // the end of the file, with content from the wrong position.
+    //
+    // Two properties kept it invisible: the older tests assert only COUNT(*)
+    // (which the corruption satisfies — the row count stays right) and they all
+    // use content WITHOUT a trailing newline, so the terminal empty-line slot,
+    // the one that gets clobbered, is never exercised. Assert the full ordered
+    // content instead.
+    let (_tmp, db) = setup_db().await;
+    let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
+
+    let original = "package com.doc.model;\n\nimport java.util.List;\n\nclass A {\n    void m() {}\n}\n";
+    let updated = "package com.doc.model;\n\nimport java.util.List;\n\nclass A {\n    void m2() {}\n}\n";
+
+    processor.add_change(test_change(1, "", original, "proj-a", Some("main"), "/src/A.java"));
+    processor.flush(0).await.unwrap();
+    assert_eq!(
+        fetch_indexed_lines(&db, 1).await,
+        expected_lines(original),
+        "first ingest must store the file verbatim, trailing empty line included"
+    );
+
+    processor.add_change(test_change(1, original, updated, "proj-a", Some("main"), "/src/A.java"));
+    processor.flush(0).await.unwrap();
+    assert_eq!(
+        fetch_indexed_lines(&db, 1).await,
+        expected_lines(updated),
+        "re-ingest must leave the index byte-identical to the new content"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn test_reingest_with_desynced_old_content_keeps_content_verbatim() {
+    // THE reproduction of the live corruption. `old_content` is the caller's
+    // claim about what is indexed, read from the `indexed_content` cache in
+    // state.db — a DIFFERENT database from the code_lines rows in search.db.
+    // `fetch_old_content` yields an EMPTY string both when that cache has no
+    // entry and when reading it FAILS, and the batch/enqueue lane (unlike the
+    // single-file lane, which guards at execute_fts_update) hands that empty
+    // string straight to the differ while the file's rows are still present.
+    //
+    // The differ then reports every new line as Inserted and pairs the old
+    // side's lone "" with the new side's TRAILING "" as
+    // `Unchanged{old_index: 0, new_index: N}`. `existing_lines.get(0)` is the
+    // stored row for line 1, so that row is marked retained (escaping
+    // delete_orphaned_lines) and renumbered to the LAST position — the file's
+    // first line reappears at the end, where the empty final line belongs.
+    let (_tmp, db) = setup_db().await;
+    let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
+
+    let original = "name: http_auth_adapter\ndescription: adapter\nversion: 1.0.0\n\ndependencies:\n  dio: ^5.10.0\n";
+    let updated = "name: http_auth_adapter\ndescription: adapter\nversion: 1.0.1\n\ndependencies:\n  dio: ^5.11.0\n";
+
+    processor.add_change(test_change(7, "", original, "proj-a", Some("main"), "/pubspec.yaml"));
+    processor.flush(20).await.unwrap();
+    assert_eq!(fetch_indexed_lines(&db, 7).await, expected_lines(original));
+
+    // Re-ingest with a DESYNCED old side (empty cache), rows already present.
+    processor.add_change(test_change(7, "", updated, "proj-a", Some("main"), "/pubspec.yaml"));
+    processor.flush(20).await.unwrap();
+
+    let stored = fetch_indexed_lines(&db, 7).await;
+    // The defect's signature, asserted directly: the first line must not
+    // reappear anywhere after position 0.
+    // `get(1..)`, not `stored[1..]`: if a regression ever leaves the file with no
+    // rows at all, indexing panics with "range start index out of range" before
+    // the informative assert below can report what actually happened.
+    assert!(
+        !stored
+            .get(1..)
+            .unwrap_or_default()
+            .contains(&"name: http_auth_adapter".to_string()),
+        "first line leaked into a later slot: {stored:?}"
+    );
+    assert_eq!(
+        stored,
+        expected_lines(updated),
+        "a desynced old_content must not corrupt the stored lines"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn test_reingest_with_same_length_stale_old_content_keeps_content_verbatim() {
+    // A line-COUNT check is not enough. `old_content` can be stale WITHOUT
+    // changing length — a pure reorder, or an `indexed_content` upsert lost after
+    // the search.db commit (different databases, no cross-DB atomicity). The
+    // old-side indices then address rows they do not describe, corrupting the
+    // file exactly as an empty claim would. Only comparing the CONTENT catches it.
+    let (_tmp, db) = setup_db().await;
+    let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
+
+    let original = "alpha\nbravo\ncharlie\n";
+    let updated = "alpha\nbravo\ndelta\n";
+    // Same line count as `original`, different content: a plausible stale cache.
+    let stale_claim = "charlie\nalpha\nbravo\n";
+
+    processor.add_change(test_change(3, "", original, "proj-a", Some("main"), "/src/a.txt"));
+    processor.flush(20).await.unwrap();
+    assert_eq!(fetch_indexed_lines(&db, 3).await, expected_lines(original));
+
+    processor.add_change(test_change(3, stale_claim, updated, "proj-a", Some("main"), "/src/a.txt"));
+    processor.flush(20).await.unwrap();
+
+    assert_eq!(
+        fetch_indexed_lines(&db, 3).await,
+        expected_lines(updated),
+        "a same-length stale old_content must not corrupt the stored lines"
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn test_reingest_heals_an_already_corrupted_file() {
+    // Repair, not just prevention. A file corrupted by the old code keeps the
+    // RIGHT row count (N+1) with the first line parked in the final slot, and its
+    // content hash still matches disk — so it is skipped by the ingest and never
+    // heals on its own. When a real edit finally arrives, the stored rows must be
+    // recognised as not matching the cache's claim and rebuilt.
+    let (_tmp, db) = setup_db().await;
+    let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
+
+    let original = "package com.doc;\nclass A {}\n";
+    processor.add_change(test_change(9, "", original, "proj-a", Some("main"), "/A.java"));
+    processor.flush(20).await.unwrap();
+
+    // Reproduce the corrupted shape in place: the final (empty) slot holds a copy
+    // of line 1. This is byte-for-byte what was measured live on 322 of 324 files.
+    let last_id: i64 =
+        sqlx::query_scalar("SELECT line_id FROM code_lines WHERE file_id = 9 ORDER BY seq DESC LIMIT 1")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    // The FTS5 index is EXTERNAL-CONTENT: a row must be retired with the exact
+    // text it was indexed under. Updating only `code_lines` would leave the two
+    // out of sync — a state the real corruption never produced, and one that makes
+    // the later delete fail for the wrong reason. Move both sides together.
+    sqlx::query("UPDATE code_lines SET content = ?1 WHERE line_id = ?2")
+        .bind("package com.doc;")
+        .bind(last_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query(crate::code_lines_schema::FTS5_DELETE_ROW_SQL)
+        .bind(last_id)
+        .bind("") // the trailing empty line this slot used to hold
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query(crate::code_lines_schema::FTS5_INSERT_ROW_SQL)
+        .bind(last_id)
+        .bind("package com.doc;")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        fetch_indexed_lines(&db, 9).await.last().unwrap(),
+        "package com.doc;",
+        "precondition: the file is in the corrupted shape"
+    );
+
+    // A later real edit, with a CORRECT old side — the count matches (so a count
+    // check would sail past), but the content does not.
+    let updated = "package com.doc;\nclass A { void m() {} }\n";
+    processor.add_change(test_change(9, original, updated, "proj-a", Some("main"), "/A.java"));
+    processor.flush(20).await.unwrap();
+
+    assert_eq!(
+        fetch_indexed_lines(&db, 9).await,
+        expected_lines(updated),
+        "the edit must heal the corrupted index, not re-apply the damage"
+    );
+
+    db.close().await;
+}
+
 #[tokio::test]
 async fn test_full_rewrite() {
     let (_tmp, db) = setup_db().await;

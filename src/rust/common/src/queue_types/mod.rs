@@ -262,7 +262,15 @@ mod tests {
         assert!(QueueOperation::Rename.is_valid_for(ItemType::Folder));
         assert!(!QueueOperation::Add.is_valid_for(ItemType::Folder));
         assert!(!QueueOperation::Update.is_valid_for(ItemType::Folder));
-        assert!(!QueueOperation::Uplift.is_valid_for(ItemType::Folder));
+        // Uplift on a Folder is the admin force re-embed's FULL rescan (see the
+        // match arm's comment): without it the force re-embed errored "uplift not
+        // valid for item type folder". The capability landed in #162 and this
+        // assertion was never touched — while its sibling in
+        // `common/tests/compatibility_vectors.rs` WAS updated in that same change.
+        // One of two co-located assertions moved and the other did not, and no
+        // gate ran to surface the survivor: that is the pattern to look for the
+        // next time this matrix changes.
+        assert!(QueueOperation::Uplift.is_valid_for(ItemType::Folder));
         assert!(!QueueOperation::Reset.is_valid_for(ItemType::Folder));
     }
 
@@ -304,8 +312,10 @@ mod tests {
         }
         // 8 item types * 8 ops = 64 total
         assert_eq!(valid_count + invalid_count, 64);
-        // Expected valid: text(4) + file(5) + url(4) + website(5) + doc(2) + folder(3) + tenant(6) + collection(3 — uplift,reset,reembed) = 32
-        assert_eq!(valid_count, 32);
+        // Expected valid: text(4) + file(5) + url(4) + website(5) + doc(2)
+        // + folder(4 — delete,scan,rename,uplift) + tenant(6)
+        // + collection(3 — uplift,reset,reembed) = 33
+        assert_eq!(valid_count, 33);
     }
 
     // ========================================================================

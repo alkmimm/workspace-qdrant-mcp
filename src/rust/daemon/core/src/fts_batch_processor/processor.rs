@@ -206,9 +206,14 @@ impl<'a> FtsBatchProcessor<'a> {
         let mut tx = crate::db_retry::begin_immediate(pool).await?;
 
         for (change, diff) in &file_diffs {
-            let file_stats =
-                apply_diff_to_code_lines(&mut tx, change.file_id, diff, &change.new_content)
-                    .await?;
+            let file_stats = apply_diff_to_code_lines(
+                &mut tx,
+                change.file_id,
+                diff,
+                &change.old_content,
+                &change.new_content,
+            )
+            .await?;
 
             stats.lines_inserted += file_stats.lines_inserted;
             stats.lines_updated += file_stats.lines_updated;
@@ -242,9 +247,14 @@ impl<'a> FtsBatchProcessor<'a> {
 
             let mut tx = crate::db_retry::begin_immediate(pool).await?;
 
-            let file_stats =
-                apply_diff_to_code_lines(&mut tx, change.file_id, &diff, &change.new_content)
-                    .await?;
+            let file_stats = apply_diff_to_code_lines(
+                &mut tx,
+                change.file_id,
+                &diff,
+                &change.old_content,
+                &change.new_content,
+            )
+            .await?;
 
             upsert_file_metadata(&mut tx, &change).await?;
 

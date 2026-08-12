@@ -62,16 +62,21 @@ impl QueueOperation {
     ///
     /// Valid combinations matrix:
     /// ```text
-    /// item_type \ op | add | update | delete | scan | rename | uplift | reset
-    /// text           |  Y  |   Y    |   Y    |  -   |   -    |   Y    |   -
-    /// file           |  Y  |   Y    |   Y    |  -   |   Y    |   Y    |   -
-    /// url            |  Y  |   Y    |   Y    |  -   |   -    |   Y    |   -
-    /// website        |  Y  |   Y    |   Y    |  Y   |   -    |   Y    |   -
-    /// doc            |  -  |   -    |   Y    |  -   |   -    |   Y    |   -
-    /// folder         |  -  |   -    |   Y    |  Y   |   Y    |   -    |   -
-    /// tenant         |  Y  |   Y    |   Y    |  Y   |   Y    |   Y    |   -
-    /// collection     |  -  |   -    |   -    |  -   |   -    |   Y    |   Y
+    /// item_type \ op | add | update | delete | scan | rename | uplift | reset | reembed
+    /// text           |  Y  |   Y    |   Y    |  -   |   -    |   Y    |   -   |   -
+    /// file           |  Y  |   Y    |   Y    |  -   |   Y    |   Y    |   -   |   -
+    /// url            |  Y  |   Y    |   Y    |  -   |   -    |   Y    |   -   |   -
+    /// website        |  Y  |   Y    |   Y    |  Y   |   -    |   Y    |   -   |   -
+    /// doc            |  -  |   -    |   Y    |  -   |   -    |   Y    |   -   |   -
+    /// folder         |  -  |   -    |   Y    |  Y   |   Y    |   Y    |   -   |   -
+    /// tenant         |  Y  |   Y    |   Y    |  Y   |   Y    |   Y    |   -   |   -
+    /// collection     |  -  |   -    |   -    |  -   |   -    |   Y    |   Y   |   Y
     /// ```
+    ///
+    /// This table is the document the unit tests are derived from, so it drifting
+    /// is how a stale assertion gets written: the `folder`/`uplift` cell read `-`
+    /// while the match arm below returned `true`, and the `reembed` column was
+    /// missing entirely though the variant has existed since migration v35.
     pub fn is_valid_for(&self, item_type: ItemType) -> bool {
         match (item_type, self) {
             // Text: add, update, delete, uplift
