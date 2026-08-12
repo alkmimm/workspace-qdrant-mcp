@@ -28,7 +28,12 @@ use super::store_track;
 /// Ingest file content: embedding, Qdrant upsert, tracked_files, FTS5.
 ///
 /// Shared by both add and update paths (after update preamble completes).
-#[allow(clippy::too_many_arguments)]
+/// `abs_file_path` is the STORE anchor — main-anchored, and the identity every
+/// persisted record is keyed by (document id, Qdrant payload, delete filter,
+/// search.db `file_metadata`). `read_abs_path` is where the BYTES live: the
+/// same path for an ordinary item, the worktree tree for a `read_root` item
+/// whose content has no copy under the main root. Only disk reads and the LSP
+/// document-open may follow it; anything that outlives the call must not.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ingest_file_content(
     ctx: &ProcessingContext,
@@ -37,6 +42,7 @@ pub(crate) async fn ingest_file_content(
     file_path: &Path,
     payload: &FilePayload,
     abs_file_path: &str,
+    read_abs_path: &str,
     watch_folder_id: &str,
     base_path: &str,
     relative_path: &str,
@@ -51,6 +57,7 @@ pub(crate) async fn ingest_file_content(
             watch_folder_id,
             relative_path,
             abs_file_path,
+            read_abs_path,
             payload,
         )
         .await;
@@ -116,6 +123,7 @@ pub(crate) async fn ingest_file_content(
         file_path,
         payload,
         abs_file_path,
+        read_abs_path,
         watch_folder_id,
         base_path,
         relative_path,
@@ -143,6 +151,7 @@ pub(super) async fn handle_retry_skip(
     watch_folder_id: &str,
     relative_path: &str,
     abs_file_path: &str,
+    read_abs_path: &str,
     _payload: &FilePayload,
 ) -> UnifiedProcessorResult<()> {
     info!(
@@ -168,6 +177,7 @@ pub(super) async fn handle_retry_skip(
                 pool,
                 existing.file_id,
                 abs_file_path,
+                read_abs_path,
                 &item.tenant_id,
                 Some(&item.branch),
                 existing.base_point.as_deref(),
@@ -236,6 +246,7 @@ async fn run_ingest_pipeline(
     file_path: &Path,
     payload: &FilePayload,
     abs_file_path: &str,
+    read_abs_path: &str,
     watch_folder_id: &str,
     base_path: &str,
     relative_path: &str,
@@ -270,6 +281,7 @@ async fn run_ingest_pipeline(
         item,
         pool,
         file_path,
+        abs_file_path,
         &document_content,
         &file_document_id,
         watch_folder_id,
@@ -309,6 +321,7 @@ async fn run_ingest_pipeline(
         file_id,
         payload,
         abs_file_path,
+        read_abs_path,
         &base_point,
         relative_path,
         &file_hash,
@@ -330,6 +343,7 @@ async fn finish_pipeline(
     file_id: i64,
     payload: &FilePayload,
     abs_file_path: &str,
+    read_abs_path: &str,
     base_point: &str,
     relative_path: &str,
     file_hash: &str,
@@ -343,6 +357,7 @@ async fn finish_pipeline(
         file_id,
         payload,
         abs_file_path,
+        read_abs_path,
         base_point,
         relative_path,
         file_hash,
@@ -366,6 +381,7 @@ async fn run_middle_phases(
     item: &UnifiedQueueItem,
     pool: &SqlitePool,
     file_path: &Path,
+    abs_file_path: &str,
     document_content: &crate::DocumentContent,
     file_document_id: &str,
     watch_folder_id: &str,
@@ -387,7 +403,12 @@ async fn run_middle_phases(
         ctx,
         item,
         document_content,
-        file_path,
+        // STORE anchor, not the read one: this path is only used to build the
+        // Qdrant payload (`file_path`/`absolute_path`), which is an identity —
+        // `delete_points_by_filter` matches on it and `generate_document_id`
+        // derives from it. Passing the read anchor here is what persisted
+        // worktree paths and split one logical file into two identities.
+        Path::new(abs_file_path),
         file_document_id,
         relative_path,
         base_point,
@@ -579,7 +600,6 @@ async fn upsert_and_mark_done(
 
 /// Update FTS5 search index for a file (phase 7).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 async fn update_search_index(
     ctx: &ProcessingContext,
     item: &UnifiedQueueItem,
@@ -587,6 +607,7 @@ async fn update_search_index(
     file_id: i64,
     _payload: &FilePayload,
     abs_file_path: &str,
+    read_abs_path: &str,
     base_point: &str,
     relative_path: &str,
     file_hash: &str,
@@ -606,6 +627,7 @@ async fn update_search_index(
             pool,
             file_id,
             abs_file_path,
+            read_abs_path,
             &item.tenant_id,
             Some(&item.branch),
             Some(base_point),

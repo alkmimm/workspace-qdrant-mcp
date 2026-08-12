@@ -132,6 +132,21 @@ impl FileStrategy {
         let file_path = Path::new(abs_file_path.as_str());
         let relative_path: &str = payload.file_path.as_str();
 
+        // STORE anchor. Everything that PERSISTS or KEYS a path uses the
+        // main-anchored form; only byte reads follow `abs_file_path` /
+        // `file_path` into the worktree.
+        //
+        // The stored path is an IDENTITY, not a label:
+        // `generate_document_id(tenant_id, path)` derives the document id from
+        // it, and `delete_points_by_filter` matches on it. Anchoring storage to
+        // the read root therefore split one logical file into two identities
+        // and left a delete issued from main unable to find a point that had
+        // been ingested from a worktree — an orphan, silently. `relative_path`
+        // was already main-anchored, so this is also the first time the pair is
+        // self-consistent (absolute == base_path + relative), the invariant
+        // every downstream consumer assumes.
+        let store_abs_path: String = main_abs_path.clone();
+
         // Dequeue-time ignore gate: ignore rules may have changed between
         // enqueue and processing (a global.wqmignore edit, a new project
         // .wqmignore). Without this re-check, a stale Add/Update burns the
@@ -185,7 +200,7 @@ impl FileStrategy {
                 pool,
                 &watch_folder_id,
                 relative_path,
-                &abs_file_path,
+                &store_abs_path,
             )
             .await;
         }
@@ -228,7 +243,7 @@ impl FileStrategy {
                 pool,
                 &watch_folder_id,
                 relative_path,
-                &abs_file_path,
+                &store_abs_path,
                 &payload,
             )
             .await?;
@@ -269,7 +284,7 @@ impl FileStrategy {
                 &watch_folder_id,
                 &base_path,
                 relative_path,
-                &abs_file_path,
+                &store_abs_path,
                 &payload,
                 defensive_delete_untracked,
             )
@@ -282,7 +297,7 @@ impl FileStrategy {
                     pool,
                     &watch_folder_id,
                     relative_path,
-                    &abs_file_path,
+                    &store_abs_path,
                     &payload,
                 )
                 .await;
@@ -297,7 +312,7 @@ impl FileStrategy {
                 file_path,
                 &watch_folder_id,
                 relative_path,
-                &abs_file_path,
+                &store_abs_path,
                 &payload,
             )
             .await?;
@@ -309,6 +324,7 @@ impl FileStrategy {
             pool,
             file_path,
             &payload,
+            &store_abs_path,
             &abs_file_path,
             &watch_folder_id,
             &base_path,
@@ -570,6 +586,12 @@ async fn resolve_skip_destinations(
         pool,
         watch_folder_id,
         relative_path,
+        abs_file_path,
+        // This helper only receives the STORE anchor; for a worktree item the
+        // bytes live elsewhere, but every caller of resolve_skip_destinations
+        // reaches it on a path where the file is unchanged, so reading the
+        // main copy is correct (and for a worktree-only file the read simply
+        // finds nothing and the FTS update no-ops).
         abs_file_path,
         payload,
     )
