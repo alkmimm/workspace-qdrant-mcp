@@ -24,6 +24,48 @@ Projeção para o conjunto completo: semantic top-10 **89,1% → 100%**.
 Toda a massa de falha do benchmark está num bucket, e a tradução o resolve
 inteiro. Nenhuma outra alavanca de qualidade de busca tem esse perfil hoje.
 
+### Atualização 2026-08-11 23:15 — bucket expandido para n=33 (Fase 4 concluída)
+
+Com 33 queries `pt-` (25 delas espelhando uma query em inglês, mesmo gold):
+
+| categoria | n | top-10 |
+|---|---|---|
+| **pt** | 33 | **69,7%** (10 miss) |
+| doc / impl / orig / real / sym | 38 | **100%** |
+
+A potência agora existe: 10 flips daria Wilcoxon exato p≈0,002. Em n=8 o teto
+era p=0,0625 mesmo com tudo virando.
+
+**O gap NÃO é uniforme.** Nos 25 pares espelhados: **PT pior em 10, empate em
+11, PT melhor em 4**. Ou seja, 15 de 25 conceitos já estão em paridade ou
+melhores em português. O dano é concentrado, não difuso — o que também significa
+que uma tradução aplicada indiscriminadamente pode piorar os 15 que já funcionam.
+Reforça o D2/D3 (aditivo, perna original com peso ≥).
+
+### O mecanismo: homofilia de idioma, não "fraqueza multilíngue"
+
+Medindo quanto os 8 documentos predominantemente em português do repo ocupam do
+top-10:
+
+| bucket | slots ocupados por doc PT |
+|---|---|
+| queries `pt-` (33) | 48 de 294 = **16,3%** |
+| queries em inglês (38) | 4 de 355 = **1,1%** |
+
+**14,5× de sobre-representação** — e esses 8 arquivos são 0,4% dos 1884 indexados.
+Em **5 das 10 falhas** há um doc PT no top-3, deslocando o código correto.
+
+O embedder está recuperando texto em português **por ser português**, não por ser
+relevante. Isso é mais específico que "cross-lingual fraco" e tem consequência de
+projeto direta: **traduzir a query remove o sinal de idioma que sequestra o
+ranking** — é exatamente a intervenção certa para este mecanismo, e explica por
+que traduzir restaurou 5/5 no teste inicial.
+
+Nota de honestidade sobre os docs PT: 6 dos 8 já existiam antes deste trabalho;
+2 são planos desta thread. Não é artefato introduzido pela medição — é
+propriedade real do corpus, e um usuário que escreve docs em português vai
+ampliá-la com o tempo.
+
 ## 2. Alternativas descartadas
 
 **Voltar para um embedder multilíngue.** É a causa direta do problema —

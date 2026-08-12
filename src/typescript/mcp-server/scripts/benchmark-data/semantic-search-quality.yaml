@@ -88,9 +88,25 @@ queries:
       - src/typescript/mcp-server/src/tools/search-helpers.ts
 
   # ── Portuguese natural-language queries (pt-) ────────────────────────────
-  # These measure the multilingual gap: with the English-only MiniLM model
-  # they mostly miss (1/8 top-10 on 2026-06-10); a multilingual embedding
-  # model should close most of the gap.
+  # These measure the CROSS-LINGUAL gap: a Portuguese query against an
+  # overwhelmingly English code corpus.
+  #
+  # 2026-08-11 status: with CodeRankEmbed (code-specialized, not multilingual)
+  # 5 of the original 8 miss the top-10 entirely, and hybrid rescues NONE of
+  # them — so it is not a lexical gap. Re-running those 5 translated to English
+  # hits 5/5. Every other category sits at 100% top-10, making this the only
+  # failing bucket in the benchmark. See docs/plans/2026-08-11-query-translation-plan.md.
+  #
+  # The earlier note here ("a multilingual embedding model should close the
+  # gap") is superseded: the CodeRankEmbed swap took recall@10 from 58.7% to
+  # 81.5%, so reverting to multilingual trades 38 queries to win 5. The lever
+  # is translating the QUERY, not changing the model.
+  #
+  # DESIGN — most pt- entries below deliberately MIRROR an English query, gold
+  # files included, so the only variable between the two buckets is language.
+  # For each mirrored concept the English rank is known, which turns "did
+  # translation restore it" into a paired, causal question instead of a vibe.
+  # Mirrors carry a `mirrors:` comment naming their English twin.
   - id: pt-fila-retry
     query: Onde a fila aplica retry e backoff para itens que falharam?
     expectedFiles:
@@ -135,6 +151,172 @@ queries:
     expectedFiles:
       - src/rust/daemon/core/src/patterns/ignore_gate.rs
       - src/rust/daemon/core/src/patterns/global_ignore.rs
+
+  # ── pt- mirrors (2026-08-11) ─────────────────────────────────────────────
+  # Added to take the bucket from 8 to 33: at n=8 the paired Wilcoxon returns
+  # p=0.0625 even with 5/5 flipping and zero regressions, so the dataset could
+  # not conclude the very thing it is measured for.
+
+  - id: pt-resolucao-project-id
+    # mirrors: project-id-resolution
+    query: Como o servidor MCP resolve o projectId nas buscas com escopo de projeto?
+    expectedFiles:
+      - src/typescript/mcp-server/src/tools/search-helpers.ts
+      - src/typescript/mcp-server/src/utils/project-detector.ts
+
+  - id: pt-limiar-score
+    # mirrors: score-threshold
+    query: Onde o limiar de score do Qdrant é aplicado na busca semântica?
+    expectedFiles:
+      - src/typescript/mcp-server/src/tools/search-qdrant.ts
+      - src/typescript/mcp-server/tests/tools/search-score-threshold.test.ts
+
+  - id: pt-contexto-grafo
+    # mirrors: graph-context
+    query: Onde a ferramenta de busca anexa contexto do grafo aos resultados?
+    expectedFiles:
+      - src/typescript/mcp-server/src/tools/search-graph-context.ts
+      - src/typescript/mcp-server/src/tools/search-helpers.ts
+
+  - id: pt-provider-embedding
+    # mirrors: embedding-provider
+    query: Como o servidor informa qual provedor de embedding está ativo?
+    expectedFiles:
+      - src/typescript/mcp-server/src/tools/embedding.ts
+      - src/rust/daemon/core/src/embedding/provider/health_monitor.rs
+
+  - id: pt-timeout-health
+    # mirrors: daemon-health-timeout
+    query: Onde o timeout do health check do daemon é aplicado durante o bootstrap do cliente?
+    expectedFiles:
+      - src/typescript/mcp-server/src/clients/daemon-client/connection.ts
+      - src/typescript/mcp-server/src/clients/daemon-client/system-methods.ts
+
+  - id: pt-latencia-watcher
+    # mirrors: watcher-latency
+    query: Onde a latência de processamento do watcher é registrada no daemon?
+    expectedFiles:
+      - src/rust/daemon/core/src/watching/telemetry.rs
+      - src/rust/daemon/core/src/watching/watcher_processing.rs
+
+  - id: pt-metricas-fila
+    # mirrors: queue-metrics
+    query: Onde a vazão da fila é medida no daemon?
+    expectedFiles:
+      - src/rust/daemon/core/src/unified_queue_processor/metrics.rs
+      - src/rust/daemon/core/src/processing/metrics.rs
+
+  - id: pt-modos-busca
+    # mirrors: search-modes-scope
+    query: Como a ferramenta de busca escolhe entre os modos semântico, híbrido e exato?
+    expectedFiles:
+      - src/typescript/mcp-server/src/tools/search.ts
+      - src/typescript/mcp-server/src/tools/search-types.ts
+
+  - id: pt-fallback-escopo
+    # mirrors: fallback-tenant-scope
+    query: Como a busca de fallback evita ampliar o escopo do projeto entre tenants?
+    expectedFiles:
+      - src/typescript/mcp-server/src/tools/search-qdrant.ts
+      - src/typescript/mcp-server/src/tools/search-helpers.ts
+
+  - id: pt-tokenizer-bm25
+    # mirrors: impl-bm25-tokenizer
+    query: Onde fica o tokenizador BM25 que separa e filtra termos para os vetores esparsos?
+    expectedFiles:
+      - src/rust/daemon/core/src/embedding/bm25.rs
+
+  - id: pt-fastembed-denso
+    # mirrors: impl-fastembed-dense
+    query: Onde o daemon gera embeddings densos usando FastEmbed ONNX?
+    expectedFiles:
+      - src/rust/daemon/core/src/embedding/provider/fastembed.rs
+
+  - id: pt-provider-remoto
+    # mirrors: impl-remote-embeddings
+    query: Onde está implementado o provedor remoto de embeddings compatível com OpenAI?
+    expectedFiles:
+      - src/rust/daemon/core/src/embedding/provider/openai.rs
+      - "src/rust/daemon/core/src/embedding/provider/openai/*.rs"
+
+  - id: pt-payload-chunk
+    # mirrors: impl-chunk-payload
+    query: Qual código monta o payload do ponto no Qdrant com os metadados de símbolo do chunk?
+    expectedFiles:
+      - src/rust/daemon/core/src/strategies/processing/file/chunk_embed/payload.rs
+
+  - id: pt-dedup-arquivo
+    # mirrors: impl-file-dedup
+    query: Onde vários chunks do mesmo arquivo são deduplicados nos resultados da busca?
+    expectedFiles:
+      - src/typescript/mcp-server/src/tools/search-helpers.ts
+
+  - id: pt-debounce-eventos
+    # mirrors: impl-debounce
+    query: Onde os eventos de mudança de arquivo passam por debounce antes do processamento?
+    expectedFiles:
+      - src/rust/daemon/core/src/watching/debouncer.rs
+      - src/rust/daemon/core/src/watching_queue/file_watcher.rs
+
+  - id: pt-filtro-branch
+    # mirrors: impl-branch-filter
+    query: Onde os resultados da busca são filtrados por branch do git?
+    expectedFiles:
+      - src/typescript/mcp-server/src/tools/search-filters.ts
+
+  - id: pt-expansao-tags
+    # mirrors: impl-tag-expansion
+    query: Onde o vetor esparso da consulta é expandido com palavras-chave de tags relacionadas?
+    expectedFiles:
+      - src/typescript/mcp-server/src/tools/search-expansion.ts
+
+  - id: pt-fts5-exato
+    # mirrors: impl-fts5-exact
+    query: Onde a consulta FTS5 é montada para a busca exata por substring?
+    expectedFiles:
+      - "src/rust/daemon/core/src/text_search/exact_search/*.rs"
+
+  - id: pt-grpc-proto
+    # mirrors: impl-grpc-proto
+    query: Onde os serviços gRPC do daemon são definidos?
+    expectedFiles:
+      - "**/proto/workspace_daemon.proto"
+
+  - id: pt-cli-stats-fila
+    # mirrors: impl-cli-queue-stats
+    query: Qual implementação de comando da CLI mostra as estatísticas da fila?
+    expectedFiles:
+      - src/rust/cli/src/commands/queue/stats.rs
+
+  - id: pt-calculo-project-id
+    # mirrors: impl-project-id-calc
+    query: Como o identificador do projeto é calculado a partir da URL do remote do git?
+    expectedFiles:
+      - src/rust/common/src/project_id/calculator.rs
+
+  - id: pt-schemas-ferramentas
+    # mirrors: impl-tool-schemas
+    query: Onde os schemas de entrada das ferramentas MCP são definidos?
+    expectedFiles:
+      - "src/typescript/mcp-server/src/tool-definitions/*.ts"
+
+  - id: pt-adr-colecoes
+    # mirrors: doc-canonical-collections
+    query: Qual ADR define as quatro coleções canônicas?
+    expectedFiles:
+      - docs/adr/ADR-001-canonical-collection-architecture.md
+
+  - id: pt-adr-escrita-daemon
+    # mirrors: doc-daemon-writes
+    query: Qual ADR estabelece que somente o daemon escreve no Qdrant?
+    expectedFiles:
+      - docs/adr/ADR-002-daemon-only-write-policy.md
+
+  - id: pt-spec-write-path
+    # mirrors: doc-write-path
+    query: Qual spec descreve o caminho de escrita enqueue-only através da fila unificada?
+    expectedFiles:
+      - docs/specs/04-write-path.md
 
   # ── Identifier/symbol lookups (sym-) ─────────────────────────────────────
   # Known-identifier queries. The sparse/BM25 leg should carry these; misses
