@@ -43,16 +43,6 @@ export const DEFAULT_MAX_BYTES_PER_HIT = 1500;
  *  under the ~25k informal client budget. Set `maxResponseBytes: 0` to disable. */
 export const DEFAULT_MAX_RESPONSE_BYTES = 24000;
 
-/**
- * Budget for `rules` list responses only.
- *
- * Every other read surface is a query: truncating it costs one more call. The
- * rules listing is the session-start "load how I must work" call, so a dropped
- * entry is a convention the agent never learns and then violates, with nothing
- * signalling the omission where it matters. Measured 2026-08-12: 61 rules
- * returned 46 with `dropped: 4` under the shared 24k budget.
- */
-export const DEFAULT_RULES_MAX_RESPONSE_BYTES = 40000;
 
 // Tag expansion defaults
 export const DEFAULT_EXPANSION_WEIGHT = 0.5;

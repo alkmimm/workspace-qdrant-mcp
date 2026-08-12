@@ -4,6 +4,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { RulesTool, type RuleOptions } from '../../src/tools/rules.js';
+import { buildRuleOptions } from '../../src/tool-builders/rules.js';
 import type { DaemonClient } from '../../src/clients/daemon-client.js';
 import type { SqliteStateManager } from '../../src/clients/sqlite-state-manager.js';
 import type { ProjectDetector } from '../../src/utils/project-detector.js';
@@ -317,9 +318,7 @@ describe('RulesTool', () => {
       // Timestamps: in the payload (see the fixtures), surfaced by the FULL
       // form, and dropped by the summary — ~100 chars per entry as two ISO
       // strings that nothing ranks or filters on. Asserted on BOTH rules,
-      // unconditionally; a guard like `if (projectId !== undefined)` on the
-      // global rule made the first version of this test pass against the
-      // pre-change code (review finding).
+      // unconditionally, so this fails against the pre-change shaping.
       const r1 = result.rules?.find((r) => r.id === 'rule-1');
       const r2 = result.rules?.find((r) => r.id === 'rule-2');
       expect(r1).toBeDefined();
@@ -346,6 +345,31 @@ describe('RulesTool', () => {
       const f2 = full.rules?.find((r) => r.id === 'rule-2');
       expect(f2?.createdAt).toBe('2026-01-01T00:00:00Z');
       expect(f2?.updatedAt).toBe('2026-01-02T00:00:00Z');
+    });
+
+    it('pins the shared defaults: fetch cap 200 in the scroll, budget 40000 in the builder', async () => {
+      // Regression coverage for the shared pattern (repo rule): a revert of
+      // either default passes the whole suite otherwise. The fetch cap is
+      // asserted where it takes effect — the scroll request — because that is
+      // the layer whose silent 50 made 11 of 61 rules invisible; the budget is
+      // asserted at the builder, the only place that applies it.
+      await rulesTool.execute({ action: 'list', scope: 'global' });
+      const { QdrantClient } = await import('@qdrant/js-client-rest');
+      const instance = vi.mocked(QdrantClient).mock.results.at(-1)?.value as {
+        scroll: ReturnType<typeof vi.fn>;
+      };
+      const lastCall = instance.scroll.mock.calls.at(-1) as
+        | [string, { limit?: number }]
+        | undefined;
+      expect(lastCall?.[1]?.limit).toBe(200);
+
+      const opts = buildRuleOptions({ action: 'list' });
+      expect(opts.maxResponseBytes).toBe(40000);
+      expect(opts.summary).toBe(true);
+      // No builder-level limit: the core default covers EVERY caller (MCP,
+      // prompt injection, seeder, admin REST) — the split-default design that
+      // kept internal callers at 50 was itself the review finding.
+      expect(opts.limit).toBeUndefined();
     });
   });
 

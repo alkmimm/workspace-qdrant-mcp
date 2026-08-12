@@ -6,23 +6,11 @@ import type { QdrantClient } from '@qdrant/js-client-rest';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import type { RuleOptions, RuleResponse, Rule, RuleScope } from './rules-types.js';
-import { RULES_COLLECTION } from './rules-types.js';
+import { RULES_COLLECTION, RULES_LIST_FETCH_LIMIT } from './rules-types.js';
 import { FIELD_PROJECT_ID, FIELD_CONTENT, FIELD_TITLE } from '../common/native-bridge.js';
 import { TENANT_GLOBAL } from '../constants/tenants.js';
 import { resolveProjectIdentity } from './branch-scope.js';
 import { applyByteBudget } from './response-budget.js';
-
-/**
- * Fetch cap for the SESSION-START surfaces (MCP list + system-prompt
- * injection). It bounds the Qdrant SCROLL, one layer ABOVE the byte budget, so
- * it decides how many rules exist before shaping can drop any: with the old 50,
- * a 61-rule set returned `total: 61` while only 50 were ever fetched — the
- * missing 11 were invisible in the drop accounting (46 kept + 4 dropped = 50).
- * Lives here (not in the builder) so the MCP surface and `agent-rules` share
- * one value; `listRules` itself keeps its 50 default for internal callers
- * (admin REST, seeder), whose behaviour this fix must not silently change.
- */
-export const RULES_SESSION_FETCH_LIMIT = 200;
 
 /**
  * Preview length (chars) for summary-mode list entries.
@@ -267,7 +255,15 @@ export async function listRules(
   projectDetector: ProjectDetector,
   options: RuleOptions
 ): Promise<RuleResponse> {
-  const { scope = 'project', projectId, limit = 50, includeGlobal = false } = options;
+  // ONE default for every caller — MCP surface, prompt injection, seeder dedup,
+  // admin REST. See RULES_LIST_FETCH_LIMIT for why splitting this per-surface
+  // was wrong (the internal callers are the ones completeness protects).
+  const {
+    scope = 'project',
+    projectId,
+    limit = RULES_LIST_FETCH_LIMIT,
+    includeGlobal = false,
+  } = options;
 
   let resolvedProjectId = projectId;
   if (scope === 'project' && !resolvedProjectId) {
