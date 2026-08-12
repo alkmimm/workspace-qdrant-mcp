@@ -262,7 +262,11 @@ async function exactSearchInCollection(
   }
   // Hard per-call exclude (`pathExclude`) — parity with the projects path. Rare
   // for scratchpad/libraries (they carry no file path), but honour it uniformly.
-  const finalResults = filterResultsByPathExclude(results, options.pathExclude);
+  const finalResults = filterResultsByPathExclude(
+    results,
+    options.pathExclude,
+    options.pathGlob
+  );
   stateManager.updateSearchEvent(eventId, {
     resultCount: finalResults.length,
     latencyMs: Date.now() - startTime,
@@ -428,9 +432,15 @@ async function executeAndLogSearch(
     //
     // Hard per-call exclude (`pathExclude`), applied AFTER any branch-widen so it
     // covers widened hits too and BEFORE the offset slice so pagination stays honest.
-    if (options.pathExclude) {
-      dedupedResults = filterResultsByPathExclude(dedupedResults, options.pathExclude);
-    }
+    // UNCONDITIONAL: the default other-worktree drop lives inside the filter and
+    // must run even when no pathExclude was passed — guarding on pathExclude made
+    // the exact lane the one production path that still returned foreign-checkout
+    // paths (review finding, 2026-08-13).
+    dedupedResults = filterResultsByPathExclude(
+      dedupedResults,
+      options.pathExclude,
+      options.pathGlob
+    );
     const limit = options.limit ?? 100;
     // Pagination parity with the vector path (P1.5 C): honor `offset` by slicing
     // the deduped result list; set next_offset below when more remain.
@@ -526,7 +536,8 @@ async function executeAndLogSearch(
               );
               const deduped = filterResultsByPathExclude(
                 dedupeExactResults(mapExactResults(probe.matches)),
-                options.pathExclude
+                options.pathExclude,
+                options.pathGlob
               );
               const first = deduped[0];
               return {

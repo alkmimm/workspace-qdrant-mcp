@@ -93,17 +93,68 @@ export function matchesPathInclude(value: string, glob: string): boolean {
 }
 
 /**
- * The linked-worktree subtree of a repo. Worktree branch content is stored
- * MAIN-ANCHORED (the daemon ignore-gates this subtree), so a read result whose
- * path is a LITERAL `.claude/worktrees/<wt>/…` is a leaked/stale generation that
- * is never the intended representation — and, worse, points into ANOTHER
- * worktree's checkout, so reading or editing it touches the wrong tree (field
- * feedback 2026-08-10, DOC-V2). The read surfaces drop these by default for a
- * main-tenant caller; see {@link isWorktreeSubtreePath}.
+ * The linked-worktree subtree of a repo.
+ *
+ * A result path under `.claude/worktrees/<wt>/…` is usually a leaked/stale
+ * generation or a first-ingest-anchored shared point — for a MAIN caller it
+ * points into another session's checkout (field feedback 2026-08-10, DOC-V2),
+ * so the read surfaces drop these by default for main-tenant callers.
+ *
+ * It is NOT universally garbage: new-on-branch and divergent worktree content
+ * (read_root ingests, worktree_membership B1.1/B2) legitimately lives ONLY
+ * there. That is why the drop is gated on the CALLER (a worktree caller keeps
+ * its own subtree) and suppressed by an explicit worktree include — do not
+ * extend it unconditionally to other surfaces or push it into a Qdrant-side
+ * filter, or that content becomes unreachable. Root fix is the daemon
+ * persisting main-anchored paths (planned PR-7); until then this stays a
+ * read-time, caller-aware measure.
  */
 export const WORKTREE_SUBTREE_GLOB = '.claude/worktrees/**';
 
+/** The literal segment that marks the worktree subtree inside a path. */
+const WORKTREE_SEGMENT = '.claude/worktrees/';
+
+/**
+ * Precompiled matchers for the constant worktree glob. `isWorktreeSubtreePath`
+ * runs by DEFAULT on every search/grep result for a main-tenant caller (the
+ * other-worktree drop), so recompiling the same glob per result — hundreds of
+ * times per query — was pure waste. Compiled once per process.
+ */
+const WORKTREE_SUBTREE_REGEXES: RegExp[] = directoryAwareGlobs(WORKTREE_SUBTREE_GLOB).flatMap(
+  (g) => [globToRegExp(g), globToRegExp(`**/${g}`)]
+);
+
 /** True when a path lies inside any repo's `.claude/worktrees/<wt>/` subtree. */
 export function isWorktreeSubtreePath(value: string): boolean {
-  return matchesPathExclude(value, WORKTREE_SUBTREE_GLOB);
+  const normalized = value.replace(/\\/g, '/');
+  return WORKTREE_SUBTREE_REGEXES.some((re) => re.test(normalized));
+}
+
+/**
+ * The repo-relative view of a worktree-anchored ABSOLUTE path: the slice from
+ * `.claude/worktrees/` onward (`/repo/.claude/worktrees/wt/lib/a.dart` →
+ * `.claude/worktrees/wt/lib/a.dart`), or undefined when the path is not under a
+ * worktree subtree.
+ *
+ * This exists so a caller-supplied exclude glob can be tested against a
+ * worktree copy WITHOUT ever testing the raw absolute path. Floated globs make
+ * raw absolutes dangerous for excludes: `docs/**` floats to `**\/docs/**`,
+ * which matches a checkout that merely LIVES under `~/docs/` — every hit
+ * dropped because of a host directory outside the repo. The slice keeps the
+ * one absolute-only fact a glob legitimately needs (the worktree location)
+ * in repo-relative coordinates, where globs are safe.
+ */
+export function worktreeSubpathOf(value: string): string | undefined {
+  const normalized = value.replace(/\\/g, '/');
+  const idx = normalized.indexOf(WORKTREE_SEGMENT);
+  return idx >= 0 ? normalized.slice(idx) : undefined;
+}
+
+/** The worktree NAME (`<wt>` in `.claude/worktrees/<wt>/…`) a path lies under,
+ *  or undefined when it is not a worktree path. */
+export function worktreeNameOf(value: string): string | undefined {
+  const sub = worktreeSubpathOf(value);
+  if (sub === undefined) return undefined;
+  const name = sub.slice(WORKTREE_SEGMENT.length).split('/')[0];
+  return name !== undefined && name.length > 0 ? name : undefined;
 }

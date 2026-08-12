@@ -11,7 +11,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { matchesPathExclude, isWorktreeSubtreePath } from '../utils/path-glob.js';
+import { matchesPathExclude } from '../utils/path-glob.js';
+import { globTargetsWorktrees, isForeignWorktreePath } from './search-path-filters.js';
 import { getWorktreeContext } from '../utils/request-context.js';
 import { shapeGrepMatches, type GrepShapingOptions } from './grep-shaping.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
@@ -295,12 +296,19 @@ export function dedupGrepMatches(matches: GrepMatch[]): GrepMatch[] {
  */
 export function filterGrepMatchesByExclude(
   matches: GrepMatch[],
-  pathExclude: string | undefined
+  pathExclude: string | undefined,
+  includeGlob?: string
 ): GrepMatch[] {
-  const dropOtherWorktrees = getWorktreeContext() === undefined;
-  if (!pathExclude && !dropOtherWorktrees) return matches;
+  // An include glob that explicitly targets the worktree subtree is consent to
+  // see those paths — without this, the default drop cancelled the include and
+  // the call deterministically returned zero (parity with the search lanes).
+  const dropForeignWorktrees = !globTargetsWorktrees(includeGlob);
+  // Name-aware, like the search lanes: a caller inside worktree A keeps A's
+  // own paths but still must not see worktree B's (sibling /batch agents).
+  const callerWorktree = getWorktreeContext()?.name;
+  if (!pathExclude && !dropForeignWorktrees) return matches;
   return matches.filter((m) => {
-    if (dropOtherWorktrees && isWorktreeSubtreePath(m.file)) return false;
+    if (dropForeignWorktrees && isForeignWorktreePath(m.file, callerWorktree)) return false;
     return pathExclude ? !matchesPathExclude(m.file, pathExclude) : true;
   });
 }
@@ -614,7 +622,8 @@ export class GrepTool {
       }
       const rawMatches = filterGrepMatchesByExclude(
         responses.flatMap((response) => mapGrepMatches(response.matches)),
-        pathExclude
+        pathExclude,
+        pathGlob
       );
       const dedupedMatches = dedupGrepMatches(rawMatches);
       let matches = dedupedMatches.slice(offset, offset + maxResults);
@@ -871,7 +880,11 @@ export class GrepTool {
           pathGlob
         )
       );
-      const rawMatches = filterGrepMatchesByExclude(mapGrepMatches(resp.matches), pathExclude);
+      const rawMatches = filterGrepMatchesByExclude(
+        mapGrepMatches(resp.matches),
+        pathExclude,
+        pathGlob
+      );
       const dedupedMatches = dedupGrepMatches(rawMatches);
       const matches = dedupedMatches.slice(0, maxResults);
       if (matches.length === 0) return undefined;
@@ -949,7 +962,7 @@ export class GrepTool {
                 )
               );
               const matches = dedupGrepMatches(
-                filterGrepMatchesByExclude(mapGrepMatches(resp.matches), pathExclude)
+                filterGrepMatchesByExclude(mapGrepMatches(resp.matches), pathExclude, pathGlob)
               );
               const first = matches[0];
               return {
