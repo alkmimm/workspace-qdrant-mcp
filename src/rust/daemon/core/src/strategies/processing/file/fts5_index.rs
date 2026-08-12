@@ -89,7 +89,7 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
         Err(e) => {
             debug!(
                 "FTS5: cannot read file for indexing (may be binary): {}: {}",
-                file_path, e
+                read_path, e
             );
             return Ok(Fts5Outcome::Skipped);
         }
@@ -193,7 +193,7 @@ pub(super) async fn update_fts5_for_file(
         Err(e) => {
             debug!(
                 "FTS5: cannot read file for indexing (may be binary): {}: {}",
-                file_path, e
+                read_path, e
             );
             return Ok(false);
         }

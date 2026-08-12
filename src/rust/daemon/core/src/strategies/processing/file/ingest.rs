@@ -92,7 +92,10 @@ pub(crate) async fn ingest_file_content(
                 item,
                 file_path,
                 relative_path,
-                abs_file_path,
+                // READ anchor: this re-parses the bytes at `file_path`, and the
+                // LSP document it opens must be that same copy — a divergent
+                // worktree file has different content at the same coordinates.
+                read_abs_path,
                 base_path,
             )
             .await;
@@ -305,6 +308,7 @@ async fn run_ingest_pipeline(
         &base_point,
         &file_hash,
         file_path,
+        abs_file_path,
         &document_content,
         lsp_status,
         treesitter_status,
@@ -530,12 +534,15 @@ async fn run_keyword_and_graph_phases(
     }
 
     let t0 = Instant::now();
-    let abs_file_path = file_path.to_string_lossy();
+    // READ anchor: the graph phase opens this document in the LSP and asks for
+    // call hierarchy at coordinates derived from the bytes just parsed, so it
+    // must be the same copy those chunks came from.
+    let read_abs_path = file_path.to_string_lossy();
     graph_ingest::ingest_graph_edges(
         ctx,
         &item.tenant_id,
         relative_path,
-        &abs_file_path,
+        &read_abs_path,
         &document_content.chunks,
     )
     .await;
@@ -558,6 +565,7 @@ async fn upsert_and_mark_done(
     base_point: &str,
     file_hash: &str,
     file_path: &Path,
+    abs_file_path: &str,
     document_content: &crate::DocumentContent,
     lsp_status: crate::tracked_files_schema::ProcessingStatus,
     treesitter_status: crate::tracked_files_schema::ProcessingStatus,
@@ -577,6 +585,9 @@ async fn upsert_and_mark_done(
         base_point,
         file_hash,
         file_path,
+        // STORE anchor for classification (is_test/extension) so the
+        // tracked_files verdict cannot disagree with the Qdrant tag.
+        Path::new(abs_file_path),
         document_content,
         lsp_status,
         treesitter_status,

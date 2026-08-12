@@ -145,7 +145,7 @@ impl FileStrategy {
         // was already main-anchored, so this is also the first time the pair is
         // self-consistent (absolute == base_path + relative), the invariant
         // every downstream consumer assumes.
-        let store_abs_path: String = main_abs_path.clone();
+        let store_abs_path: &str = main_abs_path.as_str();
 
         // Dequeue-time ignore gate: ignore rules may have changed between
         // enqueue and processing (a global.wqmignore edit, a new project
@@ -200,7 +200,7 @@ impl FileStrategy {
                 pool,
                 &watch_folder_id,
                 relative_path,
-                &store_abs_path,
+                store_abs_path,
             )
             .await;
         }
@@ -243,7 +243,7 @@ impl FileStrategy {
                 pool,
                 &watch_folder_id,
                 relative_path,
-                &store_abs_path,
+                store_abs_path,
                 &payload,
             )
             .await?;
@@ -284,7 +284,7 @@ impl FileStrategy {
                 &watch_folder_id,
                 &base_path,
                 relative_path,
-                &store_abs_path,
+                store_abs_path,
                 &payload,
                 defensive_delete_untracked,
             )
@@ -297,7 +297,8 @@ impl FileStrategy {
                     pool,
                     &watch_folder_id,
                     relative_path,
-                    &store_abs_path,
+                    store_abs_path,
+                    &abs_file_path,
                     &payload,
                 )
                 .await;
@@ -312,7 +313,7 @@ impl FileStrategy {
                 file_path,
                 &watch_folder_id,
                 relative_path,
-                &store_abs_path,
+                store_abs_path,
                 &payload,
             )
             .await?;
@@ -324,7 +325,7 @@ impl FileStrategy {
             pool,
             file_path,
             &payload,
-            &store_abs_path,
+            store_abs_path,
             &abs_file_path,
             &watch_folder_id,
             &base_path,
@@ -563,6 +564,7 @@ async fn handle_missing_file(
 /// already updated — so delegate to the retry-skip path, which re-dispatches
 /// the FTS5 work: a cheap no-op when search is current (indexed_content hash
 /// match), a healing rewrite when it is stale.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_skip_destinations(
     ctx: &ProcessingContext,
     item: &UnifiedQueueItem,
@@ -570,6 +572,7 @@ async fn resolve_skip_destinations(
     watch_folder_id: &str,
     relative_path: &str,
     abs_file_path: &str,
+    read_abs_path: &str,
     payload: &FilePayload,
 ) -> UnifiedProcessorResult<()> {
     let _ = ctx
@@ -587,12 +590,7 @@ async fn resolve_skip_destinations(
         watch_folder_id,
         relative_path,
         abs_file_path,
-        // This helper only receives the STORE anchor; for a worktree item the
-        // bytes live elsewhere, but every caller of resolve_skip_destinations
-        // reaches it on a path where the file is unchanged, so reading the
-        // main copy is correct (and for a worktree-only file the read simply
-        // finds nothing and the FTS update no-ops).
-        abs_file_path,
+        read_abs_path,
         payload,
     )
     .await
@@ -1181,6 +1179,7 @@ mod tests {
                 &pool,
                 "wf-test",
                 "src/lib.rs",
+                "/abs/src/lib.rs",
                 "/abs/src/lib.rs",
                 &payload,
             )
