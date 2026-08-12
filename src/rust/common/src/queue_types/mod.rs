@@ -262,7 +262,11 @@ mod tests {
         assert!(QueueOperation::Rename.is_valid_for(ItemType::Folder));
         assert!(!QueueOperation::Add.is_valid_for(ItemType::Folder));
         assert!(!QueueOperation::Update.is_valid_for(ItemType::Folder));
-        assert!(!QueueOperation::Uplift.is_valid_for(ItemType::Folder));
+        // Uplift on a Folder is the admin force re-embed's FULL rescan (see the
+        // match arm's comment): without it the force re-embed errored "uplift not
+        // valid for item type folder". This assertion was inverted when that
+        // capability landed and no gate ran to catch it.
+        assert!(QueueOperation::Uplift.is_valid_for(ItemType::Folder));
         assert!(!QueueOperation::Reset.is_valid_for(ItemType::Folder));
     }
 
@@ -304,8 +308,10 @@ mod tests {
         }
         // 8 item types * 8 ops = 64 total
         assert_eq!(valid_count + invalid_count, 64);
-        // Expected valid: text(4) + file(5) + url(4) + website(5) + doc(2) + folder(3) + tenant(6) + collection(3 — uplift,reset,reembed) = 32
-        assert_eq!(valid_count, 32);
+        // Expected valid: text(4) + file(5) + url(4) + website(5) + doc(2)
+        // + folder(4 — delete,scan,rename,uplift) + tenant(6)
+        // + collection(3 — uplift,reset,reembed) = 33
+        assert_eq!(valid_count, 33);
     }
 
     // ========================================================================
