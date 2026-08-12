@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 
+use tracing::warn;
 use wqm_common::hashing::normalize_line_endings;
 
 use crate::code_lines_schema::initial_seq;
@@ -46,19 +47,18 @@ pub(super) async fn apply_diff_to_code_lines(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     file_id: i64,
     diff: &DiffResult,
+    old_content: &str,
     new_content: &str,
 ) -> Result<FileDiffStats, SearchDbError> {
-    let existing_count: i32 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM code_lines WHERE file_id = ?1")
-            .bind(file_id)
-            .fetch_one(&mut **tx)
-            .await?;
+    // One read, not two: the old `SELECT COUNT(*)` only existed to fork on zero,
+    // and the guard below needs the rows anyway. In batch mode that saved
+    // `FTS5_BATCH_SIZE` round-trips per transaction, all taken while holding the
+    // search.db write lock (`begin_immediate`, PRs #329/#330).
+    let existing_lines = fetch_existing_lines(tx, file_id).await?;
 
-    if existing_count == 0 {
+    if existing_lines.is_empty() {
         return insert_all_lines(tx, file_id, new_content).await;
     }
-
-    let existing_lines = fetch_existing_lines(tx, file_id).await?;
 
     // `diff` is computed against the caller's `old_content` — a CLAIM about what
     // is indexed, read from the `indexed_content` cache in state.db, a different
@@ -78,7 +78,31 @@ pub(super) async fn apply_diff_to_code_lines(
     //
     // The stored rows are the authority for what is indexed, so on any
     // disagreement discard the diff and rebuild the file's lines from scratch.
-    if diff.old_line_count != existing_lines.len() {
+    //
+    // Compare the CONTENT, not just the line count. A count check passes for a
+    // stale-but-same-length claim (a pure reorder, or an `indexed_content` upsert
+    // lost after the search.db commit — different databases, no cross-DB
+    // atomicity) and the old-side indices then address the wrong rows, corrupting
+    // the file exactly as before. It also matters for REPAIR: a file already in
+    // the corrupted shape has the RIGHT row count (N+1) with the first line
+    // parked in the final slot, so a count check would keep re-applying the
+    // damage on every later edit. Comparing content heals it on the next one.
+    //
+    // `old_content` is the cache's raw bytes while the rows hold normalized EOL
+    // (`insert_all_lines`), so normalize before comparing — otherwise every CRLF
+    // file mismatches and rebuilds forever.
+    let claimed = normalize_line_endings(old_content);
+    let rows_match_claim = claimed
+        .split('\n')
+        .eq(existing_lines.iter().map(|(_, _, stored)| stored.as_str()));
+    if !rows_match_claim {
+        warn!(
+            file_id,
+            claimed_lines = claimed.split('\n').count(),
+            stored_rows = existing_lines.len(),
+            "FTS5: indexed_content disagrees with stored code_lines; rebuilding the \
+             file's lines instead of applying a diff against rows it does not describe"
+        );
         return rebuild_all_lines(tx, file_id, &existing_lines, new_content).await;
     }
 
@@ -128,7 +152,9 @@ async fn rebuild_all_lines(
         .await?;
 
     let mut stats = insert_all_lines(tx, file_id, new_content).await?;
-    stats.lines_deleted = existing_lines.len();
+    // `+=`, not `=`: states the intent and survives `insert_all_lines` ever
+    // touching this field itself.
+    stats.lines_deleted += existing_lines.len();
     Ok(stats)
 }
 

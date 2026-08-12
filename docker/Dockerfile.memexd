@@ -266,7 +266,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         reingest_keeps_content_verbatim reingest_with_desynced_old_content \
-        --test-threads=4
+        reingest_with_same_length_stale_old_content \
+        reingest_heals_an_already_corrupted_file \
+        --test-threads=4 2>&1 | tee /tmp/fts-reingest.log; \
+    grep -q "^test result: ok\. 4 passed" /tmp/fts-reingest.log \
+    || { echo "GATE: expected exactly 4 FTS re-ingest tests to run and pass — a \
+rename or move silently empties a positional filter, and libtest exits 0 when a \
+filter matches nothing (the v48 lesson, 30 lines above)"; exit 1; }
 
 # Issue #299 cascade-rename guard tests run here too, same rationale: hermetic
 # (in-memory SQLite + tempdir git fixtures, no FTS5/timing dependence) and they
