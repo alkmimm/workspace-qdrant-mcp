@@ -531,7 +531,91 @@ throughput) ou aceita reuso parcial. O D6 afirmava o ganho sem essa ressalva.
 As Fases 1–5 originais seguem válidas em estrutura (gating, fail-open, kill barato)
 — mas só entram em execução depois do passo 4 acima.
 
-## 6. Fora de escopo
+## 6. ACHADO 2026-08-11 — este plano ataca o gargalo errado
+
+O passo 3 (controle determinístico) foi executado como investigação e produziu um
+resultado que **invalida a premissa do plano inteiro**. Registrado aqui em vez de
+silenciosamente abandonado.
+
+### O controle determinístico não tinha o que enriquecer
+
+Perfil do metadata dos 33,5k chunks do tenant:
+
+| campo | cobertura |
+|---|---|
+| `symbol_name` | 78,6% |
+| `signature` | 43,1% |
+| `calls` | 32,3% |
+| `docstring` | 17,8% |
+| fragmentos | 22,6% |
+
+`signature` parecia o candidato — 43% de cobertura e ausente do header. Mas
+`splitting.rs:154` propaga a signature para todos os fragmentos, e só **1.425 dos
+7.573** fragmentos têm uma; nos ~13k chunks não-fragmentados a signature **já é a
+primeira linha do conteúdo**. Adicioná-la ao header seria majoritariamente
+redundante. `calls` foi descartado por risco de diluição (injeta vocabulário de
+outros símbolos no vetor deste chunk). Imports não estão no caminho do chunker —
+são extraídos em `graph/extractor/import_parsers.rs`, e puxá-los descaracterizaria
+"controle barato".
+
+### Onde as falhas realmente estão
+
+Analisando o baseline por query, as 5 falhas do semantic são **todas `pt-`**:
+
+| categoria | n | fora do top-10 | rank 4–10 |
+|---|---|---|---|
+| pt | 8 | **5** | 0 |
+| impl | 14 | 0 | 4 |
+| orig | 12 | 0 | 1 |
+| sym | 6 | 0 | 0 |
+| doc | 4 | 0 | 0 |
+| real | 2 | 0 | 0 |
+
+O hybrid não resgata nenhuma delas (`hybrid=None` também) — **não é lacuna
+lexical**. Todas as categorias em inglês já estão em 100% de top-10.
+
+### Experimento decisivo: tradução
+
+As mesmas 5 queries, traduzidas para inglês, rodadas como `cases` ad-hoc:
+
+| query | PT (baseline) | EN (traduzida) |
+|---|---|---|
+| pt-fila-retry | miss | **rank 8** |
+| pt-upsert-qdrant | miss | **rank 1** |
+| pt-idempotencia | miss | **rank 6** |
+| pt-busca-hibrida | miss | **rank 8** |
+| pt-arquivos-ignorados | miss | **rank 9** |
+
+**5/5.** O gargalo é **cross-lingual**, não contextual. Projetando para o conjunto
+completo, o semantic top-10 iria de 89,1% (41/46) para 100% (46/46).
+
+### Consequência
+
+**Header contextual — determinístico OU via SLM — não resolve isto.** Ambos só
+adicionam mais tokens em inglês do lado do documento; não constroem a ponte
+PT→EN do lado da query. E as categorias que um header melhor poderia ajudar já
+estão saturadas: sobram 5 queries de profundidade de rank (4–10), contra 5 falhas
+totais que a tradução resolve inteiramente.
+
+**Recomendação: trocar a Fase 5b (query shaping) pela Fase 1.** A alavanca é
+traduzir/expandir a query antes de embeddar — o mesmo sidecar SLM, aplicado do
+outro lado do pipeline. Cuidados de projeto:
+
+1. **Aditivo, não substitutivo:** buscar com a query original E a traduzida,
+   fundindo por RRF. Substituir quebraria conteúdo legitimamente em português
+   (scratchpad, docs). Nunca token-concat.
+2. Só disparar quando a query não for inglês — detecção barata, e evita custo e
+   risco no caminho comum.
+3. É query-time: o orçamento de latência é apertado (p50 atual ~90ms), o que
+   reforça o D8 na direção do menor modelo.
+
+**Nota sobre o instrumento:** com 5 queries virando, todas positivas e sem
+regressão, o Wilcoxon dá p=0,0625 — INCONCLUSIVE pelo teste, exatamente o piso
+travado em teste. Mas o ruído é zero e a direção é unânime, então a magnitude é
+confiável e a decisão é de julgamento, não de significância. É o cenário previsto
+em §5 R3 — e o argumento mais forte até agora para expandir o dataset.
+
+## 7. Fora de escopo
 
 - Bump de `CHUNKER_LOGIC_VERSION` (ver D3).
 - Qualquer mudança no payload devolvido pelas read surfaces além do `ctx_ver`.
