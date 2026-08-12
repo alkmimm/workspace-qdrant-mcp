@@ -297,6 +297,22 @@ describe('assessComparison', () => {
     expect(assessment.decision).toBe('regression');
   });
 
+  it('calls a fully flat comparison a null result, not an underpowered one', () => {
+    // The A-vs-A case (re-running the same eval twice). Distinguishing this
+    // from "underpowered" matters: nothing moved is a stronger statement than
+    // a non-significant test, and the two point at different next actions.
+    const queries = ['a', 'b', 'c'].map((id) => queryRun(id, 1 / 2, 2));
+    const comparison = compareBenchmarkReports(report(queries), report(queries));
+
+    const assessment = assessComparison(comparison);
+
+    expect(comparison.wilcoxon.n).toBe(0);
+    expect(assessment.decision).toBe('inconclusive');
+    expect(assessment.reasons[0]).toMatch(/all 3 pairs identical/);
+    expect(assessment.reasons[0]).toMatch(/Null result/);
+    expect(assessment.reasons[0]).not.toMatch(/cannot distinguish/);
+  });
+
   it('honours a custom alpha', () => {
     const { baseline, variant } = improvingPair(5);
 

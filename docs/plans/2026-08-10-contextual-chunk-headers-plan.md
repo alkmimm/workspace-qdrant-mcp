@@ -458,6 +458,37 @@ Duas correções sobre o texto acima, agora travadas em teste:
    Relevante porque deltas de MRR são razões de inteiros pequenos e empatam
    com frequência — o caso comum, não o degenerado.
 
+#### Baseline 2026-08-11 22:30 BRT (passo 2 — FEITO)
+
+Corpus estável no momento da medição: tenant `367157a01d98` com **33.608 pontos**,
+1884 arquivos, `indexing` 100% (0 pending / 0 in_progress / 0 failed); duas leituras
+consecutivas idênticas. Coleção inteira em 329.523 pontos (outros tenants haviam
+crescido ~10,7k após um redeploy, mas já assentados). Rerank ativo, `weight=0.10`.
+
+| modo | top1 | top3 | top10 | recall@10 | MRR |
+|---|---|---|---|---|---|
+| semantic | 54,3% | 78,3% | 89,1% | **84,4%** | **0,67** |
+| hybrid | — | — | — | 77,9% | — |
+
+**Teste nulo (A vs A', duas execuções idênticas): ruído ZERO.** 46/46 queries com
+ΔMRR exatamente 0, em semantic E hybrid. O harness é determinístico.
+
+Consequência para ler resultados futuros — vale distinguir com cuidado:
+
+- **O ruído zero NÃO baixa o limiar de significância.** Continuam sendo ~6 queries
+  se movendo para p<0,05 two-sided.
+- **Mas torna a ESTIMATIVA limpa.** Sem variância entre execuções, qualquer Δ≠0 é
+  atribuível à mudança, nunca a jitter. Então um efeito pequeno demais para ser
+  *significativo* ainda é **visível e confiável como magnitude** — o que permite
+  decidir com julgamento (custo/benefício) mesmo quando o teste fica inconclusivo.
+
+Por isso o veredito distingue os dois casos: n=0 reporta "null result, not an
+underpowered one" em vez do aviso genérico de amostra pequena. São diagnósticos
+diferentes e apontam para ações diferentes.
+
+Baselines salvos em `tmp/20260811-22{30,31}_eval-run-{A,B}.json` (gitignored —
+regravar com `POST /admin/api/tools/invoke {"tool":"search_eval"}` quando precisar).
+
 ### R4 — Escala subestimada
 
 Contagens indicativas: **33.917** chunks no tenant `367157a01d98`

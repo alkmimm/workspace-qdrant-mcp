@@ -300,6 +300,19 @@ export function assessComparison(
     };
   }
 
+  // A fully flat result is a NULL result, not an underpowered one. Reporting
+  // it as "cannot distinguish from noise" would misdiagnose it: nothing moved
+  // at all, which is a much stronger statement than a non-significant test.
+  if (wilcoxon.n === 0) {
+    return {
+      decision: 'inconclusive',
+      reasons: [
+        `No query changed rank — all ${wilcoxon.zeroPairs} pairs identical. ` +
+          'Null result, not an underpowered one.',
+      ],
+    };
+  }
+
   return {
     decision: 'inconclusive',
     reasons: [

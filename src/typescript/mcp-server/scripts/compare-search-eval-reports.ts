@@ -32,6 +32,7 @@ import {
   formatBenchmarkComparison,
   isSearchEvalResponse,
   searchEvalResponseToReport,
+  unwrapToolEnvelope,
   SEARCH_EVAL_RANKED_MODES,
   type SearchEvalRankedMode,
 } from '../src/benchmarks/compare-io.js';
@@ -50,7 +51,7 @@ function usageError(message: string): never {
 function loadSide(path: string, mode: BenchmarkMode): ComparableReport {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
+    parsed = unwrapToolEnvelope(JSON.parse(readFileSync(path, 'utf8')));
   } catch (error) {
     usageError(`Cannot read/parse ${path}: ${error instanceof Error ? error.message : error}`);
   }
