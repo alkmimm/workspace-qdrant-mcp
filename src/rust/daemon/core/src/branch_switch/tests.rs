@@ -611,13 +611,11 @@ async fn test_reconcile_worktree_branches_tags_baseline() {
         "0123456789abcdef0123456789abcdef01234567\n",
     )
     .unwrap();
-    // Gitlink here too, so this worktree is skipped for the reason under test
-    // (detached HEAD) rather than for failing the leaf-root check.
-    std::fs::write(
-        wt_det.join(".git"),
-        format!("gitdir: {}\n", admin_det.display()),
-    )
-    .unwrap();
+    // Deliberately NO gitlink here. `reconcile_worktree_branches` bails on
+    // `let Some(branch) = wt.branch else { continue }` BEFORE it ever reaches
+    // `is_leaf_worktree_root`, so a detached worktree cannot exercise the leaf
+    // check — writing one would be dead fixture code implying an ordering the
+    // loop does not have.
 
     let pool = create_test_pool().await;
     setup_tables(&pool).await;

@@ -264,8 +264,12 @@ mod tests {
         assert!(!QueueOperation::Update.is_valid_for(ItemType::Folder));
         // Uplift on a Folder is the admin force re-embed's FULL rescan (see the
         // match arm's comment): without it the force re-embed errored "uplift not
-        // valid for item type folder". This assertion was inverted when that
-        // capability landed and no gate ran to catch it.
+        // valid for item type folder". The capability landed in #162 and this
+        // assertion was never touched — while its sibling in
+        // `common/tests/compatibility_vectors.rs` WAS updated in that same change.
+        // One of two co-located assertions moved and the other did not, and no
+        // gate ran to surface the survivor: that is the pattern to look for the
+        // next time this matrix changes.
         assert!(QueueOperation::Uplift.is_valid_for(ItemType::Folder));
         assert!(!QueueOperation::Reset.is_valid_for(ItemType::Folder));
     }
