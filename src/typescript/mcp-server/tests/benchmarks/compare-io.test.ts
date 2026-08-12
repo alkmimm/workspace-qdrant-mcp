@@ -4,6 +4,7 @@ import {
   formatBenchmarkComparison,
   isSearchEvalResponse,
   searchEvalResponseToReport,
+  unwrapToolEnvelope,
   type SearchEvalResponseLike,
 } from '../../src/benchmarks/compare-io.js';
 import { assessComparison, compareBenchmarkReports } from '../../src/benchmarks/compare.js';
@@ -32,6 +33,36 @@ describe('isSearchEvalResponse', () => {
     expect(isSearchEvalResponse({ queries: [], summary: {} })).toBe(false);
     expect(isSearchEvalResponse(null)).toBe(false);
     expect(isSearchEvalResponse('perQuery')).toBe(false);
+  });
+});
+
+describe('unwrapToolEnvelope', () => {
+  it('descends into result for an admin tools/invoke envelope', () => {
+    const inner = toolResponse([{ id: 'a', semanticRank: 1 }]);
+    const envelope = { ok: true, tool: 'search_eval', latencyMs: 1234, result: inner };
+
+    expect(unwrapToolEnvelope(envelope)).toBe(inner);
+    expect(isSearchEvalResponse(unwrapToolEnvelope(envelope))).toBe(true);
+  });
+
+  it('leaves a bare tool response and a full report untouched', () => {
+    const bare = toolResponse([{ id: 'a', semanticRank: 1 }]);
+    expect(unwrapToolEnvelope(bare)).toBe(bare);
+
+    const asReport = { queries: [], summary: { modes: {} } };
+    expect(unwrapToolEnvelope(asReport)).toBe(asReport);
+  });
+
+  it('does not unwrap a payload that carries its own result key', () => {
+    // A tool response that happens to have `result` must not be mistaken for
+    // an envelope — the perQuery guard is what prevents losing the payload.
+    const withResult = { ...toolResponse([{ id: 'a', semanticRank: 1 }]), result: 'noise' };
+    expect(unwrapToolEnvelope(withResult)).toBe(withResult);
+  });
+
+  it('passes through non-objects', () => {
+    expect(unwrapToolEnvelope(null)).toBeNull();
+    expect(unwrapToolEnvelope('x')).toBe('x');
   });
 });
 

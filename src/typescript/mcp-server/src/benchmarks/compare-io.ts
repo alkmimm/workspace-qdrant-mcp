@@ -45,6 +45,30 @@ export interface SearchEvalResponseLike {
 }
 
 /**
+ * Unwrap the admin tool-invoke envelope, if present.
+ *
+ * `POST /admin/api/tools/invoke` — the most convenient way to capture a run —
+ * returns `{ok, tool, latencyMs, result}` rather than the bare tool response.
+ * Descending into `result` here means a captured envelope is accepted as-is,
+ * instead of every caller having to remember to pipe it through `jq .result`
+ * (and getting a confusing "neither a report nor a tool response" if they
+ * forget). Guarded on the payload shapes so a real report/response carrying
+ * its own `result` key is never mistaken for an envelope.
+ */
+export function unwrapToolEnvelope(value: unknown): unknown {
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    'result' in value &&
+    !('perQuery' in value) &&
+    !('queries' in value)
+  ) {
+    return (value as { result: unknown }).result;
+  }
+  return value;
+}
+
+/**
  * Distinguish a saved search_eval tool response from a full benchmark report:
  * the tool response has `perQuery`, the report has `queries`.
  */
