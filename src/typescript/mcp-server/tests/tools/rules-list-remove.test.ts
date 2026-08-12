@@ -297,6 +297,25 @@ describe('RulesTool', () => {
       // Cursor resumes at the first dropped rule (inclusive Qdrant scroll id).
       expect(result.next_cursor).toBe('rule-2');
     });
+
+    it('summary omits timestamps and a redundant owner (the per-entry cost)', async () => {
+      const result = await rulesTool.execute({
+        action: 'list',
+        scope: 'global',
+        summary: true,
+      });
+
+      const r1 = result.rules?.find((r) => r.id === 'rule-1');
+      // Not ranked or filtered on, ~100 chars per entry as two ISO strings.
+      // Still present in the full form and via retrieve.
+      expect(r1?.createdAt).toBeUndefined();
+      expect(r1?.updatedAt).toBeUndefined();
+      // `owner` equals `projectId` for project rules — emitting both repeats the
+      // same tenant hash. It must survive when it genuinely differs.
+      if (r1?.projectId !== undefined) {
+        expect(r1.owner).not.toBe(r1.projectId);
+      }
+    });
   });
 
   describe('unknown action', () => {

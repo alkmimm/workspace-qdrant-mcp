@@ -2,7 +2,7 @@
  * Rules tool argument builder — parse raw MCP tool arguments into RuleOptions
  */
 
-import { DEFAULT_MAX_RESPONSE_BYTES } from '../tools/search-types.js';
+import { DEFAULT_RULES_MAX_RESPONSE_BYTES } from '../tools/search-types.js';
 
 export type RuleOptions = {
   action: 'add' | 'update' | 'remove' | 'list';
@@ -60,9 +60,16 @@ export function buildRuleOptions(args: Record<string, unknown> | undefined): Rul
   if (action === 'list') {
     const summary = args?.['summary'];
     options.summary = typeof summary === 'boolean' ? summary : true;
+    // Rules get a HIGHER default budget than the other read surfaces. Everything
+    // else is a query whose next page is one call away; this is the call an
+    // agent makes once, at session start, to learn how it must work. Truncating
+    // it does not cost a round-trip — it silently drops conventions the agent
+    // then violates, and nothing signals the omission at the point of use.
+    // With the leaner summary shape, 61 rules land near 20k; 40k leaves room
+    // for the set to grow before anyone has to page.
     const maxResponseBytes = args?.['maxResponseBytes'];
     options.maxResponseBytes =
-      typeof maxResponseBytes === 'number' ? maxResponseBytes : DEFAULT_MAX_RESPONSE_BYTES;
+      typeof maxResponseBytes === 'number' ? maxResponseBytes : DEFAULT_RULES_MAX_RESPONSE_BYTES;
     const cursor = args?.['cursor'];
     if (typeof cursor === 'string' && cursor) options.cursor = cursor;
     // A project-scoped listing also carries the global rules: they apply to

@@ -12,8 +12,17 @@ import { TENANT_GLOBAL } from '../constants/tenants.js';
 import { resolveProjectIdentity } from './branch-scope.js';
 import { applyByteBudget } from './response-budget.js';
 
-/** Preview length (chars) for summary-mode list entries. */
-const RULES_LIST_PREVIEW_CHARS = 200;
+/**
+ * Preview length (chars) for summary-mode list entries.
+ *
+ * Rules are behavioural config an agent loads ONCE at session start, so a
+ * partial listing is a correctness problem, not just an ergonomic one — the
+ * agent silently operates without the conventions it never saw. 120 chars is
+ * enough to recognise a rule and decide whether to fetch its body; the label and
+ * title carry the identification. Measured 2026-08-12: at 200 chars a 61-rule
+ * set returned 46 entries with `dropped: 4`.
+ */
+const RULES_LIST_PREVIEW_CHARS = 120;
 
 /** Build Qdrant filter for list query based on scope. */
 function buildListFilter(
@@ -167,12 +176,17 @@ function shapeRuleForList(rule: Rule, summary: boolean): Rule {
   };
   if (rule.label) shaped.label = rule.label;
   if (rule.projectId) shaped.projectId = rule.projectId;
-  if (rule.owner) shaped.owner = rule.owner;
+  // `owner` is the tenant hash and equals `projectId` for every project rule
+  // (see the assignment in `mapPointToRule`), so emitting both spends ~40 chars
+  // per entry repeating the same value. Keep it only when it actually differs.
+  if (rule.owner && rule.owner !== rule.projectId) shaped.owner = rule.owner;
   if (rule.title) shaped.title = rule.title;
   if (rule.tags) shaped.tags = rule.tags;
   if (rule.priority !== undefined) shaped.priority = rule.priority;
-  if (rule.createdAt) shaped.createdAt = rule.createdAt;
-  if (rule.updatedAt) shaped.updatedAt = rule.updatedAt;
+  // Timestamps are dropped from the SUMMARY: two ISO-8601 strings cost ~100
+  // chars per entry and no caller ranks or filters rules by them — `priority`
+  // does that. They remain available in the full form (`summary: false`) and via
+  // `retrieve`. This is the largest single saving in the shape.
   return shaped;
 }
 
@@ -240,7 +254,14 @@ export async function listRules(
   projectDetector: ProjectDetector,
   options: RuleOptions
 ): Promise<RuleResponse> {
-  const { scope = 'project', projectId, limit = 50, includeGlobal = false } = options;
+  // 200, not 50: this limit caps the Qdrant SCROLL, one layer above the byte
+  // budget, so it decides how many rules are fetched before shaping can drop
+  // any. With 50, a 61-rule set returned `total: 61` but only ever considered
+  // 50 of them — the missing 11 were invisible in the drop accounting (46 kept
+  // + 4 dropped = 50), and an agent had to page three times to load its own
+  // conventions. The rules collection is small and warm scrolls finish in
+  // milliseconds (see RULES_SCROLL_DEADLINE_MS).
+  const { scope = 'project', projectId, limit = 200, includeGlobal = false } = options;
 
   let resolvedProjectId = projectId;
   if (scope === 'project' && !resolvedProjectId) {
