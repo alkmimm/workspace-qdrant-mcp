@@ -57,9 +57,18 @@ async fn clear_search_db_for_watch_tenants(
     search_db: &Arc<SearchDbManager>,
     pool: &sqlx::SqlitePool,
 ) -> Result<(), Status> {
+    // `enabled = 1` is load-bearing: this clear must cover EXACTLY what the
+    // re-enqueue repopulates, and `enqueue_folder_scans` selects
+    // `WHERE enabled = 1`. Without it a disabled watch folder's tenant has its
+    // whole text index deleted and is then never re-scanned — grep returns 0 for
+    // that project permanently, with no error. Disabled rows are not exotic here:
+    // the orphan-watcher auto-disable (PR #91) produces one whenever a watched
+    // path disappears. Until the count query above was fixed this function always
+    // aborted before the DELETEs, so the mismatch was unreachable.
     let tenants: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT tenant_id FROM watch_folders \
-         WHERE collection IN ('projects','libraries','rules','scratchpad')",
+         WHERE collection IN ('projects','libraries','rules','scratchpad') \
+           AND enabled = 1",
     )
     .fetch_all(pool)
     .await

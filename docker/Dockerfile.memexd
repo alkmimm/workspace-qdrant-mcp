@@ -256,15 +256,26 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # the `workspace-qdrant-grpc` package. `flush_clears_search_db_for_watch_folder_tenants`
 # already covered this path and already failed, but nothing ever executed it:
 # every filter above is `-p workspace-qdrant-core`, and this fork has GitHub
-# Actions disabled, so the grpc package had no gate at all. It is hermetic
-# (in-memory SQLite + tempdir search.db) and guards the repair lever the whole
-# index depends on — a broken clear makes a reembed report success while leaving
-# the text index stale.
+# Actions disabled, so the grpc package had no gate at all. It guards the repair
+# lever the whole index depends on — a broken clear makes a reembed report success
+# while leaving the text index stale.
+#
+# Caveat, unlike the suites above: this filter is NOT fully hermetic.
+# `folder_uplift_uses_current_project_branch` shells out to `git init/add/commit`
+# in a TempDir, and the happy-path tests call `get_current_branch` on a path that
+# does not exist. It passes because the builder installs git (for memexd's
+# build.rs) and runs as root with a writable HOME — a slimmer base or a non-root
+# stage would break it here rather than in a test report.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
-    cargo test -p workspace-qdrant-grpc --lib reembed -- --test-threads=4
+    cargo test -p workspace-qdrant-grpc --lib reembed -- --test-threads=4 \
+        2>&1 | tee /tmp/reembed.log; \
+    grep -q "^test result: ok\. 14 passed" /tmp/reembed.log \
+    || { echo "GATE: expected exactly 14 reembed tests to run and pass — libtest \
+exits 0 when a positional filter matches nothing, so renaming or moving the \
+module would silently un-gate the search.db clear"; exit 1; }
 
 # Issue #299 cascade-rename guard tests run here too, same rationale: hermetic
 # (in-memory SQLite + tempdir git fixtures, no FTS5/timing dependence) and they
