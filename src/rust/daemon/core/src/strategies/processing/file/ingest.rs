@@ -174,6 +174,9 @@ pub(super) async fn handle_retry_skip(
                 Some(relative_path),
                 Some(existing.file_hash.as_str()),
                 &item.queue_id,
+                // Uplift = forced re-processing. Pass it through so the FTS
+                // layer stops short-circuiting on an unchanged content hash.
+                matches!(item.op, crate::unified_queue_schema::QueueOperation::Uplift),
             )
             .await
             {
@@ -609,6 +612,9 @@ async fn update_search_index(
             Some(relative_path),
             Some(file_hash),
             &item.queue_id,
+            // Uplift = forced re-processing. Pass it through so the FTS layer
+            // stops short-circuiting on an unchanged content hash.
+            matches!(item.op, crate::unified_queue_schema::QueueOperation::Uplift),
         )
         .await
         {
