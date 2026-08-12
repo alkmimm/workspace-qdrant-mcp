@@ -252,6 +252,20 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         pruned_branch corpus_election branch_file_counts \
         --test-threads=4
 
+# The reembed pipeline's search.db clear runs here — the FIRST gated test from
+# the `workspace-qdrant-grpc` package. `flush_clears_search_db_for_watch_folder_tenants`
+# already covered this path and already failed, but nothing ever executed it:
+# every filter above is `-p workspace-qdrant-core`, and this fork has GitHub
+# Actions disabled, so the grpc package had no gate at all. It is hermetic
+# (in-memory SQLite + tempdir search.db) and guards the repair lever the whole
+# index depends on — a broken clear makes a reembed report success while leaving
+# the text index stale.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-grpc --lib reembed -- --test-threads=4
+
 # Issue #299 cascade-rename guard tests run here too, same rationale: hermetic
 # (in-memory SQLite + tempdir git fixtures, no FTS5/timing dependence) and they
 # guard the tenant-rename suppression + orphan prune that prevents the silent-

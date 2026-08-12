@@ -75,18 +75,36 @@ async fn clear_search_db_for_watch_tenants(
 
     for chunk in tenants.chunks(500) {
         let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT COALESCE(COUNT(*), 0), COALESCE(SUM(line_count), 0) \
-             FROM file_metadata WHERE tenant_id IN ({placeholders})"
-        );
-        let mut q = sqlx::query_as::<_, (i64, i64)>(&sql);
+        // `file_metadata` has no line-count column (see `code_lines_schema`), so
+        // the line total is counted from `code_lines` itself — before the DELETEs
+        // below remove those rows. Selecting a nonexistent
+        // `file_metadata.line_count` here failed the whole function with
+        // Status::internal, so the search.db clear and the FTS rebuild it gates
+        // never ran: a reembed reported success while leaving the text index
+        // stale, which also made it useless as a repair lever.
+        let sql = format!("SELECT COUNT(*) FROM file_metadata WHERE tenant_id IN ({placeholders})");
+        let mut q = sqlx::query_scalar::<_, i64>(&sql);
         for tenant in chunk {
             q = q.bind(tenant);
         }
-        let (files, lines) = q
+        let files = q
             .fetch_one(search_pool)
             .await
-            .map_err(|e| Status::internal(format!("count search-db rows for reembed: {e}")))?;
+            .map_err(|e| Status::internal(format!("count search-db files for reembed: {e}")))?;
+
+        let sql = format!(
+            "SELECT COUNT(*) FROM code_lines WHERE file_id IN \
+             (SELECT file_id FROM file_metadata WHERE tenant_id IN ({placeholders}))"
+        );
+        let mut q = sqlx::query_scalar::<_, i64>(&sql);
+        for tenant in chunk {
+            q = q.bind(tenant);
+        }
+        let lines = q
+            .fetch_one(search_pool)
+            .await
+            .map_err(|e| Status::internal(format!("count search-db lines for reembed: {e}")))?;
+
         total_files += files as u64;
         total_lines += lines as u64;
 
