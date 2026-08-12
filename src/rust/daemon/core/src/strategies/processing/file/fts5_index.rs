@@ -52,6 +52,7 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
     relative_path: Option<&str>,
     file_hash: Option<&str>,
     queue_id: &str,
+    uplift: bool,
 ) -> Result<Fts5Outcome, String> {
     let Some(sender) = crate::search_db::batch_writer::global_sender() else {
         return update_fts5_for_file(
@@ -64,6 +65,7 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
             base_point,
             relative_path,
             file_hash,
+            uplift,
         )
         .await
         .map(|_| Fts5Outcome::Inline);
@@ -121,7 +123,7 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
     }
 
     let new_hash = compute_content_hash(&new_content);
-    let old_content = match fetch_old_content(state_pool, file_id, file_path, &new_hash).await {
+    let old_content = match fetch_old_content(state_pool, file_id, file_path, &new_hash, uplift).await {
         Some(c) => c,
         None => return Ok(Fts5Outcome::Skipped),
     };
@@ -170,6 +172,7 @@ pub(super) async fn update_fts5_for_file(
     base_point: Option<&str>,
     relative_path: Option<&str>,
     file_hash: Option<&str>,
+    uplift: bool,
 ) -> Result<bool, String> {
     let fts_start = std::time::Instant::now();
 
@@ -220,7 +223,7 @@ pub(super) async fn update_fts5_for_file(
     let new_hash = compute_content_hash(&new_content);
 
     // Check indexed_content cache for skip detection
-    let old_content = fetch_old_content(state_pool, file_id, file_path, &new_hash).await;
+    let old_content = fetch_old_content(state_pool, file_id, file_path, &new_hash, uplift).await;
     if old_content.is_none() {
         return Ok(false);
     }
@@ -276,16 +279,27 @@ async fn fetch_old_content(
     file_id: i64,
     file_path: &str,
     new_hash: &str,
+    uplift: bool,
 ) -> Option<String> {
     match indexed_content_schema::get_indexed_content(state_pool, file_id).await {
         Ok(Some((cached_bytes, cached_hash))) => {
-            if cached_hash == new_hash {
+            if cached_hash == new_hash && !uplift {
                 debug!(
                     "FTS5: content unchanged (hash match), skipping: {}",
                     file_path
                 );
                 return None;
             }
+            // `uplift` is forced re-processing — the op the admin re-embed uses
+            // precisely to bypass unchanged-hash skips. It already bypasses the
+            // `tracked_files` skip; honouring it here too is what makes that
+            // promise true for the TEXT index. Measured 2026-08-12: a forced
+            // per-tenant re-embed left 79 of 82 files still corrupted because
+            // this gate returned early — the file's bytes had not changed, so
+            // the hash always matched and `code_lines` was never revisited.
+            // Falling through with the cached content keeps the work cheap when
+            // the rows are already correct (the diff is a no-op) and lets
+            // `apply_diff_to_code_lines` rebuild when they are not.
             // Content changed -- use cached content as diff base
             Some(String::from_utf8(cached_bytes).unwrap_or_default())
         }
