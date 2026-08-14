@@ -17,20 +17,20 @@
     {
       "type": "stat",
       "title": "Non-English share of ranked searches",
-      "description": "The headline number: the fraction of traffic the translated leg would touch, recorded regardless of whether translation is enabled. CUMULATIVE since the MCP started — deliberately NOT scoped by the time picker. rate()/increase() over a low-traffic window reports 0 until several events land inside it, which is precisely the regime this dashboard is meant to observe. BOTH readings exclude actor=benchmark: the eval harness is forced to report itself as 'user' by a schema CHECK, so one search_eval run would otherwise inject 33 Portuguese queries into the human series and manufacture the very signal being read. Below ~5% the feature is mostly dead weight.",
+      "description": "The headline number: the fraction of traffic the translated leg would touch, recorded regardless of whether translation is enabled. Uses increase() over the dashboard range — the counters live in the MCP process and RESET on every container recreate, so a raw cumulative reading would silently show only the period since the last redeploy. increase() sums across resets, and over the 30d default there are samples enough that the low-traffic zero-reporting problem does not apply (it does over an hour, which is why a short range here reads 0). BOTH readings exclude actor=benchmark: the eval harness is forced to report itself as 'user' by a schema CHECK, so one search_eval run would otherwise inject 33 Portuguese queries into the human series and manufacture the very signal being read. Below ~5% the feature is mostly dead weight.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 6, "w": 8, "x": 0, "y": 1 },
       "id": 1,
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(wqm_mcp_query_language_total{verdict=\"non_english\",actor!=\"benchmark\"}) / clamp_min(sum(wqm_mcp_query_language_total{actor!=\"benchmark\"}), 1)",
+          "expr": "sum(increase(wqm_mcp_query_language_total{verdict=\"non_english\",actor!=\"benchmark\"}[$__range])) / clamp_min(sum(increase(wqm_mcp_query_language_total{actor!=\"benchmark\"}[$__range])), 1)",
           "legendFormat": "real traffic",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(wqm_mcp_query_language_total{verdict=\"non_english\",actor=\"user\"}) / clamp_min(sum(wqm_mcp_query_language_total{actor=\"user\"}), 1)",
+          "expr": "sum(increase(wqm_mcp_query_language_total{verdict=\"non_english\",actor=\"user\"}[$__range])) / clamp_min(sum(increase(wqm_mcp_query_language_total{actor=\"user\"}[$__range])), 1)",
           "legendFormat": "human only",
           "refId": "B"
         }
@@ -59,8 +59,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Cumulative searches by verdict and actor",
-      "description": "Absolute volume behind the share, as running totals rather than a rate — at this traffic level a rate() plot is a flat line at zero and tells you nothing. A high percentage over a handful of searches is not a signal: read the counts here before acting on the ratio.",
+      "title": "Cumulative searches by verdict and actor (raw counters)",
+      "description": "Absolute volume behind the share, as the RAW running totals. Deliberately not increase()-based: a raw counter makes a process restart VISIBLE as a drop to zero, which is exactly what you want to see here, while the stat panels above use increase() so they survive that restart instead of silently reporting only the period since it. A high percentage over a handful of searches is not a signal — read the counts here before acting on the ratio.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 6, "w": 16, "x": 8, "y": 1 },
       "id": 2,
@@ -96,7 +96,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(wqm_mcp_query_translation_total{outcome=\"translation_failed\"}) / clamp_min(sum(wqm_mcp_query_translation_total{outcome=~\"translated|translation_failed\"}), 1)",
+          "expr": "sum(increase(wqm_mcp_query_translation_total{outcome=\"translation_failed\"}[$__range])) / clamp_min(sum(increase(wqm_mcp_query_translation_total{outcome=~\"translated|translation_failed\"}[$__range])), 1)",
           "legendFormat": "failed",
           "refId": "A"
         }
@@ -286,7 +286,7 @@
   "schemaVersion": 39,
   "tags": ["wqm", "mcp", "search", "query-translation"],
   "templating": { "list": [] },
-  "time": { "from": "now-7d", "to": "now" },
+  "time": { "from": "now-30d", "to": "now" },
   "timepicker": {},
   "timezone": "",
   "title": "WQM — Query Translation",
