@@ -20,6 +20,7 @@ import {
 import { fuseQueryLegs } from './search-query-fusion.js';
 import { resolveTranslatedQuery } from './search-translated-leg.js';
 import { recordTranslatedLegHits, recordTranslatedLegSkipped } from '../telemetry/metrics.js';
+import { logInfo } from '../utils/logger.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
@@ -436,6 +437,21 @@ export class SearchTool {
           else if (!originalKeys.has(`${hit.collection}:${hit.id}`)) translatedOnly += 1;
         }
         recordTranslatedLegHits(bothLegs, translatedOnly);
+        // Per-search outcome of the second leg, shipped to Loki alongside the
+        // `[query-language]` line. The counters say HOW MANY hits translation
+        // contributed; this says WHICH SEARCHES it rescued — the difference
+        // between knowing the feature is active and being able to point at a
+        // query it saved. Emitted here rather than folded into the earlier line
+        // because the contribution is only known after fusion.
+        logInfo('[translated-leg]', {
+          query: options.query.slice(0, 300),
+          translated: translation.query.slice(0, 300),
+          hits_total: fusedResults.length,
+          hits_translated_only: translatedOnly,
+          hits_both_legs: bothLegs,
+          rescued: translatedOnly > 0,
+          actor: options.telemetryIsBenchmark ? 'benchmark' : (options.telemetryActor ?? 'other'),
+        });
         primary = {
           ...primary,
           results: fusedResults,

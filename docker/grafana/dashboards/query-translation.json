@@ -1,5 +1,7 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "description": "Decide whether PT->EN query translation is worth enabling, and once enabled whether it is earning its latency. The language verdict is recorded even with the feature OFF, so the top row answers 'would this touch real traffic?' at zero cost. See docs/plans/2026-08-11-query-translation-plan.md.",
   "editable": true,
   "fiscalYearStartMonth": 0,
@@ -8,8 +10,13 @@
   "panels": [
     {
       "type": "row",
-      "title": "Decision — is it worth enabling? (collected with the feature OFF)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "title": "Reach — how much traffic does this touch?",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 100,
       "collapsed": false,
       "panels": []
@@ -18,18 +25,32 @@
       "type": "stat",
       "title": "Non-English share of ranked searches",
       "description": "The headline number: the fraction of traffic the translated leg would touch, recorded regardless of whether translation is enabled. Uses increase() over the dashboard range — the counters live in the MCP process and RESET on every container recreate, so a raw cumulative reading would silently show only the period since the last redeploy. increase() sums across resets, and over the 30d default there are samples enough that the low-traffic zero-reporting problem does not apply (it does over an hour, which is why a short range here reads 0). BOTH readings exclude actor=benchmark: the eval harness is forced to report itself as 'user' by a schema CHECK, so one search_eval run would otherwise inject 33 Portuguese queries into the human series and manufacture the very signal being read. Below ~5% the feature is mostly dead weight.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 1 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
       "id": 1,
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "sum(increase(wqm_mcp_query_language_total{verdict=\"non_english\",actor!=\"benchmark\"}[$__range])) / clamp_min(sum(increase(wqm_mcp_query_language_total{actor!=\"benchmark\"}[$__range])), 1)",
           "legendFormat": "real traffic",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "sum(increase(wqm_mcp_query_language_total{verdict=\"non_english\",actor=\"user\"}[$__range])) / clamp_min(sum(increase(wqm_mcp_query_language_total{actor=\"user\"}[$__range])), 1)",
           "legendFormat": "human only",
           "refId": "B"
@@ -42,16 +63,31 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "text", "value": null },
-              { "color": "blue", "value": 0.05 },
-              { "color": "green", "value": 0.15 }
+              {
+                "color": "text",
+                "value": null
+              },
+              {
+                "color": "blue",
+                "value": 0.05
+              },
+              {
+                "color": "green",
+                "value": 0.15
+              }
             ]
           }
         },
         "overrides": []
       },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "colorMode": "value",
         "graphMode": "none",
         "textMode": "auto"
@@ -61,41 +97,192 @@
       "type": "timeseries",
       "title": "Cumulative searches by verdict and actor (raw counters)",
       "description": "Absolute volume behind the share, as the RAW running totals. Deliberately not increase()-based: a raw counter makes a process restart VISIBLE as a drop to zero, which is exactly what you want to see here, while the stat panels above use increase() so they survive that restart instead of silently reporting only the period since it. A high percentage over a handful of searches is not a signal — read the counts here before acting on the ratio.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 1 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 16,
+        "x": 8,
+        "y": 1
+      },
       "id": 2,
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "sum by (verdict, actor) (wqm_mcp_query_language_total)",
           "legendFormat": "{{verdict}} / {{actor}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "short", "custom": { "fillOpacity": 10, "lineWidth": 2 } },
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          }
+        },
         "overrides": []
       },
-      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull"] } }
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "type": "row",
-      "title": "Health — is the translator working? (needs the feature ON)",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "title": "Value & cost — is it earning its latency?",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
       "id": 101,
       "collapsed": false,
       "panels": []
     },
     {
       "type": "stat",
+      "title": "Hits that ONLY translation found",
+      "description": "The payoff number. Share of returned hits the original query never surfaced — results that exist because of the second leg. Measured live on 2026-08-14: 29 translated-only against 7 cross-language agreements. If this trends toward zero while translations keep succeeding, the leg is paying latency for nothing and should be switched off. Read it next to 'searches that paid' below: value over cost.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      },
+      "id": 8,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(increase(wqm_mcp_translated_leg_hits_total{agreement=\"translated_only\"}[$__range])) / clamp_min(sum(increase(wqm_mcp_translated_leg_hits_total[$__range])), 1)",
+          "legendFormat": "translated-only",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "green",
+                "value": 0.3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Searches that paid for translation",
+      "description": "The cost side. Share of ranked searches that actually made the SLM round-trip — everything else (English queries, feature off) costs nothing at all, because the local gate declines before any network hop. This is the fraction of traffic carrying the ~200ms; it should track the non-English share above.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 8
+      },
+      "id": 9,
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(increase(wqm_mcp_query_translation_total{outcome=~\"translated|translation_failed\"}[$__range])) / clamp_min(sum(increase(wqm_mcp_query_translation_total[$__range])), 1)",
+          "legendFormat": "paid",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
       "title": "Translation failure rate",
       "description": "Share of ATTEMPTED translations that came back unusable — HTTP error, timeout, an echo of the input, still in the source language, or a runaway reply. Each one falls back to a single leg, so it costs a round-trip and returns nothing. The 1.5B sidecar failed 2 of 8 smoke queries this way; a rate creeping up here is the signal to swap the model, not to disable the feature.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 8
+      },
       "id": 3,
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "sum(increase(wqm_mcp_query_translation_total{outcome=\"translation_failed\"}[$__range])) / clamp_min(sum(increase(wqm_mcp_query_translation_total{outcome=~\"translated|translation_failed\"}[$__range])), 1)",
           "legendFormat": "failed",
           "refId": "A"
@@ -108,16 +295,31 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 0.1 },
-              { "color": "red", "value": 0.25 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
             ]
           }
         },
         "overrides": []
       },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "colorMode": "value",
         "graphMode": "none",
         "textMode": "auto"
@@ -127,41 +329,169 @@
       "type": "timeseries",
       "title": "Second-leg outcomes",
       "description": "Where every ranked search ended up. `disabled` dominating means the feature is off — expected until it is switched on. `already_english` is the free path: the local gate declined and no round-trip was made.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 8 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 15
+      },
       "id": 4,
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "sum by (outcome) (wqm_mcp_query_translation_total)",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "short", "custom": { "fillOpacity": 10, "lineWidth": 2 } },
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          }
+        },
         "overrides": []
       },
-      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull"] } }
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "type": "row",
       "title": "The queries themselves",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
       "id": 103,
       "collapsed": false,
       "panels": []
     },
     {
       "type": "table",
+      "title": "Searches translation RESCUED — with what it said",
+      "description": "The queries that got hits the original never surfaced, and the English the SLM produced to find them. This is where a bad translation becomes visible next to its consequence: a rescue count of 0 with a nonsense translation is the signal to change the glossary or the model, and neither is legible from a counter. Sorted newest first; `rescued=false` rows are the searches where the second leg ran and contributed nothing.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 10,
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{container=\"wqm-mcp\"} |= \"[translated-leg]\" | json | actor != `benchmark`",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "labels",
+            "replace": false,
+            "keepTime": false
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Line": true,
+              "labels": true,
+              "id": true,
+              "tsNs": true,
+              "container": true,
+              "filename": true,
+              "job": true,
+              "level": true,
+              "name": true,
+              "component": true,
+              "msg": true,
+              "time": true,
+              "service_name": true,
+              "detected_level": true,
+              "tsLabel": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "Time": "when",
+              "query": "query (as typed)",
+              "translated": "translation",
+              "hits_translated_only": "rescued hits",
+              "hits_both_legs": "both legs",
+              "hits_total": "total hits",
+              "rescued": "helped?"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "when",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
       "title": "Non-English searches — actual text",
       "description": "The counters say HOW MUCH; this says WHICH. Query text cannot live in a Prometheus label (unbounded cardinality), so it ships as a structured log line and is tabled from Loki here. Reading the real phrasings is what tells you whether a non-English share is worth acting on — and once translation is on, a bad translation is visible right next to the query that produced it. Same data already persisted in search_events, on a channel Grafana can render.",
-      "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 15 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
       "id": 7,
       "targets": [
         {
-          "datasource": { "type": "loki", "uid": "loki" },
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
           "expr": "{container=\"wqm-mcp\"} |= \"[query-language]\" | json | verdict = `non_english`",
           "queryType": "range",
           "refId": "A"
@@ -170,7 +500,11 @@
       "transformations": [
         {
           "id": "extractFields",
-          "options": { "source": "labels", "replace": false, "keepTime": false }
+          "options": {
+            "source": "labels",
+            "replace": false,
+            "keepTime": false
+          }
         },
         {
           "id": "organize",
@@ -206,13 +540,33 @@
           }
         }
       ],
-      "fieldConfig": { "defaults": { "custom": { "align": "left" } }, "overrides": [] },
-      "options": { "showHeader": true, "sortBy": [{ "displayName": "when", "desc": true }] }
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "when",
+            "desc": true
+          }
+        ]
+      }
     },
     {
       "type": "row",
-      "title": "Value — is it earning its latency?",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "title": "Detail over time",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
       "id": 102,
       "collapsed": false,
       "panels": []
@@ -221,45 +575,84 @@
       "type": "timeseries",
       "title": "Hits contributed by the translated leg",
       "description": "The one that separates 'translation ran' from 'translation helped'. `translated_only` are hits the original query never surfaced — the rescues the feature exists for. `both_legs` is cross-language agreement. If translations succeed but this stays at zero, the leg is paying latency for nothing. Read `leg skipped` first: it counts translations whose second leg could not run because its embeddings degraded, and it distinguishes 'contributed nothing' from 'never ran' — two conclusions that would otherwise look identical here.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 26 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 15
+      },
       "id": 5,
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "sum by (agreement) (wqm_mcp_translated_leg_hits_total)",
           "legendFormat": "{{agreement}}",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "wqm_mcp_translated_leg_skipped_total",
           "legendFormat": "leg skipped (degraded embeddings)",
           "refId": "B"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "short", "custom": { "fillOpacity": 20 } },
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20
+          }
+        },
         "overrides": []
       },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
     },
     {
       "type": "timeseries",
       "title": "Translation round-trip latency",
-      "description": "Added ONLY to non-English searches; English queries never reach the sidecar. Measured medians: 123ms for a 1.5B, 182ms for a 7B, +14ms for the domain glossary. A p95 past ~0.5s means the sidecar is contending for the GPU with the embedder and the trade needs revisiting.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 26 },
+      "description": "Added ONLY to non-English searches; English queries never reach the sidecar. Measured: median 123ms for a 1.5B, 182ms for the 7B, +14ms for the domain glossary; p95 observed at 0.45s live. Past ~0.5s the sidecar is contending for the GPU with the embedder (only 3.0 GB VRAM free with both loaded) and the trade needs revisiting — the lever is a smaller model via WQM_TRANSLATE_MODEL.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 15
+      },
       "id": 6,
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "histogram_quantile(0.5, sum by (le) (rate(wqm_mcp_query_translation_duration_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "histogram_quantile(0.95, sum by (le) (rate(wqm_mcp_query_translation_duration_seconds_bucket[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "B"
@@ -268,25 +661,49 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "custom": { "fillOpacity": 0 },
+          "custom": {
+            "fillOpacity": 0
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 0.5 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              }
             ]
           }
         },
         "overrides": []
       },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
     }
   ],
   "refresh": "1m",
   "schemaVersion": 39,
-  "tags": ["wqm", "mcp", "search", "query-translation"],
-  "templating": { "list": [] },
-  "time": { "from": "now-30d", "to": "now" },
+  "tags": [
+    "wqm",
+    "mcp",
+    "search",
+    "query-translation"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
   "title": "WQM — Query Translation",
