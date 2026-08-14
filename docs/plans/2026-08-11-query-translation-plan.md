@@ -227,13 +227,45 @@ desfaz o trade. Um teste fixa o deslocamento diretamente.
   próprios arquivos deste trabalho, alterando 3 queries. Baseline e variante têm
   de ser tomados em sequência, sem escrita no repo entre eles.
 
-### Não feito
+### L2 — boost de rerank gated: TESTADO E DESCARTADO (2026-08-14)
 
-**L2 — boost de rerank gated.** O `bge-reranker-v2-m3` já deployado é
-multilíngue e pode pontuar (query PT, chunk EN) sem tradução. Ficou fora desta
-rodada de propósito: seriam duas mudanças de ranking simultâneas e o ganho não
-seria atribuível. É o próximo A/B natural, e é complementar — tradução é lever
-de *recall*, cross-encoder é lever de *precisão*.
+Hipótese: o `bge-reranker-v2-m3` já deployado é multilíngue e pontua o par
+`(query, chunk)` junto, então poderia reconhecer que uma query PT casa com um
+chunk EN **sem tradução nenhuma** — subindo o peso só quando o gate de idioma
+dispara. Seria a alavanca mais barata possível: zero serviços novos, zero VRAM,
+zero latência de tradução.
+
+Testável sem escrever código, porque `search_eval` aceita `rerankWeight` por
+chamada. Sweep com a tradução DESLIGADA (efeito do reranker isolado), quatro
+pontos back-to-back para o corpus não derivar:
+
+| peso | pt top10 | pt top3 | impl | orig | sym | doc | MRR |
+|---|---|---|---|---|---|---|---|
+| **0,10** (atual) | 72,7 | 54,5 | 100 | 100 | 100 | 100 | **0,610** |
+| 0,30 | 72,7 | 54,5 | 100 | 100 | 100 | 100 | 0,610 |
+| 0,50 | 72,7 | 42,4 | 85,7 | 100 | 100 | 100 | 0,470 |
+| 1,00 | 54,5 | 21,2 | 64,3 | 66,7 | 83,3 | 75 | 0,250 |
+
+**O bucket `pt` nunca melhora.** Fica cravado em 72,7% até 0,5 e despenca para
+54,5% em 1,0. A partir de 0,5 o inglês se degrada junto — MRR 0,610 → 0,470 →
+0,250.
+
+**Por quê:** o reranker só reordena o que o retriever trouxe. Na homofilia de
+idioma o pool de candidatos das queries PT se enche de documentos em português,
+e o código certo **nunca entra no pool**. Reordenar não adiciona o que a
+recuperação não buscou.
+
+A distinção estava levantada como hipótese e agora está medida: **tradução é
+alavanca de recall, cross-encoder é de precisão. Não se conserta recall com
+precisão.**
+
+Efeito colateral útil: o sweep confirma que o default 0,10 está no topo do platô
+seguro — 0,30 é indistinguível e 0,50 já custa top-3.
+
+**Não re-tentar** sem antes mudar o que entra no pool. A única variante ainda de
+pé seria buscar um pool maior (top-100) antes de reordenar para queries
+não-inglesas — mas dado o mecanismo de homofilia, o gold pode estar fundo demais
+para qualquer profundidade praticável, e isso precisaria ser medido primeiro.
 
 ## 7. Fora de escopo
 
