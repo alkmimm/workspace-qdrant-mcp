@@ -13,6 +13,12 @@ import { randomUUID } from 'node:crypto';
 import type { QdrantClient } from '@qdrant/js-client-rest';
 import { getQdrantClient } from '../clients/qdrant-client-factory.js';
 import { effectivenessTracker } from '../clients/effectiveness-signals.js';
+import {
+  createQueryTranslatorFromEnv,
+  type QueryTranslator,
+} from '../clients/query-translator.js';
+import { fuseQueryLegs } from './search-query-fusion.js';
+import { resolveTranslatedQuery } from './search-translated-leg.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
@@ -98,6 +104,8 @@ export class SearchTool {
   private readonly expansionWeight: number;
   private readonly maxExpandedKeywords: number;
   private readonly searchDbReader: SearchDbReader | undefined;
+  /** Null unless WQM_TRANSLATE_BASE_URL + _MODEL are both set (default: off). */
+  private readonly queryTranslator: QueryTranslator | null;
 
   constructor(
     config: SearchToolConfig,
@@ -118,6 +126,7 @@ export class SearchTool {
     this.expansionWeight = config.expansionWeight ?? DEFAULT_EXPANSION_WEIGHT;
     this.maxExpandedKeywords = config.maxExpandedKeywords ?? DEFAULT_MAX_EXPANDED_KEYWORDS;
     this.searchDbReader = searchDbReader;
+    this.queryTranslator = createQueryTranslatorFromEnv();
   }
 
   get stateManager(): SqliteStateManager {
@@ -359,7 +368,61 @@ export class SearchTool {
         embeddings.sparseVector
       );
 
-    const primary = await runFinalize(effectiveOptions, fallbackBranch);
+    // Second leg (query translation, off by default): kick the SLM off BEFORE
+    // awaiting the primary search so the round-trip overlaps it instead of
+    // adding to it. Every failure path resolves to `query: null`, which leaves
+    // `primary` exactly as it is today. See search-translated-leg.ts.
+    const translationPromise = resolveTranslatedQuery(options.query, this.queryTranslator);
+    const primaryPromise = runFinalize(effectiveOptions, fallbackBranch);
+    const translation = await translationPromise;
+
+    let primary: SearchResponse;
+    if (translation.query === null) {
+      primary = await primaryPromise;
+    } else {
+      // Same options and filters — only the text being embedded differs, so
+      // the two legs are directly comparable rankings of the same corpus slice.
+      const translatedOptions: SearchOptions = { ...effectiveOptions, query: translation.query };
+      const translatedEmbeddings = await this.prepareEmbeddings(
+        translatedOptions,
+        translation.query,
+        mode,
+        collectionsToSearch,
+        currentProjectId,
+        basePoints
+      );
+      primary = await primaryPromise;
+      // A degraded/fallback embedding on the SECOND leg is not worth surfacing
+      // or acting on — drop the leg and keep today's single-leg answer.
+      if (!('fallback' in translatedEmbeddings)) {
+        const translatedLeg = await this.runSearchAndFinalize(
+          translatedOptions,
+          mode,
+          limit,
+          scope,
+          collectionsToSearch,
+          eventId,
+          searchStartMs,
+          currentProjectId,
+          basePoints,
+          fallbackBranch,
+          basePointsDegraded,
+          basePointsActiveCount,
+          translatedEmbeddings.denseEmbedding,
+          translatedEmbeddings.sparseVector
+        );
+        const fusedResults = fuseQueryLegs(primary.results, translatedLeg.results, { limit });
+        primary = {
+          ...primary,
+          results: fusedResults,
+          // `total` is the size of the returned set (search-helpers.ts:719),
+          // not a corpus count — it has to follow the fused list or the
+          // response contradicts itself.
+          total: fusedResults.length,
+          translated_query: translation.query,
+        };
+      }
+    }
 
     // Auto-widen on empty (parity with grep / search_exact): a branch-scoped
     // semantic search that finds nothing may be missing content the daemon

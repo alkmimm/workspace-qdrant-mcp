@@ -292,6 +292,12 @@ export interface SearchResponse {
    *  `dropped` is how many were cut (the kept set always has >=1). The agent can
    *  narrow the query, raise `maxResponseBytes`, or use `summary` for the rest. */
   budget_truncated?: { dropped: number };
+  /** The English query that was searched as a SECOND leg alongside the original,
+   *  present only when query translation fired (non-English query + the feature
+   *  enabled + a usable translation). Absent on every other path, including when
+   *  translation was attempted and rejected. Surfaced so a caller can see that
+   *  its results are a fusion of two queries — and which one. */
+  translated_query?: string;
   /** Set when more code candidates exist beyond the returned page — pass it back
    *  as `offset` to fetch the next page. Absent on the last page. */
   next_offset?: number;
