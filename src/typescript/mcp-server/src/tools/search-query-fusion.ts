@@ -59,6 +59,48 @@ export const TRANSLATED_LEG_WEIGHT = Math.min(
   1
 );
 
+/**
+ * How the two legs are combined.
+ *
+ * `rrf` — weighted reciprocal rank fusion. One global scalar has to serve two
+ * opposite situations: when the original leg is junk (language homophily) the
+ * translated leg should dominate, and when the original leg is good it should
+ * not be touched at all. The 0.7/0.9/1.0 sweep is that tension made visible —
+ * 0.7 was inert, 1.0 bought top-10 by breaking top-3.
+ *
+ * `best-rank` — order by each chunk's BEST position across the legs, ties going
+ * to the original. This is exactly the oracle the ceiling was measured with
+ * (pt 93.9% vs 90.9% for substitution), so it is the only mode that can reach
+ * that number; the cost is that a confident mistranslation lands at the top
+ * with nothing damping it, which is what the tail guard exists to catch.
+ */
+export type QueryFusionMode = 'rrf' | 'best-rank';
+
+/**
+ * Fusion mode. `best-rank` is the DEFAULT on measurement (2026-08-12, 71-query
+ * benchmark, 7B translator + domain glossary, same corpus, flag-off baseline):
+ *
+ *                   pt top-10   top-3 overall   MRR     Wilcoxon
+ *   baseline        23/33       50/71           0.593   —
+ *   rrf w=0.9       29/33       50/71           0.607   p=0.14  (n.s.)
+ *   best-rank       29/33       53/71           0.627   p=0.0119
+ *
+ * Both modes rescue the same six queries; they differ in WHERE those land,
+ * which is the difference between technically-in-top-10 and actually findable:
+ * pt-upsert-qdrant miss->8 under rrf but miss->2 under best-rank,
+ * pt-spec-write-path miss->10 vs miss->4, pt-metricas-fila miss->8 vs miss->2.
+ *
+ * Cost, recorded because it is a real debit and not a rounding error: one query
+ * (pt-debounce-eventos) slides 5->9, which trips the comparison tool's tail
+ * guard at its default tolerance of 3 positions. Shipped anyway, deliberately —
+ * the guard's PRINCIPLE (never buy an aggregate win with tail damage) holds,
+ * but its threshold is an unmeasured default, the query never leaves top-10,
+ * and the gains include four queries going from invisible to ranks 2-5. Set
+ * WQM_TRANSLATE_FUSION=rrf to trade those ranks back for that one slide.
+ */
+export const QUERY_FUSION_MODE: QueryFusionMode =
+  (process.env['WQM_TRANSLATE_FUSION'] ?? '').trim() === 'rrf' ? 'rrf' : 'best-rank';
+
 /** Stable identity of a hit across the two legs. */
 function hitKey(result: SearchResult): string {
   return `${result.collection}:${result.id}`;
@@ -69,6 +111,8 @@ export interface QueryLegFusionOptions {
   translatedWeight?: number;
   /** Cap on the returned list. Defaults to the length of the original leg. */
   limit?: number;
+  /** Combination strategy. Defaults to {@link QUERY_FUSION_MODE}. */
+  mode?: QueryFusionMode;
 }
 
 /**
@@ -92,6 +136,10 @@ export function fuseQueryLegs(
 
   const translatedWeight = Math.min(options.translatedWeight ?? TRANSLATED_LEG_WEIGHT, 1);
   const limit = options.limit ?? original.length;
+
+  if ((options.mode ?? QUERY_FUSION_MODE) === 'best-rank') {
+    return fuseByBestRank(original, translated, limit);
+  }
 
   const fused = new Map<string, { score: number; result: SearchResult; legs: number }>();
 
@@ -125,6 +173,55 @@ export function fuseQueryLegs(
         ...result.metadata,
         // Observability: which legs produced this hit. `both` is the
         // cross-language agreement case worth being able to count later.
+        _query_legs: legs > 1 ? 'both' : undefined,
+      },
+    }));
+}
+
+/**
+ * Order by each chunk's best position across the two legs — the oracle the
+ * ceiling was measured with.
+ *
+ * Ties go to the original leg, which is what keeps D3 meaningful in this mode:
+ * the translated leg can reach a rank the original never gave a chunk, but it
+ * can never push the original's own hit down at equal rank. `score` is set to
+ * the reciprocal of the winning rank so the field stays monotonic with the
+ * ordering, as callers downstream assume.
+ */
+function fuseByBestRank(
+  original: readonly SearchResult[],
+  translated: readonly SearchResult[],
+  limit: number
+): SearchResult[] {
+  const best = new Map<
+    string,
+    { rank: number; fromOriginal: boolean; result: SearchResult; legs: number }
+  >();
+
+  original.forEach((result, rank) => {
+    best.set(hitKey(result), { rank, fromOriginal: true, result: { ...result }, legs: 1 });
+  });
+
+  translated.forEach((result, rank) => {
+    const key = hitKey(result);
+    const existing = best.get(key);
+    if (!existing) {
+      best.set(key, { rank, fromOriginal: false, result: { ...result }, legs: 1 });
+      return;
+    }
+    existing.legs += 1;
+    // Strictly better only — an equal rank keeps the original's placement.
+    if (rank < existing.rank) existing.rank = rank;
+  });
+
+  return Array.from(best.values())
+    .sort((a, b) => a.rank - b.rank || Number(b.fromOriginal) - Number(a.fromOriginal))
+    .slice(0, limit)
+    .map(({ rank, result, legs }) => ({
+      ...result,
+      score: 1 / (rank + 1),
+      metadata: {
+        ...result.metadata,
         _query_legs: legs > 1 ? 'both' : undefined,
       },
     }));

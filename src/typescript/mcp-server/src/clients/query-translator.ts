@@ -51,10 +51,47 @@ const MAX_LENGTH_RATIO = 3;
 /** Absolute ceiling regardless of input length. */
 const MAX_TRANSLATION_CHARS = 400;
 
+/**
+ * Domain glossary.
+ *
+ * Measured 2026-08-12: swapping the sidecar from a 1.5B to a 7B fixed both
+ * INSTRUCTION-FOLLOWING failures (one echoed the input, one answered the
+ * question in Portuguese) but neither model got the DOMAIN VOCABULARY right —
+ * "vazão da fila" became "queue size" on the 1.5B and "the flow of the queue"
+ * on the 7B, where this codebase says throughput. That class is the dangerous
+ * one: it comes back fluent English, passes every validator, and only shows up
+ * as a worse rank.
+ *
+ * The entries are not guesses — each comes from an observed mistranslation or
+ * from a benchmark pair where wording alone decided the hit. The clearest is
+ * upsert: "Where are points ... SENT to Qdrant" misses, while the dataset's
+ * English twin "Where does the daemon UPSERT embedded points" hits the same
+ * gold. One word of the codebase's own vocabulary is the whole difference.
+ *
+ * Kept short on purpose. It rides in the system prompt, which llama.cpp
+ * prefix-caches across calls when it stays byte-stable, so the cost is paid
+ * once rather than per query — but only while it stays stable and small.
+ */
+const DOMAIN_GLOSSARY = [
+  'vazão -> throughput (never "flow" or "size")',
+  'fila -> queue',
+  'chave de idempotência -> idempotency key',
+  'enviar/gravar pontos no Qdrant -> upsert points into Qdrant',
+  'busca híbrida -> hybrid search',
+  'busca densa/esparsa -> dense/sparse search',
+  'ramo -> branch',
+  'trecho/pedaço -> chunk',
+  'indexação -> indexing',
+  'arquivo ignorado -> ignored file',
+].join('; ');
+
 const SYSTEM_PROMPT =
   'You translate software-engineering search queries into English. ' +
   'Reply with the translation ONLY — no quotes, no explanation, no preamble. ' +
-  'Keep code identifiers, file paths, and technical terms exactly as written.';
+  'Keep code identifiers, file paths, and technical terms exactly as written. ' +
+  'Use this codebase glossary when the source term appears: ' +
+  DOMAIN_GLOSSARY +
+  '. Translate the question as a question; never answer it.';
 
 /** Minimal shape consumed from an OpenAI-compatible chat completion. */
 interface ChatCompletionResponse {

@@ -425,8 +425,15 @@ services:
       WQM_QUERY_TRANSLATE: ${WQM_QUERY_TRANSLATE:-}
       # Weight of the translated leg in the fusion; the original is fixed at 1
       # and the value is clamped to <=1 so this can never invert that. Empty =
-      # code default 0.7, which is an UNMEASURED starting point to be swept.
+      # code default 0.9 (measured: 0.7 is inert, 1.0 trips the tail guard).
+      # Only consulted in the default `rrf` fusion mode.
       WQM_TRANSLATE_WEIGHT: ${WQM_TRANSLATE_WEIGHT:-}
+      # `best-rank` (default) or `rrf`. best-rank orders by each chunk's best
+      # position across the two legs and measured strictly better: same six
+      # queries rescued, +3 top-3, MRR 0.627 vs 0.607, Wilcoxon p=0.0119 vs
+      # p=0.14. Set to `rrf` to trade those ranks back for one query that
+      # slides 5->9 under best-rank.
+      WQM_TRANSLATE_FUSION: ${WQM_TRANSLATE_FUSION:-}
       # Trust the bind-mounted repo: git's "dubious ownership" check
       # otherwise rejects every command because the bind mount preserves
       # host uids that don't match the container's `node` user.
