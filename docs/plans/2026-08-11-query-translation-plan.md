@@ -171,7 +171,71 @@ perna.
 | Falso negativo do gate | Baixa | Mantém a falha de hoje, não introduz nova |
 | Decidir com n insuficiente | **Alta** | Fase 4 é bloqueador explícito |
 
-## 6. Fora de escopo
+## 6. RESULTADO — fases 2/3/5 executadas (2026-08-12)
+
+Todas as fases foram implementadas e medidas. Baseline sempre a mesma: flag
+desligado, mesmo corpus, 71 queries, imediatamente antes da variante.
+
+| configuração | pt top-10 | top-3 geral | MRR | Wilcoxon |
+|---|---|---|---|---|
+| baseline (flag off) | 23/33 (69,7%) | 50/71 | 0,593 | — |
+| 1,5B + RRF w=0,7 | 23/33 | — | — | **inerte** |
+| 1,5B + RRF w=0,9 | 26/33 (78,8%) | — | — | p=0,46 |
+| 1,5B + RRF w=1,0 | 28/33 (84,8%) | — | — | tail guard: REGRESSION |
+| 7B + glossário + RRF w=0,9 | 29/33 (87,9%) | 50/71 | 0,607 | p=0,14 |
+| **7B + glossário + best-rank** | **29/33 (87,9%)** | **53/71** | **0,627** | **p=0,0119** |
+| *teto (tradução ideal + oráculo)* | *31/33 (93,9%)* | — | — | — |
+
+**94% do teto capturado.** As 2 queries restantes (`pt-busca-hibrida`,
+`pt-upsert-qdrant`… corrigida) falham nos dois idiomas — não são cross-lingual.
+
+### As três contribuições, medidas em separado
+
+1. **Modelo 1,5B → 7B** resolve *seguir instrução*, não vocabulário. O 1,5B
+   ecoou uma query e respondeu outra em português; o 7B traduziu as duas. Mas
+   `vazão` só trocou de erro (`queue size` → `the flow of the queue`).
+   Latência mediana 123 → 182 ms.
+2. **Glossário de domínio** (prompt-only, +14 ms) fechou o vocabulário:
+   `vazão`→throughput, `enviados`→upserted, `idempotência`→idempotency. A
+   entrada `upsert` foi **prevista antes de medida** — no experimento do teto,
+   "sent to Qdrant" dava miss e "upsert embedded points" acertava o mesmo gold.
+3. **Forma da fusão** era o maior termo restante. RRF ponderado obriga um
+   escalar global a servir duas situações opostas (dominar quando a perna
+   original é lixo, sumir quando ela é boa). O sweep tornou isso visível:
+   0,7 inerte, 1,0 quebra o top-3. `best-rank` não tem esse conflito.
+
+### O custo do best-rank
+
+Intercalar por melhor rank numa página de tamanho fixo faz algo sair. Uma query
+(`pt-debounce-eventos`) deslizou 5 → 9, acionando o guarda de cauda, que
+reportou REGRESSION apesar do ganho significativo.
+
+Mantido como default deliberadamente: o *princípio* do guarda vale, mas seu
+limiar de 3 posições é um default não medido, a query não saiu do top-10, e
+quatro queries saíram de invisíveis para os ranks 2–5. `WQM_TRANSLATE_FUSION=rrf`
+desfaz o trade. Um teste fixa o deslocamento diretamente.
+
+### Lições de método
+
+- **A verificação do flag era falsa.** `docker exec ... "echo [$VAR]"` rodado de
+  um shell que tinha a variável exportada expandiu do lado de FORA e confirmou o
+  host, não o container. Só um probe em node DENTRO do container mostrou
+  `undefined` — e o bug era real: `WQM_QUERY_TRANSLATE` nunca foi para o compose.
+- **O default de 0,7 era aritmeticamente inerte**, não apenas subótimo: um hit
+  traduzido em rank 0 vale `w/(K+1)`, abaixo do ÚLTIMO hit da original.
+- **O corpus se move.** Entre baseline e variante o índice cresceu 8% com os
+  próprios arquivos deste trabalho, alterando 3 queries. Baseline e variante têm
+  de ser tomados em sequência, sem escrita no repo entre eles.
+
+### Não feito
+
+**L2 — boost de rerank gated.** O `bge-reranker-v2-m3` já deployado é
+multilíngue e pode pontuar (query PT, chunk EN) sem tradução. Ficou fora desta
+rodada de propósito: seriam duas mudanças de ranking simultâneas e o ganho não
+seria atribuível. É o próximo A/B natural, e é complementar — tradução é lever
+de *recall*, cross-encoder é lever de *precisão*.
+
+## 7. Fora de escopo
 
 - Qualquer mudança em `applyRRFFusion` ou nos pesos denso/sparse (D1).
 - Tradução do lado do documento.

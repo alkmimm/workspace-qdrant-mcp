@@ -414,6 +414,26 @@ services:
       # drop), this only reorders. Read per-call; change ⇒ --force-recreate mcp.
       WQM_SEARCH_DERANK: ${WQM_SEARCH_DERANK:-}
       WQM_SEARCH_DERANK_PENALTY: ${WQM_SEARCH_DERANK_PENALTY:-}
+      # Query translation (PT->EN) — see docs/plans/2026-08-11-query-translation-plan.md.
+      # Endpoint of the llm-gpu sidecar; empty (default) disables translation
+      # entirely, so the search path is byte-identical to today.
+      WQM_TRANSLATE_BASE_URL: ${WQM_TRANSLATE_BASE_URL:-}
+      WQM_TRANSLATE_MODEL: ${WQM_TRANSLATE_MODEL:-}
+      # "1" arms the second leg. Separate from the endpoint on purpose: the
+      # sidecar can be up and reachable while the feature stays off, which is
+      # what makes an A/B a container recreate rather than a redeploy.
+      WQM_QUERY_TRANSLATE: ${WQM_QUERY_TRANSLATE:-}
+      # Weight of the translated leg in the fusion; the original is fixed at 1
+      # and the value is clamped to <=1 so this can never invert that. Empty =
+      # code default 0.9 (measured: 0.7 is inert, 1.0 trips the tail guard).
+      # Only consulted in the default `rrf` fusion mode.
+      WQM_TRANSLATE_WEIGHT: ${WQM_TRANSLATE_WEIGHT:-}
+      # `best-rank` (default) or `rrf`. best-rank orders by each chunk's best
+      # position across the two legs and measured strictly better: same six
+      # queries rescued, +3 top-3, MRR 0.627 vs 0.607, Wilcoxon p=0.0119 vs
+      # p=0.14. Set to `rrf` to trade those ranks back for one query that
+      # slides 5->9 under best-rank.
+      WQM_TRANSLATE_FUSION: ${WQM_TRANSLATE_FUSION:-}
       # Trust the bind-mounted repo: git's "dubious ownership" check
       # otherwise rejects every command because the bind mount preserves
       # host uids that don't match the container's `node` user.
@@ -714,6 +734,73 @@ services:
     profiles:
       - embeddings-gpu
 
+  llm-gpu:
+    # Small multilingual instruct model for QUERY TRANSLATION (PT->EN), served
+    # over the OpenAI-compatible /v1/chat/completions. See
+    # docs/plans/2026-08-11-query-translation-plan.md.
+    #
+    # WHY llama.cpp and not vLLM: GGUF gives fine-grained VRAM control
+    # (--n-gpu-layers) and graceful degradation, and it speaks the same
+    # OpenAI-compatible transport the embedding sidecar already uses. vLLM's
+    # reservation overhead does not fit alongside Infinity on a 16 GB card.
+    #
+    # WHY a general instruct model and not a Coder one: the sibling plan's
+    # model table was written for a describe-the-code task. Translation is a
+    # different job — a code-specialized model is the wrong family for it.
+    # Qwen2.5-1.5B-Instruct covers Portuguese; override to go smaller (0.5B)
+    # once the measurement says the smaller model keeps the gains, since this
+    # runs at QUERY TIME where latency, not VRAM, is the binding constraint.
+    #
+    # Blackwell note: the same sm_120 constraint documented on embeddings-gpu
+    # applies — the image must ship CUDA 12.8+.
+    image: ${WQM_LLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: wqm-llm-gpu
+    <<: *restart
+    logging: *default-logging
+    command:
+      - -hf
+      - ${WQM_TRANSLATE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      # All layers on the GPU; the model is small enough that a partial offload
+      # would only add latency to a query-time hop.
+      - --n-gpu-layers
+      - "99"
+      # Translation needs almost no context: a query in, a query out.
+      - --ctx-size
+      - "2048"
+      # Two slots so a second query does not queue behind the first.
+      - --parallel
+      - "2"
+    environment:
+      LLAMA_CACHE: /models
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:8080/health || exit 1",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      # First boot downloads the GGUF.
+      start_period: 300s
+    volumes:
+      - llm_data:/models
+    networks:
+      - workspace-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - llm-gpu
+
 # ── Networks ─────────────────────────────────────────────────────────────────
 
 networks:
@@ -733,6 +820,10 @@ volumes:
     external: true
   # HF cache for the GPU embedding backend (Infinity downloads on first up).
   infinity_data:
+  # GGUF cache for the query-translation sidecar (llama.cpp downloads on first
+  # up). Separate from infinity_data so switching either backend's model never
+  # invalidates the other's weights.
+  llm_data:
   # Daemon SQLite databases. Named volume (ext4 in WSL2 VM) instead of
   # bind-mount because Docker Desktop's 9P/drvfs filesystem cannot satisfy
   # SQLite WAL's mmap/locking semantics. memexd.db, search.db, graph.db all
