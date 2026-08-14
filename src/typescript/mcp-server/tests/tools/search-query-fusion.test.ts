@@ -70,6 +70,29 @@ describe('fuseQueryLegs', () => {
     expect(ids(fuseQueryLegs(original, translated))).toContain('gold');
   });
 
+  it('lets the translated leg reach the tail but not the head at the default weight', () => {
+    // The property the 0.9 default is chosen for, and the reason 0.7 was inert:
+    // a translated top hit must outrank the original's TAIL (so a query whose
+    // gold the original never surfaced gets rescued) while leaving the
+    // original's HEAD alone.
+    const original = Array.from({ length: 10 }, (_, i) => hit(`orig${i}`));
+    const fused = ids(fuseQueryLegs(original, [hit('rescued')], { limit: 11 }));
+
+    const rescuedAt = fused.indexOf('rescued');
+    expect(rescuedAt).toBeGreaterThan(3); // head untouched
+    expect(rescuedAt).toBeLessThan(10); // but it does get in
+  });
+
+  it('shows why a low weight is inert', () => {
+    // At 0.7 the translated top hit falls below the original's LAST hit, so a
+    // disjoint leg contributes nothing at all. Kept as executable rationale for
+    // the default rather than a comment someone has to trust.
+    const original = Array.from({ length: 10 }, (_, i) => hit(`orig${i}`));
+    const fused = ids(fuseQueryLegs(original, [hit('ignored')], { translatedWeight: 0.7, limit: 11 }));
+
+    expect(fused.indexOf('ignored')).toBe(10);
+  });
+
   it('scores by RRF over both legs', () => {
     const fused = fuseQueryLegs([hit('a')], [hit('a')], { translatedWeight: 0.5 });
 

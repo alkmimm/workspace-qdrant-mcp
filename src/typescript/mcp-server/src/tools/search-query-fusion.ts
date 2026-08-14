@@ -32,11 +32,30 @@ import type { SearchResult } from './search-types.js';
  *
  * Capped at 1 so the translated leg can never outweigh the original (D3): a
  * mistranslation must degrade toward "no worse than today", never displace good
- * results. The 0.7 default is an UNMEASURED starting point — phase 5 sweeps it,
- * and the tail guard on regressions is the gate that decides.
+ * results.
+ *
+ * The default is NOT arbitrary, and the arithmetic is what picks it. A
+ * translated hit at rank 0 scores w/(K+1); it displaces an original hit at rank
+ * r when w > (K+1)/(K+1+r). With K=60 that is w > 0.871 to outrank the original
+ * 10th, w > 0.938 for its 4th, w > 0.968 for its 2nd. So 0.9 lets the translated
+ * leg fill the TAIL — rescuing queries whose gold the original never surfaced —
+ * without disturbing the head the original already got right.
+ *
+ * Measured on the 71-query benchmark (2026-08-12), against the same corpus,
+ * flag off as baseline:
+ *
+ *   weight  pt top-10   pt top-3   tail regressions   verdict
+ *   0.7     69.7% (no change — INERT)                 —
+ *   0.9     78.8%       54.5%      none               inconclusive
+ *   1.0     84.8%       48.5%      1 (rank 5 -> 9)    REGRESSION
+ *
+ * 0.7 is inert for a structural reason worth keeping in mind when retuning:
+ * with equal-length legs and disjoint hits, 0.7/(K+1) sits below the original's
+ * LAST hit, so the translated leg can only ever contribute through agreement.
+ * 1.0 buys the most top-10 but pays for it in top-3 and trips the tail guard.
  */
 export const TRANSLATED_LEG_WEIGHT = Math.min(
-  tuningFromEnv('WQM_TRANSLATE_WEIGHT', 0.7),
+  tuningFromEnv('WQM_TRANSLATE_WEIGHT', 0.9),
   1
 );
 

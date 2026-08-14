@@ -419,6 +419,14 @@ services:
       # entirely, so the search path is byte-identical to today.
       WQM_TRANSLATE_BASE_URL: ${WQM_TRANSLATE_BASE_URL:-}
       WQM_TRANSLATE_MODEL: ${WQM_TRANSLATE_MODEL:-}
+      # "1" arms the second leg. Separate from the endpoint on purpose: the
+      # sidecar can be up and reachable while the feature stays off, which is
+      # what makes an A/B a container recreate rather than a redeploy.
+      WQM_QUERY_TRANSLATE: ${WQM_QUERY_TRANSLATE:-}
+      # Weight of the translated leg in the fusion; the original is fixed at 1
+      # and the value is clamped to <=1 so this can never invert that. Empty =
+      # code default 0.7, which is an UNMEASURED starting point to be swept.
+      WQM_TRANSLATE_WEIGHT: ${WQM_TRANSLATE_WEIGHT:-}
       # Trust the bind-mounted repo: git's "dubious ownership" check
       # otherwise rejects every command because the bind mount preserves
       # host uids that don't match the container's `node` user.
