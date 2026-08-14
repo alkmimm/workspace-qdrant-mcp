@@ -120,6 +120,21 @@ describe('sanitizeTranslation', () => {
     expect(sanitizeTranslation(PT.toUpperCase(), PT)).toBeNull();
   });
 
+  it('rejects a reply that is still in the source language', () => {
+    // Verbatim from the live 1.5B sidecar (2026-08-12) for pt-upsert-qdrant:
+    // it ANSWERED the question in Portuguese instead of translating it. Not an
+    // echo, and only ~1.8x the input, so every other guard lets it through.
+    const answered =
+      'Os pontos com embeddings são enviados para o Qdrant através de uma API ou SDK específico para o Qdrant.';
+    expect(sanitizeTranslation(answered, 'Onde os pontos com embeddings são enviados para o Qdrant?')).toBeNull();
+  });
+
+  it('accepts a genuine English translation of the same query', () => {
+    // Guards the check above from being so eager it rejects real translations.
+    const good = 'Where are points with embeddings sent to Qdrant?';
+    expect(sanitizeTranslation(good, 'Onde os pontos com embeddings são enviados para o Qdrant?')).toBe(good);
+  });
+
   it('rejects a reply that ran away instead of translating', () => {
     expect(sanitizeTranslation('x'.repeat(500), PT)).toBeNull();
     // Disproportionate to the input even while under the absolute cap.

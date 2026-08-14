@@ -26,6 +26,7 @@
  */
 
 import { logDebug } from '../utils/logger.js';
+import { classifyQueryLanguage } from '../utils/query-language.js';
 
 /** Env var that activates translation (endpoint base URL, no path). */
 export const TRANSLATE_BASE_URL_ENV = 'WQM_TRANSLATE_BASE_URL';
@@ -166,6 +167,17 @@ export function sanitizeTranslation(raw: string, original: string): string | nul
   // An echo of the input is not a translation — searching it twice would just
   // double the cost of the identical leg.
   if (cleaned.toLowerCase() === original.toLowerCase()) return null;
+
+  // Still in the source language? Then it is not a translation, whatever else
+  // it is. Measured against the live 1.5B sidecar (2026-08-12): of 8 failing
+  // benchmark queries it echoed one verbatim (caught above) and ANSWERED
+  // another in Portuguese — "Os pontos com embeddings são enviados para o
+  // Qdrant através de uma API..." — which is not an echo and sits well under
+  // the length cap, so every earlier check passes it. Searching that as the
+  // "translated" leg would spend a query re-running the language the original
+  // leg already covers. Reusing the phase-1 gate keeps one definition of
+  // "looks non-English" for both routing and validation.
+  if (classifyQueryLanguage(cleaned).isLikelyNonEnglish) return null;
 
   return cleaned;
 }
