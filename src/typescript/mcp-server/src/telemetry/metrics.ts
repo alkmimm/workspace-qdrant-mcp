@@ -131,17 +131,32 @@ export const queryLanguageVerdicts = new Counter({
 // `actor` separates a human typing in the IDE from an agent's own searches.
 // It matters for the decision: development traffic on this machine is heavy and
 // not representative of real usage, so a share computed over everything can be
-// dominated by the agent's own work. Bounded to three values on purpose —
-// anything unrecognised collapses to `other` rather than opening cardinality.
-export const KNOWN_ACTORS = ['user', 'claude', 'other'] as const;
+// dominated by the agent's own work. Bounded on purpose — anything unrecognised
+// collapses to `other` rather than opening cardinality.
+//
+// `benchmark` exists because the eval harness deliberately reports itself as
+// `telemetryActor: 'user'` (the search_events CHECK only permits
+// claude/user/daemon, so a dedicated actor there would need a migration —
+// see benchmarks/semantic-search.ts). Without a separate bucket HERE, one
+// search_eval run injects 33 Portuguese and 38 English queries straight into
+// the series this dashboard headlines as real human usage, manufacturing a
+// ~46% non-English share out of the harness alone. Metrics carry no CHECK
+// constraint, so the split costs nothing.
+export const KNOWN_ACTORS = ['user', 'claude', 'benchmark', 'other'] as const;
 for (const verdict of ['non_english', 'english'] as const) {
   for (const actor of KNOWN_ACTORS) {
     queryLanguageVerdicts.labels({ verdict, actor }).inc(0);
   }
 }
 
-/** Collapse a free-form actor to a bounded label value. */
-export function actorLabel(actor: string | undefined): string {
+/**
+ * Collapse a free-form actor to a bounded label value.
+ *
+ * `isBenchmark` wins over `actor` because the eval harness reports itself as
+ * `user`; trusting the actor alone is what would poison the decision series.
+ */
+export function actorLabel(actor: string | undefined, isBenchmark = false): string {
+  if (isBenchmark) return 'benchmark';
   return actor === 'user' || actor === 'claude' ? actor : 'other';
 }
 
@@ -197,6 +212,32 @@ translatedLegHits.labels({ agreement: 'both_legs' }).inc(0);
 translatedLegHits.labels({ agreement: 'translated_only' }).inc(0);
 
 /**
+ * Translations that succeeded but whose leg never ran.
+ *
+ * The second leg needs its own embeddings, and that call can degrade to the
+ * fallback path. When it does, the translation genuinely succeeded — so
+ * `queryTranslationOutcomes{outcome="translated"}` is correct and stays
+ * one-per-search — but no second ranking was produced. Without this counter the
+ * dashboard shows healthy translations against zero contributed hits and the
+ * reading is "the leg is useless" when the truth is "the leg never ran".
+ *
+ * A separate counter rather than another `outcome` value on purpose: outcomes
+ * must remain a partition of searches, and a search that translated AND skipped
+ * would be counted twice there.
+ */
+export const translatedLegSkipped = new Counter({
+  name: 'wqm_mcp_translated_leg_skipped_total',
+  help: 'Successful translations whose second leg could not run (degraded embeddings)',
+  registers: [register],
+});
+translatedLegSkipped.inc(0);
+
+/** Record that a usable translation could not be turned into a second leg. */
+export function recordTranslatedLegSkipped(): void {
+  translatedLegSkipped.inc();
+}
+
+/**
  * Wall-clock of the translation round-trip. Buckets are tuned to the measured
  * range (1.5B median 123ms, 7B median 182ms) so a regression past ~0.5s — the
  * point where it visibly doubles a p50 ~90ms search — lands in its own bucket
@@ -210,9 +251,16 @@ export const translationDuration = new Histogram({
 });
 
 /** Record the language gate's verdict for a ranked search. */
-export function recordQueryLanguage(isLikelyNonEnglish: boolean, actor?: string): void {
+export function recordQueryLanguage(
+  isLikelyNonEnglish: boolean,
+  actor?: string,
+  isBenchmark = false
+): void {
   queryLanguageVerdicts
-    .labels({ verdict: isLikelyNonEnglish ? 'non_english' : 'english', actor: actorLabel(actor) })
+    .labels({
+      verdict: isLikelyNonEnglish ? 'non_english' : 'english',
+      actor: actorLabel(actor, isBenchmark),
+    })
     .inc();
 }
 

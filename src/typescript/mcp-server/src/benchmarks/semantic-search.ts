@@ -702,6 +702,12 @@ function buildSearchOptions(
     // CHECK-widening migration (cf. v39 relaxing the `op` CHECK); until then
     // 'benchmark' was silently rejected and every eval search spammed an ERROR.
     telemetryActor: 'user',
+    // Metrics-only marker. `telemetryActor` above is forced to 'user' by the
+    // search_events CHECK, which makes harness traffic indistinguishable from a
+    // person in any actor-keyed analysis. Prometheus has no such constraint, so
+    // this routes eval runs to their own `actor="benchmark"` series instead of
+    // flooding the one the query-translation dashboard reads as real usage.
+    telemetryIsBenchmark: true,
   };
   if (merged.collection !== undefined) options.collection = merged.collection;
   if (merged.projectId !== undefined) options.projectId = merged.projectId;

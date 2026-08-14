@@ -57,6 +57,17 @@ export interface SearchOptions {
    *  "claude"). The benchmark harness sets "benchmark" so eval traffic can be
    *  excluded when mining REAL agent queries from the search history. */
   telemetryActor?: string;
+  /**
+   * Marks harness traffic so metrics can exclude it.
+   *
+   * The eval harness must report `telemetryActor: 'user'` — the search_events
+   * CHECK permits only claude/user/daemon — so the actor alone cannot tell a
+   * benchmark run from a person typing. Anything that decides on "real usage"
+   * has to key off this instead, or one eval run (71 queries, 33 of them
+   * Portuguese) lands in the human bucket and invents the very signal it is
+   * being read for. Metrics-only; never persisted to search_events.
+   */
+  telemetryIsBenchmark?: boolean;
   collection?: string;
   mode?: SearchMode;
   limit?: number;

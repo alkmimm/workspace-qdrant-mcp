@@ -17,21 +17,21 @@
     {
       "type": "stat",
       "title": "Non-English share of ranked searches",
-      "description": "The headline number: the fraction of traffic the translated leg would touch, recorded regardless of whether translation is enabled. CUMULATIVE since the MCP started — deliberately NOT scoped by the time picker. rate()/increase() over a low-traffic window reports 0 until several events land inside it, which is precisely the regime this dashboard is meant to observe. Split by actor so heavy development traffic can be told apart from real use. Below ~5% the feature is mostly dead weight.",
+      "description": "The headline number: the fraction of traffic the translated leg would touch, recorded regardless of whether translation is enabled. CUMULATIVE since the MCP started — deliberately NOT scoped by the time picker. rate()/increase() over a low-traffic window reports 0 until several events land inside it, which is precisely the regime this dashboard is meant to observe. BOTH readings exclude actor=benchmark: the eval harness is forced to report itself as 'user' by a schema CHECK, so one search_eval run would otherwise inject 33 Portuguese queries into the human series and manufacture the very signal being read. Below ~5% the feature is mostly dead weight.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 6, "w": 8, "x": 0, "y": 1 },
       "id": 1,
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(wqm_mcp_query_language_total{verdict=\"non_english\"}) / clamp_min(sum(wqm_mcp_query_language_total), 1)",
-          "legendFormat": "all actors",
+          "expr": "sum(wqm_mcp_query_language_total{verdict=\"non_english\",actor!=\"benchmark\"}) / clamp_min(sum(wqm_mcp_query_language_total{actor!=\"benchmark\"}), 1)",
+          "legendFormat": "real traffic",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(wqm_mcp_query_language_total{verdict=\"non_english\",actor=\"user\"}) / clamp_min(sum(wqm_mcp_query_language_total{actor=\"user\"}), 1)",
-          "legendFormat": "actor=user",
+          "legendFormat": "human only",
           "refId": "B"
         }
       ],
@@ -220,16 +220,22 @@
     {
       "type": "timeseries",
       "title": "Hits contributed by the translated leg",
-      "description": "The one that separates 'translation ran' from 'translation helped'. `translated_only` are hits the original query never surfaced — the rescues the feature exists for. `both_legs` is cross-language agreement. If translations succeed but this stays at zero, the leg is paying latency for nothing and should be turned off.",
+      "description": "The one that separates 'translation ran' from 'translation helped'. `translated_only` are hits the original query never surfaced — the rescues the feature exists for. `both_legs` is cross-language agreement. If translations succeed but this stays at zero, the leg is paying latency for nothing. Read `leg skipped` first: it counts translations whose second leg could not run because its embeddings degraded, and it distinguishes 'contributed nothing' from 'never ran' — two conclusions that would otherwise look identical here.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 7, "w": 12, "x": 0, "y": 26 },
       "id": 5,
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (agreement) (rate(wqm_mcp_translated_leg_hits_total[$__rate_interval]))",
+          "expr": "sum by (agreement) (wqm_mcp_translated_leg_hits_total)",
           "legendFormat": "{{agreement}}",
           "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "wqm_mcp_translated_leg_skipped_total",
+          "legendFormat": "leg skipped (degraded embeddings)",
+          "refId": "B"
         }
       ],
       "fieldConfig": {

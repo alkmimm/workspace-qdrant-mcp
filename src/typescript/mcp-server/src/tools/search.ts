@@ -19,7 +19,7 @@ import {
 } from '../clients/query-translator.js';
 import { fuseQueryLegs } from './search-query-fusion.js';
 import { resolveTranslatedQuery } from './search-translated-leg.js';
-import { recordTranslatedLegHits } from '../telemetry/metrics.js';
+import { recordTranslatedLegHits, recordTranslatedLegSkipped } from '../telemetry/metrics.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
@@ -377,7 +377,8 @@ export class SearchTool {
       options.query,
       this.queryTranslator,
       process.env,
-      options.telemetryActor
+      options.telemetryActor,
+      options.telemetryIsBenchmark ?? false
     );
     const primaryPromise = runFinalize(effectiveOptions, fallbackBranch);
     const translation = await translationPromise;
@@ -399,8 +400,13 @@ export class SearchTool {
       );
       primary = await primaryPromise;
       // A degraded/fallback embedding on the SECOND leg is not worth surfacing
-      // or acting on — drop the leg and keep today's single-leg answer.
-      if (!('fallback' in translatedEmbeddings)) {
+      // or acting on — drop the leg and keep today's single-leg answer. Counted
+      // so the dashboard can tell "the leg contributed nothing" from "the leg
+      // never ran"; without it, healthy translations against zero contributed
+      // hits reads as a useless feature.
+      if ('fallback' in translatedEmbeddings) {
+        recordTranslatedLegSkipped();
+      } else {
         const translatedLeg = await this.runSearchAndFinalize(
           translatedOptions,
           mode,
@@ -460,6 +466,15 @@ export class SearchTool {
       if (codeHits(widened) > 0) {
         const note = `No semantic matches on branch "${concreteEffective}" — widened to all branches; results may be from another indexed branch.`;
         widened.hint = widened.hint ? `${widened.hint} ${note}` : note;
+        // The widen re-runs the ORIGINAL query only — runFinalize closes over
+        // the original embeddings — so these results come from one leg even
+        // when translation ran. Carry `translated_query` through anyway: it
+        // reports that a translation was made, and dropping it here would have
+        // the response deny work the caller was already told about on the
+        // non-widened path. Re-running both legs widened is deliberately not
+        // done: this fires only when the fused result was already empty, and it
+        // would double the cost of an already-degraded path.
+        if (translation.query !== null) widened.translated_query = translation.query;
         return widened;
       }
     }

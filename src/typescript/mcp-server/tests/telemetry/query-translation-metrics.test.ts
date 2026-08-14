@@ -143,12 +143,47 @@ describe('query-translation metrics', () => {
     expect([asUser, asClaude, asOther]).toEqual([1, 1, 1]);
   });
 
+  it('routes harness traffic to its own series, not the human one', async () => {
+    // The defect this guards: the eval harness is FORCED to report
+    // telemetryActor 'user' by the search_events CHECK, so trusting the actor
+    // alone puts 33 Portuguese benchmark queries into the exact series the
+    // dashboard headlines as real usage — inventing the signal it is read for.
+    const asBenchmark = await delta(queryLanguageVerdicts, 'actor', 'benchmark', () =>
+      resolveTranslatedQuery(PT, null, {}, 'user', true)
+    );
+    const asUser = await delta(queryLanguageVerdicts, 'actor', 'user', () =>
+      resolveTranslatedQuery(PT, null, {}, 'user', true)
+    );
+
+    expect(asBenchmark).toBe(1);
+    expect(asUser).toBe(0);
+  });
+
   it('exposes both leg-contribution series from startup', async () => {
     const data = await translatedLegHits.get();
     expect(data.values.map((v) => v.labels['agreement']).sort()).toEqual([
       'both_legs',
       'translated_only',
     ]);
+  });
+
+  it('keeps outcomes a partition — one per search, never double-counted', async () => {
+    // `leg_skipped` is a SEPARATE counter rather than a sixth outcome for this
+    // reason: a search that translated and then could not run its leg would be
+    // counted twice here, and the outcome distribution would stop summing to
+    // the number of searches.
+    const before = await register.getMetricsAsJSON();
+    const outcomes = before.find((m) => m.name === 'wqm_mcp_query_translation_total');
+    const outcomeNames = (outcomes?.values ?? []).map((v) => v.labels['outcome']).sort();
+
+    expect(outcomeNames).toEqual([
+      'already_english',
+      'disabled',
+      'no_translator',
+      'translated',
+      'translation_failed',
+    ]);
+    expect(outcomeNames).not.toContain('leg_skipped');
   });
 
   it('uses metric names the dashboard queries', async () => {
@@ -159,6 +194,7 @@ describe('query-translation metrics', () => {
     expect(names).toContain('wqm_mcp_query_language_total');
     expect(names).toContain('wqm_mcp_query_translation_total');
     expect(names).toContain('wqm_mcp_translated_leg_hits_total');
+    expect(names).toContain('wqm_mcp_translated_leg_skipped_total');
     expect(names).toContain('wqm_mcp_query_translation_duration_seconds');
   });
 });

@@ -50,7 +50,8 @@ export async function resolveTranslatedQuery(
   query: string,
   translator: QueryTranslator | null,
   env: NodeJS.ProcessEnv = process.env,
-  actor?: string
+  actor?: string,
+  isBenchmark = false
 ): Promise<TranslatedQueryDecision> {
   // Classify FIRST, even when the feature is off, and record it.
   //
@@ -61,7 +62,7 @@ export async function resolveTranslatedQuery(
   // and local, so this costs no I/O — just the classification the enabled path
   // would run anyway.
   const verdict = classifyQueryLanguage(query);
-  recordQueryLanguage(verdict.isLikelyNonEnglish, actor);
+  recordQueryLanguage(verdict.isLikelyNonEnglish, actor, isBenchmark);
 
   /**
    * One structured line per ranked search, shipped to Loki by promtail.
@@ -83,7 +84,7 @@ export async function resolveTranslatedQuery(
     logInfo('[query-language]', {
       verdict: verdict.isLikelyNonEnglish ? 'non_english' : 'english',
       reason,
-      actor: actor ?? 'other',
+      actor: isBenchmark ? 'benchmark' : (actor ?? 'other'),
       query: query.slice(0, 300),
       ...(translated !== undefined ? { translated: translated.slice(0, 300) } : {}),
       ...(elapsedMs !== undefined ? { translate_ms: elapsedMs } : {}),
