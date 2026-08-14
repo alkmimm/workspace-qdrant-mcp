@@ -109,6 +109,125 @@ export const multicloneSearches = new Counter({
 multicloneSearches.labels({ degraded: 'true' }).inc(0);
 multicloneSearches.labels({ degraded: 'false' }).inc(0);
 
+// ── Query-language / translation metrics ───────────────────────────────────
+
+/**
+ * Language verdict for every ranked search, recorded WHETHER OR NOT translation
+ * is enabled.
+ *
+ * This is the decision metric: it answers "what share of real traffic would the
+ * translated leg touch?" with the feature switched off and costing nothing, so
+ * the choice to enable it can be made on observed usage instead of a guess.
+ * The gate is local and pure, so recording it adds no I/O.
+ *
+ * Cardinality: 1 metric × 2 label values = 2 series.
+ */
+export const queryLanguageVerdicts = new Counter({
+  name: 'wqm_mcp_query_language_total',
+  help: 'Ranked searches by detected query language class and actor',
+  labelNames: ['verdict', 'actor'] as const,
+  registers: [register],
+});
+// `actor` separates a human typing in the IDE from an agent's own searches.
+// It matters for the decision: development traffic on this machine is heavy and
+// not representative of real usage, so a share computed over everything can be
+// dominated by the agent's own work. Bounded to three values on purpose —
+// anything unrecognised collapses to `other` rather than opening cardinality.
+export const KNOWN_ACTORS = ['user', 'claude', 'other'] as const;
+for (const verdict of ['non_english', 'english'] as const) {
+  for (const actor of KNOWN_ACTORS) {
+    queryLanguageVerdicts.labels({ verdict, actor }).inc(0);
+  }
+}
+
+/** Collapse a free-form actor to a bounded label value. */
+export function actorLabel(actor: string | undefined): string {
+  return actor === 'user' || actor === 'claude' ? actor : 'other';
+}
+
+/**
+ * What actually happened to the second leg, by outcome:
+ *
+ *  - `disabled`          feature off (the default)
+ *  - `no_translator`     enabled but endpoint/model unset
+ *  - `already_english`   gate declined — the common path, costs nothing
+ *  - `translated`        a usable translation came back
+ *  - `translation_failed` the sidecar errored, timed out, or returned an
+ *                        echo / still-Portuguese / runaway reply
+ *
+ * `translated` vs `translation_failed` is the health of the SLM itself: the 1.5B
+ * sidecar failed 2 of 8 smoke queries this way, and that ratio is exactly what
+ * decides whether a model swap is due.
+ *
+ * Cardinality: 1 metric × 5 label values = 5 series.
+ */
+export const queryTranslationOutcomes = new Counter({
+  name: 'wqm_mcp_query_translation_total',
+  help: 'Second-leg query translation attempts by outcome',
+  labelNames: ['outcome'] as const,
+  registers: [register],
+});
+for (const outcome of [
+  'disabled',
+  'no_translator',
+  'already_english',
+  'translated',
+  'translation_failed',
+] as const) {
+  queryTranslationOutcomes.labels({ outcome }).inc(0);
+}
+
+/**
+ * Hits in the returned page contributed by the translated leg, split by whether
+ * both legs agreed on them.
+ *
+ * This is the EFFECTIVENESS metric, and the one that distinguishes "translation
+ * ran" from "translation helped": a deployment where the leg fires constantly
+ * but never places a hit is paying latency for nothing.
+ *
+ * Cardinality: 1 metric × 2 label values = 2 series.
+ */
+export const translatedLegHits = new Counter({
+  name: 'wqm_mcp_translated_leg_hits_total',
+  help: 'Returned hits contributed by the translated query leg',
+  labelNames: ['agreement'] as const,
+  registers: [register],
+});
+translatedLegHits.labels({ agreement: 'both_legs' }).inc(0);
+translatedLegHits.labels({ agreement: 'translated_only' }).inc(0);
+
+/**
+ * Wall-clock of the translation round-trip. Buckets are tuned to the measured
+ * range (1.5B median 123ms, 7B median 182ms) so a regression past ~0.5s — the
+ * point where it visibly doubles a p50 ~90ms search — lands in its own bucket
+ * instead of a catch-all.
+ */
+export const translationDuration = new Histogram({
+  name: 'wqm_mcp_query_translation_duration_seconds',
+  help: 'Latency of the query-translation round-trip',
+  buckets: [0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1, 3],
+  registers: [register],
+});
+
+/** Record the language gate's verdict for a ranked search. */
+export function recordQueryLanguage(isLikelyNonEnglish: boolean, actor?: string): void {
+  queryLanguageVerdicts
+    .labels({ verdict: isLikelyNonEnglish ? 'non_english' : 'english', actor: actorLabel(actor) })
+    .inc();
+}
+
+/** Record what became of the second leg, and how long any round-trip took. */
+export function recordTranslationOutcome(outcome: string, durationSeconds?: number): void {
+  queryTranslationOutcomes.labels({ outcome }).inc();
+  if (durationSeconds !== undefined) translationDuration.observe(durationSeconds);
+}
+
+/** Record how many returned hits the translated leg put there. */
+export function recordTranslatedLegHits(bothLegs: number, translatedOnly: number): void {
+  if (bothLegs > 0) translatedLegHits.labels({ agreement: 'both_legs' }).inc(bothLegs);
+  if (translatedOnly > 0) translatedLegHits.labels({ agreement: 'translated_only' }).inc(translatedOnly);
+}
+
 // ── HTTP transport metrics (MCP_SERVER_MODE=http) ──────────────────────────
 
 /**

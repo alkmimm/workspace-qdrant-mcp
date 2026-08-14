@@ -19,6 +19,7 @@ import {
 } from '../clients/query-translator.js';
 import { fuseQueryLegs } from './search-query-fusion.js';
 import { resolveTranslatedQuery } from './search-translated-leg.js';
+import { recordTranslatedLegHits } from '../telemetry/metrics.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
@@ -372,7 +373,12 @@ export class SearchTool {
     // awaiting the primary search so the round-trip overlaps it instead of
     // adding to it. Every failure path resolves to `query: null`, which leaves
     // `primary` exactly as it is today. See search-translated-leg.ts.
-    const translationPromise = resolveTranslatedQuery(options.query, this.queryTranslator);
+    const translationPromise = resolveTranslatedQuery(
+      options.query,
+      this.queryTranslator,
+      process.env,
+      options.telemetryActor
+    );
     const primaryPromise = runFinalize(effectiveOptions, fallbackBranch);
     const translation = await translationPromise;
 
@@ -412,6 +418,18 @@ export class SearchTool {
           translatedEmbeddings.sparseVector
         );
         const fusedResults = fuseQueryLegs(primary.results, translatedLeg.results, { limit });
+        // Effectiveness, not just activity: how many of the hits we are about to
+        // return did the translated leg actually put there. A deployment where
+        // the leg fires constantly but places nothing is paying latency for
+        // nothing, and only this distinguishes the two.
+        const originalKeys = new Set(primary.results.map((r) => `${r.collection}:${r.id}`));
+        let bothLegs = 0;
+        let translatedOnly = 0;
+        for (const hit of fusedResults) {
+          if (hit.metadata['_query_legs'] === 'both') bothLegs += 1;
+          else if (!originalKeys.has(`${hit.collection}:${hit.id}`)) translatedOnly += 1;
+        }
+        recordTranslatedLegHits(bothLegs, translatedOnly);
         primary = {
           ...primary,
           results: fusedResults,
