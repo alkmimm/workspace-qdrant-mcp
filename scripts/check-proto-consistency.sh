@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 # check-proto-consistency.sh
 #
-# Guards against gRPC proto drift between the canonical Rust daemon proto
-# (the source of truth) and the TypeScript MCP daemon-client, which does NOT
-# codegen from the proto — it hand-mirrors a subset and invokes RPCs via
-# hardcoded camelCase method-name strings. If a daemon RPC is renamed or
-# removed, the TS side still compiles and only fails at runtime with an
-# "Unknown method" gRPC error. This check catches that at build time.
+# Guards against gRPC drift between the canonical Rust daemon proto (the source
+# of truth) and the TypeScript MCP daemon-client, which does NOT codegen from
+# the proto — it invokes RPCs via hardcoded camelCase method-name strings. If a
+# daemon RPC is renamed or removed, the TS side still compiles and only fails at
+# runtime with an "Unknown method" gRPC error. This check catches that at build
+# time.
+#
+# SCHEMA drift is no longer possible and is deliberately NOT checked here: the
+# TS client loads THIS file at runtime (npm `copy:proto` copies
+# src/rust/daemon/proto/workspace_daemon.proto into dist/proto/), so there is
+# one schema, not two. There used to be a hand-maintained fork under
+# src/typescript/mcp-server/src/proto/, and it drifted: fields added on the Rust
+# side were dropped SILENTLY by the stale decoder — proto3 ignores unknown
+# fields, so no error surfaced, only a missing value. That copy is gone.
+#
+# What remains checkable is the string-keyed call surface, which a shared schema
+# cannot protect: a typo'd or stale method-name literal still compiles.
 #
 # Run from anywhere; paths are resolved relative to the repo root.
 #
@@ -14,7 +25,7 @@
 # TS client actually CALLS must correspond to an `rpc` defined in the canonical
 # Rust proto. A TS call with no matching proto rpc => guaranteed runtime
 # "Unknown method". (The reverse — proto rpcs the TS client does not call yet —
-# is expected and benign, since the TS proto is an intentional subset.)
+# is expected and benign: the client covers the RPCs it needs.)
 #
 # Normalization: proto rpc names are PascalCase (e.g. NotifyServerStatus); the
 # TS call strings are camelCase (e.g. notifyServerStatus). Some proto names also

@@ -47,6 +47,15 @@ WORKDIR /build
 # Assets needed by generate-config-defaults.ts
 COPY assets/ assets/
 
+# The gRPC contract. The MCP server does NOT keep its own copy — `copy:proto`
+# reads this canonical daemon proto straight into dist/, so the TypeScript
+# client and the Rust daemon cannot decode with different schemas. (They did:
+# a hand-maintained fork under src/typescript/mcp-server/src/proto/ silently
+# dropped every field added on the Rust side — proto3 ignores unknown fields,
+# so there was no error, only a missing value.) Copied before the TS sources so
+# it keeps its own cache layer: the proto changes far less often than the app.
+COPY src/rust/daemon/proto/ src/rust/daemon/proto/
+
 # Native addon loader plus the Linux x64 glibc addon compiled in the previous stage.
 COPY src/rust/common-node/index.js src/rust/common-node/index.js
 COPY src/rust/common-node/index.d.ts src/rust/common-node/index.d.ts
@@ -72,6 +81,18 @@ ENV WQM_BUILD_SHA=$WQM_BUILD_SHA
 
 # Copy source and build TypeScript.
 COPY src/typescript/mcp-server/ src/typescript/mcp-server/
+
+# gRPC call-surface gate. The TS client invokes RPCs by hardcoded camelCase
+# STRING, which no compiler checks: a renamed or typo'd method still builds and
+# fails only at runtime with "Unknown method". Sharing one proto (above) fixes
+# schema drift but cannot fix a wrong string, so the check still earns its keep.
+#
+# It runs HERE, in the image build, because this fork's GitHub Actions are
+# disabled — the container build IS the CI. The check previously lived only in
+# .github/workflows/ci.yml and therefore never ran at all.
+COPY scripts/check-proto-consistency.sh scripts/check-proto-consistency.sh
+RUN bash scripts/check-proto-consistency.sh
+
 RUN cd src/typescript/mcp-server && npm run build
 
 # Keep only production dependencies in the runtime image.
