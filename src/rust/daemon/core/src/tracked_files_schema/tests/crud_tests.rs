@@ -503,12 +503,7 @@ async fn test_get_tracked_files_by_prefix_no_false_positives() {
 // ── #224 overlap groups: shadowed-holder queries ────────────────────────────
 
 /// Insert one generation of `path` with `hash`, tagged `branch`.
-async fn insert_generation(
-    pool: &sqlx::SqlitePool,
-    path: &str,
-    hash: &str,
-    branch: &str,
-) -> i64 {
+async fn insert_generation(pool: &sqlx::SqlitePool, path: &str, hash: &str, branch: &str) -> i64 {
     insert_tracked_file(
         pool,
         "w1",
@@ -604,9 +599,11 @@ async fn other_generation_exists_only_when_another_row_tracks_the_path() {
 
     // A different path is not a survivor for this one.
     let gen_other = insert_generation(&pool, "src/other.rs", "hash-c", "main").await;
-    assert!(!other_generation_exists(&pool, "w1", "src/other.rs", gen_other)
-        .await
-        .unwrap());
+    assert!(
+        !other_generation_exists(&pool, "w1", "src/other.rs", gen_other)
+            .await
+            .unwrap()
+    );
 
     // Excluding an already-deleted file_id still answers for the path: after
     // the row is gone, "does anything else track it?" is what the cleanup
@@ -616,15 +613,21 @@ async fn other_generation_exists_only_when_another_row_tracks_the_path() {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(other_generation_exists(&pool, "w1", "src/lib.rs", gen_b)
-        .await
-        .unwrap(), "gen_a still tracks the path");
+    assert!(
+        other_generation_exists(&pool, "w1", "src/lib.rs", gen_b)
+            .await
+            .unwrap(),
+        "gen_a still tracks the path"
+    );
     sqlx::query("DELETE FROM tracked_files WHERE file_id = ?1")
         .bind(gen_a)
         .execute(&pool)
         .await
         .unwrap();
-    assert!(!other_generation_exists(&pool, "w1", "src/lib.rs", gen_a)
-        .await
-        .unwrap(), "no generation left — cleanups may run");
+    assert!(
+        !other_generation_exists(&pool, "w1", "src/lib.rs", gen_a)
+            .await
+            .unwrap(),
+        "no generation left — cleanups may run"
+    );
 }

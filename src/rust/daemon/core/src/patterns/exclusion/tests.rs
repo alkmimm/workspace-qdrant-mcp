@@ -255,11 +255,11 @@ fn test_bare_pattern_no_substring_over_match() {
         "integrator-events/src/main/java/com/x/events/domain/RouteDefinition.java",
         "integrator-events/src/main/java/com/x/events/shared/ProtoRouteMapper.java",
         "src/routing/RoutingKeyFactory.java",
-        "web/src/components/Layout.tsx",   // "out" in Layout
-        "app/pages/Checkout.go",           // "out" in Checkout
-        "docs/About.md",                   // "out" in About
-        "src/RebuildIndex.rs",             // "build" in Rebuild
-        "lib/DistanceCalc.py",             // "dist" in Distance
+        "web/src/components/Layout.tsx", // "out" in Layout
+        "app/pages/Checkout.go",         // "out" in Checkout
+        "docs/About.md",                 // "out" in About
+        "src/RebuildIndex.rs",           // "build" in Rebuild
+        "lib/DistanceCalc.py",           // "dist" in Distance
     ] {
         assert!(
             !engine.should_exclude(p).excluded,

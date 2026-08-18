@@ -270,10 +270,7 @@ mod tests {
     fn tarjan_cycle_with_dangling_tail() {
         // 0 → 1 → 2 → 0, and 2 → 3 (3 is a sink, not in the cycle)
         let adj = vec![vec![1], vec![2], vec![0, 3], vec![]];
-        assert_eq!(
-            normalize(tarjan_scc(&adj)),
-            vec![vec![0, 1, 2], vec![3]]
-        );
+        assert_eq!(normalize(tarjan_scc(&adj)), vec![vec![0, 1, 2], vec![3]]);
     }
 
     /// A deep chain closed into ONE giant SCC. Depth 20k would blow a recursive
@@ -402,7 +399,10 @@ mod tests {
         edge(&pool, "b", "a", 1.0).await;
         let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap();
         assert_eq!(cycles.len(), 1);
-        assert!(!cycles[0].cross_file, "single-file recursion is not cross-file");
+        assert!(
+            !cycles[0].cross_file,
+            "single-file recursion is not cross-file"
+        );
     }
 
     // ── Scenarios grounded in real graph data ──────────────────────────
@@ -419,7 +419,13 @@ mod tests {
     #[tokio::test]
     async fn cross_file_two_node_repository_service_cycle() {
         let pool = mem_pool().await;
-        node(&pool, "repo", "getResourceViewUrl", "resources_repository.dart").await;
+        node(
+            &pool,
+            "repo",
+            "getResourceViewUrl",
+            "resources_repository.dart",
+        )
+        .await;
         node(&pool, "svc", "getViewUrl", "resources_service.dart").await;
         edge(&pool, "repo", "svc", 1.0).await;
         edge(&pool, "svc", "repo", 1.0).await;

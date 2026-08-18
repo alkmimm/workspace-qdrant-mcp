@@ -302,7 +302,9 @@ pub(crate) async fn persist_branch_tag_for_base_points(
         search_db
             .add_branch_to_file_metadata_by_file_ids(&file_ids, branch)
             .await
-            .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("branch bulk fts5: {e}")))?;
+            .map_err(|e| {
+                UnifiedProcessorError::ProcessingFailed(format!("branch bulk fts5: {e}"))
+            })?;
     }
     Ok(())
 }

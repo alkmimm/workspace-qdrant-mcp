@@ -73,8 +73,15 @@ async fn test_guard_prunes_orphan_local_fallback() {
     let gone = "/definitely/not/a/real/path-299b";
     insert_watch(&pool, "orphan", gone, "local_dacc2738defc", 0).await;
 
-    let outcome =
-        guard_cascade_rename(&pool, "orphan", gone, false, "local_dacc2738defc", "local_x").await;
+    let outcome = guard_cascade_rename(
+        &pool,
+        "orphan",
+        gone,
+        false,
+        "local_dacc2738defc",
+        "local_x",
+    )
+    .await;
 
     assert_eq!(outcome, RenameGuardOutcome::Pruned);
     assert_eq!(row_flags(&pool, "orphan").await, (0, 1));
@@ -166,9 +173,15 @@ async fn test_guard_allows_normal_remote_change() {
     let path = temp.path().to_str().unwrap();
     insert_watch(&pool, "repo", path, "old_canonical_id", 0).await;
 
-    let outcome =
-        guard_cascade_rename(&pool, "repo", path, false, "old_canonical_id", "new_canonical_id")
-            .await;
+    let outcome = guard_cascade_rename(
+        &pool,
+        "repo",
+        path,
+        false,
+        "old_canonical_id",
+        "new_canonical_id",
+    )
+    .await;
 
     assert_eq!(outcome, RenameGuardOutcome::Proceed);
 }

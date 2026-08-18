@@ -244,7 +244,10 @@ impl TextStrategy {
         }
         // Write-time provenance (attribution only — reads stay branch-agnostic).
         if let Some(ref origin_branch) = payload.origin_branch {
-            point_payload.insert("origin_branch".to_string(), serde_json::json!(origin_branch));
+            point_payload.insert(
+                "origin_branch".to_string(),
+                serde_json::json!(origin_branch),
+            );
         }
         if let Some(ref origin_cwd) = payload.origin_cwd {
             point_payload.insert("origin_cwd".to_string(), serde_json::json!(origin_cwd));
@@ -445,8 +448,7 @@ impl TextStrategy {
         let mut doc_ids = vec![content_doc_id.to_string()];
         if item.op == QueueOperation::Update {
             if let Some(old_content) = &payload.old_content {
-                let old_doc_id =
-                    crate::generate_content_document_id(&item.tenant_id, old_content);
+                let old_doc_id = crate::generate_content_document_id(&item.tenant_id, old_content);
                 if old_doc_id != content_doc_id {
                     doc_ids.push(old_doc_id);
                 }

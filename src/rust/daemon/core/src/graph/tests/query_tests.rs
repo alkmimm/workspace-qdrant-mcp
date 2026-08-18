@@ -139,22 +139,42 @@ async fn test_query_related_same_depth_keeps_strongest_path_confidence() {
         .await
         .unwrap();
 
-    let mut s_to_weak = GraphEdge::new(TENANT, &s.node_id, &m_weak.node_id, EdgeType::Calls, "s.rs");
+    let mut s_to_weak =
+        GraphEdge::new(TENANT, &s.node_id, &m_weak.node_id, EdgeType::Calls, "s.rs");
     s_to_weak.weight = 0.2;
-    let mut s_to_strong =
-        GraphEdge::new(TENANT, &s.node_id, &m_strong.node_id, EdgeType::Calls, "s.rs");
+    let mut s_to_strong = GraphEdge::new(
+        TENANT,
+        &s.node_id,
+        &m_strong.node_id,
+        EdgeType::Calls,
+        "s.rs",
+    );
     s_to_strong.weight = 0.9;
     // Insert the weak path's edge to `c` FIRST: without best-arrival
     // aggregation, SQLite's insertion-order rows make first-wins record 0.2.
-    let weak_to_c = GraphEdge::new(TENANT, &m_weak.node_id, &c.node_id, EdgeType::Calls, "mw.rs");
-    let strong_to_c =
-        GraphEdge::new(TENANT, &m_strong.node_id, &c.node_id, EdgeType::Calls, "ms.rs");
+    let weak_to_c = GraphEdge::new(
+        TENANT,
+        &m_weak.node_id,
+        &c.node_id,
+        EdgeType::Calls,
+        "mw.rs",
+    );
+    let strong_to_c = GraphEdge::new(
+        TENANT,
+        &m_strong.node_id,
+        &c.node_id,
+        EdgeType::Calls,
+        "ms.rs",
+    );
     store
         .insert_edges(&[s_to_weak, s_to_strong, weak_to_c, strong_to_c])
         .await
         .unwrap();
 
-    let results = store.query_related(TENANT, &s.node_id, 2, None).await.unwrap();
+    let results = store
+        .query_related(TENANT, &s.node_id, 2, None)
+        .await
+        .unwrap();
     let c_hit = results
         .iter()
         .find(|n| n.node_id == c.node_id)
@@ -176,12 +196,20 @@ async fn test_impact_same_depth_keeps_strongest_caller_confidence() {
     // edge's confidence, same rationale as the forward test above.
     let target = GraphNode::new(TENANT, "t.rs", "target", NodeType::Function);
     let x = GraphNode::new(TENANT, "x.rs", "x", NodeType::Function);
-    store.upsert_nodes(&[target.clone(), x.clone()]).await.unwrap();
+    store
+        .upsert_nodes(&[target.clone(), x.clone()])
+        .await
+        .unwrap();
 
     let mut weak = GraphEdge::new(TENANT, &x.node_id, &target.node_id, EdgeType::Calls, "x.rs");
     weak.weight = 0.2;
-    let mut strong =
-        GraphEdge::new(TENANT, &x.node_id, &target.node_id, EdgeType::UsesType, "x.rs");
+    let mut strong = GraphEdge::new(
+        TENANT,
+        &x.node_id,
+        &target.node_id,
+        EdgeType::UsesType,
+        "x.rs",
+    );
     strong.weight = 0.9;
     // Weak edge first (see forward test).
     store.insert_edges(&[weak, strong]).await.unwrap();

@@ -143,7 +143,9 @@ impl Migration for V45Migration {
         info!("Migration v45: fix token_savings probes (self-match, smear, quadratic window) + search_behavior fallback arm");
 
         let mut tx = pool.begin().await?;
-        sqlx::query(DROP_TOKEN_SAVINGS_VIEW_SQL).execute(&mut *tx).await?;
+        sqlx::query(DROP_TOKEN_SAVINGS_VIEW_SQL)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(CREATE_TOKEN_SAVINGS_VIEW_V45_SQL)
             .execute(&mut *tx)
             .await?;
@@ -262,9 +264,29 @@ mod tests {
     async fn parent_linked_search_row_counts_as_followup_without_op_rewrite() {
         let pool = fresh_pool().await;
         setup(&pool).await;
-        insert(&pool, "a", "2026-07-08T12:00:00.000Z", "search", Some("s1"), None, Some((5000, 1000)), Some(5)).await;
+        insert(
+            &pool,
+            "a",
+            "2026-07-08T12:00:00.000Z",
+            "search",
+            Some("s1"),
+            None,
+            Some((5000, 1000)),
+            Some(5),
+        )
+        .await;
         // op preserved as 'search' — the parent link alone carries the signal.
-        insert(&pool, "b", "2026-07-08T12:00:30.000Z", "search", Some("s1"), Some("a"), Some((4000, 900)), Some(3)).await;
+        insert(
+            &pool,
+            "b",
+            "2026-07-08T12:00:30.000Z",
+            "search",
+            Some("s1"),
+            Some("a"),
+            Some((4000, 900)),
+            Some(3),
+        )
+        .await;
         assert!(had_followup(&pool, "a").await);
     }
 
@@ -272,8 +294,28 @@ mod tests {
     async fn interim_followup_op_rows_still_count() {
         let pool = fresh_pool().await;
         setup(&pool).await;
-        insert(&pool, "a", "2026-07-08T12:00:00.000Z", "search", Some("s1"), None, Some((5000, 1000)), Some(5)).await;
-        insert(&pool, "b", "2026-07-08T12:00:30.000Z", "followup", Some("s1"), Some("a"), Some((4000, 900)), Some(3)).await;
+        insert(
+            &pool,
+            "a",
+            "2026-07-08T12:00:00.000Z",
+            "search",
+            Some("s1"),
+            None,
+            Some((5000, 1000)),
+            Some(5),
+        )
+        .await;
+        insert(
+            &pool,
+            "b",
+            "2026-07-08T12:00:30.000Z",
+            "followup",
+            Some("s1"),
+            Some("a"),
+            Some((4000, 900)),
+            Some(3),
+        )
+        .await;
         assert!(had_followup(&pool, "a").await);
     }
 
@@ -283,7 +325,17 @@ mod tests {
         setup(&pool).await;
         // Lone parent-linked followup row with economy data: its own probe
         // must not fire on itself (the v44 defect).
-        insert(&pool, "orphanless", "2026-07-08T12:00:00.000Z", "followup", Some("s1"), Some("missing"), Some((4000, 900)), Some(3)).await;
+        insert(
+            &pool,
+            "orphanless",
+            "2026-07-08T12:00:00.000Z",
+            "followup",
+            Some("s1"),
+            Some("missing"),
+            Some((4000, 900)),
+            Some(3),
+        )
+        .await;
         assert!(!had_followup(&pool, "orphanless").await);
     }
 
@@ -292,10 +344,43 @@ mod tests {
         let pool = fresh_pool().await;
         setup(&pool).await;
         // Unrelated search A, then B, then a followup parent-linked to B only.
-        insert(&pool, "a", "2026-07-08T12:00:00.000Z", "search", Some("s1"), None, Some((5000, 1000)), Some(5)).await;
-        insert(&pool, "b", "2026-07-08T12:00:10.000Z", "search", Some("s1"), None, Some((5000, 1000)), Some(5)).await;
-        insert(&pool, "b2", "2026-07-08T12:00:30.000Z", "search", Some("s1"), Some("b"), Some((4000, 900)), Some(3)).await;
-        assert!(!had_followup(&pool, "a").await, "A must not inherit B's followup");
+        insert(
+            &pool,
+            "a",
+            "2026-07-08T12:00:00.000Z",
+            "search",
+            Some("s1"),
+            None,
+            Some((5000, 1000)),
+            Some(5),
+        )
+        .await;
+        insert(
+            &pool,
+            "b",
+            "2026-07-08T12:00:10.000Z",
+            "search",
+            Some("s1"),
+            None,
+            Some((5000, 1000)),
+            Some(5),
+        )
+        .await;
+        insert(
+            &pool,
+            "b2",
+            "2026-07-08T12:00:30.000Z",
+            "search",
+            Some("s1"),
+            Some("b"),
+            Some((4000, 900)),
+            Some(3),
+        )
+        .await;
+        assert!(
+            !had_followup(&pool, "a").await,
+            "A must not inherit B's followup"
+        );
         assert!(had_followup(&pool, "b").await);
     }
 
@@ -303,8 +388,28 @@ mod tests {
     async fn grep_lineage_link_is_not_a_followup() {
         let pool = fresh_pool().await;
         setup(&pool).await;
-        insert(&pool, "a", "2026-07-08T12:00:00.000Z", "search", Some("s1"), None, Some((5000, 1000)), Some(5)).await;
-        insert(&pool, "g", "2026-07-08T12:00:20.000Z", "grep", Some("s1"), Some("a"), Some((3000, 800)), Some(7)).await;
+        insert(
+            &pool,
+            "a",
+            "2026-07-08T12:00:00.000Z",
+            "search",
+            Some("s1"),
+            None,
+            Some((5000, 1000)),
+            Some(5),
+        )
+        .await;
+        insert(
+            &pool,
+            "g",
+            "2026-07-08T12:00:20.000Z",
+            "grep",
+            Some("s1"),
+            Some("a"),
+            Some((3000, 800)),
+            Some(7),
+        )
+        .await;
         assert!(!had_followup(&pool, "a").await);
     }
 
@@ -312,12 +417,52 @@ mod tests {
     async fn unlinked_external_followup_counts_via_legacy_window() {
         let pool = fresh_pool().await;
         setup(&pool).await;
-        insert(&pool, "a", "2026-07-08T12:00:00.000Z", "search", Some("s1"), None, Some((5000, 1000)), Some(5)).await;
-        insert(&pool, "f", "2026-07-08T12:00:30.000Z", "followup", Some("s1"), None, None, None).await;
+        insert(
+            &pool,
+            "a",
+            "2026-07-08T12:00:00.000Z",
+            "search",
+            Some("s1"),
+            None,
+            Some((5000, 1000)),
+            Some(5),
+        )
+        .await;
+        insert(
+            &pool,
+            "f",
+            "2026-07-08T12:00:30.000Z",
+            "followup",
+            Some("s1"),
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(had_followup(&pool, "a").await);
         // ...but not outside the 60s lexical window.
-        insert(&pool, "b", "2026-07-08T13:00:00.000Z", "search", Some("s1"), None, Some((5000, 1000)), Some(5)).await;
-        insert(&pool, "f2", "2026-07-08T13:01:30.000Z", "followup", Some("s1"), None, None, None).await;
+        insert(
+            &pool,
+            "b",
+            "2026-07-08T13:00:00.000Z",
+            "search",
+            Some("s1"),
+            None,
+            Some((5000, 1000)),
+            Some(5),
+        )
+        .await;
+        insert(
+            &pool,
+            "f2",
+            "2026-07-08T13:01:30.000Z",
+            "followup",
+            Some("s1"),
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(!had_followup(&pool, "b").await);
     }
 
@@ -325,12 +470,42 @@ mod tests {
     async fn escalation_requires_delivered_results() {
         let pool = fresh_pool().await;
         setup(&pool).await;
-        insert(&pool, "a", "2026-07-08T12:00:00.000Z", "search", Some("s1"), None, Some((5000, 1000)), Some(5)).await;
+        insert(
+            &pool,
+            "a",
+            "2026-07-08T12:00:00.000Z",
+            "search",
+            Some("s1"),
+            None,
+            Some((5000, 1000)),
+            Some(5),
+        )
+        .await;
         // Linked retrieve that was refused / delivered nothing.
-        insert(&pool, "r0", "2026-07-08T12:00:30.000Z", "retrieve", Some("s1"), Some("a"), Some((0, 0)), Some(0)).await;
+        insert(
+            &pool,
+            "r0",
+            "2026-07-08T12:00:30.000Z",
+            "retrieve",
+            Some("s1"),
+            Some("a"),
+            Some((0, 0)),
+            Some(0),
+        )
+        .await;
         assert!(!had_escalation(&pool, "a").await);
         // Linked retrieve that delivered a document.
-        insert(&pool, "r1", "2026-07-08T12:00:40.000Z", "retrieve", Some("s1"), Some("a"), Some((9000, 9000)), Some(1)).await;
+        insert(
+            &pool,
+            "r1",
+            "2026-07-08T12:00:40.000Z",
+            "retrieve",
+            Some("s1"),
+            Some("a"),
+            Some((9000, 9000)),
+            Some(1),
+        )
+        .await;
         assert!(had_escalation(&pool, "a").await);
     }
 
@@ -339,8 +514,28 @@ mod tests {
         let pool = fresh_pool().await;
         setup(&pool).await;
         // mcp -> mcp seconds apart: NOT a fallback (the v14 defect).
-        insert(&pool, "m1", "2026-07-08T12:00:00.000Z", "search", Some("s1"), None, None, None).await;
-        insert(&pool, "m2", "2026-07-08T12:00:10.000Z", "search", Some("s1"), None, None, None).await;
+        insert(
+            &pool,
+            "m1",
+            "2026-07-08T12:00:00.000Z",
+            "search",
+            Some("s1"),
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert(
+            &pool,
+            "m2",
+            "2026-07-08T12:00:10.000Z",
+            "search",
+            Some("s1"),
+            None,
+            None,
+            None,
+        )
+        .await;
         let behavior: String = sqlx::query_scalar(
             "SELECT behavior FROM search_behavior WHERE ts = '2026-07-08T12:00:10.000Z'",
         )

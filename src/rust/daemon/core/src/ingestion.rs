@@ -83,8 +83,7 @@ impl IngestionEngine {
         let file_hash = wqm_common::hashing::compute_file_hash(file_path)
             .unwrap_or_else(|_| "unknown".to_string());
         let _ = branch; // Layer 2: base_point is branch-agnostic
-        let base_point =
-            wqm_common::hashing::compute_base_point(collection, &path_str, &file_hash);
+        let base_point = wqm_common::hashing::compute_base_point(collection, &path_str, &file_hash);
 
         let (points, embed_ms) = self
             .stage3_embed_chunks(

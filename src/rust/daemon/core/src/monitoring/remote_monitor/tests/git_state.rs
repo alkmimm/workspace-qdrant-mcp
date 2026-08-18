@@ -281,7 +281,10 @@ async fn test_git_state_worktree_converges_without_demotion() {
         .await
         .unwrap();
     assert_eq!(first.projects_checked, 1);
-    assert_eq!(first.transitions_detected, 1, "worktree transition detected");
+    assert_eq!(
+        first.transitions_detected, 1,
+        "worktree transition detected"
+    );
 
     // Tenant must NOT be demoted/changed — the worktree keeps the shared tenant.
     let tid: String =
@@ -297,7 +300,10 @@ async fn test_git_state_worktree_converges_without_demotion() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(is_git, 1, "is_git_tracked converged to current on-disk state");
+    assert_eq!(
+        is_git, 1,
+        "is_git_tracked converged to current on-disk state"
+    );
 
     // No cascade rename was enqueued (the worktree's tenant never moved).
     let rename_count: i32 = sqlx::query_scalar(
@@ -306,7 +312,10 @@ async fn test_git_state_worktree_converges_without_demotion() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(rename_count, 0, "a blocked worktree must not enqueue a rename");
+    assert_eq!(
+        rename_count, 0,
+        "a blocked worktree must not enqueue a rename"
+    );
 
     // Second cycle: stored state now matches reality → NO transition re-fires.
     let second = check_git_state_changes(&pool, &queue_manager)

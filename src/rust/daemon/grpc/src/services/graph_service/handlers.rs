@@ -11,11 +11,11 @@ use workspace_qdrant_core::graph::EdgeType;
 use crate::proto::{
     graph_service_server::GraphService, BetweennessNodeProto, BetweennessRequest,
     BetweennessResponse, CommunityMemberProto, CommunityProto, CommunityRequest, CommunityResponse,
-    CycleMemberProto, CycleProto, CycleRequest, CycleResponse,
-    GraphMigrateRequest, GraphMigrateResponse, GraphStatsRequest, GraphStatsResponse,
-    ImpactAnalysisRequest, ImpactAnalysisResponse, ImpactNodeProto, PageRankNodeProto,
-    PageRankRequest, PageRankResponse, QueryRelatedRequest, QueryRelatedResponse,
-    TestGapProto, TestGapsRequest, TestGapsResponse, TraversalNodeProto,
+    CycleMemberProto, CycleProto, CycleRequest, CycleResponse, GraphMigrateRequest,
+    GraphMigrateResponse, GraphStatsRequest, GraphStatsResponse, ImpactAnalysisRequest,
+    ImpactAnalysisResponse, ImpactNodeProto, PageRankNodeProto, PageRankRequest, PageRankResponse,
+    QueryRelatedRequest, QueryRelatedResponse, TestGapProto, TestGapsRequest, TestGapsResponse,
+    TraversalNodeProto,
 };
 use crate::validation::extract_relative_path;
 
@@ -87,7 +87,12 @@ impl GraphService for GraphServiceImpl {
         } else {
             match self
                 .graph_store
-                .query_related(&req.tenant_id, &req.node_id, max_hops, edge_types.as_deref())
+                .query_related(
+                    &req.tenant_id,
+                    &req.node_id,
+                    max_hops,
+                    edge_types.as_deref(),
+                )
                 .await
             {
                 Ok(n) => n,
@@ -108,7 +113,13 @@ impl GraphService for GraphServiceImpl {
                 let fp = req.file_path.as_deref().filter(|s| !s.is_empty());
                 match self
                     .graph_store
-                    .query_related_by_symbol(&req.tenant_id, sym, fp, max_hops, edge_types.as_deref())
+                    .query_related_by_symbol(
+                        &req.tenant_id,
+                        sym,
+                        fp,
+                        max_hops,
+                        edge_types.as_deref(),
+                    )
                     .await
                 {
                     Ok(n) => nodes = n,
@@ -642,11 +653,18 @@ impl GraphService for GraphServiceImpl {
                     covered: report.covered,
                     gap_count: report.gap_count,
                     query_time_ms,
+                    test_nodes: report.test_nodes,
+                    // Carried verbatim from the core algorithm so the MCP tool
+                    // and `wqm graph test_gaps` warn on identical terms.
+                    reliability_warning: report.reliability_warning,
                 }))
             }
             Err(e) => {
                 error!("GraphService.DetectTestGaps failed: {}", e);
-                Err(Status::internal(format!("Test-gap detection failed: {}", e)))
+                Err(Status::internal(format!(
+                    "Test-gap detection failed: {}",
+                    e
+                )))
             }
         }
     }

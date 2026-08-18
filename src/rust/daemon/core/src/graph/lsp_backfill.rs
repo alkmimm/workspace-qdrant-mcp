@@ -307,7 +307,10 @@ mod tests {
             n.start_line = Some(3);
             n
         };
-        store.upsert_nodes(&[build.clone(), helper.clone()]).await.unwrap();
+        store
+            .upsert_nodes(&[build.clone(), helper.clone()])
+            .await
+            .unwrap();
 
         // LSP resolved the caller's calls to those absolute paths + lines.
         let resolved = vec![
@@ -366,7 +369,11 @@ mod tests {
 
         // Per-language scoping: the Dart server's pass sees only Dart callers.
         let dart_callers = tenant_callers(&store, t, &["dart".to_string()]).await;
-        assert_eq!(dart_callers.len(), 1, "only the dart caller with a start_line");
+        assert_eq!(
+            dart_callers.len(),
+            1,
+            "only the dart caller with a start_line"
+        );
         assert_eq!(dart_callers[0].symbol_name, "build");
 
         let java_callers = tenant_callers(&store, t, &["java".to_string()]).await;

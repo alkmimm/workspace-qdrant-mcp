@@ -849,7 +849,6 @@ impl DaemonMetrics {
 
     // ── LSP helpers ───────────────────────────────────────────────────────
 
-
     /// Set the running state for a language (1 = running, 0 = stopped).
     ///
     /// Called by the LSP metrics background task every 30 s.

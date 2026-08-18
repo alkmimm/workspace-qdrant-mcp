@@ -329,8 +329,14 @@ async fn test_branch_bulk_persist_checkpoints_and_resumes() {
         .connect("sqlite::memory:")
         .await
         .expect("in-memory pool");
-    sqlx::query(CREATE_WATCH_FOLDERS_SQL).execute(&pool).await.unwrap();
-    sqlx::query(CREATE_TRACKED_FILES_V41_SQL).execute(&pool).await.unwrap();
+    sqlx::query(CREATE_WATCH_FOLDERS_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let now = "2025-01-01T00:00:00Z";
     sqlx::query(
@@ -381,14 +387,21 @@ async fn test_branch_bulk_persist_checkpoints_and_resumes() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(branches_a.contains("feat"), "a.rs re-keyed onto feat: {branches_a}");
+    assert!(
+        branches_a.contains("feat"),
+        "a.rs re-keyed onto feat: {branches_a}"
+    );
     assert!(!branches_b.contains("feat"), "b.rs untouched: {branches_b}");
 
     // RESUME: re-selecting candidates now excludes a.rs — only b.rs remains.
     let after = select_branch_bulk_candidates(&pool, "w1", "feat", Some("main"), &paths)
         .await
         .unwrap();
-    assert_eq!(after.len(), 1, "a.rs skipped after checkpoint — op resumes at b.rs");
+    assert_eq!(
+        after.len(),
+        1,
+        "a.rs skipped after checkpoint — op resumes at b.rs"
+    );
 
     // IDEMPOTENT: persisting a.rs again does not double-insert 'feat'.
     persist_branch_tag_for_base_points(&pool, None, "w1", "feat", std::slice::from_ref(&bp_a))
@@ -399,7 +412,11 @@ async fn test_branch_bulk_persist_checkpoints_and_resumes() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(branches_a2.matches("feat").count(), 1, "feat tagged once: {branches_a2}");
+    assert_eq!(
+        branches_a2.matches("feat").count(),
+        1,
+        "feat tagged once: {branches_a2}"
+    );
 }
 
 /// Cross-worktree isolation for the bulk branch re-key's search.db mirror.
@@ -425,8 +442,14 @@ async fn test_branch_bulk_search_db_mirror_scopes_to_watch_folder() {
         .connect("sqlite::memory:")
         .await
         .expect("in-memory pool");
-    sqlx::query(CREATE_WATCH_FOLDERS_SQL).execute(&pool).await.unwrap();
-    sqlx::query(CREATE_TRACKED_FILES_V41_SQL).execute(&pool).await.unwrap();
+    sqlx::query(CREATE_WATCH_FOLDERS_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let now = "2025-01-01T00:00:00Z";
     // Two sibling worktrees of the SAME project (tenant t1). base_point =
@@ -468,7 +491,10 @@ async fn test_branch_bulk_search_db_mirror_scopes_to_watch_folder() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_ne!(fid_w1, fid_w2, "sibling worktrees must have distinct file_ids");
+    assert_ne!(
+        fid_w1, fid_w2,
+        "sibling worktrees must have distinct file_ids"
+    );
 
     // Seed the search.db mirror: one file_metadata row per file_id, both on main.
     let dir = tempfile::tempdir().unwrap();
@@ -508,24 +534,28 @@ async fn test_branch_bulk_search_db_mirror_scopes_to_watch_folder() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    let w1_fm: String =
-        sqlx::query_scalar("SELECT branches FROM file_metadata WHERE file_id = ?1")
-            .bind(fid_w1)
-            .fetch_one(sdb.pool())
-            .await
-            .unwrap();
-    let w2_fm: String =
-        sqlx::query_scalar("SELECT branches FROM file_metadata WHERE file_id = ?1")
-            .bind(fid_w2)
-            .fetch_one(sdb.pool())
-            .await
-            .unwrap();
+    let w1_fm: String = sqlx::query_scalar("SELECT branches FROM file_metadata WHERE file_id = ?1")
+        .bind(fid_w1)
+        .fetch_one(sdb.pool())
+        .await
+        .unwrap();
+    let w2_fm: String = sqlx::query_scalar("SELECT branches FROM file_metadata WHERE file_id = ?1")
+        .bind(fid_w2)
+        .fetch_one(sdb.pool())
+        .await
+        .unwrap();
 
     // w1: authority AND mirror both gained `feat`.
     assert!(w1_tf.contains("feat"), "w1 tracked_files re-keyed: {w1_tf}");
-    assert!(w1_fm.contains("feat"), "w1 file_metadata mirror re-keyed: {w1_fm}");
+    assert!(
+        w1_fm.contains("feat"),
+        "w1 file_metadata mirror re-keyed: {w1_fm}"
+    );
     // w2 (sibling sharing the base_point): UNTOUCHED in BOTH stores — the leak fix.
-    assert!(!w2_tf.contains("feat"), "w2 tracked_files must be untouched: {w2_tf}");
+    assert!(
+        !w2_tf.contains("feat"),
+        "w2 tracked_files must be untouched: {w2_tf}"
+    );
     assert!(
         !w2_fm.contains("feat"),
         "sibling worktree's file_metadata must NOT be cross-tagged: {w2_fm}"

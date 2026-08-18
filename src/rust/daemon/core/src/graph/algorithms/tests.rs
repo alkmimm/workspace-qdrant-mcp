@@ -27,7 +27,10 @@ fn graph_exclude_matches_by_substring() {
         "_pb2".to_string(),
         ".g.dart".to_string(),
     ];
-    assert!(is_graph_excluded("gen/java/UserOuterClass.java", &generated));
+    assert!(is_graph_excluded(
+        "gen/java/UserOuterClass.java",
+        &generated
+    ));
     assert!(is_graph_excluded("lib/api/user.pb.dart", &generated));
     assert!(is_graph_excluded("proto/user_pb2.py", &generated));
     assert!(is_graph_excluded("lib/models/user.g.dart", &generated));
@@ -61,8 +64,16 @@ fn centrality_generic_filter_is_dynamic_not_hardcoded() {
     );
     // The threshold is corpus-derived: floored for a small graph, ~0.2% for a large
     // one (so it adapts to a small lib vs a large monorepo, any language).
-    assert_eq!(centrality_generic_threshold(100), 15, "small corpus → floor (15)");
-    assert_eq!(centrality_generic_threshold(50_000), 100, "large corpus → ~0.2%");
+    assert_eq!(
+        centrality_generic_threshold(100),
+        15,
+        "small corpus → floor (15)"
+    );
+    assert_eq!(
+        centrality_generic_threshold(50_000),
+        100,
+        "large corpus → ~0.2%"
+    );
 }
 
 #[test]
@@ -72,8 +83,16 @@ fn centrality_usage_threshold_is_dynamic() {
     // case (collect/iter/Result) the definition-count axis cannot see. Threshold is
     // corpus-derived: floor 50, then total/150, CAPPED at 125 (the generic-name line
     // is ~constant across project sizes, not proportional — calibrated on 3 tenants).
-    assert_eq!(centrality_usage_threshold(100), 50, "small corpus → floor (50)");
-    assert_eq!(centrality_usage_threshold(15_000), 100, "mid corpus → total/150");
+    assert_eq!(
+        centrality_usage_threshold(100),
+        50,
+        "small corpus → floor (50)"
+    );
+    assert_eq!(
+        centrality_usage_threshold(15_000),
+        100,
+        "mid corpus → total/150"
+    );
     assert_eq!(
         centrality_usage_threshold(30_000),
         125,
@@ -619,10 +638,7 @@ async fn test_load_adjacency_drops_use_ubiquitous_node() {
         graph.nodes.contains_key("norm"),
         "a normally-referenced node (in-degree 2) must be kept"
     );
-    assert!(
-        graph.nodes.contains_key("c0"),
-        "caller nodes must be kept"
-    );
+    assert!(graph.nodes.contains_key("c0"), "caller nodes must be kept");
 
     // With genericity filters OFF (structural callers like cycle detection), the
     // same use-ubiquitous node is KEPT — a real cycle may pass through it.

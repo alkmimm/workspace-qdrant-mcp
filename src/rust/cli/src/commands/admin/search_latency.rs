@@ -122,7 +122,9 @@ fn query_latency(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(params.iter()), |r| {
         Ok(LatencyAgg {
-            group: r.get::<_, Option<String>>(0)?.unwrap_or_else(|| "<null>".into()),
+            group: r
+                .get::<_, Option<String>>(0)?
+                .unwrap_or_else(|| "<null>".into()),
             calls: r.get::<_, i64>(1)?,
             p50: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
             p95: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
@@ -258,7 +260,10 @@ fn print_chain_table(events: &[ChainEvent], session_id: &str) {
             op: e.op.clone(),
             query: e.query.clone(),
             hits: e.hits.map(|h| h.to_string()).unwrap_or_else(|| "—".into()),
-            ms: e.latency_ms.map(|m| m.to_string()).unwrap_or_else(|| "—".into()),
+            ms: e
+                .latency_ms
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "—".into()),
             link: e.link.clone(),
         })
         .collect();

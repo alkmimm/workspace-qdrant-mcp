@@ -424,12 +424,18 @@ mod tests {
     fn grpc_url_maps_to_rest_port_for_readyz_probe() {
         // The daemon's gRPC URL (6334) must become the REST URL (6333) for
         // the HTTP /readyz probe; everything else is left untouched.
-        assert_eq!(qdrant_http_probe_url_from("http://qdrant:6334"), "http://qdrant:6333");
+        assert_eq!(
+            qdrant_http_probe_url_from("http://qdrant:6334"),
+            "http://qdrant:6333"
+        );
         assert_eq!(
             qdrant_http_probe_url_from("http://host.docker.internal:6334"),
             "http://host.docker.internal:6333"
         );
-        assert_eq!(qdrant_http_probe_url_from("http://qdrant:6333"), "http://qdrant:6333");
+        assert_eq!(
+            qdrant_http_probe_url_from("http://qdrant:6333"),
+            "http://qdrant:6333"
+        );
         assert_eq!(
             qdrant_http_probe_url_from("https://example:9999"),
             "https://example:9999"

@@ -27,7 +27,7 @@
  */
 
 import { FIELD_CONTENT } from '../common/native-bridge.js';
-import { RANKING_AID_KEYS } from '../common/payload-noise.js';
+import { TEXT_BODY_KEYS, stripServedNoise } from '../common/payload-noise.js';
 import { applyByteBudget } from './response-budget.js';
 import type {
   ParentContext,
@@ -76,19 +76,6 @@ export function dedupeIdenticalBodies(results: readonly SearchResult[]): {
   }
   return { kept, dropped };
 }
-
-/** Metadata payload fields known to carry chunk text. Stripped in
- *  summary mode AND deduplicated against `result.content` in truncate
- *  mode (the daemon's payload already duplicates content into both
- *  `result.content` and `result.metadata[FIELD_CONTENT]`). */
-const TEXT_BODY_KEYS: readonly string[] = [
-  'content',
-  'text',
-  'chunk_text',
-  'unit_text',
-  'snippet',
-  'body',
-];
 
 function metadataNumber(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -167,21 +154,21 @@ function truncateText(text: string, cap: number, reference: string): string {
   return text.slice(0, keep) + marker;
 }
 
-/** Strip the metadata an agent never reads from a default (truncate-mode) hit:
- *  duplicated text bodies (shipping the chunk twice) AND the daemon's
- *  ranking-aid fields ({@link RANKING_AID_KEYS} — keywords/baskets/tags, ~1.5–2k
- *  tokens/hit). Summary mode drops the same noise via its allowlist; this keeps
- *  the default mode from leaking it back in. */
+/** Strip the metadata an agent never reads from a served hit: duplicated text
+ *  bodies (shipping the chunk twice), the daemon's ranking-aid fields, ingest
+ *  plumbing, and provably-redundant duplicates — see
+ *  {@link ../common/payload-noise.ts}, shared with `retrieve` so the two paths
+ *  cannot drift. Summary mode drops the same noise via its allowlist; this
+ *  keeps the concise and detailed modes from leaking it back in.
+ *
+ *  Field feedback (v0-bws-training audit, 2026-08): a 9-line code hit carried
+ *  28 metadata fields — file_hash, base_point, idf_epoch, chunk_encoding, and
+ *  absolute_path + file_path + relative_path together — whose serialization
+ *  exceeded the code itself. `responseFormat:"concise"` did not help because it
+ *  is the DEFAULT and only ever governed the body cap, never this bag. */
 function stripBulkMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...metadata };
-  for (const key of TEXT_BODY_KEYS) {
-    if (key in out) delete out[key];
-  }
-  for (const key of RANKING_AID_KEYS) {
-    if (key in out) delete out[key];
-  }
-  if (FIELD_CONTENT && FIELD_CONTENT in out) delete out[FIELD_CONTENT];
-  return out;
+  const textKeys = FIELD_CONTENT ? [...TEXT_BODY_KEYS, FIELD_CONTENT] : TEXT_BODY_KEYS;
+  return stripServedNoise(metadata, textKeys);
 }
 
 /** Metadata fields worth keeping in `summary` mode — just enough to decide
@@ -428,13 +415,17 @@ export function shapeHitPayloads(
   if (cap <= 0) {
     const metrics = emptyMetrics('none');
     // Cap disabled: bodies pass through untouched, but still lift `location`
-    // out of metadata so the grep-like locator is uniform across all modes.
+    // out of metadata so the grep-like locator is uniform across all modes —
+    // and still strip the metadata noise. `detailed` asks for the full chunk
+    // BODY, not for ranking aids and ingest plumbing; leaving them in was the
+    // one mode that leaked back what every other mode drops.
     const results = response.results.map((r) => {
       const bytes = hitShapedBytes(r);
       metrics.bytesInShaped += bytes;
       metrics.bytesOutShaped += bytes;
+      const shaped: SearchResult = { ...r, metadata: stripBulkMetadata(r.metadata) };
       const location = deriveLocation(r.metadata);
-      return location !== undefined ? { ...r, location } : r;
+      return location !== undefined ? { ...shaped, location } : shaped;
     });
     return { response: finalize(response, results, metrics), metrics };
   }

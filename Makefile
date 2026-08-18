@@ -110,6 +110,9 @@ help:
 	@echo "  build-images     docker compose build mcp memexd"
 	@echo "  mcp-rebuild      rebuild + recreate ONLY the mcp container"
 	@echo "  memexd-recreate  recreate memexd (picks up env changes from docker/.env)"
+	@echo "  validate         LOCAL CI (GitHub Actions are disabled): clippy -D warnings +"
+	@echo "                   hermetic test gates. Run before pushing. The cheap static"
+	@echo "                   checks (fmt/path-discipline/versions) already run in every build."
 	@echo "------------------------------------------------------------"
 	@echo "Codex integration:"
 	@echo "  codex-register   create/update the workspace-qdrant HTTP MCP in Codex"
@@ -260,6 +263,24 @@ mcp-rebuild: check-env
 memexd-recreate: check-env
 	@echo "Recreating memexd container (picks up env changes from docker/.env)..."
 	@cd "$(REPO)" && $(COMPOSE) up -d --force-recreate memexd
+
+# ── Local CI gate ────────────────────────────────────────────────────────────
+# GitHub Actions are disabled on this fork, so THIS is the CI. Two tiers:
+#
+#   static-checks  cheap (seconds): cargo fmt --check, path discipline,
+#                  canonicalize markers, hooks .claude paths, ONNX/tree-sitter
+#                  version consistency. Runs AUTOMATICALLY on every image build
+#                  — `runtime` copies its marker, so `redeploy` cannot succeed
+#                  while one fails. Nothing to remember.
+#
+#   validate       expensive (minutes): clippy -D warnings over lib+bins+tests,
+#                  plus the hermetic test gates (schema_version, FTS re-ingest,
+#                  branch attribution, graph, test_gaps reliability). NOT on the
+#                  redeploy path — run it before pushing.
+validate:
+	@echo "=== Local CI gate: clippy + hermetic test suites (container) ==="
+	@echo "Static checks already ran during the image build; this is the compile tier."
+	@bash "$(REPO)/scripts/validate.sh"
 
 # Register the containerized Streamable HTTP server in the Linux/WSL Codex
 # config. The helper delegates creation/update to the installed Codex CLI, then

@@ -88,7 +88,9 @@ impl Migration for V46Migration {
         info!("Migration v46: unary-+ hint on the token_savings legacy-followup arm (live planner picked the NULL-heavy parent index)");
 
         let mut tx = pool.begin().await?;
-        sqlx::query(DROP_TOKEN_SAVINGS_VIEW_SQL).execute(&mut *tx).await?;
+        sqlx::query(DROP_TOKEN_SAVINGS_VIEW_SQL)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(CREATE_TOKEN_SAVINGS_VIEW_V46_SQL)
             .execute(&mut *tx)
             .await?;
@@ -144,7 +146,13 @@ mod tests {
         // Idempotent re-run.
         V46Migration.up(&pool).await.unwrap();
 
-        let ins = |id: &str, ts: &str, op: &str, session: Option<&str>, parent: Option<&str>, bytes: bool, rc: Option<i32>| {
+        let ins = |id: &str,
+                   ts: &str,
+                   op: &str,
+                   session: Option<&str>,
+                   parent: Option<&str>,
+                   bytes: bool,
+                   rc: Option<i32>| {
             let pool = pool.clone();
             let (id, ts, op) = (id.to_string(), ts.to_string(), op.to_string());
             let session = session.map(|s| s.to_string());
@@ -170,17 +178,89 @@ mod tests {
         };
 
         // parent-linked search (op preserved) → followup on origin
-        ins("a", "2026-07-08T12:00:00.000Z", "search", Some("s1"), None, true, Some(5)).await;
-        ins("b", "2026-07-08T12:00:30.000Z", "search", Some("s1"), Some("a"), true, Some(3)).await;
+        ins(
+            "a",
+            "2026-07-08T12:00:00.000Z",
+            "search",
+            Some("s1"),
+            None,
+            true,
+            Some(5),
+        )
+        .await;
+        ins(
+            "b",
+            "2026-07-08T12:00:30.000Z",
+            "search",
+            Some("s1"),
+            Some("a"),
+            true,
+            Some(3),
+        )
+        .await;
         // lone linked followup row must not self-match
-        ins("self", "2026-07-08T12:10:00.000Z", "followup", Some("s1"), Some("x"), true, Some(3)).await;
+        ins(
+            "self",
+            "2026-07-08T12:10:00.000Z",
+            "followup",
+            Some("s1"),
+            Some("x"),
+            true,
+            Some(3),
+        )
+        .await;
         // unlinked external followup counts via the (hinted) legacy window
-        ins("l0", "2026-07-08T12:40:00.000Z", "search", Some("s4"), None, true, Some(5)).await;
-        ins("lf", "2026-07-08T12:40:30.000Z", "followup", Some("s4"), None, false, None).await;
+        ins(
+            "l0",
+            "2026-07-08T12:40:00.000Z",
+            "search",
+            Some("s4"),
+            None,
+            true,
+            Some(5),
+        )
+        .await;
+        ins(
+            "lf",
+            "2026-07-08T12:40:30.000Z",
+            "followup",
+            Some("s4"),
+            None,
+            false,
+            None,
+        )
+        .await;
         // refused retrieve does not escalate; delivered one does
-        ins("e0", "2026-07-08T12:50:00.000Z", "search", Some("s5"), None, true, Some(5)).await;
-        ins("r0", "2026-07-08T12:50:30.000Z", "retrieve", Some("s5"), Some("e0"), true, Some(0)).await;
-        ins("r1", "2026-07-08T12:50:40.000Z", "retrieve", Some("s5"), Some("e0"), true, Some(1)).await;
+        ins(
+            "e0",
+            "2026-07-08T12:50:00.000Z",
+            "search",
+            Some("s5"),
+            None,
+            true,
+            Some(5),
+        )
+        .await;
+        ins(
+            "r0",
+            "2026-07-08T12:50:30.000Z",
+            "retrieve",
+            Some("s5"),
+            Some("e0"),
+            true,
+            Some(0),
+        )
+        .await;
+        ins(
+            "r1",
+            "2026-07-08T12:50:40.000Z",
+            "retrieve",
+            Some("s5"),
+            Some("e0"),
+            true,
+            Some(1),
+        )
+        .await;
 
         let probe = |id: &str| {
             let pool = pool.clone();

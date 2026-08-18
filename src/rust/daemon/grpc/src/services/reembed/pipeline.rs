@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use tonic::Status;
 use tracing::info;
-use workspace_qdrant_core::SearchDbManager;
 use uuid::Uuid;
+use workspace_qdrant_core::SearchDbManager;
 
 use crate::proto::TriggerReembedResponse;
 
@@ -51,7 +51,6 @@ async fn drain_to_quiescence(
         tokio::time::sleep(poll_interval).await;
     }
 }
-
 
 async fn clear_search_db_for_watch_tenants(
     search_db: &Arc<SearchDbManager>,
@@ -125,25 +124,27 @@ async fn clear_search_db_for_watch_tenants(
         for tenant in chunk {
             q = q.bind(tenant);
         }
-        q.execute(search_pool)
-            .await
-            .map_err(|e| Status::internal(format!("clear search-db code_lines for reembed: {e}")))?;
+        q.execute(search_pool).await.map_err(|e| {
+            Status::internal(format!("clear search-db code_lines for reembed: {e}"))
+        })?;
 
         let sql = format!("DELETE FROM file_metadata WHERE tenant_id IN ({placeholders})");
         let mut q = sqlx::query(&sql);
         for tenant in chunk {
             q = q.bind(tenant);
         }
-        q.execute(search_pool)
-            .await
-            .map_err(|e| Status::internal(format!("clear search-db file_metadata for reembed: {e}")))?;
+        q.execute(search_pool).await.map_err(|e| {
+            Status::internal(format!("clear search-db file_metadata for reembed: {e}"))
+        })?;
     }
 
     if total_files > 0 {
         search_db
             .rebuild_and_maybe_optimize_fts(total_lines as usize)
             .await
-            .map_err(|e| Status::internal(format!("rebuild search-db FTS after reembed clear: {e}")))?;
+            .map_err(|e| {
+                Status::internal(format!("rebuild search-db FTS after reembed clear: {e}"))
+            })?;
         info!(
             tenants = tenants.len(),
             files = total_files,

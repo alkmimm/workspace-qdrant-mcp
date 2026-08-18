@@ -287,6 +287,9 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count, 0, "boundary-date timing must be cleaned (ISO-Z threshold)");
+        assert_eq!(
+            count, 0,
+            "boundary-date timing must be cleaned (ISO-Z threshold)"
+        );
     }
 }

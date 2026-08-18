@@ -44,6 +44,30 @@ session, project, or time window.
 | `hits_truncated` | Number of hits whose `content`/`parent_context.unit_text` was truncated by the shaping pass (0 in summary mode). | int |
 | `mode` | `truncate` (default), `summary`, `packed` (single ranked, deduplicated context bundle under the response budget — `responseFormat: "packed"`), or `none` (cap disabled). | enum |
 
+`mode` governs the hit **body** only. Per-hit **metadata** is trimmed
+identically in every mode by the shared `stripServedNoise`
+(`src/typescript/mcp-server/src/common/payload-noise.ts`), which `retrieve`
+also uses so the two payload-backed read surfaces cannot drift. It removes
+three categories: the daemon's ranking aids (`keywords`, `keyword_baskets`,
+`concept_tags`, `structural_tags`), ingest plumbing addressing nothing the
+agent can call back into (`file_hash`, `base_point`, `idf_epoch`, `tenant_id`,
+`item_type`, `chunk_index`, `chunk_encoding`, `chunk_collection`,
+`chunk_line_count`, `chunk_source_format`), and fields that are byte-identical
+duplicates of a neighbour (`absolute_path` = `file_path`, `chunk_language` =
+`language`, `document_type` = `file_type`, `chunk_symbol_kind` =
+`chunk_chunk_type`, `file_extension` when the path already shows it).
+
+The duplicate drops are **equality-guarded**, never unconditional: if a
+collection ever populates them differently, both survive. That is what makes a
+single denylist safe across `projects` / `libraries` / `rules` / `scratchpad`,
+whose payload shapes differ — an allowlist tuned on code chunks would silently
+swallow scratchpad provenance. Anything unrecognized passes through.
+
+Field feedback (v0-bws-training audit, 2026-08) measured a 9-line code hit
+carrying 28 metadata fields whose serialization exceeded the code itself, on a
+response where `responseFormat:"concise"` appeared to do nothing — it is the
+default, and it only ever governed the body cap.
+
 Derived per-row:
 
 ```

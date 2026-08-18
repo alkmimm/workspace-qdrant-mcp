@@ -313,11 +313,9 @@ impl GraphDbManager {
     /// only ever exists once this migration runs on a linear version chain.
     async fn migrate_v5(&self) -> GraphDbResult<()> {
         info!("Graph migration v5: adding graph_nodes.is_test_symbol");
-        sqlx::query(
-            "ALTER TABLE graph_nodes ADD COLUMN is_test_symbol INTEGER NOT NULL DEFAULT 0",
-        )
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("ALTER TABLE graph_nodes ADD COLUMN is_test_symbol INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -406,7 +404,10 @@ mod tests {
         .fetch_optional(&mgr.pool)
         .await
         .expect("query sqlite_master");
-        assert_eq!(idx_fileless, None, "idx_nodes_fileless must be dropped by v4");
+        assert_eq!(
+            idx_fileless, None,
+            "idx_nodes_fileless must be dropped by v4"
+        );
 
         // The plain index the stub-edge resolver actually drives from (created
         // in v1) must exist.

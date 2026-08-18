@@ -449,8 +449,15 @@ mod tests {
         index.add_path(Path::new("identical.txt")).unwrap();
         index.write().unwrap();
         let tree2 = repo.find_tree(index.write_tree().unwrap()).unwrap();
-        repo.commit(Some("refs/heads/feat"), &sig, &sig, "c2", &tree2, &[&commit1])
-            .unwrap();
+        repo.commit(
+            Some("refs/heads/feat"),
+            &sig,
+            &sig,
+            "c2",
+            &tree2,
+            &[&commit1],
+        )
+        .unwrap();
 
         let modified = modified_paths_head_vs_branch(tmp.path(), "feat");
         assert!(

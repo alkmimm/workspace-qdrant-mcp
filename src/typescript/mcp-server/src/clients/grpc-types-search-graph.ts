@@ -248,4 +248,11 @@ export interface TestGapsResponse {
   covered: number;
   gap_count: number;
   query_time_ms: number;
+  /** Graph nodes classified as test — the seeds of the reachability walk.
+   *  Separates "no tests here" (an honest 0%) from "tests found nothing". */
+  test_nodes?: number;
+  /** Set by the daemon when tests exist but reach almost nothing: the
+   *  test→production edges failed to resolve, so the ranking is not a finding.
+   *  Surfaced to the agent as the response `hint`. */
+  reliability_warning?: string;
 }

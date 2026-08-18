@@ -305,10 +305,19 @@ async fn test_reingest_keeps_content_verbatim_single_file_mode() {
     let (_tmp, db) = setup_db().await;
     let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
 
-    let original = "package com.doc.model;\n\nimport java.util.List;\n\nclass A {\n    void m() {}\n}\n";
-    let updated = "package com.doc.model;\n\nimport java.util.List;\n\nclass A {\n    void m2() {}\n}\n";
+    let original =
+        "package com.doc.model;\n\nimport java.util.List;\n\nclass A {\n    void m() {}\n}\n";
+    let updated =
+        "package com.doc.model;\n\nimport java.util.List;\n\nclass A {\n    void m2() {}\n}\n";
 
-    processor.add_change(test_change(1, "", original, "proj-a", Some("main"), "/src/A.java"));
+    processor.add_change(test_change(
+        1,
+        "",
+        original,
+        "proj-a",
+        Some("main"),
+        "/src/A.java",
+    ));
     processor.flush(0).await.unwrap();
     assert_eq!(
         fetch_indexed_lines(&db, 1).await,
@@ -316,7 +325,14 @@ async fn test_reingest_keeps_content_verbatim_single_file_mode() {
         "first ingest must store the file verbatim, trailing empty line included"
     );
 
-    processor.add_change(test_change(1, original, updated, "proj-a", Some("main"), "/src/A.java"));
+    processor.add_change(test_change(
+        1,
+        original,
+        updated,
+        "proj-a",
+        Some("main"),
+        "/src/A.java",
+    ));
     processor.flush(0).await.unwrap();
     assert_eq!(
         fetch_indexed_lines(&db, 1).await,
@@ -349,12 +365,26 @@ async fn test_reingest_with_desynced_old_content_keeps_content_verbatim() {
     let original = "name: http_auth_adapter\ndescription: adapter\nversion: 1.0.0\n\ndependencies:\n  dio: ^5.10.0\n";
     let updated = "name: http_auth_adapter\ndescription: adapter\nversion: 1.0.1\n\ndependencies:\n  dio: ^5.11.0\n";
 
-    processor.add_change(test_change(7, "", original, "proj-a", Some("main"), "/pubspec.yaml"));
+    processor.add_change(test_change(
+        7,
+        "",
+        original,
+        "proj-a",
+        Some("main"),
+        "/pubspec.yaml",
+    ));
     processor.flush(20).await.unwrap();
     assert_eq!(fetch_indexed_lines(&db, 7).await, expected_lines(original));
 
     // Re-ingest with a DESYNCED old side (empty cache), rows already present.
-    processor.add_change(test_change(7, "", updated, "proj-a", Some("main"), "/pubspec.yaml"));
+    processor.add_change(test_change(
+        7,
+        "",
+        updated,
+        "proj-a",
+        Some("main"),
+        "/pubspec.yaml",
+    ));
     processor.flush(20).await.unwrap();
 
     let stored = fetch_indexed_lines(&db, 7).await;
@@ -394,11 +424,25 @@ async fn test_reingest_with_same_length_stale_old_content_keeps_content_verbatim
     // Same line count as `original`, different content: a plausible stale cache.
     let stale_claim = "charlie\nalpha\nbravo\n";
 
-    processor.add_change(test_change(3, "", original, "proj-a", Some("main"), "/src/a.txt"));
+    processor.add_change(test_change(
+        3,
+        "",
+        original,
+        "proj-a",
+        Some("main"),
+        "/src/a.txt",
+    ));
     processor.flush(20).await.unwrap();
     assert_eq!(fetch_indexed_lines(&db, 3).await, expected_lines(original));
 
-    processor.add_change(test_change(3, stale_claim, updated, "proj-a", Some("main"), "/src/a.txt"));
+    processor.add_change(test_change(
+        3,
+        stale_claim,
+        updated,
+        "proj-a",
+        Some("main"),
+        "/src/a.txt",
+    ));
     processor.flush(20).await.unwrap();
 
     assert_eq!(
@@ -421,16 +465,24 @@ async fn test_reingest_heals_an_already_corrupted_file() {
     let mut processor = FtsBatchProcessor::new(&db, FtsBatchConfig::default());
 
     let original = "package com.doc;\nclass A {}\n";
-    processor.add_change(test_change(9, "", original, "proj-a", Some("main"), "/A.java"));
+    processor.add_change(test_change(
+        9,
+        "",
+        original,
+        "proj-a",
+        Some("main"),
+        "/A.java",
+    ));
     processor.flush(20).await.unwrap();
 
     // Reproduce the corrupted shape in place: the final (empty) slot holds a copy
     // of line 1. This is byte-for-byte what was measured live on 322 of 324 files.
-    let last_id: i64 =
-        sqlx::query_scalar("SELECT line_id FROM code_lines WHERE file_id = 9 ORDER BY seq DESC LIMIT 1")
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
+    let last_id: i64 = sqlx::query_scalar(
+        "SELECT line_id FROM code_lines WHERE file_id = 9 ORDER BY seq DESC LIMIT 1",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
     // The FTS5 index is EXTERNAL-CONTENT: a row must be retired with the exact
     // text it was indexed under. Updating only `code_lines` would leave the two
     // out of sync — a state the real corruption never produced, and one that makes
@@ -462,7 +514,14 @@ async fn test_reingest_heals_an_already_corrupted_file() {
     // A later real edit, with a CORRECT old side — the count matches (so a count
     // check would sail past), but the content does not.
     let updated = "package com.doc;\nclass A { void m() {} }\n";
-    processor.add_change(test_change(9, original, updated, "proj-a", Some("main"), "/A.java"));
+    processor.add_change(test_change(
+        9,
+        original,
+        updated,
+        "proj-a",
+        Some("main"),
+        "/A.java",
+    ));
     processor.flush(20).await.unwrap();
 
     assert_eq!(

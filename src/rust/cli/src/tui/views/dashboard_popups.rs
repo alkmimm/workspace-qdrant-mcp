@@ -269,10 +269,7 @@ fn fetch_file_details(
             // unified_queue.file_path stores the watch-folder-relative path,
             // so tracked_files.relative_path is the matching lookup key.
             let rel = relative_path.as_str();
-            let status = status_map
-                .get(rel)
-                .copied()
-                .unwrap_or(FileStatus::UpToDate);
+            let status = status_map.get(rel).copied().unwrap_or(FileStatus::UpToDate);
             let (dir, fname) = match rel.rsplit_once('/') {
                 Some((d, f)) => (d.to_string(), f.to_string()),
                 None => (String::new(), rel.to_string()),

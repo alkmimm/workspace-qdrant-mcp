@@ -343,7 +343,13 @@ mod tests {
             .await
             .expect_err("422 payload rejection must propagate");
         assert!(
-            matches!(err, EmbeddingError::RemoteError { status_code: 422, .. }),
+            matches!(
+                err,
+                EmbeddingError::RemoteError {
+                    status_code: 422,
+                    ..
+                }
+            ),
             "expected the primary's 422 to propagate verbatim, got: {err}"
         );
         assert_eq!(primary.embed_calls.load(Ordering::SeqCst), 1);

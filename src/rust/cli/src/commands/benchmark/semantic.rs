@@ -270,7 +270,10 @@ fn build_forwarded_args(
         forwarded.push(OsString::from(format!("--query-id={query_id}")));
     }
     if let Some(output) = args.output.as_ref() {
-        forwarded.push(OsString::from(format!("--output={}", resolve_path_argument(output)?.display())));
+        forwarded.push(OsString::from(format!(
+            "--output={}",
+            resolve_path_argument(output)?.display()
+        )));
     }
 
     Ok(forwarded)
@@ -298,9 +301,7 @@ fn build_sweep_forwarded_args(
         forwarded.push(OsString::from(format!("--qdrant-url={qdrant_url}")));
     }
     if let Some(qdrant_api_key) = args.qdrant_api_key.as_ref() {
-        forwarded.push(OsString::from(format!(
-            "--qdrant-api-key={qdrant_api_key}"
-        )));
+        forwarded.push(OsString::from(format!("--qdrant-api-key={qdrant_api_key}")));
     }
     if let Some(daemon_host) = args.daemon_host.as_ref() {
         forwarded.push(OsString::from(format!("--daemon-host={daemon_host}")));
@@ -371,9 +372,7 @@ fn resolve_workspace_root(explicit: Option<PathBuf>) -> Result<PathBuf> {
         return Ok(found);
     }
 
-    bail!(
-        "Unable to resolve the workspace root. Pass --workspace-root or set WQM_REPO_DIR."
-    )
+    bail!("Unable to resolve the workspace root. Pass --workspace-root or set WQM_REPO_DIR.")
 }
 
 fn detect_workspace_root_from(start: PathBuf) -> Option<PathBuf> {
@@ -544,11 +543,7 @@ mod tests {
         let nested = repo.join("a/b/c");
         std::fs::create_dir_all(repo.join("src/typescript/mcp-server")).unwrap();
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(
-            repo.join("src/typescript/mcp-server/package.json"),
-            "{}",
-        )
-        .unwrap();
+        std::fs::write(repo.join("src/typescript/mcp-server/package.json"), "{}").unwrap();
 
         let found = detect_workspace_root_from(nested).expect("should find the repo root");
         assert_eq!(found, repo);

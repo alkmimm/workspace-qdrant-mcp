@@ -126,8 +126,7 @@ impl MaintenanceTask for FilesystemReconcileTask {
             // needs a Delete enqueued per branch it was tracked on so the
             // branch-set delete handler can drop each from the set (GC'ing the
             // row and its shared point once the set empties).
-            let branches: Vec<String> =
-                serde_json::from_str(&branches_json).unwrap_or_default();
+            let branches: Vec<String> = serde_json::from_str(&branches_json).unwrap_or_default();
 
             let abs_path_str = abs_path.to_string_lossy();
             // FilePayload.file_path is a validating RelativePath — ship the

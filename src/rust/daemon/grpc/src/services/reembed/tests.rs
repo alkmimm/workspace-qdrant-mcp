@@ -7,10 +7,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tempfile::TempDir;
 use tonic::Status;
 use workspace_qdrant_core::embedding::provider::DenseProvider;
 use workspace_qdrant_core::embedding::{DenseEmbedding, EmbeddingError};
-use tempfile::TempDir;
 use workspace_qdrant_core::fts_batch_processor::{FtsBatchConfig, FtsBatchProcessor};
 use workspace_qdrant_core::search_db::SearchDbManager;
 use workspace_qdrant_core::storage::StorageClient;
@@ -309,7 +309,11 @@ async fn flush_clears_search_db_for_watch_folder_tenants() {
     .unwrap();
 
     let tmp = TempDir::new().unwrap();
-    let search_db = Arc::new(SearchDbManager::new(tmp.path().join("search.db")).await.unwrap());
+    let search_db = Arc::new(
+        SearchDbManager::new(tmp.path().join("search.db"))
+            .await
+            .unwrap(),
+    );
     let processor = FtsBatchProcessor::new(&search_db, FtsBatchConfig::default());
     processor
         .full_rewrite(
@@ -342,12 +346,11 @@ async fn flush_clears_search_db_for_watch_folder_tenants() {
     ctx.search_db = Some(search_db.clone());
     flush_and_clear_state(&ctx).await.unwrap();
 
-    let tenants: Vec<String> = sqlx::query_scalar(
-        "SELECT tenant_id FROM file_metadata ORDER BY tenant_id",
-    )
-    .fetch_all(search_db.pool())
-    .await
-    .unwrap();
+    let tenants: Vec<String> =
+        sqlx::query_scalar("SELECT tenant_id FROM file_metadata ORDER BY tenant_id")
+            .fetch_all(search_db.pool())
+            .await
+            .unwrap();
     assert_eq!(tenants, vec!["tenant-c".to_string()]);
     // Assert the surviving CONTENT, not just a row count. "keep other tenant\n"
     // is stored verbatim, and `split('\n')` on a file that ends in a newline
@@ -388,13 +391,15 @@ async fn folder_scan_enqueue_uses_null_path_for_root() {
         .unwrap();
     assert_eq!(n, 1);
 
-    let (op, payload): (String, String) = sqlx::query_as(
-        "SELECT op, payload_json FROM unified_queue WHERE item_type = 'folder'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(op, "uplift", "reembed must force a rebuild, not an incremental scan");
+    let (op, payload): (String, String) =
+        sqlx::query_as("SELECT op, payload_json FROM unified_queue WHERE item_type = 'folder'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        op, "uplift",
+        "reembed must force a rebuild, not an incremental scan"
+    );
     let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(
         v.get("folder_path"),
@@ -446,12 +451,11 @@ async fn folder_uplift_uses_current_project_branch() {
         .unwrap();
     assert_eq!(n, 1);
 
-    let (op, branch): (String, String) = sqlx::query_as(
-        "SELECT op, branch FROM unified_queue WHERE item_type = 'folder'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (op, branch): (String, String) =
+        sqlx::query_as("SELECT op, branch FROM unified_queue WHERE item_type = 'folder'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(op, "uplift");
     assert_eq!(branch, "dev-clean");
 }

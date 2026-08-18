@@ -271,12 +271,10 @@ mod tests {
         let pool = fresh_pool().await;
         setup_pre_v48(&pool).await;
         // Dangling view: references a table that does not exist.
-        sqlx::query(
-            "CREATE VIEW search_behavior AS SELECT session_id FROM search_events_v47_old",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("CREATE VIEW search_behavior AS SELECT session_id FROM search_events_v47_old")
+            .execute(&pool)
+            .await
+            .unwrap();
         // (no token_savings view — dropped by the failed first attempt)
 
         V48Migration.up(&pool).await.unwrap();

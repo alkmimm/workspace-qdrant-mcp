@@ -186,10 +186,7 @@ async fn test_fetch_unchanged_excludes_paths_already_on_new_branch() {
         .await
         .unwrap();
     paths.sort();
-    assert_eq!(
-        paths,
-        vec!["src/b.rs".to_string(), "src/c.rs".to_string()]
-    );
+    assert_eq!(paths, vec!["src/b.rs".to_string(), "src/c.rs".to_string()]);
 }
 
 /// The chunker-aware variant (issue #246) returns each unchanged file's stored
@@ -205,8 +202,15 @@ async fn test_fetch_unchanged_with_chunker_returns_versions() {
     insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
 
     let fresh = chunking_fingerprint(Some("rust"));
-    insert_tracked_file_with_chunker(&pool, "w1", &["main"], "h_fresh", "src/fresh.rs", Some(&fresh))
-        .await;
+    insert_tracked_file_with_chunker(
+        &pool,
+        "w1",
+        &["main"],
+        "h_fresh",
+        "src/fresh.rs",
+        Some(&fresh),
+    )
+    .await;
     insert_tracked_file_with_chunker(
         &pool,
         "w1",
@@ -230,7 +234,11 @@ async fn test_fetch_unchanged_with_chunker_returns_versions() {
         .filter(|(_, cv, _)| stored_fingerprint_is_stale(cv.as_deref()))
         .map(|(p, _, _)| p.as_str())
         .collect();
-    assert_eq!(stale, vec!["src/stale.rs"], "only the old-version row is stale");
+    assert_eq!(
+        stale,
+        vec!["src/stale.rs"],
+        "only the old-version row is stale"
+    );
 }
 
 /// Content guard (issue #224 cross-branch stale content): a candidate whose
@@ -252,7 +260,11 @@ async fn test_content_guard_reingests_diverged_generation() {
     let root = dir.path();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/match.rs"), b"fn matches() {}\n").unwrap();
-    std::fs::write(root.join("src/diverged.rs"), b"fn new_content_on_feature() {}\n").unwrap();
+    std::fs::write(
+        root.join("src/diverged.rs"),
+        b"fn new_content_on_feature() {}\n",
+    )
+    .unwrap();
     let root_str = root.to_str().unwrap();
 
     // match.rs: tracked `main` generation's hash EQUALS the working tree → safe
@@ -302,7 +314,10 @@ async fn test_content_guard_reingests_diverged_generation() {
         .filter(|(op, pj)| op == "scan" && pj.contains("branch_membership"))
         .collect();
     assert_eq!(bulk.len(), 1, "one bulk re-key op");
-    assert!(bulk[0].1.contains("src/match.rs"), "verified file bulk-re-keyed");
+    assert!(
+        bulk[0].1.contains("src/match.rs"),
+        "verified file bulk-re-keyed"
+    );
     assert!(
         !bulk[0].1.contains("src/diverged.rs"),
         "diverged file must never be bulk-re-keyed onto stale content"
@@ -466,7 +481,14 @@ async fn test_branch_membership_bulk_chunks_large_lists() {
     // 60 paths with BRANCH_BULK_CHUNK = 25 → ceil(60/25) = 3 bounded ops.
     let paths: Vec<String> = (0..60).map(|i| format!("src/f{i}.rs")).collect();
     let n = enqueue_branch_membership_bulk(
-        &qm, "t1", "projects", "w1", "/tmp/project", "feature", "main", paths,
+        &qm,
+        "t1",
+        "projects",
+        "w1",
+        "/tmp/project",
+        "feature",
+        "main",
+        paths,
     )
     .await
     .unwrap();
@@ -477,10 +499,18 @@ async fn test_branch_membership_bulk_chunks_large_lists() {
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(rows.len(), 3, "60 paths / chunk 25 = 3 bounded ops, not 1 monolith");
+    assert_eq!(
+        rows.len(),
+        3,
+        "60 paths / chunk 25 = 3 bounded ops, not 1 monolith"
+    );
 
     // Every path appears exactly once across the chunk payloads — no loss, no dup.
-    let combined = rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>().join("");
+    let combined = rows
+        .iter()
+        .map(|r| r.0.as_str())
+        .collect::<Vec<_>>()
+        .join("");
     for i in 0..60 {
         assert!(
             combined.contains(&format!("src/f{i}.rs")),
@@ -500,7 +530,9 @@ async fn test_fetch_paths_missing_branch_selects_untagged() {
     insert_tracked_file(&pool, "w1", &["main", "feat"], "h_b", "src/b.rs").await; // tagged
     insert_tracked_file(&pool, "w1", &["dev-clean"], "h_c", "src/c.rs").await; // missing feat
 
-    let mut paths = fetch_paths_missing_branch(&pool, "w1", "feat").await.unwrap();
+    let mut paths = fetch_paths_missing_branch(&pool, "w1", "feat")
+        .await
+        .unwrap();
     paths.sort();
     assert_eq!(paths, vec!["src/a.rs".to_string(), "src/c.rs".to_string()]);
 }
@@ -514,7 +546,7 @@ async fn test_reconcile_enqueues_present_untagged_only() {
     let root = tmp.path();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/a.rs"), b"fn a() {}").unwrap(); // present
-    // src/gone.rs is NOT created — tracked but deleted on this branch.
+                                                                  // src/gone.rs is NOT created — tracked but deleted on this branch.
 
     let pool = create_test_pool().await;
     setup_tables(&pool).await;
@@ -525,7 +557,8 @@ async fn test_reconcile_enqueues_present_untagged_only() {
     insert_tracked_file(&pool, "w1", &["main", "feat"], "h_b", "src/b.rs").await; // tagged
 
     let qm = QueueManager::new(pool.clone());
-    let n = reconcile_branch_membership(&pool, &qm, "w1", "t1", "projects", &root_str, "feat").await;
+    let n =
+        reconcile_branch_membership(&pool, &qm, "w1", "t1", "projects", &root_str, "feat").await;
     assert_eq!(n, 1, "only the present, untagged file is reconciled");
 
     let rows: Vec<(String, String, String)> =
@@ -555,7 +588,8 @@ async fn test_reconcile_noop_when_all_tagged() {
     insert_tracked_file(&pool, "w1", &["main", "feat"], "h_a", "src/a.rs").await;
 
     let qm = QueueManager::new(pool.clone());
-    let n = reconcile_branch_membership(&pool, &qm, "w1", "t1", "projects", &root_str, "feat").await;
+    let n =
+        reconcile_branch_membership(&pool, &qm, "w1", "t1", "projects", &root_str, "feat").await;
     assert_eq!(n, 0);
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unified_queue")
         .fetch_one(&pool)
@@ -596,7 +630,10 @@ async fn test_reconcile_worktree_branches_tags_baseline() {
     std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
 
     // A second linked worktree in detached HEAD — must be skipped entirely.
-    let wt_det = main_repo.join(".claude").join("worktrees").join("wt-detached");
+    let wt_det = main_repo
+        .join(".claude")
+        .join("worktrees")
+        .join("wt-detached");
     std::fs::create_dir_all(wt_det.join("src")).unwrap();
     std::fs::write(wt_det.join("src/a.rs"), b"fn a() {}").unwrap();
     let admin_det = main_git.join("worktrees").join("wt-detached");
@@ -625,7 +662,16 @@ async fn test_reconcile_worktree_branches_tags_baseline() {
     insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await;
 
     let qm = QueueManager::new(pool.clone());
-    let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str, &AllowedExtensions::default()).await;
+    let n = reconcile_worktree_branches(
+        &pool,
+        &qm,
+        "w1",
+        "t1",
+        "projects",
+        &main_str,
+        &AllowedExtensions::default(),
+    )
+    .await;
     assert_eq!(
         n, 1,
         "only the branch worktree tags the baseline (detached skipped)"
@@ -701,7 +747,16 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
     insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await;
 
     let qm = QueueManager::new(pool.clone());
-    let n = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str, &AllowedExtensions::default()).await;
+    let n = reconcile_worktree_branches(
+        &pool,
+        &qm,
+        "w1",
+        "t1",
+        "projects",
+        &main_str,
+        &AllowedExtensions::default(),
+    )
+    .await;
     assert_eq!(
         n, 2,
         "shared baseline (src/a.rs) + new-on-branch (src/only_feat.rs); generated/gen.rs excluded"
@@ -715,7 +770,10 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
     .unwrap();
     assert_eq!(rows.len(), 2, "two enqueues from the 'feat' worktree");
     for r in &rows {
-        assert_eq!(r.0, "add", "Add op → dedup fast-path / novel-content ingest");
+        assert_eq!(
+            r.0, "add",
+            "Add op → dedup fast-path / novel-content ingest"
+        );
         assert_eq!(r.1, "feat", "tagged under the WORKTREE branch");
         assert!(
             r.3.as_deref().unwrap_or("").contains("worktree_membership"),
@@ -741,7 +799,10 @@ async fn test_reconcile_worktree_branches_tags_new_on_branch() {
         .find(|r| r.2.contains("only_feat.rs"))
         .expect("new-on-branch enqueue present");
     let meta = new_on_branch.3.as_deref().unwrap_or("");
-    assert!(meta.contains("read_root"), "new-on-branch carries read_root: {meta}");
+    assert!(
+        meta.contains("read_root"),
+        "new-on-branch carries read_root: {meta}"
+    );
     assert!(
         meta.contains("wt-feat"),
         "read_root points at the worktree root: {meta}"
@@ -795,8 +856,15 @@ async fn test_reconcile_worktree_branches_tags_divergent() {
     idx.add_path(std::path::Path::new("shared.rs")).unwrap();
     idx.write().unwrap();
     let tree2 = repo.find_tree(idx.write_tree().unwrap()).unwrap();
-    repo.commit(Some("refs/heads/feat"), &sig, &sig, "c2", &tree2, &[&commit1])
-        .unwrap();
+    repo.commit(
+        Some("refs/heads/feat"),
+        &sig,
+        &sig,
+        "c2",
+        &tree2,
+        &[&commit1],
+    )
+    .unwrap();
 
     // Linked worktree on branch feat, holding feat's (divergent) content.
     let wt = main_repo.join(".claude").join("worktrees").join("wt-feat");
@@ -874,11 +942,29 @@ async fn test_reconcile_worktree_branches_gated_and_noop() {
     let qm = QueueManager::new(pool.clone());
 
     // Non-projects collection → gated out.
-    let n_lib = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "libraries", &main_str, &AllowedExtensions::default()).await;
+    let n_lib = reconcile_worktree_branches(
+        &pool,
+        &qm,
+        "w1",
+        "t1",
+        "libraries",
+        &main_str,
+        &AllowedExtensions::default(),
+    )
+    .await;
     assert_eq!(n_lib, 0);
 
     // Projects but no `.git/worktrees` → nothing to do.
-    let n_none = reconcile_worktree_branches(&pool, &qm, "w1", "t1", "projects", &main_str, &AllowedExtensions::default()).await;
+    let n_none = reconcile_worktree_branches(
+        &pool,
+        &qm,
+        "w1",
+        "t1",
+        "projects",
+        &main_str,
+        &AllowedExtensions::default(),
+    )
+    .await;
     assert_eq!(n_none, 0);
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unified_queue")

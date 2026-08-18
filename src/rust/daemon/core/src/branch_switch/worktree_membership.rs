@@ -401,8 +401,13 @@ async fn enqueue_worktree_new_on_branch(
         // Mirror the main scan's eligibility (ignore gate + extension allowlist)
         // so a worktree branch never indexes generated / globally-excluded /
         // disallowed-type files the main scan omits (see `worktree_path_eligible`).
-        if !worktree_path_eligible(main_project_root, &gate, allowed_extensions, collection, &rel_str)
-        {
+        if !worktree_path_eligible(
+            main_project_root,
+            &gate,
+            allowed_extensions,
+            collection,
+            &rel_str,
+        ) {
             continue;
         }
         let rel = match RelativePath::from_user_input(&rel_str) {
@@ -478,8 +483,13 @@ async fn enqueue_worktree_divergent(
         }
         // Mirror the main scan's eligibility so a modified generated / disallowed
         // file the diff surfaces is never indexed under the branch.
-        if !worktree_path_eligible(main_project_root, &gate, allowed_extensions, collection, rel_str)
-        {
+        if !worktree_path_eligible(
+            main_project_root,
+            &gate,
+            allowed_extensions,
+            collection,
+            rel_str,
+        ) {
             continue;
         }
         let rel = match RelativePath::from_user_input(rel_str) {

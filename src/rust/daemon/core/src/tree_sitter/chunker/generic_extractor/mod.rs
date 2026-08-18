@@ -411,7 +411,11 @@ impl GenericExtractor {
                     }
                 }
             } else if (kind == "do_block" || child.child_count() > 0)
-                && !self.patterns.paired_body_node_types.iter().any(|t| t == kind)
+                && !self
+                    .patterns
+                    .paired_body_node_types
+                    .iter()
+                    .any(|t| t == kind)
             {
                 // Recurse into nested blocks (Elixir do blocks, etc.), but NOT
                 // into a paired body that the preceding signature already

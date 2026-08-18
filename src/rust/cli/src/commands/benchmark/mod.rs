@@ -1,7 +1,7 @@
 //! Benchmark commands — sparse vector and search evaluation tools.
 
-mod semantic;
 mod search;
+mod semantic;
 mod sparse;
 pub mod stats;
 

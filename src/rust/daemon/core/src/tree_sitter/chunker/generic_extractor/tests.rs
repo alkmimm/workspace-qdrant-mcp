@@ -338,8 +338,12 @@ fn cfg_gated_helper() -> u8 {
         chunks
             .iter()
             .find(|c| c.symbol_name == name)
-            .unwrap_or_else(|| panic!("no chunk named {name}; got {:?}",
-                chunks.iter().map(|c| &c.symbol_name).collect::<Vec<_>>()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no chunk named {name}; got {:?}",
+                    chunks.iter().map(|c| &c.symbol_name).collect::<Vec<_>>()
+                )
+            })
             .is_test
     };
 
@@ -347,13 +351,19 @@ fn cfg_gated_helper() -> u8 {
     assert!(!is_test("parse"), "production `parse` must not be a test");
     // Everything inside `#[cfg(test)] mod tests`, incl. the non-#[test] helper.
     assert!(is_test("tests"), "the #[cfg(test)] module itself is a test");
-    assert!(is_test("make_input"), "helper inside #[cfg(test)] is a test");
+    assert!(
+        is_test("make_input"),
+        "helper inside #[cfg(test)] is a test"
+    );
     assert!(is_test("checks_parse"), "#[test] fn is a test");
     assert!(is_test("checks_parse_async"), "#[tokio::test] fn is a test");
     // A #[test] fn outside any cfg(test) module, by its own attribute.
     assert!(is_test("top_level_test"), "top-level #[test] fn is a test");
     // A file-scope item directly gated by #[cfg(test)] (own attribute, no mod).
-    assert!(is_test("cfg_gated_helper"), "#[cfg(test)] fn is test-only code");
+    assert!(
+        is_test("cfg_gated_helper"),
+        "#[cfg(test)] fn is test-only code"
+    );
 }
 
 #[test]
@@ -394,10 +404,10 @@ export function applyRRFFusion(results: string[], mode: SearchMode): string[] {
         .unwrap();
 
     assert!(chunks.iter().any(|c| c.chunk_type == ChunkType::Preamble));
-    assert!(chunks.iter().any(|c| {
-        c.chunk_type == ChunkType::Constant && c.symbol_name == "SPARSE_ONLY_WEIGHT"
-    }));
-    assert!(chunks.iter().any(|c| {
-        c.chunk_type == ChunkType::Function && c.symbol_name == "applyRRFFusion"
-    }));
+    assert!(chunks
+        .iter()
+        .any(|c| { c.chunk_type == ChunkType::Constant && c.symbol_name == "SPARSE_ONLY_WEIGHT" }));
+    assert!(chunks
+        .iter()
+        .any(|c| { c.chunk_type == ChunkType::Function && c.symbol_name == "applyRRFFusion" }));
 }

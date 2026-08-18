@@ -49,11 +49,7 @@ service WidgetService {
 }
 "#;
 
-fn find<'a>(
-    chunks: &'a [SemanticChunk],
-    chunk_type: ChunkType,
-    symbol: &str,
-) -> &'a SemanticChunk {
+fn find<'a>(chunks: &'a [SemanticChunk], chunk_type: ChunkType, symbol: &str) -> &'a SemanticChunk {
     chunks
         .iter()
         .find(|c| c.chunk_type == chunk_type && c.symbol_name == symbol)
@@ -107,7 +103,9 @@ async fn test_proto_produces_semantic_chunks() {
         .expect("should extract a preamble chunk");
     assert!(preamble.content.contains("syntax = \"proto3\""));
     assert!(preamble.content.contains("package acme.widgets.v1"));
-    assert!(preamble.content.contains("import \"google/protobuf/timestamp.proto\""));
+    assert!(preamble
+        .content
+        .contains("import \"google/protobuf/timestamp.proto\""));
 
     // Top-level definitions carry real symbol names.
     find(&chunks, ChunkType::Enum, "WidgetKind");

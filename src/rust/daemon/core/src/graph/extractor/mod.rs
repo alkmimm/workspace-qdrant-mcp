@@ -158,9 +158,12 @@ pub fn extract_edges_from_text_chunks(
     // per-language graph metrics (see `extract_edges` for the same fix on the
     // `SemanticChunk` entry point).
     let mut file_node = GraphNode::new(tenant_id, file_path, file_path, NodeType::File);
-    file_node.language = chunks
-        .iter()
-        .find_map(|c| c.metadata.get("language").filter(|l| !l.is_empty()).cloned());
+    file_node.language = chunks.iter().find_map(|c| {
+        c.metadata
+            .get("language")
+            .filter(|l| !l.is_empty())
+            .cloned()
+    });
     result.nodes.push(file_node);
 
     for chunk in chunks {
@@ -204,7 +207,10 @@ fn process_text_chunk(
     node.language = Some(language.clone());
     // Rust inline unit test flag carried through the TextChunk metadata by
     // `convert_semantic_chunks_to_text_chunks` (see `GraphNode::is_test_symbol`).
-    node.is_test_symbol = meta.get("is_test_symbol").map(|s| s == "true").unwrap_or(false);
+    node.is_test_symbol = meta
+        .get("is_test_symbol")
+        .map(|s| s == "true")
+        .unwrap_or(false);
     result.nodes.push(node.clone());
 
     add_contains_edges(meta, &node, tenant_id, file_path, &language, result);

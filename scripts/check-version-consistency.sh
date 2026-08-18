@@ -17,34 +17,66 @@ EXIT_CODE=0
 echo "=== Version Consistency Check ==="
 echo ""
 
-# ── Check 1: ORT_VERSION consistency across workflows ──────────────────
+# ── Check 1: ONNX Runtime version consistency ──────────────────────────
+#
+# The REFERENCE is the version the real build uses, not a workflow constant.
+# This originally compared `ORT_VERSION:` across .github/workflows/ only —
+# which on this fork validates nothing, because GitHub Actions are disabled and
+# the container build is the CI. Worse, it PASSED when it found no declarations
+# at all, so it would have reported "OK" from inside an image where
+# .github/ is not even in the build context.
+#
+# Reference resolution, in order:
+#   1. $ONNX_VERSION — passed by docker/Dockerfile.memexd from its own ARG, so
+#      the check validates the version the build is ACTUALLY compiling against.
+#   2. `ARG ONNX_VERSION=` in docker/Dockerfile.memexd — for host runs.
+# No reference => hard error. A version check with no reference is not a pass.
 
-echo "--- ORT_VERSION consistency ---"
+echo "--- ONNX Runtime version consistency ---"
 
-ORT_VERSIONS=()
-while IFS= read -r line; do
-    file=$(echo "$line" | cut -d: -f1)
-    version=$(echo "$line" | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"' || true)
-    if [ -n "$version" ]; then
-        ORT_VERSIONS+=("$file:$version")
-        echo "  $file: $version"
-    fi
-done < <(grep -rn 'ORT_VERSION:' "$REPO_ROOT/.github/workflows/" 2>/dev/null || true)
+DOCKERFILE="$REPO_ROOT/docker/Dockerfile.memexd"
+ORT_REFERENCE=""
+ORT_SOURCE=""
 
-if [ ${#ORT_VERSIONS[@]} -eq 0 ]; then
-    echo "  WARNING: No ORT_VERSION found in any workflow file"
+if [ -n "${ONNX_VERSION:-}" ]; then
+    ORT_REFERENCE="$ONNX_VERSION"
+    ORT_SOURCE="\$ONNX_VERSION (passed by the image build)"
+elif [ -f "$DOCKERFILE" ]; then
+    ORT_REFERENCE=$(grep -oE '^ARG ONNX_VERSION=[0-9]+\.[0-9]+\.[0-9]+' "$DOCKERFILE" \
+        | head -1 | cut -d= -f2 || true)
+    ORT_SOURCE="docker/Dockerfile.memexd (ARG ONNX_VERSION)"
+fi
+
+if [ -z "$ORT_REFERENCE" ]; then
+    echo "  ERROR: could not determine the ONNX Runtime version the build uses." >&2
+    echo "  Expected \$ONNX_VERSION in the environment, or 'ARG ONNX_VERSION=x.y.z'" >&2
+    echo "  in $DOCKERFILE." >&2
+    EXIT_CODE=1
 else
-    # Extract unique versions
-    UNIQUE_VERSIONS=$(printf '%s\n' "${ORT_VERSIONS[@]}" | sed 's/.*://' | sort -u)
-    COUNT=$(echo "$UNIQUE_VERSIONS" | wc -l | tr -d ' ')
+    echo "  reference: $ORT_REFERENCE  (from $ORT_SOURCE)"
 
-    if [ "$COUNT" -gt 1 ]; then
-        echo ""
-        echo "  ERROR: ORT_VERSION mismatch across workflow files!"
-        echo "  Found versions: $(echo "$UNIQUE_VERSIONS" | tr '\n' ' ')"
+    # Cross-check any other declaration in the repo. The workflows are inert on
+    # this fork, but a stale constant there is still a trap for anyone reading
+    # them as documentation — flag the drift, anchored on the real build.
+    MISMATCHED=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        file=$(echo "$line" | cut -d: -f1)
+        version=$(echo "$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        [ -z "$version" ] && continue
+        if [ "$version" != "$ORT_REFERENCE" ]; then
+            echo "  MISMATCH: $file declares $version, build uses $ORT_REFERENCE" >&2
+            MISMATCHED=1
+        else
+            echo "  OK: $file agrees ($version)"
+        fi
+    done < <(grep -rn 'ORT_VERSION:' "$REPO_ROOT/.github/workflows/" 2>/dev/null || true)
+
+    if [ "$MISMATCHED" -eq 1 ]; then
+        echo "" >&2
+        echo "  ERROR: ONNX Runtime version drift. Align every declaration with" >&2
+        echo "  the build's ARG ONNX_VERSION, or delete the stale declaration." >&2
         EXIT_CODE=1
-    else
-        echo "  OK: All workflow files use ORT_VERSION=$UNIQUE_VERSIONS"
     fi
 fi
 echo ""

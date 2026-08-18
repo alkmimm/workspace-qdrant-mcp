@@ -10,7 +10,7 @@ import {
   COLLECTION_SCRATCHPAD,
   FIELD_CONTENT,
 } from '../common/native-bridge.js';
-import { RANKING_AID_KEYS } from '../common/payload-noise.js';
+import { VECTOR_KEYS, stripServedNoise } from '../common/payload-noise.js';
 export const PROJECTS_COLLECTION = COLLECTION_PROJECTS;
 export const LIBRARIES_COLLECTION = COLLECTION_LIBRARIES;
 export const RULES_COLLECTION = COLLECTION_RULES;
@@ -86,26 +86,27 @@ export function getCollectionName(collection: RetrieveCollectionType): string {
 }
 
 /**
- * Extract metadata from payload, excluding content, vector fields, and the
- * daemon's ranking-aid fields ({@link RANKING_AID_KEYS} — keywords/baskets/tags
- * are indexing signal, ~1.5–2k tokens/hit, that a reading agent never consumes;
- * the `search` truncate path drops the same set).
+ * Surface-specific drops layered on top of the shared served-payload noise set
+ * ({@link ../common/payload-noise.ts}): the content field `retrieve` already
+ * lifts into `document.content`, plus the raw vectors.
  */
-const RETRIEVE_DROP_KEYS: ReadonlySet<string> = new Set<string>([
+const RETRIEVE_EXTRA_DROP_KEYS: readonly string[] = [
   FIELD_CONTENT,
-  'dense_vector',
-  'sparse_vector',
-  ...RANKING_AID_KEYS,
-]);
+  ...VECTOR_KEYS,
+];
 
+/**
+ * Extract metadata from a payload for serving, dropping content, vectors, the
+ * daemon's ranking aids, ingest plumbing, and provably-redundant duplicates.
+ *
+ * Shares {@link stripServedNoise} with the `search` shaping path (CLAUDE.md
+ * shared-behavior rule) so the two read surfaces cannot drift: a `retrieve`
+ * response used to ship the same file_hash / base_point / idf_epoch /
+ * absolute_path plumbing that `search` had already been trimming.
+ */
 export function extractMetadata(
   payload: Record<string, unknown> | null | undefined
 ): Record<string, unknown> {
   if (!payload) return {};
-  const metadata: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(payload)) {
-    if (RETRIEVE_DROP_KEYS.has(key)) continue;
-    metadata[key] = value;
-  }
-  return metadata;
+  return stripServedNoise(payload, RETRIEVE_EXTRA_DROP_KEYS);
 }

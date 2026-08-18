@@ -253,8 +253,14 @@ pub(crate) async fn scan_library_directory(
     );
 
     let start_time = std::time::Instant::now();
-    let (files_queued, files_excluded, errors) =
-        walk_and_enqueue(item, library_root, queue_manager, allowed_extensions, uplift).await?;
+    let (files_queued, files_excluded, errors) = walk_and_enqueue(
+        item,
+        library_root,
+        queue_manager,
+        allowed_extensions,
+        uplift,
+    )
+    .await?;
 
     update_last_scan(item, queue_manager).await;
 

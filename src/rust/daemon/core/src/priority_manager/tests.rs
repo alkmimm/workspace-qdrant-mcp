@@ -139,7 +139,10 @@ async fn test_heartbeat_updates_timestamp() {
 
     // Wait briefly and send heartbeat
     tokio::time::sleep(Duration::from_millis(10)).await;
-    let updated = priority_manager.heartbeat("abcd12345678", "main").await.unwrap();
+    let updated = priority_manager
+        .heartbeat("abcd12345678", "main")
+        .await
+        .unwrap();
     assert!(updated);
 
     // Verify timestamp updated
@@ -162,7 +165,10 @@ async fn test_heartbeat_no_op_for_inactive_project() {
     // Heartbeat should not update a project with no active sessions.
     // With reference counting, only live sessions can keep a project active;
     // heartbeat cannot resurrect a project with 0 sessions.
-    let updated = priority_manager.heartbeat("abcd12345678", "main").await.unwrap();
+    let updated = priority_manager
+        .heartbeat("abcd12345678", "main")
+        .await
+        .unwrap();
     assert!(!updated);
 
     // Verify project remains inactive
@@ -526,6 +532,9 @@ async fn test_heartbeat_active_session() {
         .unwrap();
 
     // Heartbeat on an active project (is_active > 0) should return true
-    let updated = priority_manager.heartbeat("abcd12345678", "main").await.unwrap();
+    let updated = priority_manager
+        .heartbeat("abcd12345678", "main")
+        .await
+        .unwrap();
     assert!(updated);
 }

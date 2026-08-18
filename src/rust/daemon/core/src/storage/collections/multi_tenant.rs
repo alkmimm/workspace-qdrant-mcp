@@ -41,12 +41,22 @@ use super::super::types::{MultiTenantInitResult, StorageError};
 /// MUST include every keyword field used in a filter expression against
 /// this collection. Adding a new filter field without updating this list
 /// is a performance bug; see `multi_tenant_indexes` test below.
-pub(crate) const PROJECTS_PAYLOAD_INDEX_FIELDS: &[&str] =
-    &["tenant_id", "file_path", "branch", "project_id", "base_point"];
+pub(crate) const PROJECTS_PAYLOAD_INDEX_FIELDS: &[&str] = &[
+    "tenant_id",
+    "file_path",
+    "branch",
+    "project_id",
+    "base_point",
+];
 
 /// Payload-index fields for the `libraries` collection.
-pub(crate) const LIBRARIES_PAYLOAD_INDEX_FIELDS: &[&str] =
-    &["tenant_id", "library_name", "file_path", "branch", "base_point"];
+pub(crate) const LIBRARIES_PAYLOAD_INDEX_FIELDS: &[&str] = &[
+    "tenant_id",
+    "library_name",
+    "file_path",
+    "branch",
+    "base_point",
+];
 
 /// Payload-index fields for the `rules` collection.
 pub(crate) const RULES_PAYLOAD_INDEX_FIELDS: &[&str] = &["tenant_id"];

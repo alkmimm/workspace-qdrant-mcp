@@ -40,7 +40,10 @@ async fn test_has_other_references_single_watch() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    let has_refs = manager.has_other_references("bp_abc123", fid).await.unwrap();
+    let has_refs = manager
+        .has_other_references("bp_abc123", fid)
+        .await
+        .unwrap();
     assert!(!has_refs, "Single row should have no other references");
 }
 

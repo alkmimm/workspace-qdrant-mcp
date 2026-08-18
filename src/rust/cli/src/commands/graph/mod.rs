@@ -30,7 +30,9 @@ fn parse_confidence(s: &str) -> Result<f64, String> {
     if (0.0..=1.0).contains(&v) {
         Ok(v)
     } else {
-        Err(format!("must be within 0.0..=1.0 (a probability-like product, not a percentage), got {v}"))
+        Err(format!(
+            "must be within 0.0..=1.0 (a probability-like product, not a percentage), got {v}"
+        ))
     }
 }
 

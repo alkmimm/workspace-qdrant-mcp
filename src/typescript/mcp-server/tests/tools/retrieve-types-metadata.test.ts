@@ -47,4 +47,42 @@ describe('extractMetadata', () => {
     // Discovery-relevant metadata survives.
     expect(md).toEqual({ file_path: 'src/foo.ts', chunk_symbol_name: 'fooFn' });
   });
+
+  it('drops ingest plumbing and provably-redundant duplicates', () => {
+    // Shared with the search shaping path (CLAUDE.md shared-behavior rule):
+    // retrieve used to ship the same file_hash / base_point / idf_epoch /
+    // absolute_path plumbing that search had already been trimming.
+    const md = extractMetadata({
+      file_path: '/repo/src/foo.ts',
+      absolute_path: '/repo/src/foo.ts',
+      relative_path: 'src/foo.ts',
+      file_hash: 'e1775fe041aede12427236a4bbd0927930c604348c5f8ec82d1c6cd9042b5ae8',
+      base_point: '8686aa3465fafeb71068229bc818d94e',
+      idf_epoch: 39174,
+      tenant_id: '367157a01d98',
+      item_type: 'file',
+      chunk_index: 9,
+      chunk_symbol_name: 'fooFn',
+    });
+    expect(md).toEqual({
+      file_path: '/repo/src/foo.ts',
+      relative_path: 'src/foo.ts',
+      chunk_symbol_name: 'fooFn',
+    });
+  });
+
+  it('preserves scratchpad provenance and timestamps', () => {
+    // The trimmer is a denylist precisely so non-code collections keep their
+    // own shape — an allowlist tuned on code chunks would swallow these.
+    const note = {
+      created_at: '2026-08-18T00:00:00Z',
+      updated_at: '2026-08-18T00:00:00Z',
+      origin_branch: 'main',
+      origin_cwd: '/repo',
+      origin_worktree: false,
+      title: 'a note',
+      tags: ['triage'],
+    };
+    expect(extractMetadata({ ...note })).toEqual(note);
+  });
 });

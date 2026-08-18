@@ -165,7 +165,8 @@ impl MaintenanceTask for BranchReconcileTask {
             // Qdrant state (a base_point with zero live points still deserves
             // a correct FTS branch filter). Runs for EVERY candidate, including
             // single-branch files (heals corrupt/`[]` branch sets).
-            self.reconcile_file_metadata(ctx, *file_id, &authority).await;
+            self.reconcile_file_metadata(ctx, *file_id, &authority)
+                .await;
             // The Qdrant read is the expensive half — only 2+-branch
             // authorities can hold inverse drift there (a single-branch file
             // was ingested on that branch and already carries the tag).
@@ -218,7 +219,11 @@ impl BranchReconcileTask {
         authority: &[String],
         collection: &str,
     ) {
-        let qdrant = match ctx.storage_client.read_branch_set(collection, base_point).await {
+        let qdrant = match ctx
+            .storage_client
+            .read_branch_set(collection, base_point)
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
                 warn!(
@@ -426,10 +431,12 @@ mod tests {
         // file_id, so it may not be wider). The target is exactly the authority.
         let (_d, db) = search_db_with_row(7, "feat/extra").await;
         // Seed the drifted state: fm carries a stale `main` the authority lacks.
-        sqlx::query(r#"UPDATE file_metadata SET branches = '["feat/extra","main"]' WHERE file_id = 7"#)
-            .execute(db.pool())
-            .await
-            .unwrap();
+        sqlx::query(
+            r#"UPDATE file_metadata SET branches = '["feat/extra","main"]' WHERE file_id = 7"#,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
         let authority = vec!["feat/extra".to_string()];
 
         let changed = sync_authority_into_file_metadata(db.pool(), 7, &authority)
