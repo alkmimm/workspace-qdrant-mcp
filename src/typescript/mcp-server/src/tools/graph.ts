@@ -143,7 +143,44 @@ function graphNoEdgesHint(kind: 'usages' | 'impact' | 'relations'): string {
   );
 }
 
+/**
+ * Strip proto-loader's synthetic oneof markers from a decoded daemon response.
+ *
+ * The client loads the proto with `oneofs: true` (connection.ts), so every
+ * proto3 `optional` field arrives with a sibling `_<field>` whose value is the
+ * field's own name — e.g. `reliability_warning` comes with
+ * `_reliability_warning: "reliability_warning"`. That is decoder bookkeeping,
+ * not data, and the graph actions spread daemon responses wholesale, so it
+ * lands straight in the agent's context.
+ *
+ * Applied once at the tool boundary rather than at the one action that has an
+ * `optional` field today: any action that gains one later is covered, and the
+ * recursion catches nested messages too.
+ */
+function stripOneofMarkers<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((v) => stripOneofMarkers(v)) as unknown as T;
+  }
+  if (value === null || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    // A marker is `_<field>` whose value is exactly `<field>`; a real payload
+    // key starting with `_` (e.g. search's `_search_type`) never matches that.
+    if (key.startsWith('_') && v === key.slice(1)) continue;
+    out[key] = stripOneofMarkers(v);
+  }
+  return out as T;
+}
+
 export async function handleGraph(
+  rawArgs: Record<string, unknown> | undefined,
+  daemonClient: DaemonClient | undefined,
+  projectDetector: ProjectDetector
+): Promise<unknown> {
+  return stripOneofMarkers(await runGraphAction(rawArgs, daemonClient, projectDetector));
+}
+
+async function runGraphAction(
   rawArgs: Record<string, unknown> | undefined,
   daemonClient: DaemonClient | undefined,
   projectDetector: ProjectDetector
@@ -269,7 +306,21 @@ export async function handleGraph(
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
       };
       const r = await daemonClient.detectTestGaps(req);
-      return { success: true, action, tenant_id: tenant, ...r };
+      // The daemon flags an implausible coverage ratio (tests indexed, yet
+      // almost nothing reachable = unresolved test→production edges, not
+      // untested code). Surface it as `hint` — same channel the empty
+      // usages/impact/relations caveat uses — and place it BEFORE `gaps` so an
+      // agent reading top-down sees "this is noise" ahead of the ranking it
+      // would otherwise act on. Field feedback: a 0.6% report was taken as a
+      // finding and its top entries were demonstrably tested functions.
+      const { reliability_warning: warning, ...rest } = r;
+      return {
+        success: true,
+        action,
+        tenant_id: tenant,
+        ...(warning !== undefined && warning !== '' ? { hint: warning } : {}),
+        ...rest,
+      };
     }
 
     case 'modules': {

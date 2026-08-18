@@ -148,6 +148,48 @@ describe('shapeHitPayloads', () => {
       // Discovery-relevant metadata must survive.
       expect(shaped.results[0].metadata).toHaveProperty('file_path', 'a.ts');
     });
+
+    it('strips ingest plumbing and duplicated path/language fields', () => {
+      // Field feedback: a 9-line code hit carried 28 metadata fields — the
+      // hashes, the BM25 epoch, and the SAME absolute path twice — whose
+      // serialization exceeded the code itself.
+      const r = makeResult({
+        metadata: {
+          file_path: '/repo/src/a.ts',
+          absolute_path: '/repo/src/a.ts',
+          relative_path: 'src/a.ts',
+          file_hash: 'e1775fe041aede12427236a4bbd0927930c604348c5f8ec82d1c6cd9042b5ae8',
+          base_point: '8686aa3465fafeb71068229bc818d94e',
+          idf_epoch: 39174,
+          tenant_id: '367157a01d98',
+          chunk_encoding: 'utf-8',
+          chunk_collection: 'projects',
+          language: 'typescript',
+          chunk_language: 'typescript',
+          chunk_symbol_name: 'foo',
+        },
+      });
+      const { response: shaped } = shapeHitPayloads(makeResponse([r]), baseOptions());
+      const md = shaped.results[0].metadata;
+      for (const key of [
+        'absolute_path',
+        'file_hash',
+        'base_point',
+        'idf_epoch',
+        'tenant_id',
+        'chunk_encoding',
+        'chunk_collection',
+        'chunk_language',
+      ]) {
+        expect(md, key).not.toHaveProperty(key);
+      }
+      expect(md).toEqual({
+        file_path: '/repo/src/a.ts',
+        relative_path: 'src/a.ts',
+        language: 'typescript',
+        chunk_symbol_name: 'foo',
+      });
+    });
   });
 
   describe('custom maxBytesPerHit', () => {
@@ -198,6 +240,35 @@ describe('shapeHitPayloads', () => {
       );
       expect(shaped.results[0].content.length).toBeLessThanOrEqual(DEFAULT_MAX_BYTES_PER_HIT);
       expect(shaped.results[0].content).toContain('[truncated');
+    });
+
+    it('detailed still strips metadata noise (full BODY, not full plumbing)', () => {
+      // The cap-disabled branch used to pass metadata through untouched — the
+      // one mode that leaked back the ranking aids and plumbing every other
+      // mode drops. `detailed` is about the chunk body, nothing else.
+      const long = 'z'.repeat(5000);
+      const { response: shaped } = shapeHitPayloads(
+        makeResponse([
+          makeResult({
+            content: long,
+            metadata: {
+              file_path: '/repo/a.ts',
+              absolute_path: '/repo/a.ts',
+              file_hash: 'deadbeef',
+              keywords: ['kw1', 'kw2'],
+              chunk_symbol_name: 'foo',
+            },
+          }),
+        ]),
+        baseOptions({ responseFormat: 'detailed' })
+      );
+      expect(shaped.results[0].content).toBe(long);
+      expect(shaped.results[0].metadata).toEqual({
+        file_path: '/repo/a.ts',
+        chunk_symbol_name: 'foo',
+      });
+      // The locator still gets lifted in this branch.
+      expect(shaped.results[0].location).toBe('/repo/a.ts');
     });
 
     it('explicit maxBytesPerHit overrides responseFormat=detailed', () => {

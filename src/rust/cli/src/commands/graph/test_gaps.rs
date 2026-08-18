@@ -44,7 +44,15 @@ pub async fn test_gaps(tenant_id: &str, top_k: Option<u32>, edge_types: Vec<Stri
             resp.covered, resp.total_production, pct
         ),
     );
+    output::kv("Test symbols indexed", resp.test_nodes.to_string());
     output::kv("Gaps", resp.gap_count.to_string());
+
+    // Lead with the caveat when the daemon judged the measurement broken — a
+    // ranking printed above an unread trailing note reads as authoritative.
+    if let Some(warning) = resp.reliability_warning.as_deref() {
+        output::separator();
+        output::warning(warning);
+    }
     output::separator();
 
     if resp.gaps.is_empty() {

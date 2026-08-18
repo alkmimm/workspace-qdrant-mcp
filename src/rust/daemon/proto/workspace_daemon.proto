@@ -926,6 +926,8 @@ message TestGapsResponse {
     uint32 covered = 3;                           // Of those, reached by some test
     uint32 gap_count = 4;                         // True total of gaps (gaps may be truncated to top_k)
     int64 query_time_ms = 5;
+    uint32 test_nodes = 6;                        // Graph nodes classified as test (seeds of the reachability walk)
+    optional string reliability_warning = 7;      // Set when test_nodes > 0 but coverage is implausibly low: the test->production edges did not resolve (DI containers, alias imports, dynamic dispatch), so the ranking is not trustworthy
 }
 
 // A production definition no test reaches

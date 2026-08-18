@@ -22,6 +22,15 @@
 //! `#[tokio::test]` / `#[rstest]` / `#[test_case]` attributes) at index time, so
 //! inline unit tests now seed coverage like any other test — a tenant must be
 //! (re)indexed after the schema bump for the flag to populate.
+//!
+//! **Reliability guard.** Because coverage here depends entirely on edges the
+//! extractor managed to resolve, a repo whose tests reach their subjects
+//! indirectly (DI container, path-aliased imports, dynamic dispatch) yields a
+//! near-zero ratio that says nothing about its tests. The report therefore
+//! carries `test_nodes` and, when tests exist but reach almost nothing, a
+//! `reliability_warning` telling the caller to disregard the ranking — see
+//! [`IMPLAUSIBLE_COVERAGE_RATIO`]. Reporting "0.6% covered" as a finding is a
+//! worse failure than reporting nothing at all.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
@@ -58,12 +67,69 @@ pub struct TestGapsReport {
     /// `gap_count` stays the true total.
     pub gaps: Vec<TestGap>,
     pub gap_count: u32,
+    /// Graph nodes classified as test — the seeds of the reachability walk.
+    /// Reported so a caller can tell "this repo has no tests" (an honest 0%)
+    /// apart from "this repo's tests produced no resolvable edges" (a broken
+    /// measurement); see [`reliability_warning`](Self::reliability_warning).
+    pub test_nodes: u32,
+    /// Set when the measurement is not trustworthy: tests exist in the graph
+    /// yet reach almost nothing, which means the test→production edges failed
+    /// to resolve rather than that the code is untested. `None` when the
+    /// coverage figure is plausible (or when there is genuinely no test code).
+    pub reliability_warning: Option<String>,
 }
 
 /// Edge types that mean "exercised by": a test that CALLS production code, or
 /// USES_TYPE of a production type, exercises it. IMPORTS is deliberately absent —
 /// importing a symbol is not testing it.
 const DEFAULT_TEST_GAP_EDGE_TYPES: &[&str] = &["CALLS", "USES_TYPE"];
+
+/// Coverage ratio below which a report that HAS test nodes is treated as a
+/// failed measurement rather than as a finding.
+///
+/// Field feedback (v0-bws-training audit, 2026-08): a Next.js/TS repo with 183
+/// Jest test files reported 21 of 3554 symbols covered (0.6%) and ranked
+/// demonstrably-tested functions as the top gaps. The tests resolve their
+/// subjects through a DI container and import via an `@/` path alias, so no
+/// `CALLS` edge test→production was ever extracted. At that ratio the ranking
+/// is noise, and presenting it as a finding is worse than presenting nothing.
+///
+/// 5% is deliberately far below any real-world floor: this repo's own graph
+/// measures ~28%, and even a lightly-tested codebase clears 5% once its test
+/// edges resolve at all. Anything under it indicates the extractor, not the
+/// test suite.
+const IMPLAUSIBLE_COVERAGE_RATIO: f64 = 0.05;
+
+/// Build the reliability caveat for a finished report, or `None` when the
+/// numbers are trustworthy.
+///
+/// Deliberately silent when `test_nodes == 0`: a project with no test code
+/// genuinely has 0% coverage, and that is a finding, not a malfunction. The
+/// warning fires only on the contradiction — tests are present in the graph,
+/// yet they reach almost no production symbol.
+fn build_reliability_warning(
+    total_production: u32,
+    covered: u32,
+    test_nodes: u32,
+) -> Option<String> {
+    if test_nodes == 0 || total_production == 0 {
+        return None;
+    }
+    let ratio = f64::from(covered) / f64::from(total_production);
+    if ratio >= IMPLAUSIBLE_COVERAGE_RATIO {
+        return None;
+    }
+    Some(format!(
+        "UNRELIABLE: {test_nodes} test symbols are indexed, yet only {covered} of \
+         {total_production} production symbols ({:.1}%) are reachable from them. A real test \
+         suite does not measure this low — the test->production edges almost certainly failed \
+         to resolve. Common causes: subjects wired through a DI container, imports via a path \
+         alias the extractor does not follow, dynamic dispatch, or mocking that replaces the \
+         call entirely. Treat the gap ranking below as noise, not as a list of untested code, \
+         and confirm with a real coverage tool.",
+        ratio * 100.0
+    ))
+}
 
 /// Symbol types that are meaningful test-gap CANDIDATES — the things one writes
 /// tests against. Excludes modules, imports, variables, constants, fields, which
@@ -100,6 +166,8 @@ pub async fn detect_test_gaps(
             covered: 0,
             gaps: Vec::new(),
             gap_count: 0,
+            test_nodes: 0,
+            reliability_warning: None,
         });
     }
 
@@ -183,9 +251,17 @@ pub async fn detect_test_gaps(
         gaps.truncate(top_k);
     }
 
+    let test_nodes = test_set.len() as u32;
+    let reliability_warning = build_reliability_warning(total_production, covered, test_nodes);
+
     info!(
-        "GraphService test-gaps: tenant={} production={} covered={} gaps={}",
-        tenant_id, total_production, covered, gap_count
+        "GraphService test-gaps: tenant={} production={} covered={} gaps={} test_nodes={} unreliable={}",
+        tenant_id,
+        total_production,
+        covered,
+        gap_count,
+        test_nodes,
+        reliability_warning.is_some()
     );
 
     Ok(TestGapsReport {
@@ -193,6 +269,8 @@ pub async fn detect_test_gaps(
         covered,
         gaps,
         gap_count,
+        test_nodes,
+        reliability_warning,
     })
 }
 
@@ -305,12 +383,18 @@ mod tests {
         let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
 
         // handler, service, orphan_p/q/r are the 5 production candidates (MAX excluded).
-        assert_eq!(r.total_production, 5, "constant MAX excluded from candidates");
+        assert_eq!(
+            r.total_production, 5,
+            "constant MAX excluded from candidates"
+        );
         // handler + service reached transitively from test_main.
         assert_eq!(r.covered, 2);
         assert_eq!(r.gap_count, 3);
         let names: Vec<&str> = r.gaps.iter().map(|g| g.symbol_name.as_str()).collect();
-        assert!(!names.contains(&"handler") && !names.contains(&"service"), "covered not gaps");
+        assert!(
+            !names.contains(&"handler") && !names.contains(&"service"),
+            "covered not gaps"
+        );
         assert!(!names.contains(&"MAX"), "non-testable type not a gap");
         // Ranked by production_dependents: orphan_q (2) first, then p, r (0) by name.
         assert_eq!(r.gaps[0].symbol_name, "orphan_q");
@@ -329,7 +413,14 @@ mod tests {
         // Inline test lives in a production .rs file (not `*_test.rs`, no tests/).
         inline_test_node(&p, "it", "detects_cycles", "graph/algorithms/cycles.rs").await;
         // Production symbol the inline test exercises, same production file.
-        node(&p, "pt", "detect_cycles", "function", "graph/algorithms/cycles.rs").await;
+        node(
+            &p,
+            "pt",
+            "detect_cycles",
+            "function",
+            "graph/algorithms/cycles.rs",
+        )
+        .await;
         // An unrelated, genuinely untested production symbol.
         node(&p, "orph", "orphan", "function", "graph/other.rs").await;
         edge(&p, "it", "pt").await;
@@ -337,13 +428,26 @@ mod tests {
         let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
 
         // Candidates: detect_cycles + orphan (the inline test is NOT a candidate).
-        assert_eq!(r.total_production, 2, "inline test excluded from candidates");
+        assert_eq!(
+            r.total_production, 2,
+            "inline test excluded from candidates"
+        );
         assert_eq!(r.covered, 1, "detect_cycles reached from the inline test");
         assert_eq!(r.gap_count, 1);
         let names: Vec<&str> = r.gaps.iter().map(|g| g.symbol_name.as_str()).collect();
-        assert_eq!(names, vec!["orphan"], "only the truly untested symbol is a gap");
-        assert!(!names.contains(&"detect_cycles"), "inline-tested symbol is covered");
-        assert!(!names.contains(&"detects_cycles"), "the inline test itself is not a gap");
+        assert_eq!(
+            names,
+            vec!["orphan"],
+            "only the truly untested symbol is a gap"
+        );
+        assert!(
+            !names.contains(&"detect_cycles"),
+            "inline-tested symbol is covered"
+        );
+        assert!(
+            !names.contains(&"detects_cycles"),
+            "the inline test itself is not a gap"
+        );
     }
 
     /// `top_k` truncates the returned list but not the true `gap_count`.
@@ -368,5 +472,115 @@ mod tests {
         assert_eq!(r.total_production, 0);
         assert_eq!(r.gap_count, 0);
         assert!(r.gaps.is_empty());
+        assert_eq!(r.test_nodes, 0);
+        assert!(r.reliability_warning.is_none(), "nothing to warn about");
+    }
+
+    /// The v0-bws-training shape: tests ARE indexed, but their subjects resolve
+    /// through a DI container / path alias, so almost no test→production edge
+    /// was extracted. The ratio is then a measurement failure, not a finding —
+    /// the report must say so instead of letting the ranking read as truth.
+    #[tokio::test]
+    async fn warns_when_indexed_tests_reach_almost_nothing() {
+        let p = pool().await;
+        node(&p, "tm", "renders_the_page", "function", "page.test.ts").await;
+        for i in 0..25 {
+            node(
+                &p,
+                &format!("n{i}"),
+                &format!("prod{i}"),
+                "function",
+                "app/prod.ts",
+            )
+            .await;
+        }
+        // The single edge the extractor did manage to resolve: 1/25 = 4%.
+        edge(&p, "tm", "n0").await;
+
+        let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
+
+        assert_eq!(r.total_production, 25);
+        assert_eq!(r.covered, 1);
+        assert_eq!(r.test_nodes, 1, "the test file's symbol seeded the walk");
+        let warning = r
+            .reliability_warning
+            .expect("4% with indexed tests must be flagged as unreliable");
+        assert!(
+            warning.contains("UNRELIABLE"),
+            "leads with the verdict: {warning}"
+        );
+        assert!(
+            warning.contains("4.0%"),
+            "states the measured ratio: {warning}"
+        );
+        // Still returns the gaps — the caller is told to distrust them, not
+        // denied the data (a coverage tool may still want the raw list).
+        assert_eq!(r.gap_count, 24);
+    }
+
+    /// A project with genuinely NO test code is 0% covered and that is a real
+    /// finding — the guard must stay silent rather than blaming the extractor.
+    #[tokio::test]
+    async fn no_warning_when_project_has_no_tests() {
+        let p = pool().await;
+        for i in 0..25 {
+            node(
+                &p,
+                &format!("n{i}"),
+                &format!("prod{i}"),
+                "function",
+                "app/prod.ts",
+            )
+            .await;
+        }
+
+        let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
+
+        assert_eq!(r.covered, 0);
+        assert_eq!(r.test_nodes, 0);
+        assert!(
+            r.reliability_warning.is_none(),
+            "0% with no test code is honest, not a malfunction"
+        );
+    }
+
+    /// Above the threshold the report is trusted and ships no caveat.
+    #[tokio::test]
+    async fn no_warning_when_coverage_is_plausible() {
+        let p = pool().await;
+        node(&p, "tm", "test_main", "function", "main_test.rs").await;
+        for i in 0..10 {
+            node(
+                &p,
+                &format!("n{i}"),
+                &format!("prod{i}"),
+                "function",
+                "prod.rs",
+            )
+            .await;
+        }
+        for i in 0..3 {
+            edge(&p, "tm", &format!("n{i}")).await;
+        }
+
+        let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
+
+        assert_eq!(r.covered, 3, "30% — well above the implausibility floor");
+        assert!(r.reliability_warning.is_none());
+    }
+
+    /// The threshold is a floor on the RATIO, not on the absolute count: the
+    /// boundary is inclusive, so exactly 5% is still trusted.
+    #[test]
+    fn threshold_boundary_is_inclusive() {
+        assert!(build_reliability_warning(100, 5, 1).is_none(), "5% passes");
+        assert!(
+            build_reliability_warning(100, 4, 1).is_some(),
+            "4% is flagged"
+        );
+        assert!(
+            build_reliability_warning(0, 0, 7).is_none(),
+            "no production candidates → nothing to judge"
+        );
     }
 }
