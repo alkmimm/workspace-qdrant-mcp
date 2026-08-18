@@ -66,3 +66,7 @@ sentinel-config.yaml
 # Pre-commit / linting configs
 .pre-commit-config.yaml
 .gitleaks.toml
+
+# Consumed by scripts/ci/path-discipline.sh in the static-checks stage of
+# docker/Dockerfile.memexd (the rest of docs/ stays excluded).
+!docs/specs/16-path-abstraction-audit.md

@@ -57,6 +57,27 @@ need a local Rust/cargo toolchain, a local ONNX Runtime, or a host `npm` build.
 `docker/Dockerfile.memexd` builds the daemon (Rust + statically-linked ONNX) and
 the root `Dockerfile` compiles the TypeScript MCP server and the Rust node addon.
 
+> **GitHub Actions are DISABLED on this fork — the container build IS the CI.**
+> Never treat a check under `.github/workflows/` as covering anything: nothing
+> there runs, and a gate added there is dead on arrival. When you add or fix a
+> check, wire it into the container build in the same change.
+
+The local CI has **two tiers**. Know which one your check belongs in:
+
+| Tier | Where | Runs when | Contents |
+|---|---|---|---|
+| **static** | `static-checks` stage (`docker/Dockerfile.memexd`), `check-proto-consistency` in the root `Dockerfile` | **every image build** — `make redeploy` cannot succeed while one fails | `cargo fmt --check`, path discipline, canonicalize markers, hooks `.claude` paths, ONNX/tree-sitter version consistency, TS↔proto RPC call surface |
+| **compile** | `validate` stage (`docker/Dockerfile.memexd`) | **only `make validate`** | `clippy -D warnings` (lib+bins+tests) and the hermetic test gates (schema_version, FTS re-ingest, branch attribution, graph, test_gaps reliability) |
+
+A stage is only built if the build target **reaches** it. `runtime` copies
+`/static-checks.ok` purely to put the static stage on the graph — remove that
+COPY and every static gate silently stops running. `validate` is deliberately
+NOT reached, which is why it needs `make validate`; do not assume a green
+`docker compose build` exercised it.
+
+When using a positional libtest filter, assert the expected test count — an
+empty filter matches nothing and libtest still exits 0.
+
 Use the Makefile that matches your shell:
 
 - **Linux / WSL** → `make <target>` (top-level `Makefile`, bash + docker compose)

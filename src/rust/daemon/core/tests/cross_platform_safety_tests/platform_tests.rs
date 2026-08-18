@@ -165,6 +165,12 @@ impl CrossPlatformTestSuite {
     pub(crate) async fn test_path_resolution(&self) -> anyhow::Result<bool> {
         let current_dir = env::current_dir()?;
         let relative_path = Path::new(".");
+        // This IS the platform probe: it asserts the OS resolves "." to the
+        // process's own cwd. The result is compared in place and never stored,
+        // returned, or used to key anything.
+        // CATEGORY-B: process-local only, so the symlink-resolution hazard that
+        // makes canonicalize() unsafe for persisted paths (a stored path is an
+        // IDENTITY) cannot apply here.
         let resolved = relative_path.canonicalize()?;
 
         Ok(resolved == current_dir)

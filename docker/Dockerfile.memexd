@@ -382,6 +382,84 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
  && cargo test -p workspace-qdrant-core --test graph_store_tests -- \
         clears_incoming clears_ghost_and_stale --test-threads=4
 
+# test_gaps reliability guard runs here: hermetic (in-memory SQLite), and it
+# protects a REPORTING defect that is invisible to every other assertion —
+# `test_gaps` happily returned "21 of 3554 symbols covered" (0.6%) on a repo
+# with 183 Jest test files and ranked demonstrably-tested functions at the top.
+# The tests resolved their subjects through a DI container and `@/` path-alias
+# imports, so no test->production CALLS edge was ever extracted. The numbers
+# were internally consistent, so the suite stayed green while the tool emitted
+# noise an agent then acted on. These four pin the contradiction the guard
+# fires on (tests indexed + near-zero reach = broken measurement), the two
+# cases it must stay SILENT for (no test code at all; plausible coverage), and
+# the inclusive 5% boundary — plus the four pre-existing module tests, which the
+# module-path filter picks up for free.
+#
+# The filter is the MODULE PATH alone, deliberately. Naming the four tests after
+# a `--` as well does not narrow anything: libtest unions positional filters, so
+# `--lib graph::algorithms::test_gaps -- <names>` still ran all 8 and the count
+# assertion below caught the mismatch on its first real execution.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib graph::algorithms::test_gaps \
+        -- --test-threads=4 2>&1 | tee /tmp/test-gaps-guard.log; \
+    grep -q "^test result: ok\. 8 passed" /tmp/test-gaps-guard.log \
+    || { echo "GATE: expected exactly 8 tests in graph::algorithms::test_gaps to run and \
+pass — a rename silently empties a positional filter and libtest exits 0 when a filter \
+matches nothing (the v48 lesson). If you ADDED a test here, bump this count."; exit 1; }
+
+# ─────────────────────────────────────────────
+# Stage 2c: static-checks — the cheap gates, on the CRITICAL PATH
+#
+# Unlike `validate` above, this stage is REACHABLE from `runtime` (which copies
+# its /static-checks.ok marker), so BuildKit must build it and `make redeploy`
+# cannot succeed while any of these fails. That distinction is the whole point:
+# a stage nothing references is silently skipped, which is how these checks came
+# to run nowhere at all — they lived only in .github/workflows/, and GitHub
+# Actions are disabled on this fork.
+#
+# Only checks that need no dependency compilation belong here; they add seconds,
+# not minutes. The expensive compile-based gates (clippy, cargo test) stay in
+# `validate`, reached via `make validate`.
+#
+# Uses the pinned Rust base for `cargo fmt` (rustfmt parses, it does not build,
+# so no registry/ONNX setup is needed) and for a POSIX shell toolchain. Paths
+# are repo-shaped here — deliberately unlike `builder`, which flattens src/rust
+# to /build; the scripts resolve <root>/src/rust.
+# ─────────────────────────────────────────────
+FROM rust:${RUST_VERSION}-${DEBIAN_CODENAME} AS static-checks
+
+# The base rust image ships cargo/rustc but not the rustfmt component (same
+# omission as clippy in the `validate` stage above). Installed in its own layer
+# so it caches independently of the source COPYs below.
+RUN rustup component add rustfmt
+
+WORKDIR /repo
+
+COPY scripts/ scripts/
+COPY src/rust/ src/rust/
+COPY assets/default_configuration.yaml assets/default_configuration.yaml
+# path-discipline.sh hard-requires this audit doc. The rest of docs/ is
+# excluded by .dockerignore, which carries a matching `!` exception for it.
+COPY docs/specs/16-path-abstraction-audit.md docs/specs/16-path-abstraction-audit.md
+
+# The real ONNX version this build compiles against. Passed to the version
+# check so it validates the ACTUAL build input — docker/ and .github/ are
+# excluded by .dockerignore, so the script cannot read either from in here.
+ARG ONNX_VERSION
+
+# `cargo fmt` runs from the workspace root (src/rust), the shell checks from the
+# repo root; they disagree on cwd, hence the subshell.
+RUN set -eux; \
+    (cd src/rust && cargo fmt --all -- --check); \
+    bash scripts/ci/path-discipline.sh /repo; \
+    bash scripts/ci/forbid_canonicalize.sh /repo; \
+    bash scripts/ci/hooks-claude-path-audit.sh /repo; \
+    ONNX_VERSION="${ONNX_VERSION}" bash scripts/check-version-consistency.sh; \
+    touch /static-checks.ok
+
 # ─────────────────────────────────────────────
 # Stage 3a: rust-analyzer binary download
 # Ships as a single statically-linked release archive on GitHub. Downloaded
@@ -684,6 +762,14 @@ LABEL org.opencontainers.image.title="memexd" \
       org.opencontainers.image.version="0.1.3" \
       org.opencontainers.image.source="https://github.com/ChrisGVE/workspace-qdrant-mcp" \
       org.opencontainers.image.licenses="MIT"
+
+# Pull the static-checks marker FIRST. This COPY is what puts the
+# `static-checks` stage on the build graph: BuildKit only builds stages the
+# target actually reaches, so without a reference here the whole stage — and
+# every gate in it — would be silently skipped, which is precisely how these
+# checks came to run nowhere. The file itself is inert; the dependency is the
+# point. Do not "clean this up".
+COPY --from=static-checks /static-checks.ok /usr/share/wqm/static-checks.ok
 
 COPY --from=builder /usr/local/bin/memexd /usr/local/bin/memexd
 # Bundled wqm CLI — lets `docker exec wqm-memexd wqm <cmd>` run inside the daemon
