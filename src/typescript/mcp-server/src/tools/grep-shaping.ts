@@ -30,6 +30,10 @@ export const DEFAULT_GREP_MAX_BYTES_PER_LINE = 500;
 export interface GrepShapingOptions {
   maxBytesPerLine?: number | undefined;
   maxResponseBytes?: number | undefined;
+  /** Return only the count — drop the match bodies entirely. The strongest
+   *  shaping mode there is, so it belongs with the other response-shape knobs
+   *  rather than as another positional parameter. */
+  countOnly?: boolean | undefined;
 }
 
 export interface ShapedGrepMatches {

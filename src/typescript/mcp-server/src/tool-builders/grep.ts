@@ -13,6 +13,18 @@
  */
 const DEFAULT_GREP_MAX_RESULTS = 100;
 
+/**
+ * Page cap used for `countOnly` when the caller names none.
+ *
+ * The small agent-sized default above exists to bound the RESPONSE, but a
+ * count-only response carries no match bodies — so the only thing the cap
+ * governs is whether the reported total is exact (the deduped set) or a
+ * truncation upper bound. Counting is the entire point of the mode, so it gets
+ * a ceiling high enough that a real surface is counted exactly; beyond it the
+ * response still reports `truncated: true` rather than lying.
+ */
+const COUNT_ONLY_MAX_RESULTS = 10000;
+
 // Single source of truth for the options shape: the tool's own interface.
 // A structural clone here was a fourth sync point for every new knob — a
 // forgotten copy passes JSON-schema validation and is silently dropped
@@ -48,8 +60,12 @@ export function buildGrepOptions(args: Record<string, unknown> | undefined): Gre
   const contextLines = args?.['contextLines'] as number | undefined;
   if (contextLines !== undefined) options.contextLines = contextLines;
 
+  const countOnly = args?.['countOnly'] as boolean | undefined;
+  if (countOnly === true) options.countOnly = true;
+
   const maxResults = args?.['maxResults'] as number | undefined;
-  options.maxResults = maxResults ?? DEFAULT_GREP_MAX_RESULTS;
+  options.maxResults =
+    maxResults ?? (countOnly === true ? COUNT_ONLY_MAX_RESULTS : DEFAULT_GREP_MAX_RESULTS);
 
   const offset = args?.['offset'] as number | undefined;
   if (offset !== undefined) options.offset = offset;

@@ -69,6 +69,7 @@ import type {
   RetrieveToolConfig,
 } from './retrieve-types.js';
 import { getCollectionName, extractMetadata } from './retrieve-types.js';
+import { fragmentSliceHint } from '../common/fragment-hint.js';
 import { RETRIEVE_ARG_KEYS } from '../tool-definitions/retrieve.js';
 
 /**
@@ -665,7 +666,20 @@ export class RetrieveTool {
       // shared-behavior rule) so a many-branch repo does not ship a ~60-name dump.
       collapseResultBranchFields([document], concreteBranchFilter(branchScope?.branch));
 
-      return { success: true, documents: [document], total: 1, hasMore: false };
+      // A retrieved point can be ONE fragment of an oversized symbol, in which
+      // case the caller silently gets a slice — same defect the search path
+      // now warns about, so it gets the same warning (CLAUDE.md
+      // shared-behaviour rule). `hint` previously only ever appeared on
+      // failures; a successful-but-partial read is exactly when it earns its
+      // place.
+      const sliceHint = fragmentSliceHint(document.metadata);
+      return {
+        success: true,
+        documents: [document],
+        total: 1,
+        hasMore: false,
+        ...(sliceHint !== undefined ? { hint: sliceHint } : {}),
+      };
     } catch (error) {
       return failureResponse(
         `Failed to retrieve document: ${error instanceof Error ? error.message : 'unknown error'}`,

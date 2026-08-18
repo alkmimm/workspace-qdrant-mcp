@@ -51,6 +51,11 @@ export const grepToolDefinition = {
         description:
           'Maximum matches per page (default: 100). When the cap is hit the response sets truncated:true, reports total_matches, and sets next_offset — page with offset, narrow with pathGlob, or raise this cap.',
       },
+      countOnly: {
+        type: 'boolean',
+        description:
+          'Return ONLY total_matches — no matches array, no context lines. Use when you want the SIZE of a surface ("how many routes/callers/TODOs are there?") instead of the matches themselves, so you do not pay for bodies you will discard. The count is the exact deduped total (the page cap is raised to 10000 for this mode); past that the response still reports truncated:true. Default: false.',
+      },
       offset: {
         type: 'number',
         description:
