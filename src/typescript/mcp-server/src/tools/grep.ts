@@ -118,6 +118,16 @@ export interface GrepOptions {
   scope?: 'project' | 'all';
   contextLines?: number;
   maxResults?: number;
+  /** Return ONLY the match count — no `matches` array, no context lines.
+   *
+   *  Field feedback (DOC-V2, 2026-08-13): a caller wanting the SIZE of a
+   *  surface (`GoRoute\(` → 172 matches) had to fetch match bodies it would
+   *  immediately discard, then read the count out of truncation metadata. The
+   *  daemon still scans the same rows; what this removes is the response cost,
+   *  which is what the caller actually pays. The builder also raises the
+   *  default page cap when this is set, so the reported count is the exact
+   *  deduped total rather than a truncation upper bound. */
+  countOnly?: boolean;
   /** Pagination offset into the deduped match list (default 0). Stable:
    *  the daemon orders matches deterministically (file, then line), so the
    *  window `[offset, offset + maxResults)` never skips or duplicates across
@@ -185,7 +195,11 @@ export interface GrepMatch {
 
 export interface GrepResponse {
   success: boolean;
-  matches: GrepMatch[];
+  /** Absent ONLY under `countOnly`, where the caller asked for the size of the
+   *  surface rather than the surface. Deliberately absent instead of `[]`: an
+   *  empty array is indistinguishable from "no matches", which is the one
+   *  reading a count-only response must never produce. */
+  matches?: GrepMatch[];
   total_matches: number;
   truncated: boolean;
   latency_ms: number;
@@ -473,7 +487,11 @@ export class GrepTool {
       maxResponseBytes,
     } = options;
     const pageOffset = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
-    const shaping: GrepShapingOptions = { maxBytesPerLine, maxResponseBytes };
+    const shaping: GrepShapingOptions = {
+      maxBytesPerLine,
+      maxResponseBytes,
+      countOnly: options.countOnly,
+    };
 
     if (!pattern) return grepError('Search pattern is required', 0);
 
@@ -798,6 +816,24 @@ export class GrepTool {
       // Worktree callers get MAIN-anchored paths; tell them how to Read their own
       // copy once (only worth saying when there are paths to translate).
       const wtNote = shaped.matches.length > 0 ? worktreeReadNote() : undefined;
+      const totalMatchesOut = truncated
+        ? Math.max(offset + matches.length, totalMatches - duplicatesDropped)
+        : widenedFired
+          ? matches.length
+          : dedupedMatches.length;
+      // countOnly: the caller wants the SIZE of the surface, not the surface.
+      // Drop everything that only makes sense alongside match bodies —
+      // worktree path note, byte-budget report, next_offset — and keep the
+      // count plus the honesty flags about it.
+      if (shaping.countOnly === true) {
+        return {
+          success: true,
+          total_matches: totalMatchesOut,
+          truncated,
+          latency_ms: latencyMs,
+          ...(message ? { message } : {}),
+        };
+      }
       return {
         success: true,
         matches: shaped.matches,
@@ -807,11 +843,7 @@ export class GrepTool {
         // discount the duplicates seen on this page as a best effort. An
         // untruncated paged read knows the exact full count (the deduped set);
         // a widened result only knows its own page.
-        total_matches: truncated
-          ? Math.max(offset + matches.length, totalMatches - duplicatesDropped)
-          : widenedFired
-            ? matches.length
-            : dedupedMatches.length,
+        total_matches: totalMatchesOut,
         truncated,
         latency_ms: latencyMs,
         ...(message ? { message } : {}),

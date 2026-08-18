@@ -27,6 +27,7 @@
  */
 
 import { FIELD_CONTENT } from '../common/native-bridge.js';
+import { firstFragmentSliceHint } from '../common/fragment-hint.js';
 import { TEXT_BODY_KEYS, stripServedNoise } from '../common/payload-noise.js';
 import { applyByteBudget } from './response-budget.js';
 import type {
@@ -40,6 +41,7 @@ import {
   DEFAULT_MAX_BYTES_PER_HIT,
   DEFAULT_MAX_RESPONSE_BYTES,
   PROJECTS_COLLECTION,
+  resolveDerankConfig,
 } from './search-types.js';
 
 /** Minimum trimmed-body length for cross-hit identical-content collapse.
@@ -138,6 +140,43 @@ function hasSymbolHit(results: readonly SearchResult[]): boolean {
   return results.some((r) => metadataString(r.metadata, 'chunk_symbol_name') !== undefined);
 }
 
+/**
+ * Hint naming the de-prioritized trees a page's hits came from.
+ *
+ * `WQM_SEARCH_DERANK` sinks legacy/vendored paths in the ranking but keeps them
+ * findable, so on a query with little competition they can still fill most of a
+ * page — silently, since the demotion leaves no trace in the response.
+ *
+ * Field feedback (DOC-V2, 2026-08-13): a prose query returned 5 of 9 hits from
+ * `docs/archive/plans/evidence/tmp/` and the caller had no way to know the dead
+ * tree existed until it had already read them. `pathExclude` fixes it, but only
+ * for someone who already knows. This makes the demotion visible and names the
+ * remedy.
+ */
+function derankedHint(results: readonly SearchResult[], substrings: readonly string[]): string | undefined {
+  if (substrings.length === 0 || results.length === 0) return undefined;
+  const matched = new Set<string>();
+  let count = 0;
+  for (const r of results) {
+    const rel = metadataString(r.metadata, 'relative_path');
+    const abs = metadataString(r.metadata, 'file_path');
+    const haystacks = [rel, abs].filter((s): s is string => s !== undefined).map((s) => s.replace(/\\/g, '/'));
+    if (haystacks.length === 0) continue;
+    const hit = substrings.find((needle) => haystacks.some((h) => h.includes(needle)));
+    if (hit !== undefined) {
+      matched.add(hit);
+      count += 1;
+    }
+  }
+  if (count === 0) return undefined;
+  const names = [...matched].join(', ');
+  return (
+    `Note: ${count} of ${results.length} hits come from de-prioritized paths (${names}). They are ` +
+    `already ranked down but still fill slots on a query with little competition — pass ` +
+    `pathExclude to drop them outright.`
+  );
+}
+
 function buildRetrieveReference(r: SearchResult): string {
   const filePath = r.metadata['file_path'] as string | undefined;
   const lineNumber = metadataNumber(r.metadata['line_number']);
@@ -192,6 +231,12 @@ const SUMMARY_METADATA_KEYS: readonly string[] = [
   'chunk_start_line',
   'chunk_end_line',
   'chunk_chunk_type',
+  // Fragment provenance: without these, summary-mode discovery cannot tell a
+  // whole symbol from slice 11 of 12 of one — the exact confusion that cost a
+  // field session a call (see fragmentHint).
+  'chunk_is_fragment',
+  'chunk_fragment_index',
+  'chunk_total_fragments',
   // Scratchpad/rules-only fields (absent on code chunks, so no noise there):
   // timestamps + write-time provenance let an agent pick the right note
   // without a follow-up retrieve.
@@ -369,9 +414,17 @@ export function shapeHitPayloads(
   // and the rebuild branches (summary / packed) copy it explicitly.
   response = { ...response, results: response.results.map(stampIsTest) };
   // Computed from the ORIGINAL hits so it is independent of which shaping
-  // branch runs (every branch preserves chunk_symbol_name). Folded into the
-  // response by `finalize` below.
-  const hint = hasSymbolHit(response.results) ? GRAPH_HINT : undefined;
+  // branch runs (every branch preserves the metadata these read). Folded into
+  // the response by `finalize` below.
+  //
+  // ONE hint slot, filled by the most SPECIFIC applicable message. The two
+  // situational hints below fire rarely and each cost the caller a wasted call
+  // when absent; the graph tip is generic advice and yields to them. Keeping it
+  // to one keeps the token cost of a hint flat rather than additive.
+  const hint =
+    firstFragmentSliceHint(response.results) ??
+    derankedHint(response.results, resolveDerankConfig().substrings) ??
+    (hasSymbolHit(response.results) ? GRAPH_HINT : undefined);
   const budget = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const finalize = (
     base: SearchResponse,
