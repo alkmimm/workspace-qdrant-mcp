@@ -149,7 +149,12 @@ mod tests {
         ] {
             assert!(attr_text_marks_test_fn(a), "{a} should mark a test fn");
         }
-        for a in ["#[cfg(test)]", "#[should_panic]", "#[inline]", "#[derive(Debug)]"] {
+        for a in [
+            "#[cfg(test)]",
+            "#[should_panic]",
+            "#[inline]",
+            "#[derive(Debug)]",
+        ] {
             assert!(!attr_text_marks_test_fn(a), "{a} is NOT a test-fn attr");
         }
     }

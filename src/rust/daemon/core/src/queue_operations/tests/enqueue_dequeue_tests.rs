@@ -108,7 +108,10 @@ async fn test_worktree_membership_idempotency_key_is_branch_scoped() {
         .await
         .unwrap();
     assert!(new_a);
-    assert!(new_b, "different worktree branch → different key → not deduped");
+    assert!(
+        new_b,
+        "different worktree branch → different key → not deduped"
+    );
     assert_ne!(id_a, id_b);
 
     // Same worktree branch again → still deduped (idempotent, no double-enqueue).
@@ -131,15 +134,34 @@ async fn test_worktree_membership_idempotency_key_is_branch_scoped() {
     // on two branches dedups, so the TS/daemon/CLI contract is unchanged.
     let payload2 = r#"{"file_path":"/test/other.rs"}"#;
     let (_n1, new_n1) = manager
-        .enqueue_unified(ItemType::File, UnifiedOp::Add, "t", "c", payload2, Some("main"), None)
+        .enqueue_unified(
+            ItemType::File,
+            UnifiedOp::Add,
+            "t",
+            "c",
+            payload2,
+            Some("main"),
+            None,
+        )
         .await
         .unwrap();
     let (_n2, new_n2) = manager
-        .enqueue_unified(ItemType::File, UnifiedOp::Add, "t", "c", payload2, Some("dev"), None)
+        .enqueue_unified(
+            ItemType::File,
+            UnifiedOp::Add,
+            "t",
+            "c",
+            payload2,
+            Some("dev"),
+            None,
+        )
         .await
         .unwrap();
     assert!(new_n1);
-    assert!(!new_n2, "normal items keep the branch-less shared idempotency key");
+    assert!(
+        !new_n2,
+        "normal items keep the branch-less shared idempotency key"
+    );
 }
 
 /// Test FIFO ordering: priority_descending=true -> created_at ASC (oldest first)

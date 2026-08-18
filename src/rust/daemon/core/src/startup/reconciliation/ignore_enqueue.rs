@@ -249,7 +249,6 @@ mod tests {
         assert_eq!(parsed.file_path.as_str(), "lib/src/main.dart");
     }
 
-
     /// The branch the caller measured staleness against is the branch stamped on
     /// every enqueued item. `ignore_sync` owns resolving it from the walked tree
     /// (see `ignore_sync::resolve_branch`); this side must not second-guess it.
@@ -341,7 +340,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(row.0, "uplift", "missing-file repair must force reprocessing");
+        assert_eq!(
+            row.0, "uplift",
+            "missing-file repair must force reprocessing"
+        );
         let parsed: FilePayload = serde_json::from_str(&row.1).unwrap();
         assert_eq!(parsed.file_path.as_str(), missing);
     }

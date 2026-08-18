@@ -112,7 +112,11 @@ impl FileStrategy {
                 item.tenant_id, e
             ))
         })?;
-        let main_abs_path: String = payload.file_path.to_absolute(&main_canonical).as_str().to_string();
+        let main_abs_path: String = payload
+            .file_path
+            .to_absolute(&main_canonical)
+            .as_str()
+            .to_string();
 
         // Read-anchored absolute path: the worktree tree for a new-on-branch
         // item, else the main folder. The relative form (already validated by
@@ -125,7 +129,11 @@ impl FileStrategy {
                         root, item.tenant_id, e
                     ))
                 })?;
-                payload.file_path.to_absolute(&read_canonical).as_str().to_string()
+                payload
+                    .file_path
+                    .to_absolute(&read_canonical)
+                    .as_str()
+                    .to_string()
             }
             None => main_abs_path.clone(),
         };
@@ -1343,8 +1351,16 @@ mod tests {
                             .unwrap();
                     }
                     prepare_update(
-                        ctx, item, pool, file_abs, "wf-gate", base_path, "src/lib.rs", abs_str,
-                        payload, false,
+                        ctx,
+                        item,
+                        pool,
+                        file_abs,
+                        "wf-gate",
+                        base_path,
+                        "src/lib.rs",
+                        abs_str,
+                        payload,
+                        false,
                     )
                     .await
                     .unwrap()

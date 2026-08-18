@@ -44,7 +44,11 @@ pub async fn cycles(
     }
 
     for (i, c) in resp.cycles.iter().enumerate() {
-        let scope = if c.cross_file { "CROSS-FILE" } else { "same-file" };
+        let scope = if c.cross_file {
+            "CROSS-FILE"
+        } else {
+            "same-file"
+        };
         println!(
             "\nCycle #{}  ({} nodes, {} file(s), {})",
             i + 1,

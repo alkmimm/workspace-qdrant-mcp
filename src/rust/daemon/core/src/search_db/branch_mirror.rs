@@ -100,8 +100,8 @@ pub(crate) fn target_branches(authority: &[String], current: &[String]) -> Optio
         return None;
     }
     // Already in sync? Compare as sets (json_each ignores order/duplicates).
-    let in_sync = canon.iter().all(|b| current.contains(b))
-        && current.iter().all(|b| canon.contains(b));
+    let in_sync =
+        canon.iter().all(|b| current.contains(b)) && current.iter().all(|b| canon.contains(b));
     if in_sync {
         return None;
     }

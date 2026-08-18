@@ -292,7 +292,10 @@ pub(super) async fn enqueue_unchanged_files(
         match enqueue_unchanged_file(queue_manager, tenant_id, collection, &rel, new_branch).await {
             Ok(()) => stats.enqueued_changed += 1,
             Err(e) => {
-                warn!("Failed to enqueue stale-chunker re-chunk for {}: {}", rel, e);
+                warn!(
+                    "Failed to enqueue stale-chunker re-chunk for {}: {}",
+                    rel, e
+                );
                 stats.errors += 1;
             }
         }

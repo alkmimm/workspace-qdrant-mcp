@@ -120,5 +120,8 @@ fn test_classifier_id_matches_graph_vocabulary() {
     ] {
         assert_eq!(lang.classifier_id(), lang.identifier());
     }
-    assert_eq!(Language::Other("kotlin".to_string()).classifier_id(), "kotlin");
+    assert_eq!(
+        Language::Other("kotlin".to_string()).classifier_id(),
+        "kotlin"
+    );
 }

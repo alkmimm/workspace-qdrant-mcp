@@ -536,7 +536,9 @@ mod tests {
 
         // Deduplicated union of every bp1 row's branches — this is the authority
         // set the Qdrant `branch` array must be restored up to (#224).
-        let mut got = read_authority_branches(&pool, "bp1").await.expect("read bp1");
+        let mut got = read_authority_branches(&pool, "bp1")
+            .await
+            .expect("read bp1");
         got.sort();
         assert_eq!(
             got,

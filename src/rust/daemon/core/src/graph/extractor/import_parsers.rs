@@ -107,7 +107,11 @@ pub(crate) fn parse_import_module(line: &str, language: &str) -> Option<String> 
         "javascript" | "typescript" | "tsx" | "jsx" => {
             let l = line.trim_end_matches(';');
             let after = &l[l.find(" from ")? + 6..];
-            non_empty(after.trim().trim_matches(|c| c == '\'' || c == '"' || c == '`'))
+            non_empty(
+                after
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"' || c == '`'),
+            )
         }
         "go" => {
             let start = line.find('"')?;

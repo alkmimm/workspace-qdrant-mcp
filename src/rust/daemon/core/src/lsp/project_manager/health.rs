@@ -453,7 +453,7 @@ enum SingleHealthResult {
 #[cfg(test)]
 mod readiness_exemption_tests {
     use super::{
-        AtomicBool, Arc, Duration, HashMap, Instant, LanguageServerManager, ProjectLanguageKey,
+        Arc, AtomicBool, Duration, HashMap, Instant, LanguageServerManager, ProjectLanguageKey,
         RwLock,
     };
     use crate::lsp::Language;

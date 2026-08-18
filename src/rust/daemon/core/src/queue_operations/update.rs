@@ -337,7 +337,9 @@ impl QueueManager {
         .ok()
         .flatten();
         match root {
-            Some(root) => std::path::Path::new(&root).join(relative_file_path).exists(),
+            Some(root) => std::path::Path::new(&root)
+                .join(relative_file_path)
+                .exists(),
             None => false,
         }
     }

@@ -54,7 +54,8 @@ impl Migration for V41Migration {
         // Rebuild tracked_files into the content-keyed shape. The FK child
         // qdrant_chunks is cleared below; FK checks are disabled for the swap.
         conn.execute("PRAGMA foreign_keys = OFF").await?;
-        conn.execute("DROP TABLE IF EXISTS tracked_files_old").await?;
+        conn.execute("DROP TABLE IF EXISTS tracked_files_old")
+            .await?;
         if exists {
             // legacy_alter_table keeps dependent FKs pointing at the symbolic
             // name `tracked_files`, which we re-create immediately.
@@ -65,7 +66,8 @@ impl Migration for V41Migration {
         }
         conn.execute(crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL)
             .await?;
-        conn.execute("DROP TABLE IF EXISTS tracked_files_old").await?;
+        conn.execute("DROP TABLE IF EXISTS tracked_files_old")
+            .await?;
 
         for stmt in crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_INDEXES_SQL {
             conn.execute(*stmt).await?;

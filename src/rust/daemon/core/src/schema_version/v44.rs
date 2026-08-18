@@ -86,7 +86,9 @@ impl Migration for V44Migration {
         sqlx::query(CREATE_PARENT_EVENT_ID_INDEX_SQL)
             .execute(pool)
             .await?;
-        sqlx::query(DROP_TOKEN_SAVINGS_VIEW_SQL).execute(pool).await?;
+        sqlx::query(DROP_TOKEN_SAVINGS_VIEW_SQL)
+            .execute(pool)
+            .await?;
         sqlx::query(CREATE_TOKEN_SAVINGS_VIEW_V44_SQL)
             .execute(pool)
             .await?;
@@ -166,7 +168,9 @@ mod tests {
             "INSERT INTO search_events (id, ts, actor, tool, op, parent_event_id) \
              VALUES ('e2', '2026-07-07T12:00:30.000Z', 'claude', 'mcp_qdrant', 'followup', 'e1')",
         )
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let had_followup: bool =
             sqlx::query_scalar("SELECT had_followup FROM token_savings WHERE id = 'e1'")
@@ -191,7 +195,9 @@ mod tests {
             "INSERT INTO search_events (id, ts, actor, tool, op, parent_event_id) \
              VALUES ('e2', '2026-07-07T12:05:00.000Z', 'claude', 'mcp_qdrant', 'followup', 'e1')",
         )
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let had_followup: bool =
             sqlx::query_scalar("SELECT had_followup FROM token_savings WHERE id = 'e1'")
@@ -217,7 +223,9 @@ mod tests {
             "INSERT INTO search_events (id, ts, actor, tool, op, parent_event_id) \
              VALUES ('e2', '2026-07-07T12:01:00.000Z', 'claude', 'mcp_qdrant', 'retrieve', 'e1')",
         )
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let had_escalation: bool =
             sqlx::query_scalar("SELECT had_escalation FROM token_savings WHERE id = 'e1'")
@@ -242,7 +250,9 @@ mod tests {
             "INSERT INTO search_events (id, ts, actor, tool, op) \
              VALUES ('e2', '2026-07-07T12:01:00.000Z', 'claude', 'mcp_qdrant', 'retrieve')",
         )
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let had_escalation: bool =
             sqlx::query_scalar("SELECT had_escalation FROM token_savings WHERE id = 'e1'")

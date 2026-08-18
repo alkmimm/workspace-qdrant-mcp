@@ -514,8 +514,7 @@ mod tests {
         std::fs::write(&file, "fn main() {}\n").unwrap();
         let metadata = std::fs::metadata(&file).unwrap();
         let abs_path = file.to_string_lossy();
-        let root =
-            CanonicalPath::from_user_input(&project.path().to_string_lossy()).unwrap();
+        let root = CanonicalPath::from_user_input(&project.path().to_string_lossy()).unwrap();
 
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let qm = Arc::new(QueueManager::new(pool.clone()));
@@ -563,7 +562,6 @@ mod tests {
         assert_eq!(op_uplift, "uplift");
     }
 
-
     #[tokio::test]
     async fn uplift_bypasses_mtime_pruning() {
         let project = tempfile::tempdir().unwrap();
@@ -605,15 +603,17 @@ mod tests {
             &mut errors,
         )
         .await;
-        assert_eq!(uplift_queued, 1, "Uplift is a forced rebuild and must ignore mtime");
+        assert_eq!(
+            uplift_queued, 1,
+            "Uplift is a forced rebuild and must ignore mtime"
+        );
         assert_eq!(errors, 0);
 
-        let op: String = sqlx::query_scalar(
-            "SELECT op FROM unified_queue WHERE tenant_id = 't-uplift-mtime'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let op: String =
+            sqlx::query_scalar("SELECT op FROM unified_queue WHERE tenant_id = 't-uplift-mtime'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(op, "uplift");
     }
 
@@ -622,8 +622,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let child = project.path().join("child");
         std::fs::create_dir(&child).unwrap();
-        let root =
-            CanonicalPath::from_user_input(&project.path().to_string_lossy()).unwrap();
+        let root = CanonicalPath::from_user_input(&project.path().to_string_lossy()).unwrap();
 
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let qm = Arc::new(QueueManager::new(pool.clone()));

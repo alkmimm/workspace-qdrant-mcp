@@ -81,8 +81,8 @@ impl SqliteGraphStore {
     fn import_anchors_file(module: &str, file: &str) -> bool {
         fn strip_code_ext(s: &str) -> &str {
             for ext in [
-                ".dart", ".rs", ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".kt",
-                ".mjs", ".cjs",
+                ".dart", ".rs", ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".java", ".kt", ".mjs",
+                ".cjs",
             ] {
                 if let Some(p) = s.strip_suffix(ext) {
                     return p;
@@ -321,14 +321,14 @@ impl GraphStore for SqliteGraphStore {
         // The stale set = this file's nodes whose id is NOT in `keep` (the current
         // extraction). Compute it in Rust so the FK-satisfying edge delete and the
         // node delete bind the same bounded id list.
-        let keep_set: std::collections::HashSet<&str> =
-            keep.iter().map(|s| s.as_str()).collect();
-        let all_ids: Vec<String> =
-            sqlx::query_scalar("SELECT node_id FROM graph_nodes WHERE tenant_id = ?1 AND file_path = ?2")
-                .bind(tenant_id)
-                .bind(file_path)
-                .fetch_all(&self.pool)
-                .await?;
+        let keep_set: std::collections::HashSet<&str> = keep.iter().map(|s| s.as_str()).collect();
+        let all_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT node_id FROM graph_nodes WHERE tenant_id = ?1 AND file_path = ?2",
+        )
+        .bind(tenant_id)
+        .bind(file_path)
+        .fetch_all(&self.pool)
+        .await?;
         let stale: Vec<&String> = all_ids
             .iter()
             .filter(|id| !keep_set.contains(id.as_str()))
@@ -369,7 +369,8 @@ impl GraphStore for SqliteGraphStore {
         }
         eq.execute(&mut *tx).await?;
 
-        let del_nodes = format!("DELETE FROM graph_nodes WHERE tenant_id = ? AND node_id IN ({ph})");
+        let del_nodes =
+            format!("DELETE FROM graph_nodes WHERE tenant_id = ? AND node_id IN ({ph})");
         let mut nq = sqlx::query(&del_nodes).bind(tenant_id);
         for id in &stale {
             nq = nq.bind(*id);
@@ -639,7 +640,11 @@ impl GraphStore for SqliteGraphStore {
             let id: String = r.get("node_id");
             meta.insert(
                 id,
-                (r.get("symbol_name"), r.get("symbol_type"), r.get("file_path")),
+                (
+                    r.get("symbol_name"),
+                    r.get("symbol_type"),
+                    r.get("file_path"),
+                ),
             );
         }
 
@@ -659,8 +664,11 @@ impl GraphStore for SqliteGraphStore {
                     })
             })
             .collect();
-        results
-            .sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.symbol_name.cmp(&b.symbol_name)));
+        results.sort_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then_with(|| a.symbol_name.cmp(&b.symbol_name))
+        });
         Ok(results)
     }
 
@@ -704,7 +712,11 @@ impl GraphStore for SqliteGraphStore {
                 }
             }
         }
-        out.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.symbol_name.cmp(&b.symbol_name)));
+        out.sort_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then_with(|| a.symbol_name.cmp(&b.symbol_name))
+        });
         Ok(out)
     }
 
@@ -936,7 +948,12 @@ impl GraphStore for SqliteGraphStore {
         .fetch_all(&self.pool)
         .await?
         .iter()
-        .map(|r| (r.get::<String, _>("member_id"), r.get::<String, _>("class_id")))
+        .map(|r| {
+            (
+                r.get::<String, _>("member_id"),
+                r.get::<String, _>("class_id"),
+            )
+        })
         .collect();
 
         // R4 import map: (source_file, imported_symbol) -> module locators, read
@@ -1012,10 +1029,12 @@ impl GraphStore for SqliteGraphStore {
                 // the candidate's languages are known AND differ (a cross-language
                 // false positive). Unknown on either side → keep, so a node the
                 // registry didn't classify is never over-dropped.
-                .filter(|(nid, _, _)| match (caller_lang, node_lang.get(nid.as_str())) {
-                    (Some(cl), Some(tl)) => cl == tl.as_str(),
-                    _ => true,
-                })
+                .filter(
+                    |(nid, _, _)| match (caller_lang, node_lang.get(nid.as_str())) {
+                        (Some(cl), Some(tl)) => cl == tl.as_str(),
+                        _ => true,
+                    },
+                )
                 .map(|(nid, fp, _)| (nid.as_str(), fp.as_str()))
                 .collect();
             if pool.is_empty() {
@@ -1052,9 +1071,7 @@ impl GraphStore for SqliteGraphStore {
                 {
                     let anchored: Vec<&str> = pool
                         .iter()
-                        .filter(|(_, fp)| {
-                            modules.iter().any(|m| Self::import_anchors_file(m, fp))
-                        })
+                        .filter(|(_, fp)| modules.iter().any(|m| Self::import_anchors_file(m, fp)))
                         .map(|(nid, _)| *nid)
                         .collect();
                     if anchored.len() == 1 {
@@ -1482,14 +1499,20 @@ mod matcher_tests {
         // Python: `from graph.store import Foo`.
         assert!(S::import_anchors_file("graph.store", "app/graph/store.py"));
         // JS/TS relative import.
-        assert!(S::import_anchors_file("./graph/store", "src/graph/store.ts"));
+        assert!(S::import_anchors_file(
+            "./graph/store",
+            "src/graph/store.ts"
+        ));
         // Java FQN -> file named after the class, package mirrors the path.
         assert!(S::import_anchors_file(
             "com.example.model.User",
             "src/main/java/com/example/model/User.java"
         ));
         // Dart URI import (extension stripped on both sides).
-        assert!(S::import_anchors_file("src/graph/foo.dart", "lib/src/graph/foo.dart"));
+        assert!(S::import_anchors_file(
+            "src/graph/foo.dart",
+            "lib/src/graph/foo.dart"
+        ));
         // Single-segment module (only a stem to go on).
         assert!(S::import_anchors_file("serde", "src/serde.rs"));
     }
@@ -1500,7 +1523,10 @@ mod matcher_tests {
         // (this is what keeps the R4 tier from false-anchoring across packages).
         assert!(!S::import_anchors_file("graph.store", "app/other/store.py"));
         // Unrelated import / file.
-        assert!(!S::import_anchors_file("react", "src/components/Button.tsx"));
+        assert!(!S::import_anchors_file(
+            "react",
+            "src/components/Button.tsx"
+        ));
         // Module names a directory, not the file (`graph/mod.rs`) -> no stem match.
         assert!(!S::import_anchors_file("crate::graph", "src/graph/mod.rs"));
     }

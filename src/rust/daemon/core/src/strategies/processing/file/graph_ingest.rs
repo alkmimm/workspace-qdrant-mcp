@@ -192,7 +192,12 @@ async fn resolve_calls_via_lsp(
         // stub as the fallback — precise-where-available, fuzzy-fallback per call.
         let resolved_names: std::collections::HashSet<&str> =
             calls.iter().map(|c| c.name.as_str()).collect();
-        suppress_fuzzy_calls(&mut extraction.edges, tenant_id, &caller_id, &resolved_names);
+        suppress_fuzzy_calls(
+            &mut extraction.edges,
+            tenant_id,
+            &caller_id,
+            &resolved_names,
+        );
         let (nodes, edges) =
             resolved_call_edges(tenant_id, &caller_id, file_path, &project_root, &calls);
         debug!(
@@ -362,8 +367,7 @@ mod tests {
         // The caller's resolved fuzzy CALLS stubs are gone.
         assert!(!edges.iter().any(|e| e.source_node_id == caller
             && e.edge_type == EdgeType::Calls
-            && (e.target_node_id == stub_id(t, "add")
-                || e.target_node_id == stub_id(t, "build"))));
+            && (e.target_node_id == stub_id(t, "add") || e.target_node_id == stub_id(t, "build"))));
         // The unresolved call keeps its fuzzy stub (fallback).
         assert!(edges
             .iter()

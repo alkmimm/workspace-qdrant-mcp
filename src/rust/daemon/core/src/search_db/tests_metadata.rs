@@ -99,7 +99,10 @@ async fn test_add_branch_to_file_metadata_by_file_ids() {
         .add_branch_to_file_metadata_by_file_ids(&[999], "x")
         .await
         .unwrap();
-    assert_eq!(read_branches(&manager, 1).await, vec!["main".to_string(), "feature".to_string()]);
+    assert_eq!(
+        read_branches(&manager, 1).await,
+        vec!["main".to_string(), "feature".to_string()]
+    );
 
     manager.close().await;
 }
@@ -156,8 +159,7 @@ async fn test_file_metadata_upsert() {
             .await
             .unwrap();
     assert_eq!(row.get::<String, _>("tenant_id"), "project-abc");
-    let branches: Vec<String> =
-        serde_json::from_str(&row.get::<String, _>("branches")).unwrap();
+    let branches: Vec<String> = serde_json::from_str(&row.get::<String, _>("branches")).unwrap();
     assert_eq!(branches, vec!["main".to_string()]);
     assert_eq!(row.get::<String, _>("file_path"), "/src/lib.rs");
 
@@ -282,8 +284,7 @@ async fn test_file_metadata_null_branch() {
         .await
         .unwrap();
     // A NULL branch upsert leaves the `branches` set empty (post-v10).
-    let branches: Vec<String> =
-        serde_json::from_str(&row.get::<String, _>("branches")).unwrap();
+    let branches: Vec<String> = serde_json::from_str(&row.get::<String, _>("branches")).unwrap();
     assert!(branches.is_empty());
 
     manager.close().await;
@@ -507,8 +508,7 @@ async fn test_fts5_search_by_project_branch() {
 
     assert_eq!(rows.len(), 1);
     // The query aliases `fm.branches AS branch`, so the value is the JSON array.
-    let branches: Vec<String> =
-        serde_json::from_str(&rows[0].get::<String, _>("branch")).unwrap();
+    let branches: Vec<String> = serde_json::from_str(&rows[0].get::<String, _>("branch")).unwrap();
     assert_eq!(branches, vec!["feature/v2".to_string()]);
 
     manager.close().await;

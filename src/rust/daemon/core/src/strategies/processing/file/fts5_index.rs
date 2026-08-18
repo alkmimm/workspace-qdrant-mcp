@@ -128,10 +128,11 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
     }
 
     let new_hash = compute_content_hash(&new_content);
-    let old_content = match fetch_old_content(state_pool, file_id, file_path, &new_hash, uplift).await {
-        Some(c) => c,
-        None => return Ok(Fts5Outcome::Skipped),
-    };
+    let old_content =
+        match fetch_old_content(state_pool, file_id, file_path, &new_hash, uplift).await {
+            Some(c) => c,
+            None => return Ok(Fts5Outcome::Skipped),
+        };
 
     let change = FileChange {
         file_id,

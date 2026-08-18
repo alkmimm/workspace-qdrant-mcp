@@ -37,11 +37,8 @@ impl ProjectServiceImpl {
         if let Some(ref path) = watch_path {
             self.deprioritize_by_path(&req.project_id, path).await
         } else {
-            self.deprioritize_tenant_wide(
-                &req.project_id,
-                req.session_id.as_deref().unwrap_or(""),
-            )
-            .await
+            self.deprioritize_tenant_wide(&req.project_id, req.session_id.as_deref().unwrap_or(""))
+                .await
         }
     }
 

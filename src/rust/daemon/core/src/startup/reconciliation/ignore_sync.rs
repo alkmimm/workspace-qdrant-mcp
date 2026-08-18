@@ -731,7 +731,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(stats.stale_deleted, 0, "must not delete against an empty walk");
+        assert_eq!(
+            stats.stale_deleted, 0,
+            "must not delete against an empty walk"
+        );
         assert_eq!(stats.missing_added, 0);
         let queued: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM unified_queue")
             .fetch_one(&pool)

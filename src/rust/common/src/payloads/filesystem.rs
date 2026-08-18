@@ -191,7 +191,9 @@ mod tests {
             last_scan: None,
             uplift: false,
         };
-        assert!(!serde_json::to_string(&non_forced).unwrap().contains("uplift"));
+        assert!(!serde_json::to_string(&non_forced)
+            .unwrap()
+            .contains("uplift"));
 
         // True round-trips.
         let forced = FolderPayload {

@@ -122,7 +122,11 @@ async fn test_get_project_status_treats_session_counter_as_active() {
         project_id: "abcd12345678".to_string(),
     });
 
-    let response = service.get_project_status(request).await.unwrap().into_inner();
+    let response = service
+        .get_project_status(request)
+        .await
+        .unwrap()
+        .into_inner();
 
     assert!(response.found);
     assert_eq!(response.priority, "high");

@@ -128,7 +128,11 @@ fn build_index_neighbors(
 /// Run label-propagation over integer-indexed adjacency until convergence,
 /// `max_iterations`, or [`LP_TIME_BUDGET`] (whichever comes first). Returns the
 /// label assigned to each node index.
-fn run_label_propagation(neighbors: &[Vec<usize>], max_iterations: usize, tenant_id: &str) -> Vec<u32> {
+fn run_label_propagation(
+    neighbors: &[Vec<usize>],
+    max_iterations: usize,
+    tenant_id: &str,
+) -> Vec<u32> {
     let n = neighbors.len();
     let mut labels: Vec<u32> = (0..n as u32).collect();
     let start = Instant::now();
@@ -262,7 +266,10 @@ mod tests {
         assert_eq!(labels[1], labels[2]);
         assert_eq!(labels[3], labels[4]);
         assert_eq!(labels[4], labels[5]);
-        assert_ne!(labels[0], labels[3], "disjoint triangles get distinct labels");
+        assert_ne!(
+            labels[0], labels[3],
+            "disjoint triangles get distinct labels"
+        );
     }
 
     /// Scaling regression guard: with the old `HashMap<&str,_>` form this size

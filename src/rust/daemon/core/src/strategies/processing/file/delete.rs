@@ -423,9 +423,7 @@ pub(super) async fn delete_tracked_file(
     let t0 = Instant::now();
     if let Some(bp) = bp {
         if delete_points {
-            if let Err(e) =
-                delete_qdrant_points(ctx, item, pool, relative_path, existing).await
-            {
+            if let Err(e) = delete_qdrant_points(ctx, item, pool, relative_path, existing).await {
                 timings.push(PhaseTiming {
                     phase: "qdrant_delete",
                     duration_ms: t0.elapsed().as_millis() as u64,
@@ -896,7 +894,10 @@ mod tests {
             &[b("fix/feature"), b("main")],
             "fix/feature"
         ));
-        assert!(!would_remove_last_tag(&[b("main"), b("dev")], "fix/feature"));
+        assert!(!would_remove_last_tag(
+            &[b("main"), b("dev")],
+            "fix/feature"
+        ));
     }
 
     #[test]
@@ -948,7 +949,9 @@ mod tests {
 
         // Watcher/folder deletes carry no marker → keep the stale-file-on-disk skip.
         assert!(!is_branch_prune_delete(&delete_item_with_metadata(None)));
-        assert!(!is_branch_prune_delete(&delete_item_with_metadata(Some("{}"))));
+        assert!(!is_branch_prune_delete(&delete_item_with_metadata(Some(
+            "{}"
+        ))));
         assert!(!is_branch_prune_delete(&delete_item_with_metadata(Some(
             r#"{"reason":"watcher"}"#
         ))));
@@ -986,8 +989,7 @@ mod tests {
 
         // A different payload reason is not ignore-exclusion.
         let mut other = delete_item_with_metadata(None);
-        other.payload_json =
-            r#"{"file_path":"src/a.ts","reason":"something_else"}"#.to_string();
+        other.payload_json = r#"{"file_path":"src/a.ts","reason":"something_else"}"#.to_string();
         assert!(!is_ignore_excluded_delete(&other));
     }
 
@@ -1066,7 +1068,10 @@ mod tests {
 
     #[test]
     fn covered_delete_policy_defaults_to_dry_for_anything_unknown() {
-        assert_eq!(parse_covered_delete_policy(Some("on")), CoveredDeletePolicy::On);
+        assert_eq!(
+            parse_covered_delete_policy(Some("on")),
+            CoveredDeletePolicy::On
+        );
         assert_eq!(
             parse_covered_delete_policy(Some("off")),
             CoveredDeletePolicy::Off
@@ -1079,7 +1084,10 @@ mod tests {
         // Unset, empty, typo'd, or wrong-cased → dry. Deleting data must require
         // an exact, deliberate opt-in.
         assert_eq!(parse_covered_delete_policy(None), CoveredDeletePolicy::Dry);
-        assert_eq!(parse_covered_delete_policy(Some("")), CoveredDeletePolicy::Dry);
+        assert_eq!(
+            parse_covered_delete_policy(Some("")),
+            CoveredDeletePolicy::Dry
+        );
         assert_eq!(
             parse_covered_delete_policy(Some("ON")),
             CoveredDeletePolicy::Dry

@@ -192,11 +192,7 @@ impl SearchDbManager {
     /// Drop a single branch from a file's `file_metadata` `branches` set without
     /// deleting its `code_lines` (Layer 2 stage 2 — other branches still hold the
     /// content). No-op if the branch is absent.
-    pub async fn remove_branch_from_file_metadata(
-        &self,
-        file_id: i64,
-        branch: &str,
-    ) -> Result<()> {
+    pub async fn remove_branch_from_file_metadata(&self, file_id: i64, branch: &str) -> Result<()> {
         sqlx::query(
             "UPDATE file_metadata
              SET branches = (SELECT json_group_array(value) FROM json_each(branches) WHERE value != ?2)

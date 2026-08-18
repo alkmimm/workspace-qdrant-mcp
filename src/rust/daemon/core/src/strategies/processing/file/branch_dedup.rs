@@ -31,7 +31,9 @@ use crate::fts_batch_processor::FileChange;
 use crate::search_db::Fts5WorkItem;
 use crate::tracked_files_schema::{self, ProcessingStatus};
 use crate::unified_queue_processor::UnifiedProcessorError;
-use crate::unified_queue_schema::{DestinationStatus, FilePayload, QueueOperation, UnifiedQueueItem};
+use crate::unified_queue_schema::{
+    DestinationStatus, FilePayload, QueueOperation, UnifiedQueueItem,
+};
 use wqm_common::hashing::{compute_base_point, compute_content_hash, normalize_line_endings};
 
 /// Outcome of [`try_branch_dedup`] — `Some` means the dedup fast-path completed

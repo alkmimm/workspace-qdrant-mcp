@@ -278,12 +278,11 @@ mod tests {
 
         V47Migration.up(&pool).await.unwrap();
 
-        let row: (String, i64, i64) = sqlx::query_as(
-            "SELECT op, result_count, bytes_in FROM search_events WHERE id = 'e1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let row: (String, i64, i64) =
+            sqlx::query_as("SELECT op, result_count, bytes_in FROM search_events WHERE id = 'e1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(row, ("grep".to_string(), 7, 9000));
 
         for name in [

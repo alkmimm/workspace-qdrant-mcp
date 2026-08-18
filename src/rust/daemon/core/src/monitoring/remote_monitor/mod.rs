@@ -81,8 +81,15 @@ pub async fn check_remote_url_changes(
 
     let calculator = ProjectIdCalculator::new();
 
-    for (watch_id, path, old_tenant_id, stored_url, _stored_hash, disambiguation_path, is_worktree) in
-        &watches
+    for (
+        watch_id,
+        path,
+        old_tenant_id,
+        stored_url,
+        _stored_hash,
+        disambiguation_path,
+        is_worktree,
+    ) in &watches
     {
         result.projects_checked += 1;
 
@@ -158,7 +165,15 @@ async fn process_remote_change(
     // Issue #299: gate the tenant move BEFORE mutating SQLite, so a suppressed
     // rename never leaves watch_folders pointing at a tenant Qdrant never
     // received (the exact SQLite/Qdrant drift that hides as a silent-zero search).
-    match guard_cascade_rename(pool, watch_id, path, is_worktree, old_tenant_id, &new_tenant_id).await
+    match guard_cascade_rename(
+        pool,
+        watch_id,
+        path,
+        is_worktree,
+        old_tenant_id,
+        &new_tenant_id,
+    )
+    .await
     {
         RenameGuardOutcome::Proceed => {}
         RenameGuardOutcome::Block | RenameGuardOutcome::Pruned => return Ok(()),

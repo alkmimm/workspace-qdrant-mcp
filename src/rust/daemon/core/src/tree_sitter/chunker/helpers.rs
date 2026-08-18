@@ -176,7 +176,10 @@ fn resolve_postfix_callee(arg_node: &Node, source: &str) -> Option<String> {
     // there is no named callee to attribute, so skip it.
     if prev.kind() == "selector" {
         let mut cursor = prev.walk();
-        if prev.children(&mut cursor).any(|c| c.kind() == "argument_part") {
+        if prev
+            .children(&mut cursor)
+            .any(|c| c.kind() == "argument_part")
+        {
             return None;
         }
     }

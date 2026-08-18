@@ -308,9 +308,7 @@ impl ServerInstance {
                         // this to clear so call-hierarchy is asked only once the
                         // opened file is analyzed.
                         "$/analyzerStatus" => {
-                            if let Some(is) =
-                                params.get("isAnalyzing").and_then(|v| v.as_bool())
-                            {
+                            if let Some(is) = params.get("isAnalyzing").and_then(|v| v.as_bool()) {
                                 analyzing.store(is, Ordering::Relaxed);
                             }
                         }

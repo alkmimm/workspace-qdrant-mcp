@@ -171,17 +171,37 @@ mod min_confidence_filter {
             .await
             .unwrap();
 
-        let mut in_strong =
-            GraphEdge::new(TENANT, &caller_strong.node_id, &hub.node_id, EdgeType::Calls, "cs.rs");
+        let mut in_strong = GraphEdge::new(
+            TENANT,
+            &caller_strong.node_id,
+            &hub.node_id,
+            EdgeType::Calls,
+            "cs.rs",
+        );
         in_strong.weight = 0.9;
-        let mut in_weak =
-            GraphEdge::new(TENANT, &caller_weak.node_id, &hub.node_id, EdgeType::Calls, "cw.rs");
+        let mut in_weak = GraphEdge::new(
+            TENANT,
+            &caller_weak.node_id,
+            &hub.node_id,
+            EdgeType::Calls,
+            "cw.rs",
+        );
         in_weak.weight = 0.15;
-        let mut out_strong =
-            GraphEdge::new(TENANT, &hub.node_id, &callee_strong.node_id, EdgeType::Calls, "hub.rs");
+        let mut out_strong = GraphEdge::new(
+            TENANT,
+            &hub.node_id,
+            &callee_strong.node_id,
+            EdgeType::Calls,
+            "hub.rs",
+        );
         out_strong.weight = 0.9;
-        let mut out_weak =
-            GraphEdge::new(TENANT, &hub.node_id, &callee_weak.node_id, EdgeType::Calls, "hub.rs");
+        let mut out_weak = GraphEdge::new(
+            TENANT,
+            &hub.node_id,
+            &callee_weak.node_id,
+            EdgeType::Calls,
+            "hub.rs",
+        );
         out_weak.weight = 0.15;
         store
             .insert_edges(&[in_strong, in_weak, out_strong, out_weak])
@@ -263,7 +283,10 @@ mod min_confidence_filter {
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(resp.total_impacted, 1, "total_impacted must reflect the filtered set");
+        assert_eq!(
+            resp.total_impacted, 1,
+            "total_impacted must reflect the filtered set"
+        );
         assert_eq!(resp.impacted_nodes.len(), 1);
         assert_eq!(resp.impacted_nodes[0].symbol_name, "caller_strong");
     }

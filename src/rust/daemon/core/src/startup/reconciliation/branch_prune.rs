@@ -678,8 +678,14 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("in-memory pool");
-        sqlx::query(CREATE_WATCH_FOLDERS_SQL).execute(&pool).await.unwrap();
-        sqlx::query(CREATE_TRACKED_FILES_V41_SQL).execute(&pool).await.unwrap();
+        sqlx::query(CREATE_WATCH_FOLDERS_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let now = "2026-07-16T00:00:00Z";
         sqlx::query(
@@ -717,7 +723,11 @@ mod tests {
 
         let counts = super::branch_file_counts(&pool, "w1").await.unwrap();
         let get = |b: &str| counts.iter().find(|(n, _)| n == b).map(|(_, c)| *c);
-        assert_eq!(get("dead"), Some(1), "dead covers ONE file across 3 generations");
+        assert_eq!(
+            get("dead"),
+            Some(1),
+            "dead covers ONE file across 3 generations"
+        );
         assert_eq!(get("main"), Some(2), "main covers two files");
 
         // Guard 3's verdict: main is the corpus, so the dead branch is prunable.
@@ -744,7 +754,11 @@ mod tests {
         let a = build_prune_delete_payload(&rel, "feat/dead-a").unwrap();
         let b = build_prune_delete_payload(&rel, "feat/dead-b").unwrap();
         assert_ne!(a, b, "payloads must differ per pruned branch");
-        assert_ne!(key_for(&a), key_for(&b), "keys must differ per pruned branch");
+        assert_ne!(
+            key_for(&a),
+            key_for(&b),
+            "keys must differ per pruned branch"
+        );
 
         // Same (path, branch) stays idempotent across runs.
         let a_again = build_prune_delete_payload(&rel, "feat/dead-a").unwrap();
@@ -783,8 +797,7 @@ mod tests {
             size_bytes: None,
             old_path: None,
         };
-        let bare_value =
-            serde_json::to_value(&bare).expect("serialize bare payload");
+        let bare_value = serde_json::to_value(&bare).expect("serialize bare payload");
         assert_eq!(value, bare_value);
     }
 }

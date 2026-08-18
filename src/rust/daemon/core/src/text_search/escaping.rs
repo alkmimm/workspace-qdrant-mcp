@@ -277,17 +277,32 @@ mod tests {
 
         // Un-normalized bare literal used to match nothing under the directory.
         let raw = compile_glob_matcher("tool-builders").unwrap();
-        assert!(!raw(under), "un-normalized bare literal should not match subtree");
+        assert!(
+            !raw(under),
+            "un-normalized bare literal should not match subtree"
+        );
 
         let bare = compile_glob_matcher(&normalize_path_glob("tool-builders")).unwrap();
-        assert!(bare(under), "normalized literal matches files under the directory");
-        assert!(bare(exact_file), "normalized literal still matches an exact file of that name");
-        assert!(!bare(unrelated), "and does not over-match a sibling directory");
+        assert!(
+            bare(under),
+            "normalized literal matches files under the directory"
+        );
+        assert!(
+            bare(exact_file),
+            "normalized literal still matches an exact file of that name"
+        );
+        assert!(
+            !bare(unrelated),
+            "and does not over-match a sibling directory"
+        );
 
         // Trailing slash: subtree only (a file literally named `tool-builders` is a dir miss).
         let dir = compile_glob_matcher(&normalize_path_glob("tool-builders/")).unwrap();
         assert!(dir(under), "trailing-slash directory matches its subtree");
-        assert!(!dir(exact_file), "trailing-slash form does not match a same-named file");
+        assert!(
+            !dir(exact_file),
+            "trailing-slash form does not match a same-named file"
+        );
     }
 
     #[test]
@@ -407,7 +422,10 @@ mod tests {
             matcher("src/deep/nested/x.rs"),
             "single `*` crosses `/` (intentional over-match)"
         );
-        assert!(!matcher("tests/x.rs"), "different top-level dir does not match");
+        assert!(
+            !matcher("tests/x.rs"),
+            "different top-level dir does not match"
+        );
         assert!(!matcher("src/main.ts"), "extension still constrains");
     }
 

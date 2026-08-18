@@ -551,7 +551,9 @@ pub fn start_grammar_backfill(pool: SqlitePool) -> JoinHandle<()> {
         use workspace_qdrant_core::strategies::capability_upgrade::trigger_capability_upgrade;
         use workspace_qdrant_core::tracked_files_schema::UpgradeReason;
         use workspace_qdrant_core::tree_sitter::GrammarManager;
-        use workspace_qdrant_core::{canonical_language, get_static_language, is_language_supported};
+        use workspace_qdrant_core::{
+            canonical_language, get_static_language, is_language_supported,
+        };
 
         let langs = match sqlx::query(
             "SELECT DISTINCT language FROM tracked_files \
@@ -944,14 +946,26 @@ pub fn start_token_economy_sampler(pool: SqlitePool) -> JoinHandle<()> {
                     METRICS.mcp_token_escalation_recent.reset();
                     for r in &rows {
                         let labels = &[r.op.as_str(), r.actor.as_str()];
-                        METRICS.mcp_token_calls_recent.with_label_values(labels).set(r.calls);
-                        METRICS.mcp_token_bytes_in_recent.with_label_values(labels).set(r.bytes_in);
-                        METRICS.mcp_token_bytes_out_recent.with_label_values(labels).set(r.bytes_out);
+                        METRICS
+                            .mcp_token_calls_recent
+                            .with_label_values(labels)
+                            .set(r.calls);
+                        METRICS
+                            .mcp_token_bytes_in_recent
+                            .with_label_values(labels)
+                            .set(r.bytes_in);
+                        METRICS
+                            .mcp_token_bytes_out_recent
+                            .with_label_values(labels)
+                            .set(r.bytes_out);
                         METRICS
                             .mcp_token_hits_truncated_recent
                             .with_label_values(labels)
                             .set(r.hits_truncated);
-                        METRICS.mcp_token_followup_recent.with_label_values(labels).set(r.followup);
+                        METRICS
+                            .mcp_token_followup_recent
+                            .with_label_values(labels)
+                            .set(r.followup);
                         METRICS
                             .mcp_token_escalation_recent
                             .with_label_values(labels)
@@ -1303,18 +1317,19 @@ async fn sweep_ghost_nodes(
                 continue;
             }
         };
-        let roots: Vec<String> =
-            match sqlx::query_scalar("SELECT path FROM watch_folders WHERE tenant_id = ?1")
-                .bind(&tenant)
-                .fetch_all(state_pool)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(e) => {
-                    warn!(tenant = %tenant, error = %e, "ghost sweep: watch_folders query failed — skipping tenant");
-                    continue;
-                }
-            };
+        let roots: Vec<String> = match sqlx::query_scalar(
+            "SELECT path FROM watch_folders WHERE tenant_id = ?1",
+        )
+        .bind(&tenant)
+        .fetch_all(state_pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(tenant = %tenant, error = %e, "ghost sweep: watch_folders query failed — skipping tenant");
+                continue;
+            }
+        };
         // No roots means no on-disk safety net — skip rather than risk it.
         if roots.is_empty() {
             continue;
@@ -1605,8 +1620,11 @@ pub fn start_graph_lsp_backfill(
                     // Always stop the enrichment server we started (frees the slot
                     // and deregisters it so the health monitor won't keep an
                     // unhealthy one alive).
-                    if let Err(e) =
-                        lsp_manager.read().await.stop_server(&tenant, language.clone()).await
+                    if let Err(e) = lsp_manager
+                        .read()
+                        .await
+                        .stop_server(&tenant, language.clone())
+                        .await
                     {
                         warn!(tenant = %tenant, language = ?language, error = %e,
                             "LSP backfill: stop_server failed");
@@ -1753,7 +1771,8 @@ pub fn spawn_all(
     // takes sustained write load. (graph.db has its own pool behind
     // SharedGraphStore and no loop yet — tracked as a follow-up.)
     let state_db_path = crate::database::get_state_db_path(pool);
-    let search_db_path = workspace_qdrant_core::search_db::search_db_path_from_state(&state_db_path);
+    let search_db_path =
+        workspace_qdrant_core::search_db::search_db_path_from_state(&state_db_path);
     let _wal_checkpoint =
         start_wal_checkpoint_loop(pool.clone(), wal_sidecar(&state_db_path), "memexd.db");
     let _search_wal_checkpoint = start_wal_checkpoint_loop(
@@ -1891,27 +1910,118 @@ mod token_economy_tests {
 
         // Every MCP read call is tool="mcp_qdrant"; the read-tool is `op`.
         // In-view call: claude search, 5000→1000, 2 truncated, 10s ago.
-        insert_event(&pool, "c1", "s1", "claude", "mcp_qdrant", "search", None,
-            Some(5000), Some(1000), Some(2), "truncate", "-10 seconds").await;
+        insert_event(
+            &pool,
+            "c1",
+            "s1",
+            "claude",
+            "mcp_qdrant",
+            "search",
+            None,
+            Some(5000),
+            Some(1000),
+            Some(2),
+            "truncate",
+            "-10 seconds",
+        )
+        .await;
         // Followup + escalation of c1 — NOT view rows (bytes_in NULL), but they
         // flip c1.had_followup / had_escalation in the view's probes ("now",
         // i.e. ~10s after c1, inside both windows). Same tool/session as c1.
-        insert_event(&pool, "c1f", "s1", "claude", "mcp_qdrant", "followup", None,
-            None, None, None, "none", "-0 seconds").await;
-        insert_event(&pool, "c1o", "s1", "claude", "mcp_qdrant", "open", Some("c1"),
-            None, None, None, "none", "-0 seconds").await;
+        insert_event(
+            &pool,
+            "c1f",
+            "s1",
+            "claude",
+            "mcp_qdrant",
+            "followup",
+            None,
+            None,
+            None,
+            None,
+            "none",
+            "-0 seconds",
+        )
+        .await;
+        insert_event(
+            &pool,
+            "c1o",
+            "s1",
+            "claude",
+            "mcp_qdrant",
+            "open",
+            Some("c1"),
+            None,
+            None,
+            None,
+            "none",
+            "-0 seconds",
+        )
+        .await;
         // In-view call: claude grep, 3000→1500, truncate.
-        insert_event(&pool, "c2", "s2", "claude", "mcp_qdrant", "grep", None,
-            Some(3000), Some(1500), Some(1), "truncate", "-1 minute").await;
+        insert_event(
+            &pool,
+            "c2",
+            "s2",
+            "claude",
+            "mcp_qdrant",
+            "grep",
+            None,
+            Some(3000),
+            Some(1500),
+            Some(1),
+            "truncate",
+            "-1 minute",
+        )
+        .await;
         // In-view call: user search (separate actor), unshaped.
-        insert_event(&pool, "u1", "s3", "user", "mcp_qdrant", "search", None,
-            Some(9000), Some(9000), Some(0), "none", "-1 minute").await;
+        insert_event(
+            &pool,
+            "u1",
+            "s3",
+            "user",
+            "mcp_qdrant",
+            "search",
+            None,
+            Some(9000),
+            Some(9000),
+            Some(0),
+            "none",
+            "-1 minute",
+        )
+        .await;
         // Excluded: outside the 24h window.
-        insert_event(&pool, "old", "s4", "claude", "mcp_qdrant", "search", None,
-            Some(1234), Some(1), Some(9), "truncate", "-2 days").await;
+        insert_event(
+            &pool,
+            "old",
+            "s4",
+            "claude",
+            "mcp_qdrant",
+            "search",
+            None,
+            Some(1234),
+            Some(1),
+            Some(9),
+            "truncate",
+            "-2 days",
+        )
+        .await;
         // Excluded: no bytes_in → not a token_savings row.
-        insert_event(&pool, "nob", "s5", "claude", "mcp_qdrant", "search", None,
-            None, None, None, "none", "-0 seconds").await;
+        insert_event(
+            &pool,
+            "nob",
+            "s5",
+            "claude",
+            "mcp_qdrant",
+            "search",
+            None,
+            None,
+            None,
+            None,
+            "none",
+            "-0 seconds",
+        )
+        .await;
 
         let (rows, shapes) = sample_token_economy(&pool).await.unwrap();
 

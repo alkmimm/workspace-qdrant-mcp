@@ -361,6 +361,9 @@ mod tests {
     #[test]
     fn qdrant_rest_url_leaves_rest_and_custom_ports_unchanged() {
         assert_eq!(qdrant_rest_url("http://qdrant:6333"), "http://qdrant:6333");
-        assert_eq!(qdrant_rest_url("https://example:7443"), "https://example:7443");
+        assert_eq!(
+            qdrant_rest_url("https://example:7443"),
+            "https://example:7443"
+        );
     }
 }

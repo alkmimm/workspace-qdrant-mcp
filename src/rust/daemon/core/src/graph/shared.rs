@@ -498,7 +498,10 @@ mod tests {
         // R1: the one dangling stub edge is RESOLVED (not skipped) — it fans out to
         // BOTH same-named candidates with confidence 1/N, restoring recall.
         let repointed = store.resolve_stub_edges(T).await.unwrap();
-        assert_eq!(repointed, 1, "ambiguous stub must resolve (keep-all-candidates)");
+        assert_eq!(
+            repointed, 1,
+            "ambiguous stub must resolve (keep-all-candidates)"
+        );
 
         // Both candidates are now reachable from the caller (impact/usages recall).
         let related = store
@@ -786,8 +789,13 @@ mod tests {
             .await
             .unwrap();
 
-        let call_edge =
-            GraphEdge::new(T, &caller.node_id, &call_stub.node_id, EdgeType::Calls, "pkg/a/caller.rs");
+        let call_edge = GraphEdge::new(
+            T,
+            &caller.node_id,
+            &call_stub.node_id,
+            EdgeType::Calls,
+            "pkg/a/caller.rs",
+        );
         // IMPORTS file -> stub(handle), carrying the module locator (as the
         // extractor stamps it).
         let mut import_edge = GraphEdge::new(
@@ -913,9 +921,27 @@ mod tests {
         store
             .insert_edges(&[
                 // CONTAINS edges define class membership (build the scope map).
-                GraphEdge::new(T, &class_a.node_id, &caller.node_id, EdgeType::Contains, "y.rs"),
-                GraphEdge::new(T, &class_a.node_id, &m_a.node_id, EdgeType::Contains, "y.rs"),
-                GraphEdge::new(T, &class_b.node_id, &m_b.node_id, EdgeType::Contains, "z.rs"),
+                GraphEdge::new(
+                    T,
+                    &class_a.node_id,
+                    &caller.node_id,
+                    EdgeType::Contains,
+                    "y.rs",
+                ),
+                GraphEdge::new(
+                    T,
+                    &class_a.node_id,
+                    &m_a.node_id,
+                    EdgeType::Contains,
+                    "y.rs",
+                ),
+                GraphEdge::new(
+                    T,
+                    &class_b.node_id,
+                    &m_b.node_id,
+                    EdgeType::Contains,
+                    "z.rs",
+                ),
                 // The ambiguous, name-only call.
                 GraphEdge::new(T, &caller.node_id, &stub.node_id, EdgeType::Calls, "x.rs"),
             ])
@@ -923,7 +949,10 @@ mod tests {
             .unwrap();
 
         let repointed = store.resolve_stub_edges(T).await.unwrap();
-        assert_eq!(repointed, 1, "scoped stub must resolve to a single candidate");
+        assert_eq!(
+            repointed, 1,
+            "scoped stub must resolve to a single candidate"
+        );
 
         // The call resolves to A's m (same class) and NOT to B's m.
         let callees = store
@@ -1099,8 +1128,20 @@ mod tests {
             .unwrap();
         store
             .insert_edges(&[
-                GraphEdge::new(T, &caller.node_id, &save1.node_id, EdgeType::Calls, "a/caller.rs"),
-                GraphEdge::new(T, &caller.node_id, &save2.node_id, EdgeType::Calls, "a/caller.rs"),
+                GraphEdge::new(
+                    T,
+                    &caller.node_id,
+                    &save1.node_id,
+                    EdgeType::Calls,
+                    "a/caller.rs",
+                ),
+                GraphEdge::new(
+                    T,
+                    &caller.node_id,
+                    &save2.node_id,
+                    EdgeType::Calls,
+                    "a/caller.rs",
+                ),
             ])
             .await
             .unwrap();

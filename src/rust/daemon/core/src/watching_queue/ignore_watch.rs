@@ -246,7 +246,10 @@ async fn run_reconciliation(
             return;
         }
         Err(e) => {
-            warn!("[ignore_watch] {} — watch folder lookup failed: {e}", tenant_id);
+            warn!(
+                "[ignore_watch] {} — watch folder lookup failed: {e}",
+                tenant_id
+            );
             return;
         }
     };

@@ -41,11 +41,7 @@ impl PriorityManager {
     /// heartbeat instead of incrementing, so `is_active` can never leak.
     ///
     /// Returns the resulting live-session count.
-    pub async fn register_session(
-        &self,
-        tenant_id: &str,
-        session_id: &str,
-    ) -> PriorityResult<i32> {
+    pub async fn register_session(&self, tenant_id: &str, session_id: &str) -> PriorityResult<i32> {
         if tenant_id.is_empty() {
             return Err(PriorityError::EmptyParameter);
         }

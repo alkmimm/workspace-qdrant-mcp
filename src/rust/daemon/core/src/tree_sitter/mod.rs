@@ -168,8 +168,7 @@ pub fn known_grammar_languages() -> Vec<&'static str> {
 /// Checks against the registry of languages with grammar sources.
 pub fn is_language_supported(language: &str) -> bool {
     let data = registry_data();
-    data.known_languages.contains(language)
-        || data.aliases.contains_key(&language.to_lowercase())
+    data.known_languages.contains(language) || data.aliases.contains_key(&language.to_lowercase())
 }
 
 /// Resolve a language label to its canonical registry id.

@@ -618,8 +618,14 @@ async fn test_delete_file_nodes_clears_incoming_cross_file_edge() {
 
     // Delete file A: foo is an incoming-edge target from B. Must succeed (no FK
     // error), removing foo AND the now-dangling bar -> foo edge; bar survives.
-    let deleted = store.delete_nodes_by_file(TENANT, "src/a.rs").await.unwrap();
-    assert_eq!(deleted, 1, "foo removed despite being a cross-file edge target");
+    let deleted = store
+        .delete_nodes_by_file(TENANT, "src/a.rs")
+        .await
+        .unwrap();
+    assert_eq!(
+        deleted, 1,
+        "foo removed despite being a cross-file edge target"
+    );
     let stats = store.stats(Some(TENANT)).await.unwrap();
     assert_eq!(stats.total_nodes, 1, "only bar remains");
     assert_eq!(stats.total_edges, 0, "the dangling bar -> foo edge is gone");
@@ -653,15 +659,30 @@ async fn test_reingest_partial_keep_clears_incoming_edge_to_dropped_symbol() {
             "src/b.rs",
             &[caller.clone()],
             &[
-                GraphEdge::new(TENANT, &caller.node_id, &foo.node_id, EdgeType::Calls, "src/b.rs"),
-                GraphEdge::new(TENANT, &caller.node_id, &bar.node_id, EdgeType::Calls, "src/b.rs"),
+                GraphEdge::new(
+                    TENANT,
+                    &caller.node_id,
+                    &foo.node_id,
+                    EdgeType::Calls,
+                    "src/b.rs",
+                ),
+                GraphEdge::new(
+                    TENANT,
+                    &caller.node_id,
+                    &bar.node_id,
+                    EdgeType::Calls,
+                    "src/b.rs",
+                ),
             ],
         )
         .await
         .unwrap();
     let stats = store.stats(Some(TENANT)).await.unwrap();
     assert_eq!(stats.total_nodes, 3, "foo, bar, caller present after setup");
-    assert_eq!(stats.total_edges, 2, "caller -> foo and caller -> bar present");
+    assert_eq!(
+        stats.total_edges, 2,
+        "caller -> foo and caller -> bar present"
+    );
 
     // Re-ingest A keeping only `foo` (bar dropped). `bar` is an incoming-edge
     // target from B, so its now-dangling edge must go; `foo` and its incoming
@@ -693,7 +714,10 @@ async fn test_delete_nodes_by_file_spares_stub_nodes() {
         .unwrap();
 
     // Delete by the real file: the stub (empty file_path) survives.
-    let deleted = store.delete_nodes_by_file(TENANT, "src/m.rs").await.unwrap();
+    let deleted = store
+        .delete_nodes_by_file(TENANT, "src/m.rs")
+        .await
+        .unwrap();
     assert_eq!(deleted, 1, "only the file's own node is deleted");
     assert_eq!(
         store.stats(Some(TENANT)).await.unwrap().total_nodes,

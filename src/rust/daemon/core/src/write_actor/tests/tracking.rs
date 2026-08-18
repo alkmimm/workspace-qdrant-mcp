@@ -87,12 +87,11 @@ async fn log_search_event_accepts_rules_and_scratchpad_ops() {
             .unwrap_or_else(|e| panic!("op='{op}' must pass the CHECK: {e}"));
     }
 
-    let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM search_events WHERE id LIKE 'evt-%'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM search_events WHERE id LIKE 'evt-%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(count, 7);
 }
 
@@ -147,7 +146,10 @@ async fn log_search_event_touches_last_activity_but_not_is_active() {
         "expected last_activity_at to be refreshed, got {last_activity}"
     );
     // …but is_active stayed 0 (no synthetic session, no LSP, no reprioritize).
-    assert_eq!(is_active, 0, "read-path touch must not activate the project");
+    assert_eq!(
+        is_active, 0,
+        "read-path touch must not activate the project"
+    );
 }
 
 /// The touch is scoped by tenant: a search event for one project must not
