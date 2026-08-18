@@ -39,7 +39,16 @@ pub async fn cycles(
         .into_inner();
 
     if resp.cycles.is_empty() {
+        // Parity with the MCP `graph` tool's action description (CLAUDE.md
+        // shared-behaviour rule): the zero-result message must say what the
+        // zero covers. Tarjan ran over the CALLS/IMPORTS edges the extractor
+        // resolved, so "none found" is not "none exist".
         println!("No dependency cycles found.");
+        println!(
+            "Note: this covers the CALLS/IMPORTS edges that were EXTRACTED. Dynamic dispatch, \
+             string-keyed DI, and generated-code references are not edges, so a zero does not \
+             prove there is no circular coupling."
+        );
         return Ok(());
     }
 
