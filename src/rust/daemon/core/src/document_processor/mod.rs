@@ -424,7 +424,25 @@ fn generate_chunks(
                         file_path.file_name(),
                         lang
                     );
-                    convert_semantic_chunks_to_text_chunks(semantic_chunks, metadata)
+                    // A successful parse that yields NO chunks is not a success
+                    // for the index: the file is stored with chunk_count=0 and
+                    // is invisible to semantic search, with no error and no
+                    // retry — the reconciler sees a matching hash, and the
+                    // grammar backfill skips already-cached grammars. Files
+                    // whose whole body sits outside top-level declarations hit
+                    // this: Laravel `config/*.php` and `lang/*.php`
+                    // (`<?php return [...]`), Blade templates, TS barrel and
+                    // enum files. Fall back to text chunking so the content is
+                    // at least searchable.
+                    if semantic_chunks.is_empty() {
+                        warn!(
+                            "Semantic chunking produced no chunks for {:?} ({}), falling back to text chunking",
+                            file_path, lang
+                        );
+                        chunk_text(raw_text, metadata, chunking_config)
+                    } else {
+                        convert_semantic_chunks_to_text_chunks(semantic_chunks, metadata)
+                    }
                 }
                 Err(e) => {
                     warn!(
