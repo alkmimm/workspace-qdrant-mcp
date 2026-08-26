@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS search_events (
     project_id TEXT,
     actor TEXT NOT NULL CHECK (actor IN ('claude', 'user', 'daemon')),
     tool TEXT NOT NULL CHECK (tool IN ('mcp_qdrant', 'rg', 'grep', 'ctags', 'lsp', 'filesearch')),
-    op TEXT NOT NULL CHECK (op IN ('search', 'expand', 'open', 'followup', 'grep', 'retrieve', 'list', 'search_exact', 'rules', 'scratchpad', 'graph', 'store', 'embedding', 'workspace_index', 'search_eval')),
+    op TEXT NOT NULL CHECK (op IN ('search', 'expand', 'open', 'followup', 'grep', 'retrieve', 'list', 'search_exact', 'rules', 'scratchpad', 'graph', 'store', 'embedding', 'workspace_index', 'search_eval', 'help')),
     query_text TEXT,
     filters TEXT,
     top_k INTEGER,
@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn test_op_check_accepts_all_known_values() {
         // Fresh-DB CREATE constant must accept the same op values that the
-        // v39/v47/v48 migrations relax for existing databases.
+        // v39/v47/v48/v49 migrations relax for existing databases.
         for op in [
             "search",
             "expand",
@@ -86,6 +86,7 @@ mod tests {
             "embedding",
             "workspace_index",
             "search_eval",
+            "help",
         ] {
             assert!(
                 CREATE_SEARCH_EVENTS_SQL.contains(&format!("'{}'", op)),
