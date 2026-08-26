@@ -9,7 +9,8 @@
     "scratchpad",
     "rules",
     "workspace_index",
-    "graph"
+    "graph",
+    "help"
   ],
   "internalTools": [
     "embedding",

@@ -2,7 +2,7 @@
 
 ### MCP Tools
 
-The server provides **10 tools**: `search`, `retrieve`, `rules`, `store`, `grep`, `list`, `embedding`, `graph`, `search_eval`, and `workspace_index`.
+The server provides **12 tools**: `search`, `retrieve`, `rules`, `store`, `scratchpad`, `grep`, `list`, `embedding`, `graph`, `search_eval`, `workspace_index`, and `help`. The canonical registry is `src/typescript/mcp-server/src/constants/mcp-public-config.json` (10 public + 2 internal) — update that file, not this sentence, when the roster changes.
 
 **Important design principles:**
 
@@ -254,6 +254,24 @@ Registers a new project with the daemon for file watching and ingestion. Uses `r
 
 **Note:** The server cannot store content to the `projects` collection — project content is ingested exclusively by the daemon via file watching. Behavioral rules use the dedicated `rules` tool. Libraries are collections of reference information (books, documentation, papers, websites) — NOT programming libraries (use context7 MCP for those).
 
+#### scratchpad
+
+Manage existing scratchpad notes: list them, update one in place, or delete one. Writing new notes goes through `store` with `type: "scratchpad"`; this tool exists so revisions don't accumulate near-duplicates.
+
+```typescript
+scratchpad({
+    action: "list" | "update" | "delete", // Required
+    id?: string,                        // Point id from a list/search result (update/delete)
+    content?: string,                   // Verbatim current content, as an alternative selector
+    newContent?: string,                // Replacement text (update)
+    title?: string, tags?: string[],    // Optional metadata (update)
+    projectId?: string, cwd?: string,   // Tenant scoping
+    limit?: number, summary?: boolean, cursor?: string, // list paging/shaping
+});
+```
+
+Notes carry write-time provenance (`origin_branch`/`origin_cwd`/`origin_worktree`) and resurface automatically in project-scoped `search`. See `help("scratchpad")` for the usage guidance.
+
 #### grep
 
 Search code with exact substring or regex pattern matching via FTS5 trigram index.
@@ -380,6 +398,18 @@ workspace_index({
 **Mutating actions** (double opt-in): `add_project`, `start_agent_branch`, `finish_agent_branch`, `abandon_agent_branch`, `register_wqm`, `register_all_wqm`, `cleanup_orphans`, `observe_project`, `sync_current_branch`.
 
 See [`workspace_index` `indexing_status` action](#workspace_index-indexing_status) below for the indexing-progress payload shape.
+
+#### help
+
+On-demand topical usage manual (progressive disclosure). The always-on server `instructions` carry only a short behavioral kernel; the detailed chapters live behind this tool so they cost tokens only when fetched. The handler answers from in-process constants and the dispatcher skips its session preamble for this tool (`STATIC_TOOLS` in tool-dispatcher.ts), so a help call makes no daemon round-trip and triggers no project detection.
+
+```typescript
+help({
+    topic?: string, // Topic id (schema enum, derived); omit for the index of topics
+});
+```
+
+The topic catalog lives in `src/typescript/mcp-server/src/tools/help-topics.ts`; the tool description, the input enum, and the kernel's advertised list are all derived from it, and `help()` with no argument returns the live `{topic, summary}` index — this document deliberately does not duplicate the list. Response hints reference chapters via the typed `helpRef()` helper (e.g. the unresolved-project search hint points at `help("http")`, retrieve misses at `help("exact")`).
 
 ### Session Lifecycle
 

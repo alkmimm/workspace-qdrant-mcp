@@ -23,6 +23,7 @@ const READ_ONLY = new Set([
   'embedding',
   'search_eval',
   'graph',
+  'help',
 ]);
 
 // Tools with at least one persistent-state mutation — must NOT claim read-only.

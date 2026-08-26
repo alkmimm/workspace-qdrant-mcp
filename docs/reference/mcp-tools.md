@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-The workspace-qdrant MCP server exposes eleven tools to AI assistants. All tools communicate with the `memexd` daemon over gRPC.
+The workspace-qdrant MCP server exposes twelve tools to AI assistants. All tools except the static `help` communicate with the `memexd` daemon over gRPC.
 
 ## Tool Index
 
@@ -17,6 +17,7 @@ The workspace-qdrant MCP server exposes eleven tools to AI assistants. All tools
 | [`graph`](#graph) | Navigate the code-relationship graph (callers, impact, hotspots) |
 | [`workspace_index`](#workspace_index) | Manage indexed-project registry + branch sync (host hooks) |
 | [`search_eval`](#search_eval) | Benchmark search quality (hit@k, recall, MRR) against a case set |
+| [`help`](#help) | On-demand topical usage manual (static, progressive disclosure) |
 
 ---
 
@@ -822,6 +823,26 @@ Evaluate another project with an ad-hoc case set:
 ### Response Format
 
 Returns per-mode metrics (hit@1/3/10, recall@10, MRR, duplicate-rate) and an overall quality verdict.
+
+---
+
+## help
+
+On-demand topical usage manual. The server's always-on `instructions` carry only a short behavioral kernel; the detailed chapters live behind this tool and cost tokens only when fetched. Static — answered from in-process constants, no daemon call, no project detection.
+
+### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `topic` | string (enum) | No | Topic id. Omit to get the `{topic, summary}` index. |
+
+The topic catalog is defined in `src/typescript/mcp-server/src/tools/help-topics.ts` and the input enum is derived from it — call `help` with no argument for the live list. Unknown or missing topics return the index plus a corrective hint, and error hints elsewhere may point at a chapter as `help("<topic>")`.
+
+### Example
+
+```json
+{ "topic": "branches" }
+```
 
 ---
 

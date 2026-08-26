@@ -1639,6 +1639,9 @@ const PG_TOOLS = [
     F('hookName', 'text', { adv: true }),
     F('payload', 'json', { adv: true }),
   ] },
+  { name: 'help', mutates: false, note: 'topical usage manual (static; no topic = index)', fields: [
+    F('topic', 'enum', { enum: ['search', 'exact', 'store', 'scratchpad', 'branches', 'graph', 'collections', 'http', 'rules'] }),
+  ] },
   { name: 'embedding', mutates: false, note: 'report active embedding provider (no parameters)', fields: [] },
   { name: 'search_eval', mutates: false, note: 'benchmark search quality (hit@k / recall / MRR)', fields: [
     F('cwd', 'text'),

@@ -34,6 +34,7 @@ import { recordMulticloneSearch } from '../telemetry/metrics.js';
 import { buildFilter } from './search-filters.js';
 import { dedupeIdenticalBodies } from './search-shaping.js';
 import { filterResultsByPathExclude, applyPathDerank } from './search-path-filters.js';
+import { helpRef } from './help-topics.js';
 import {
   searchCollection,
   applyRRFFusion,
@@ -81,7 +82,7 @@ export function unresolvedProjectResponse(
       "would cross tenant boundaries silently and surface another repo's code. Pass `cwd` " +
       '(your absolute working directory, so the project auto-detects) or `projectId` explicitly, ' +
       'or set `scope: "all"` to search across every repository on purpose.',
-    hint: 'No project resolved — pass `cwd` or `projectId`. A project-scoped search will not silently search other repos.',
+    hint: `No project resolved — pass \`cwd\` or \`projectId\`. A project-scoped search will not silently search other repos. See ${helpRef('http')}.`,
   };
 }
 
