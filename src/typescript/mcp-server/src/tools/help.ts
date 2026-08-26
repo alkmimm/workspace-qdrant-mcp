@@ -3,11 +3,10 @@
  *
  * The handler answers entirely from in-process constants, and the dispatcher
  * skips its session preamble for STATIC_TOOLS (tool-dispatcher.ts), so a help
- * call really does cost no daemon round-trip, no git spawn, and no project
- * detection. Deliberately NOT in OP_EVENT_TOOLS — the search_events op CHECK
- * (schema v48) does not accept a `help` op, and a static lookup has no
- * latency/outcome worth a daemon write; the JSONL tool-call log still records
- * usage.
+ * RESPONSE never waits on the daemon, spawns git, or triggers project
+ * detection. It IS in OP_EVENT_TOOLS (schema v49 widened the search_events op
+ * CHECK to accept 'help') so adoption shows up in the op-events telemetry
+ * lane — that write is fire-and-forget and off the latency path.
  */
 
 import { HELP_TOPICS, HELP_TOPIC_IDS } from './help-topics.js';

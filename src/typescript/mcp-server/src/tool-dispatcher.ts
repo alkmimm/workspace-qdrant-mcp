@@ -77,7 +77,7 @@ export const KNOWN_TOOLS = [
  * list) self-instrument inside their own implementations — richer records with
  * filters, topK, and the token-economy sidecar — and are deliberately NOT here.
  * Any op listed here must be accepted by the search_events op CHECK
- * (schema v48; see search_events_schema.rs).
+ * (schema v49; see search_events_schema.rs).
  */
 const OP_EVENT_TOOLS = new Set([
   'rules',
@@ -87,6 +87,11 @@ const OP_EVENT_TOOLS = new Set([
   'embedding',
   'workspace_index',
   'search_eval',
+  // 'help' rides the same lane since schema v49 widened the op CHECK — its
+  // adoption then shows in the dashboard's "by op & actor" panels. The event
+  // write is fire-and-forget, so it does not undo the STATIC_TOOLS preamble
+  // skip: a help RESPONSE still never waits on the daemon.
+  'help',
 ]);
 
 /**
@@ -129,7 +134,9 @@ async function withOpEvent(
 ): Promise<unknown> {
   const eventId = randomUUID();
   const startTime = Date.now();
-  const action = args?.['action'] ?? args?.['type'];
+  // The op's "what was asked": action for the CRUD-style tools, type for
+  // store, topic for help.
+  const action = args?.['action'] ?? args?.['type'] ?? args?.['topic'];
   logSearchEvent(daemonClient, {
     id: eventId,
     actor: 'claude',
