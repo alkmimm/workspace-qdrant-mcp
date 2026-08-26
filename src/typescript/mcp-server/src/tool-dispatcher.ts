@@ -23,6 +23,7 @@ import {
 } from './tool-builders/index.js';
 import { storeUrl, storeScratchpad, storeFeedback } from './store-handlers.js';
 import { handleEmbedding } from './tools/embedding.js';
+import { handleHelp } from './tools/help.js';
 import { handleWorkspaceIndex } from './tools/workspace-index.js';
 import { handleGraph } from './tools/graph.js';
 import { getQdrantClient } from './clients/qdrant-client-factory.js';
@@ -240,6 +241,9 @@ async function routeToolInner(
       return listTool.list(buildListOptions(args));
     case 'embedding':
       return handleEmbedding(args, daemonClient);
+    case 'help':
+      // Static topical manual — local, no daemon, no project detection.
+      return handleHelp(args);
     case 'workspace_index': {
       const { qdrantUrl, qdrantApiKey } = components.qdrantConfig;
       // Issue #299: let indexing_status/project_status cross-check the vector

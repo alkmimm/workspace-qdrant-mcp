@@ -14,6 +14,7 @@ export { embeddingToolDefinition } from './embedding.js';
 export { workspaceIndexToolDefinition } from './workspace-index.js';
 export { searchEvalToolDefinition } from './search-eval.js';
 export { graphToolDefinition } from './graph.js';
+export { helpToolDefinition } from './help.js';
 
 import { searchToolDefinition } from './search.js';
 import { retrieveToolDefinition } from './retrieve.js';
@@ -26,6 +27,7 @@ import { embeddingToolDefinition } from './embedding.js';
 import { workspaceIndexToolDefinition } from './workspace-index.js';
 import { searchEvalToolDefinition } from './search-eval.js';
 import { graphToolDefinition } from './graph.js';
+import { helpToolDefinition } from './help.js';
 import {
   SEARCH_OUTPUT_SCHEMA,
   GREP_OUTPUT_SCHEMA,
@@ -83,5 +85,6 @@ export function getToolDefinitions(): McpToolDefinition[] {
     workspaceIndexToolDefinition,
     searchEvalToolDefinition,
     { ...graphToolDefinition, outputSchema: GRAPH_OUTPUT_SCHEMA },
+    helpToolDefinition,
   ];
 }

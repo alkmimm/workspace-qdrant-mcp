@@ -2,7 +2,7 @@
 
 ### MCP Tools
 
-The server provides **10 tools**: `search`, `retrieve`, `rules`, `store`, `grep`, `list`, `embedding`, `graph`, `search_eval`, and `workspace_index`.
+The server provides **11 tools**: `search`, `retrieve`, `rules`, `store`, `grep`, `list`, `embedding`, `graph`, `search_eval`, `workspace_index`, and `help`.
 
 **Important design principles:**
 
@@ -380,6 +380,20 @@ workspace_index({
 **Mutating actions** (double opt-in): `add_project`, `start_agent_branch`, `finish_agent_branch`, `abandon_agent_branch`, `register_wqm`, `register_all_wqm`, `cleanup_orphans`, `observe_project`, `sync_current_branch`.
 
 See [`workspace_index` `indexing_status` action](#workspace_index-indexing_status) below for the indexing-progress payload shape.
+
+#### help
+
+On-demand topical usage manual (progressive disclosure). The always-on server `instructions` carry only a short behavioral kernel; the detailed chapters live behind this tool so they cost tokens only when fetched. Static and local — no daemon round-trip, no project detection.
+
+```typescript
+help({
+    topic?: string, // Topic id; omit for the index of topics
+});
+```
+
+**Topics:** `search` (query formulation, fileType taxonomy, path filters), `exact` (grep/list/retrieve), `store`, `scratchpad`, `branches` (worktrees, agent branches, mutation opt-in), `graph`, `collections`, `http` (cwd/project detection).
+
+Calling without a topic (or with an unknown one) returns the `{topic, summary}` index. Response hints and error messages elsewhere may reference these topics (e.g. `see help("branches")`).
 
 ### Session Lifecycle
 
