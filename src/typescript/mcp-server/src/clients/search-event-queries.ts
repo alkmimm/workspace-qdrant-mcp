@@ -16,6 +16,39 @@ import { currentSessionId, effectivenessTracker } from './effectiveness-signals.
  *  "followup" from the parent link + op instead. */
 const QUERY_TRACKING_OPS = new Set(['search', 'search_exact', 'grep']);
 
+/**
+ * In-flight INSERTs, keyed by event id.
+ *
+ * Every update below addresses its row by `event_id`, so it is only correct
+ * AFTER the insert has landed. That ordering used to be implicit — guaranteed
+ * only by however long the instrumented operation happened to take. A tool
+ * that resolves in the SAME TICK breaks the assumption: both gRPC calls are
+ * fire-and-forget, so the UPDATE reaches the daemon before the row exists,
+ * matches nothing, and is silently dropped. Measured on the static `help`
+ * lookup (0ms): 0 of 2 rows carried latency_ms/result_count, against ~100%
+ * for every other op.
+ *
+ * Chaining here — at the single event-write boundary, where this file already
+ * applies its other cross-cutting concerns — fixes ordering for EVERY caller
+ * (the dispatcher's op-event lane and the self-instrumenting read tools)
+ * instead of special-casing one tool, and costs no latency: the response path
+ * still awaits none of this. Entries live only for the duration of their
+ * insert, so the map cannot grow unbounded.
+ */
+const inFlightInserts = new Map<string, Promise<void>>();
+
+/** Run `send` once this event's insert has settled (immediately if none is
+ *  in flight — the insert already completed, or this process never made it). */
+function afterInsert(eventId: string, send: () => void): void {
+  const pending = inFlightInserts.get(eventId);
+  if (!pending) {
+    send();
+    return;
+  }
+  // Settle either way: a failed insert must not strand the update forever.
+  void pending.then(send, send);
+}
+
 export interface SearchEventInput {
   id: string;
   sessionId?: string | undefined;
@@ -123,12 +156,18 @@ export function logSearchEvent(daemonClient: DaemonClient | null, event: SearchE
   if (event.outcome !== undefined) request.outcome = event.outcome;
   if (parentEventId !== undefined) request.parent_event_id = parentEventId;
 
-  daemonClient.logSearchEvent(request).catch((err: unknown) => {
+  // Tracked in `inFlightInserts` so any update for this id waits for the row
+  // to exist (see the map's doc comment). Still fire-and-forget to the caller.
+  const insert = daemonClient.logSearchEvent(request).catch((err: unknown) => {
     // Instrumentation must never break search, but log for diagnostics
     console.warn(
       'logSearchEvent instrumentation failed:',
       err instanceof Error ? err.message : err
     );
+  });
+  inFlightInserts.set(event.id, insert);
+  void insert.finally(() => {
+    inFlightInserts.delete(event.id);
   });
 }
 
@@ -160,12 +199,14 @@ export function updateSearchEvent(
   if (update.topResultRefs !== undefined) request.top_result_refs = update.topResultRefs;
   if (update.outcome !== undefined) request.outcome = update.outcome;
 
-  daemonClient.updateSearchEvent(request).catch((err: unknown) => {
-    // Instrumentation must never break search, but log for diagnostics
-    console.warn(
-      'updateSearchEvent instrumentation failed:',
-      err instanceof Error ? err.message : err
-    );
+  afterInsert(eventId, () => {
+    daemonClient.updateSearchEvent(request).catch((err: unknown) => {
+      // Instrumentation must never break search, but log for diagnostics
+      console.warn(
+        'updateSearchEvent instrumentation failed:',
+        err instanceof Error ? err.message : err
+      );
+    });
   });
 }
 
@@ -197,11 +238,13 @@ export function updateSearchEventEconomy(
   };
   if (update.toolVersion !== undefined) request.tool_version = update.toolVersion;
 
-  daemonClient.updateSearchEventEconomy(request).catch((err: unknown) => {
-    console.warn(
-      'updateSearchEventEconomy instrumentation failed:',
-      err instanceof Error ? err.message : err
-    );
+  afterInsert(eventId, () => {
+    daemonClient.updateSearchEventEconomy(request).catch((err: unknown) => {
+      console.warn(
+        'updateSearchEventEconomy instrumentation failed:',
+        err instanceof Error ? err.message : err
+      );
+    });
   });
 }
 
