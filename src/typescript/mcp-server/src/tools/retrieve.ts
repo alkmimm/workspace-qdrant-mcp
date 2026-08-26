@@ -39,6 +39,9 @@ import {
   collapseResultBranchFields,
 } from './branch-scope.js';
 import { branchFilterClause } from './search-filters.js';
+// Shared with the help("exact") chapter — see retrieve-hints.ts.
+import { RETRIEVE_ID_FILTER_HINT, RETRIEVE_LOCATION_HINT } from './retrieve-hints.js';
+import { helpRef } from './help-topics.js';
 
 /**
  * Branch scope for projects scroll paths. `branch` is the caller's effective
@@ -91,11 +94,6 @@ export function computeRetrieveEconomy(documents: RetrievedDocument[]): {
   return { bytesOut, bytesIn: bytesOut };
 }
 
-const RETRIEVE_ID_FILTER_HINT =
-  'If you only have `metadata.document_id`, use `filter: { document_id: "<value>" }` instead.';
-const RETRIEVE_LOCATION_HINT =
-  'For exact-search hits, pass `filePath` + `lineNumber` from the result metadata.';
-
 function looksLikeContentHash(documentId: string): boolean {
   return /^[a-f0-9]{64}$/i.test(documentId);
 }
@@ -114,7 +112,7 @@ function buildUnknownArgsHint(unknownArgs: string[]): string {
     return `Use \`documentId\` for point IDs, \`filePath\` + \`lineNumber\` for exact-search locators, and \`filter\` for metadata lookups. ${RETRIEVE_ID_FILTER_HINT}`;
   }
 
-  return `Use only the documented retrieve parameters. For point IDs, pass \`documentId\`; for exact-search hits, use \`filePath\` + \`lineNumber\`; for metadata lookups, use \`filter\`. ${RETRIEVE_ID_FILTER_HINT}`;
+  return `Use only the documented retrieve parameters. For point IDs, pass \`documentId\`; for exact-search hits, use \`filePath\` + \`lineNumber\`; for metadata lookups, use \`filter\`. ${RETRIEVE_ID_FILTER_HINT} See ${helpRef('exact')}.`;
 }
 
 function buildNotFoundHint(documentId: string): string {
@@ -126,7 +124,7 @@ function buildNotFoundHint(documentId: string): string {
   if (looksLikeContentHash(documentId)) {
     return `${base} The requested value looks like a metadata \`document_id\` hash, so use \`filter: { document_id: "${documentId}" }\` instead.`;
   }
-  return `${base} ${RETRIEVE_ID_FILTER_HINT}`;
+  return `${base} ${RETRIEVE_ID_FILTER_HINT} See ${helpRef('exact')}.`;
 }
 
 function buildLocationNotFoundHint(filePath: string, lineNumber?: number): string {

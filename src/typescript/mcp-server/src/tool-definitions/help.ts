@@ -1,11 +1,15 @@
 /**
  * MCP tool schema definition for the 'help' tool.
  *
- * On-demand topical manual (progressive disclosure, issue #357): the always-on
- * server instructions carry only a short behavioral kernel, and the detailed
- * chapters live behind this tool. Keep the topic list in the description in
- * sync with HELP_TOPICS (tools/help-topics.ts) — pinned by tests/tools/help.test.ts.
+ * On-demand topical manual (progressive disclosure, issue #357). The topic
+ * list in the description AND the input enum are DERIVED from HELP_TOPICS
+ * (tools/help-topics.ts) — add a chapter there and this definition updates
+ * itself; a client that validates inputSchema rejects typos before a
+ * round-trip. help-topics.ts imports only retrieve-hints.ts, so this import
+ * pulls no runtime dependencies into the definition module.
  */
+
+import { HELP_TOPIC_IDS } from '../tools/help-topics.js';
 
 export const helpToolDefinition = {
   name: 'help',
@@ -15,13 +19,16 @@ export const helpToolDefinition = {
     openWorldHint: false,
   },
   description:
-    'Detailed usage manual for this server, served on demand instead of front-loaded into the session. Call with topic: "search" (query formulation, fileType, path filters), "exact" (grep/list/retrieve), "store", "scratchpad", "branches" (worktrees, agent branches, mutations), "graph", "collections", or "http" (cwd/project detection) for the full chapter; call without a topic for the index. Response hints and error messages may reference these topics.',
+    'Detailed usage manual for this server, served on demand instead of front-loaded into the session. ' +
+    `Topics: ${HELP_TOPIC_IDS.map((id) => `"${id}"`).join(', ')}. ` +
+    'Call without a topic for a {topic, summary} index. Error hints may reference a chapter as help("<topic>").',
   inputSchema: {
     type: 'object' as const,
     properties: {
       topic: {
         type: 'string',
-        description: 'Topic id from the index (e.g. "branches"). Omit to list all topics.',
+        enum: [...HELP_TOPIC_IDS],
+        description: 'Topic id. Omit to list all topics with one-line summaries.',
       },
     },
   },

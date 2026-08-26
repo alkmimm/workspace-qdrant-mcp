@@ -53,6 +53,16 @@ export type ToolResult = {
  *  in tool-definitions/index.ts. */
 const STRUCTURED_OUTPUT_TOOLS = new Set(['search', 'grep', 'list', 'retrieve', 'graph']);
 
+/** Tools answered entirely from in-process constants. The dispatcher skips its
+ *  session preamble (heartbeat RPC, git-state refresh, project activation) for
+ *  these, so a static lookup can never block on the daemon, spawn git, or
+ *  side-effect project registration — this set is what makes the "static,
+ *  local" claim in their docs true, rather than merely asserted. Safe to skip:
+ *  heartbeat cadence is already kept by the self-rescheduling timer in
+ *  session-lifecycle.ts, and activation simply defers to the next non-static
+ *  call. */
+const STATIC_TOOLS = new Set(['help']);
+
 // Derived from src/constants/mcp-public-config.json (single source of truth).
 // publicTools = tools exposed in client `enabled_tools` lists.
 // internalTools = tools the server accepts but not advertised to clients by default.
@@ -242,7 +252,8 @@ async function routeToolInner(
     case 'embedding':
       return handleEmbedding(args, daemonClient);
     case 'help':
-      // Static topical manual — local, no daemon, no project detection.
+      // Static topical manual. The handler reads only in-process constants;
+      // the dispatch-level preamble is skipped via STATIC_TOOLS above.
       return handleHelp(args);
     case 'workspace_index': {
       const { qdrantUrl, qdrantApiKey } = components.qdrantConfig;
@@ -282,19 +293,25 @@ export async function dispatchToolCall(
 ): Promise<ToolResult> {
   const startTime = Date.now();
 
-  sendHeartbeat(sessionState, components.daemonClient);
+  if (!STATIC_TOOLS.has(toolName)) {
+    sendHeartbeat(sessionState, components.daemonClient);
 
-  // Refresh cached git state (branch + worktree flag) if stale. Cheap inside
-  // the TTL window; ~3ms `git` invocation outside it.
-  ensureProjectFresh(sessionState);
+    // Refresh cached git state (branch + worktree flag) if stale. Cheap inside
+    // the TTL window; ~3ms `git` invocation outside it.
+    ensureProjectFresh(sessionState);
 
-  // Lazily activate the connecting client's project from THIS call's cwd (bound
-  // into the request context above by handleToolCall). Fire-and-forget: the
-  // resolve/register is off the tool's latency path, and the current call's
-  // scoping already uses the cwd directly. This is what lets a non-wqm client
-  // repo become `is_active` — see ensureClientProjectActive. `cwd` is captured
-  // synchronously inside it, before any await unwinds the request context.
-  void ensureClientProjectActive(sessionState, components.daemonClient, components.projectDetector);
+    // Lazily activate the connecting client's project from THIS call's cwd (bound
+    // into the request context above by handleToolCall). Fire-and-forget: the
+    // resolve/register is off the tool's latency path, and the current call's
+    // scoping already uses the cwd directly. This is what lets a non-wqm client
+    // repo become `is_active` — see ensureClientProjectActive. `cwd` is captured
+    // synchronously inside it, before any await unwinds the request context.
+    void ensureClientProjectActive(
+      sessionState,
+      components.daemonClient,
+      components.projectDetector
+    );
+  }
 
   if (!KNOWN_TOOLS.includes(toolName as (typeof KNOWN_TOOLS)[number])) {
     logToolCall(toolName, Date.now() - startTime, false, { error: 'Unknown tool' });

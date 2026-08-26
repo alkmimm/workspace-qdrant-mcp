@@ -95,6 +95,18 @@ RUN bash scripts/check-proto-consistency.sh
 
 RUN cd src/typescript/mcp-server && npm run build
 
+# TS test gate. Runs HERE for the same reason as the proto check above: this
+# fork's GitHub Actions are disabled — the container build IS the CI. The
+# vitest suite is what enforces the server-instructions byte budget, the
+# help-topic contracts, and the config-drift mirrors (they have no other
+# executing home), so it must gate the image, not sit in a Makefile target
+# nobody is forced to run. Placed before `npm prune` while devDependencies
+# (vitest) are still installed. The two tracked client-config mirrors are
+# copied in because the drift test asserts their enabled_tools line.
+COPY templates/fork-kit/codex_config.template.toml templates/fork-kit/codex_config.template.toml
+COPY docs/fork-kit/02-clientes-claude-codex.md docs/fork-kit/02-clientes-claude-codex.md
+RUN cd src/typescript/mcp-server && npm test
+
 # Keep only production dependencies in the runtime image.
 RUN cd src/typescript/mcp-server && npm prune --omit=dev
 

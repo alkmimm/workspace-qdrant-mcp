@@ -76,6 +76,41 @@ describe('mcp-public-config drift guard', () => {
     });
   });
 
+  describe('publicTools is mirrored in TRACKED templates/docs (no skip — these files exist)', () => {
+    // Unlike generated/ (gitignored, so the guard above self-skips in CI),
+    // these mirrors are checked into the repo and MUST carry the canonical
+    // enabled_tools line. This is the guard that failed to exist when `help`
+    // was added to publicTools and every Codex client provisioned from the
+    // fork kit kept filtering it out (PR #358 review).
+    const trackedMirrors = [
+      'templates/fork-kit/codex_config.template.toml',
+      'docs/fork-kit/02-clientes-claude-codex.md',
+    ];
+
+    for (const rel of trackedMirrors) {
+      it(`${rel} carries the canonical enabled_tools line`, () => {
+        const content = readFileSync(resolve(REPO_ROOT, rel), 'utf8');
+        expect(content).toContain(expectedToolsLine());
+      });
+    }
+  });
+
+  describe('admin tools playground mirrors the tool registry', () => {
+    it('PG_TOOLS has an entry for every public and internal tool', () => {
+      // The playground registry in admin/static/app.js is plain browser JS and
+      // cannot import the JSON, so it is pinned here instead: a tool missing
+      // from PG_TOOLS is invisible in the admin UI even though the invoke
+      // route accepts it.
+      const appJs = readFileSync(
+        resolve(__dirname, '..', '..', 'src', 'admin', 'static', 'app.js'),
+        'utf8'
+      );
+      for (const tool of [...mcpPublicConfig.publicTools, ...mcpPublicConfig.internalTools]) {
+        expect(appJs, `PG_TOOLS entry for ${tool}`).toContain(`{ name: '${tool}'`);
+      }
+    });
+  });
+
   describe('publicTools ⊆ KNOWN_TOOLS (tool-dispatcher accepts every public tool)', () => {
     // Re-derive what tool-dispatcher.ts computes to confirm the union is consistent.
     it('no public tool is missing from the server registry', () => {

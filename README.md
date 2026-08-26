@@ -37,7 +37,7 @@ guarantees — see [CLAUDE.md](CLAUDE.md) for the architecture this fork actuall
 
 - **Hybrid Search** - Combines semantic similarity with keyword matching using Reciprocal Rank Fusion
 - **Project Detection** - Automatic Git repository awareness and project-scoped collections
-- **11 MCP Tools** - search, retrieve, rules, store, scratchpad, grep, list, graph, embedding, search_eval, workspace_index
+- **12 MCP Tools** - search, retrieve, rules, store, scratchpad, grep, list, graph, embedding, search_eval, workspace_index, help
 - **Code Intelligence** - Tree-sitter semantic chunking + LSP integration for active projects
 - **Code Graph** - Relationship graph with algorithms (PageRank, community detection, betweenness centrality), dependency-cycle detection, and test-gap analysis (production symbols no test reaches)
 - **High-Performance CLI** - Rust-based `wqm` command-line tool
@@ -209,6 +209,7 @@ workspace-qdrant is under active development. If you encounter errors, unexpecte
 | `embedding` | Generate vector embeddings for text |
 | `search_eval` | Evaluate search quality (hit@k, recall) against a case set |
 | `workspace_index` | Manage the indexed-project registry and branch sync |
+| `help` | On-demand topical usage manual (progressive disclosure) |
 
 See [MCP Tools Reference](docs/reference/mcp-tools.md) for parameters and examples.
 

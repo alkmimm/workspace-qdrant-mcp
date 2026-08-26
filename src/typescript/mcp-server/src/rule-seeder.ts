@@ -19,8 +19,13 @@ interface DefaultRule {
 /**
  * The default global rule set: the workspace-qdrant MCP usage conventions
  * distilled into behavioral rules. Seeded once on a fresh install so every
- * project (current and future) inherits them as global defaults — these are
- * the same rules the server advertises in its MCP instructions.
+ * project (current and future) inherits them as global defaults.
+ *
+ * This is one of three guidance channels (issue #357): the always-on
+ * instructions KERNEL (server-instructions.ts) carries only behavioral
+ * nudges, the `help` tool (tools/help-topics.ts) serves detailed chapters on
+ * demand, and these rules persist the conventions an agent loads via
+ * `rules` list. Keep a rule's authoritative copy in exactly one channel.
  */
 export const DEFAULT_RULES: ReadonlyArray<DefaultRule> = [
   {

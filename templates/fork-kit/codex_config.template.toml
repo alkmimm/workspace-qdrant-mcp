@@ -1,8 +1,8 @@
 # Reference example for ~/.codex/config.toml (HTTP variant).
 # Canonical values for `enabled_tools`, `startup_timeout_sec`, `tool_timeout_sec`
 # live in src/typescript/mcp-server/src/constants/mcp-public-config.json.
-# If you change them here, update the JSON too — drift is verified by the
-# config-drift test in src/admin/__tests__/.
+# If you change them here, update the JSON too — drift is verified by
+# src/typescript/mcp-server/tests/admin/config-drift.test.ts.
 
 [projects.'\\wsl.localhost\Ubuntu-24.04\home\dev\repos\workspace-qdrant-mcp']
 trust_level = "trusted"
@@ -14,7 +14,7 @@ trust_level = "trusted"
 enabled = true
 startup_timeout_sec = 20
 tool_timeout_sec = 120
-enabled_tools = ["search", "retrieve", "grep", "list", "store", "scratchpad", "rules", "workspace_index", "graph"]
+enabled_tools = ["search", "retrieve", "grep", "list", "store", "scratchpad", "rules", "workspace_index", "graph", "help"]
 url = "http://localhost:6335/mcp"
 bearer_token_env_var = "MCP_HTTP_TOKEN"
 

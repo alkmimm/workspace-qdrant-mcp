@@ -25,6 +25,10 @@ tmp/
 
 # Documentation and research (not needed for build)
 docs/
+# ...except the Codex-config mirror: the mcp image's vitest gate
+# (tests/admin/config-drift.test.ts) asserts it carries the canonical
+# enabled_tools line derived from mcp-public-config.json.
+!docs/fork-kit/02-clientes-claude-codex.md
 research/
 
 # Test files
