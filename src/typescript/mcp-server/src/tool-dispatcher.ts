@@ -29,6 +29,7 @@ import { handleGraph } from './tools/graph.js';
 import { getQdrantClient } from './clients/qdrant-client-factory.js';
 import { PROJECTS_COLLECTION } from './tools/retrieve-types.js';
 import { runSearchEval } from './tools/search-eval.js';
+import { resolveScopedTenant } from './tools/tenant-scope.js';
 import {
   ensureClientProjectActive,
   ensureProjectFresh,
@@ -187,11 +188,49 @@ async function dispatchStore(
   }
   if (storeType === 'project')
     return registerProjectFromTool(args, sessionState, components.daemonClient);
-  if (storeType === 'url') return storeUrl(args, components.stateManager, sessionState);
+  if (storeType === 'url')
+    return storeUrl(args, components.stateManager, components.projectDetector, sessionState);
   if (storeType === 'scratchpad')
     return storeScratchpad(args, components.stateManager, components.projectDetector, sessionState);
   if (storeType === 'feedback') return storeFeedback(args, components.stateManager, sessionState);
-  return components.storeTool.store(buildStoreOptions(args, sessionState));
+  return storeLibrary(args, components, sessionState);
+}
+
+/**
+ * `store(type:"library")`. A named library is its own tenant; `forProject:true`
+ * instead scopes the entry to a PROJECT, so its tenant goes through the shared
+ * write resolver ({@link resolveScopedTenant}) — same precedence as the read
+ * surfaces and the scratchpad path, rather than the session project alone.
+ * A `'fallback'` source means nothing resolved: leave `projectId` unset so
+ * `StoreTool` raises its own "no active project" error instead of quietly
+ * writing the entry to the global tenant.
+ */
+async function storeLibrary(
+  args: Record<string, unknown> | undefined,
+  components: ServerComponents,
+  sessionState: SessionState
+): Promise<unknown> {
+  const options = buildStoreOptions(args);
+  if (!options.forProject) return components.storeTool.store(options);
+
+  const scoped = await resolveScopedTenant({
+    explicitProjectId: args?.['projectId'],
+    projectDetector: components.projectDetector,
+    sessionProjectId: sessionState.projectId,
+    stateManager: components.stateManager,
+  });
+  if (scoped.source !== 'fallback') options.projectId = scoped.tenantId;
+
+  const result = await components.storeTool.store(options);
+  if (!result.success || scoped.source === 'fallback') return result;
+  // StoreTool's own message already carries `libraries/<tenant>`, so only the
+  // project PATH is added here — repeating the tenant id would just be noise.
+  return {
+    ...result,
+    ...(scoped.projectPath ? { message: `${result.message} — ${scoped.projectPath}` } : {}),
+    project_id: scoped.tenantId,
+    ...(scoped.projectPath ? { project_path: scoped.projectPath } : {}),
+  };
 }
 
 /**

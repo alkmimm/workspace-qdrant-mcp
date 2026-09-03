@@ -2,8 +2,6 @@
  * Store tool argument builder — parse raw MCP tool arguments into StoreOptions
  */
 
-import type { SessionState } from '../server-types.js';
-
 export type StoreOptions = {
   content: string;
   libraryName?: string;
@@ -43,16 +41,17 @@ function validateStoreArgs(args: Record<string, unknown> | undefined): string {
 function extractTargetOptions(
   args: Record<string, unknown> | undefined,
   options: StoreOptions,
-  sessionState: Pick<SessionState, 'projectId'>,
 ): void {
   const libraryName = args?.['libraryName'] as string | undefined;
   if (libraryName) options.libraryName = libraryName;
 
   const forProject = args?.['forProject'] as boolean | undefined;
-  if (forProject) {
-    options.forProject = true;
-    if (sessionState.projectId) options.projectId = sessionState.projectId;
-  }
+  if (forProject) options.forProject = true;
+  // `projectId` is deliberately NOT filled here. A forProject entry is
+  // project-scoped, so its tenant is resolved by the shared write resolver in
+  // the dispatcher (explicit projectId > effective cwd > session project) —
+  // reading `sessionState.projectId` here would reinstate the session-first
+  // precedence that misrouted writes away from the caller's cwd.
 }
 
 function extractMetadataOptions(
@@ -87,14 +86,11 @@ function extractMetadataOptions(
  * Build store options from raw tool arguments.
  * Store tool is for libraries collection ONLY per spec.
  */
-export function buildStoreOptions(
-  args: Record<string, unknown> | undefined,
-  sessionState: Pick<SessionState, 'projectId'>
-): StoreOptions {
+export function buildStoreOptions(args: Record<string, unknown> | undefined): StoreOptions {
   const content = validateStoreArgs(args);
   const options: StoreOptions = { content };
 
-  extractTargetOptions(args, options, sessionState);
+  extractTargetOptions(args, options);
   extractMetadataOptions(args, options);
 
   return options;
