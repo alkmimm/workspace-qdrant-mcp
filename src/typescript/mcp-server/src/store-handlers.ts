@@ -8,17 +8,35 @@ import type { SqliteStateManager } from './clients/sqlite-state-manager.js';
 import type { ProjectDetector } from './utils/project-detector.js';
 import type { SessionState } from './server-types.js';
 import { COLLECTION_SCRATCHPAD, PRIORITY_HIGH } from './common/native-bridge.js';
-import { TENANT_GLOBAL, TENANT_FEEDBACK } from './constants/tenants.js';
+import { TENANT_FEEDBACK } from './constants/tenants.js';
 import { utcNow } from './utils/timestamps.js';
-import { resolveProjectIdentity } from './tools/branch-scope.js';
 import { resolveScratchpadOrigin, type ScratchpadOrigin } from './tools/scratchpad-origin.js';
+import { resolveScopedTenant, describeScope, type ScopedTenant } from './tools/tenant-scope.js';
 
 type StoreResult = {
   success: boolean;
   message: string;
   queue_id?: string;
   collection: string;
+  /**
+   * Tenant the write was routed to, and that tenant's registered path when
+   * known. Echoed on every project-scoped write so a caller who passed `cwd`
+   * can see WHICH project the server resolved rather than trusting it — the
+   * failure mode this guards against (a note silently landing in another
+   * project) is otherwise indistinguishable from success.
+   */
+  project_id?: string;
+  project_path?: string;
 };
+
+/** Attach the resolved-scope echo to a write result. */
+function withScopeEcho(result: StoreResult, scoped: ScopedTenant): StoreResult {
+  return {
+    ...result,
+    project_id: scoped.tenantId,
+    ...(scoped.projectPath ? { project_path: scoped.projectPath } : {}),
+  };
+}
 
 /**
  * Pre-enqueue URL validation. Rejects malformed input, non-http(s) schemes,
@@ -81,6 +99,7 @@ function buildUrlPayload(
 export async function storeUrl(
   args: Record<string, unknown> | undefined,
   stateManager: SqliteStateManager,
+  projectDetector: ProjectDetector,
   sessionState: Pick<SessionState, 'projectId'>
 ): Promise<StoreResult> {
   const url = args?.['url'] as string;
@@ -92,7 +111,20 @@ export async function storeUrl(
   const libraryName = args?.['libraryName'] as string | undefined;
   const title = args?.['title'] as string | undefined;
   const collection = libraryName ? 'libraries' : COLLECTION_SCRATCHPAD;
-  const tenantId = libraryName?.trim() || sessionState.projectId || TENANT_GLOBAL;
+  // A named library is its OWN tenant (the libraries collection is keyed by
+  // library_name, not by project) — no project resolution applies. Without one
+  // the capture is project-scoped and follows the shared write precedence.
+  const libraryTenant = libraryName?.trim();
+  let scoped: ScopedTenant | undefined;
+  if (!libraryTenant) {
+    scoped = await resolveScopedTenant({
+      explicitProjectId: args?.['projectId'],
+      projectDetector,
+      sessionProjectId: sessionState.projectId,
+      stateManager,
+    });
+  }
+  const tenantId = scoped ? scoped.tenantId : (libraryTenant as string);
   const payload = buildUrlPayload(url, libraryName, title);
 
   try {
@@ -108,12 +140,13 @@ export async function storeUrl(
     );
     if (result.status !== 'ok' || !result.data)
       return { success: false, message: result.message ?? 'Failed to enqueue URL', collection };
-    return {
+    const ok: StoreResult = {
       success: true,
-      message: `URL queued for fetch and ingestion (${collection}/${tenantId})`,
+      message: `URL queued for fetch and ingestion (${collection}/${scoped ? describeScope(scoped) : tenantId})`,
       queue_id: result.data.queueId,
       collection,
     };
+    return scoped ? withScopeEcho(ok, scoped) : ok;
   } catch (error) {
     return {
       success: false,
@@ -163,38 +196,14 @@ function buildScratchpadPayload(
 }
 
 /**
- * Resolve the tenant a scratchpad note belongs to. Resolution order:
- *   1. An explicit `projectId` arg — the reliable path for HTTP clients whose
- *      host cwd can't be path-matched inside the container (mirrors how
- *      `search`/`rules` accept an explicit projectId).
- *   2. An explicitly activated session project (`sessionState.projectId`).
- *   3. The project detected from the effective cwd — the body `cwd` arg /
- *      `X-MCP-Host-Cwd` header (best effort; depends on the cwd resolving to a
- *      registered project inside the container).
- *   4. The global tenant, only when none resolves.
+ * Tenanting a scratchpad note is what makes it REACHABLE: the recall lane and
+ * `scratchpad list` both filter strictly by tenant, so a note must carry the
+ * right project's tenant_id or it is written and then never seen again.
  *
- * This is what makes a note reachable: the scratchpad recall lane filters by
- * tenant, so a note must carry the project's tenant_id to surface on
- * project-scoped search. Without it (pre-fix) every HTTP-stored note landed in
- * the global tenant and the lane — being tenant-strict — never found it.
+ * The order lives in {@link resolveScopedTenant}, shared with every other
+ * project-scoped write and matched to the read surfaces — explicit `projectId`,
+ * then the effective cwd, then the session's activated project, then global.
  */
-async function resolveScratchpadTenant(
-  args: Record<string, unknown> | undefined,
-  projectDetector: ProjectDetector,
-  sessionState: Pick<SessionState, 'projectId'>
-): Promise<string> {
-  const explicit = args?.['projectId'];
-  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
-  if (sessionState.projectId) return sessionState.projectId;
-  try {
-    const identity = await resolveProjectIdentity(projectDetector, undefined);
-    if (identity.projectId) return identity.projectId;
-  } catch {
-    // Detection failed (no project at cwd / ambiguous) — fall through to global.
-  }
-  return TENANT_GLOBAL;
-}
-
 export async function storeScratchpad(
   args: Record<string, unknown> | undefined,
   stateManager: SqliteStateManager,
@@ -211,24 +220,30 @@ export async function storeScratchpad(
 
   const title = args?.['title'] as string | undefined;
   const tags = (args?.['tags'] as string[] | undefined) ?? [];
-  const tenantId = await resolveScratchpadTenant(args, projectDetector, sessionState);
+  const scoped = await resolveScopedTenant({
+    explicitProjectId: args?.['projectId'],
+    projectDetector,
+    sessionProjectId: sessionState.projectId,
+    stateManager,
+  });
   const origin = await resolveScratchpadOrigin({
     explicitBranch: args?.['branch'] as string | undefined,
     sessionState,
   });
   const payload = buildScratchpadPayload(content, title, tags, origin);
 
-  return enqueueScratchpadEntry(stateManager, payload, tenantId, content, title, tags);
+  return enqueueScratchpadEntry(stateManager, payload, scoped, content, title, tags);
 }
 
 async function enqueueScratchpadEntry(
   stateManager: SqliteStateManager,
   payload: Record<string, unknown>,
-  tenantId: string,
+  scoped: ScopedTenant,
   content: string,
   title: string | undefined,
   tags: string[]
 ): Promise<StoreResult> {
+  const tenantId = scoped.tenantId;
   try {
     // branch stays "main" by design: the scratchpad point id derives from
     // (tenant, branch, document_id), so a real-branch value would fork a
@@ -252,12 +267,15 @@ async function enqueueScratchpadEntry(
       };
 
     writeScratchpadMirror(stateManager, content, title, tags, tenantId);
-    return {
-      success: true,
-      message: `Scratchpad entry queued for processing (${tenantId})`,
-      queue_id: result.data.queueId,
-      collection: COLLECTION_SCRATCHPAD,
-    };
+    return withScopeEcho(
+      {
+        success: true,
+        message: `Scratchpad entry queued for processing (${describeScope(scoped)})`,
+        queue_id: result.data.queueId,
+        collection: COLLECTION_SCRATCHPAD,
+      },
+      scoped
+    );
   } catch (error) {
     return {
       success: false,

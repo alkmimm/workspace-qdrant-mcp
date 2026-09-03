@@ -29,8 +29,7 @@ import {
   FIELD_CONTENT,
   FIELD_TITLE,
 } from '../common/native-bridge.js';
-import { TENANT_GLOBAL } from '../constants/tenants.js';
-import { resolveProjectIdentity } from './branch-scope.js';
+import { resolveScopedTenant } from './tenant-scope.js';
 import { resolveScratchpadOrigin } from './scratchpad-origin.js';
 import { applyByteBudget } from './response-budget.js';
 import { DEFAULT_MAX_RESPONSE_BYTES } from './search-types.js';
@@ -149,20 +148,20 @@ export class ScratchpadTool {
   }
 
   /**
-   * Resolve the tenant whose notes the action targets. Mirrors the store path:
-   * explicit projectId → project detected from the effective cwd → global. No
-   * sessionState here (the tool is stateless); pass the tenant_id seen in a
-   * search/list result as projectId to target a specific project's notes.
+   * Resolve the tenant whose notes the action targets, through the SAME shared
+   * resolver every project-scoped write uses: explicit projectId → the project
+   * detected from the effective cwd → global. There is no session project rung
+   * here (the tool is stateless), which is exactly why this path never suffered
+   * the store misroute — pass the tenant_id seen in a search/list result as
+   * projectId to target a specific project's notes.
    */
   private async resolveTenant(projectId: string | undefined): Promise<string> {
-    if (projectId && projectId.trim()) return projectId.trim();
-    try {
-      const identity = await resolveProjectIdentity(this.projectDetector, undefined);
-      if (identity.projectId) return identity.projectId;
-    } catch {
-      // fall through to global
-    }
-    return TENANT_GLOBAL;
+    const scoped = await resolveScopedTenant({
+      explicitProjectId: projectId,
+      projectDetector: this.projectDetector,
+      stateManager: this.stateManager,
+    });
+    return scoped.tenantId;
   }
 
   async execute(options: ScratchpadOptions): Promise<ScratchpadResponse> {
