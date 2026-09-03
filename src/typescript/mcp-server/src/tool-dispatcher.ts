@@ -29,7 +29,7 @@ import { handleGraph } from './tools/graph.js';
 import { getQdrantClient } from './clients/qdrant-client-factory.js';
 import { PROJECTS_COLLECTION } from './tools/retrieve-types.js';
 import { runSearchEval } from './tools/search-eval.js';
-import { resolveScopedTenant, describeScope } from './tools/tenant-scope.js';
+import { resolveScopedTenant } from './tools/tenant-scope.js';
 import {
   ensureClientProjectActive,
   ensureProjectFresh,
@@ -223,9 +223,11 @@ async function storeLibrary(
 
   const result = await components.storeTool.store(options);
   if (!result.success || scoped.source === 'fallback') return result;
+  // StoreTool's own message already carries `libraries/<tenant>`, so only the
+  // project PATH is added here — repeating the tenant id would just be noise.
   return {
     ...result,
-    message: `${result.message} (${describeScope(scoped)})`,
+    ...(scoped.projectPath ? { message: `${result.message} — ${scoped.projectPath}` } : {}),
     project_id: scoped.tenantId,
     ...(scoped.projectPath ? { project_path: scoped.projectPath } : {}),
   };
