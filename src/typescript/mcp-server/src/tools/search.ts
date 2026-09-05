@@ -13,10 +13,7 @@ import { randomUUID } from 'node:crypto';
 import type { QdrantClient } from '@qdrant/js-client-rest';
 import { getQdrantClient } from '../clients/qdrant-client-factory.js';
 import { effectivenessTracker } from '../clients/effectiveness-signals.js';
-import {
-  createQueryTranslatorFromEnv,
-  type QueryTranslator,
-} from '../clients/query-translator.js';
+import { createQueryTranslatorFromEnv, type QueryTranslator } from '../clients/query-translator.js';
 import { fuseQueryLegs } from './search-query-fusion.js';
 import { resolveTranslatedQuery } from './search-translated-leg.js';
 import { recordTranslatedLegHits, recordTranslatedLegSkipped } from '../telemetry/metrics.js';
@@ -60,8 +57,10 @@ import {
   applyEffectiveBranch,
   concreteBranchFilter,
   resolveFallbackBranch,
+  resolveProjectIdentity,
 } from './branch-scope.js';
 import { worktreeReadNote } from './worktree-note.js';
+import { projectEcho } from './project-echo.js';
 
 import { determineCollections } from './search-filters.js';
 import { diagnoseEmptyResult, EMPTY_DIAGNOSIS_PROBE_LIMIT } from './empty-diagnosis.js';
@@ -270,6 +269,18 @@ export class SearchTool {
     if (shaped.results.length > 0) {
       const wtNote = worktreeReadNote();
       if (wtNote) shaped.worktree = wtNote;
+    }
+    // Name the project the answer came from and HOW it was resolved (cwd /
+    // sticky-cwd / projectId): field feedback — a cwd-less search answered from
+    // the previous repo via the sticky cwd and nothing in the envelope said so.
+    if ((options.scope ?? 'project') === 'project') {
+      const identity = await resolveProjectIdentity(
+        this.projectDetector,
+        options.projectId,
+        true,
+        this._stateManager ?? undefined
+      );
+      Object.assign(shaped, projectEcho(identity, options.projectId));
     }
     return shaped;
   }

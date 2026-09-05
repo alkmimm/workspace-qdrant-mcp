@@ -39,7 +39,9 @@
       "prompt": "Which schema migration creates the `token_savings` SQL view? Answer with the migration file path.",
       "expected_paths": [
         "v38.rs",
-        "v44.rs"
+        "v44.rs",
+        "v45.rs",
+        "v46.rs"
       ]
     },
     {

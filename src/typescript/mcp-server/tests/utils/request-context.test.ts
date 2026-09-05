@@ -46,6 +46,7 @@ describe('request-context', () => {
       expect(resolveStickyCwd({ bodyCwd: 'C:\\Users\\x\\proj' })).toEqual({
         bind: 'C:\\Users\\x\\proj',
         sticky: 'C:\\Users\\x\\proj',
+        bindSource: 'body',
       });
     });
 
@@ -62,6 +63,7 @@ describe('request-context', () => {
       // it only rebinds the remembered one for project detection.
       expect(resolveStickyCwd({ stickyCwd: '/remembered/proj' })).toEqual({
         bind: '/remembered/proj',
+        bindSource: 'sticky',
       });
     });
 
@@ -69,6 +71,7 @@ describe('request-context', () => {
       expect(resolveStickyCwd({ bodyCwd: '/new/proj', stickyCwd: '/old/proj' })).toEqual({
         bind: '/new/proj',
         sticky: '/new/proj',
+        bindSource: 'body',
       });
     });
 

@@ -11,7 +11,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 /**
@@ -167,6 +167,43 @@ function runGit(repoRoot: string, args: ReadonlyArray<string>): string | null {
     });
     const trimmed = out.trim();
     return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Branch checked out in the linked worktree `<mainRepoRoot>/.claude/worktrees/<name>`,
+ * read from the MAIN checkout's `.git/worktrees/<id>/HEAD`. No git spawn, and
+ * nothing is read from the worktree's own path beyond its `.git` gitlink under
+ * the main folder — the worktree path a client reports is a HOST path the
+ * server (in a container) cannot open. `<id>` is normally the directory name;
+ * git disambiguates collisions with a suffix, so the gitlink's recorded id is
+ * preferred when readable. Returns null when detached or unreadable.
+ */
+export function readLinkedWorktreeBranch(
+  mainRepoRoot: string,
+  worktreeName: string
+): string | null {
+  try {
+    let id = worktreeName;
+    try {
+      const gitlink = readFileSync(
+        join(mainRepoRoot, '.claude', 'worktrees', worktreeName, '.git'),
+        'utf-8'
+      );
+      const m = /^gitdir:\s*(.+?)\s*$/m.exec(gitlink);
+      const last = m?.[1]
+        ?.replace(/[\\/]+$/, '')
+        .split(/[\\/]/)
+        .pop();
+      if (last) id = last;
+    } catch {
+      // No gitlink readable here — fall back to the directory name.
+    }
+    const head = readFileSync(join(mainRepoRoot, '.git', 'worktrees', id, 'HEAD'), 'utf-8').trim();
+    const ref = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
+    return ref?.[1] ?? null;
   } catch {
     return null;
   }

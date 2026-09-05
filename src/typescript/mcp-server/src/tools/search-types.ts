@@ -9,6 +9,7 @@ import {
   COLLECTION_SCRATCHPAD,
 } from '../common/native-bridge.js';
 import type { WorktreeReadNote } from './worktree-note.js';
+import type { ProjectSource } from './project-echo.js';
 export const PROJECTS_COLLECTION = COLLECTION_PROJECTS;
 export const LIBRARIES_COLLECTION = COLLECTION_LIBRARIES;
 export const SCRATCHPAD_COLLECTION = COLLECTION_SCRATCHPAD;
@@ -42,7 +43,6 @@ export const DEFAULT_MAX_BYTES_PER_HIT = 1500;
  *  `SearchResponse.budget_truncated` reports how many. ~24k chars ≈ 6k tokens,
  *  under the ~25k informal client budget. Set `maxResponseBytes: 0` to disable. */
 export const DEFAULT_MAX_RESPONSE_BYTES = 24000;
-
 
 // Tag expansion defaults
 export const DEFAULT_EXPANSION_WEIGHT = 0.5;
@@ -286,6 +286,14 @@ export interface SearchResponse {
   collections_searched: string[];
   status?: 'ok' | 'uncertain';
   status_reason?: string;
+  /** The project the search answered from (project scope only): tenant id,
+   *  registered path, and HOW it was resolved — `cwd` (this call's cwd),
+   *  `sticky-cwd` (a cwd remembered from an earlier call in the session: the
+   *  one case where a stale project can answer silently) or `projectId`.
+   *  Absent for scope "all"/"global" and when no project resolved. */
+  project_id?: string;
+  project_path?: string;
+  project_source?: ProjectSource;
   /** One-line in-band teaching hint, attached only when the results contain
    *  code symbols — points the agent at the `graph` tool for callers/impact.
    *  Subagents never receive the server's MCP `instructions`, so a hint carried

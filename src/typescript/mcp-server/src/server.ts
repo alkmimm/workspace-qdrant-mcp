@@ -124,7 +124,12 @@ export class WorkspaceQdrantMcpServer {
     }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      return this.handleToolCall(request.params.name, request.params.arguments, components, sessionState);
+      return this.handleToolCall(
+        request.params.name,
+        request.params.arguments,
+        components,
+        sessionState
+      );
     });
 
     server.onerror = (error): void => {
@@ -155,7 +160,7 @@ export class WorkspaceQdrantMcpServer {
     // so SUBSEQUENT calls that omit `cwd` still resolve the project, instead of
     // every cwd-less call failing with "Could not detect project". Precedence:
     //   header > body `cwd` > session sticky cwd > WQM_DEFAULT_HOST_CWD > process.cwd().
-    const { bind, sticky } = resolveStickyCwd({
+    const { bind, sticky, bindSource } = resolveStickyCwd({
       headerCwd: getRequestContext()?.hostCwd,
       bodyCwd: typeof args?.['cwd'] === 'string' ? (args['cwd'] as string) : undefined,
       stickyCwd: sessionState.lastHostCwd,
@@ -167,7 +172,12 @@ export class WorkspaceQdrantMcpServer {
       // exactly the dominant HTTP path (body-`cwd` / sticky-cwd calls), so
       // every search event fell back to the per-process session key —
       // cross-linking followup/escalation signals between concurrent clients.
-      return runWithRequestContext({ ...getRequestContext(), hostCwd: bind }, () =>
+      const bound = {
+        ...getRequestContext(),
+        hostCwd: bind,
+        ...(bindSource ? { cwdSource: bindSource } : {}),
+      };
+      return runWithRequestContext(bound, () =>
         dispatchToolCall(toolName, args, components, sessionState)
       );
     }

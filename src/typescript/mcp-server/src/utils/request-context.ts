@@ -32,7 +32,17 @@ export interface RequestContext {
    * on the anonymous `initialize` request.
    */
   mcpSessionId?: string;
+  /**
+   * Where `hostCwd` came from — the transport header, the tool-body `cwd`, or
+   * the session's sticky cwd remembered from an EARLIER call. Surfaces in read
+   * responses as `project_source` so a call that silently rode a stale sticky
+   * cwd (and answered from the previous repo) is legible to the caller.
+   */
+  cwdSource?: CwdSource;
 }
+
+/** Provenance of the effective host cwd bound to a request. */
+export type CwdSource = 'header' | 'body' | 'sticky';
 
 const storage = new AsyncLocalStorage<RequestContext>();
 
@@ -76,7 +86,16 @@ export function getEffectiveCwd(): string {
  * and `\` separators (a Windows-host cwd over UNC).
  */
 export function getWorktreeContext(): { name: string; root: string } | undefined {
-  const cwd = getEffectiveCwd();
+  return worktreeContextOf(getEffectiveCwd());
+}
+
+/**
+ * Path-shape worktree detection for an arbitrary cwd string: a path inside
+ * `.claude/worktrees/<name>` (either separator). Shared by the read tools'
+ * worktree note (via {@link getWorktreeContext}) and by scratchpad provenance,
+ * which applies it to the cwd it stamps as `origin_cwd`.
+ */
+export function worktreeContextOf(cwd: string): { name: string; root: string } | undefined {
   const m = /^(.*[/\\]\.claude[/\\]worktrees[/\\]([^/\\]+))(?:[/\\].*)?$/.exec(cwd);
   if (!m || !m[1] || !m[2]) return undefined;
   return { root: m[1], name: m[2] };
@@ -96,6 +115,8 @@ export interface StickyCwdResolution {
    * (header or body `cwd`) was present this call.
    */
   sticky?: string;
+  /** Which source `bind` came from; absent whenever `bind` is absent. */
+  bindSource?: 'body' | 'sticky';
 }
 
 /**
@@ -135,6 +156,9 @@ export function resolveStickyCwd(opts: {
   // No header: bind the body cwd if given, else fall back to the sticky value
   // remembered from an earlier call in this session.
   const effective = body ?? sticky;
-  if (effective) result.bind = effective;
+  if (effective) {
+    result.bind = effective;
+    result.bindSource = body ? 'body' : 'sticky';
+  }
   return result;
 }

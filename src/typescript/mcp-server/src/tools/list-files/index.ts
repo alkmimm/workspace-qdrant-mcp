@@ -27,6 +27,8 @@ import {
   resolveFallbackBranch,
   resolveProjectIdentity,
 } from '../branch-scope.js';
+import { projectEcho } from '../project-echo.js';
+import { SUMMARY_SCAN_CAP, assembleSummaryResponse } from './summary.js';
 
 /**
  * Approximate per-file byte cost the agent would pay if they ran
@@ -181,6 +183,13 @@ export class ListFilesTool {
       depth,
       limit
     );
+    if (response.success) {
+      // Read-side project echo (shared with search/grep/retrieve/graph): the
+      // tenant listed and how it was resolved. `projectPath` is already a field.
+      const echo = projectEcho(identity, options.projectId);
+      if (echo.project_id) response.project_id = echo.project_id;
+      if (echo.project_source) response.project_source = echo.project_source;
+    }
     this.finishList(eventId, response, startTime);
     return response;
   }
@@ -257,6 +266,21 @@ export class ListFilesTool {
 
     const submodules = this.stateManager.listSubmodules(watchFolderId).data;
 
+    if (format === 'summary') {
+      return assembleSummaryResponse({
+        files,
+        submodules,
+        basePath,
+        depth,
+        limit,
+        totalMatching,
+        projectPath,
+        componentSummaries,
+        options,
+        partialScan: files.length >= SUMMARY_SCAN_CAP,
+      });
+    }
+
     return this.assembleResponse(
       files,
       submodules,
@@ -305,10 +329,24 @@ export class ListFilesTool {
       let lo = 1; // always keep at least one entry
       let hi = pageFiles.length - 1;
       let best = 1;
-      let bestRender = renderFiles(pageFiles.slice(0, 1), submodules, basePath, format, depth, limit);
+      let bestRender = renderFiles(
+        pageFiles.slice(0, 1),
+        submodules,
+        basePath,
+        format,
+        depth,
+        limit
+      );
       while (lo <= hi) {
         const mid = (lo + hi) >> 1;
-        const probe = renderFiles(pageFiles.slice(0, mid), submodules, basePath, format, depth, limit);
+        const probe = renderFiles(
+          pageFiles.slice(0, mid),
+          submodules,
+          basePath,
+          format,
+          depth,
+          limit
+        );
         if (probe.listing.length <= budget) {
           best = mid;
           bestRender = probe;
@@ -376,10 +414,12 @@ export class ListFilesTool {
       ? Buffer.from(options.cursor, 'base64').toString('utf8')
       : undefined;
 
-    const pageSize = Math.min(
-      Math.max(options.pageSize ?? options.limit ?? DEFAULT_LIMIT, 1),
-      MAX_LIMIT
-    );
+    // `summary` aggregates over EVERY matching file (see ./summary.ts): one
+    // path-only scan up to SUMMARY_SCAN_CAP, no cursor. tree/flat stay paged.
+    const scanAll = options.format === 'summary';
+    const pageSize = scanAll
+      ? SUMMARY_SCAN_CAP
+      : Math.min(Math.max(options.pageSize ?? options.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
 
     const baseOpts: Parameters<typeof this.stateManager.listTrackedFiles>[0] = { watchFolderId };
     if (basePath) baseOpts.path = basePath;
@@ -400,7 +440,7 @@ export class ListFilesTool {
 
     // Paginated fetch: add cursor and page-size limit
     const pageOpts = { ...baseOpts, limit: pageSize };
-    if (afterPath) pageOpts.afterPath = afterPath;
+    if (afterPath && !scanAll) pageOpts.afterPath = afterPath;
 
     const filesResult = this.stateManager.listTrackedFiles(pageOpts);
     if (filesResult.status === 'degraded') {
@@ -445,7 +485,6 @@ export class ListFilesTool {
     }
     return { components: undefined, componentSummaries: undefined };
   }
-
 }
 
 function errorResponse(message: string, basePath: string, format: ListFormat): ListResponse {

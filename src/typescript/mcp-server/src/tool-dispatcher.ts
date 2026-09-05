@@ -192,7 +192,8 @@ async function dispatchStore(
     return storeUrl(args, components.stateManager, components.projectDetector, sessionState);
   if (storeType === 'scratchpad')
     return storeScratchpad(args, components.stateManager, components.projectDetector, sessionState);
-  if (storeType === 'feedback') return storeFeedback(args, components.stateManager, sessionState);
+  if (storeType === 'feedback')
+    return storeFeedback(args, components.stateManager, sessionState, components.projectDetector);
   return storeLibrary(args, components, sessionState);
 }
 

@@ -11,6 +11,7 @@ import {
   FIELD_CONTENT,
 } from '../common/native-bridge.js';
 import { VECTOR_KEYS, stripServedNoise } from '../common/payload-noise.js';
+import type { ProjectSource } from './project-echo.js';
 export const PROJECTS_COLLECTION = COLLECTION_PROJECTS;
 export const LIBRARIES_COLLECTION = COLLECTION_LIBRARIES;
 export const RULES_COLLECTION = COLLECTION_RULES;
@@ -61,6 +62,12 @@ export interface RetrieveResponse {
   message?: string;
   /** Short, actionable recovery guidance for the caller. */
   hint?: string;
+  /** The project a projects/scratchpad read resolved to and how (`cwd` |
+   *  `sticky-cwd` | `projectId`) — the read-side echo shared with search /
+   *  grep / list / graph. Absent for libraries/rules and on failures. */
+  project_id?: string;
+  project_path?: string;
+  project_source?: ProjectSource;
 }
 
 export interface RetrieveToolConfig {
@@ -90,10 +97,7 @@ export function getCollectionName(collection: RetrieveCollectionType): string {
  * ({@link ../common/payload-noise.ts}): the content field `retrieve` already
  * lifts into `document.content`, plus the raw vectors.
  */
-const RETRIEVE_EXTRA_DROP_KEYS: readonly string[] = [
-  FIELD_CONTENT,
-  ...VECTOR_KEYS,
-];
+const RETRIEVE_EXTRA_DROP_KEYS: readonly string[] = [FIELD_CONTENT, ...VECTOR_KEYS];
 
 /**
  * Extract metadata from a payload for serving, dropping content, vectors, the

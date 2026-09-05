@@ -14,12 +14,23 @@
  *
  * All fields are best-effort ATTRIBUTION, never scoping filters: a field the
  * server cannot determine is omitted, not fabricated.
+ *
+ * Worktree cwd (2026-09-05): a client working in `.claude/worktrees/<name>`
+ * resolves to the MAIN project (worktree content is indexed under the main
+ * folder), so the session branch and `getCurrentBranch(projectPath)` both name
+ * the main checkout's branch — and `isWorktree(projectPath)` is false. A note
+ * written from a worktree was therefore stamped with the wrong branch and
+ * `origin_worktree:false`, while `search`/`grep` on the same cwd emitted their
+ * worktree note. The shape of the cwd being stamped as `origin_cwd` now
+ * decides: inside a worktree the branch is read from the main checkout's
+ * `.git/worktrees/<id>/HEAD` (the worktree path itself is a HOST path the
+ * server, in a container, cannot open), and when that is unreadable the branch
+ * is omitted rather than borrowed.
  */
-
 import type { SessionState } from '../server-types.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
-import { getRequestContext, getEffectiveCwd } from '../utils/request-context.js';
-import { getCurrentBranch, isWorktree } from '../utils/git-utils.js';
+import { getRequestContext, getEffectiveCwd, worktreeContextOf } from '../utils/request-context.js';
+import { getCurrentBranch, isWorktree, readLinkedWorktreeBranch } from '../utils/git-utils.js';
 import { resolveProjectIdentity } from './branch-scope.js';
 
 /** Provenance fields, named exactly as persisted in the Qdrant payload. */
@@ -29,8 +40,7 @@ export interface ScratchpadOrigin {
   origin_worktree?: boolean;
 }
 
-/** The slice of session git state the origin resolver consumes. */
-export type OriginSessionState = Pick<SessionState, 'currentBranch' | 'isWorktree'>;
+type OriginSessionState = Pick<SessionState, 'currentBranch' | 'isWorktree'>;
 
 /**
  * The client cwd to attribute a write to, or `undefined` when unknowable.
@@ -43,53 +53,88 @@ export type OriginSessionState = Pick<SessionState, 'currentBranch' | 'isWorktre
  */
 function resolveOriginCwd(): string | undefined {
   const ctx = getRequestContext();
-  if (ctx?.hostCwd && ctx.hostCwd.length > 0) return ctx.hostCwd;
+  if (ctx?.hostCwd !== undefined && ctx.hostCwd.length > 0) return ctx.hostCwd;
   if (!ctx) return getEffectiveCwd();
   return undefined;
 }
 
+/** Registered path of the project the cwd resolves to, or `undefined`. */
+async function detectProjectPath(
+  projectDetector: ProjectDetector | undefined
+): Promise<string | undefined> {
+  if (!projectDetector) return undefined;
+  try {
+    return (await resolveProjectIdentity(projectDetector, undefined)).projectPath;
+  } catch {
+    return undefined;
+  }
+}
+
+function nonEmpty(value: string | null | undefined): value is string {
+  return value !== null && value !== undefined && value !== '';
+}
+
 /**
- * Resolve write-time provenance for a scratchpad create/update.
+ * Resolve the provenance to stamp on a scratchpad write.
  *
- * Branch resolution order: explicit `branch` arg (the caller knows best —
- * e.g. a /batch worker in a worktree the server cannot see) → the session's
- * cached git state (refreshed ≤5s ago by `ensureProjectFresh`) → best-effort
- * detection from the effective cwd (the stateless `scratchpad` tool has no
- * session). Origin means "where the write came from": when a note targets
- * another project via explicit projectId, the writer's own location is still
- * the correct attribution.
+ * Precedence for `origin_branch`: explicit `branch` argument > the linked
+ * worktree's HEAD when the stamped cwd is inside `.claude/worktrees/<name>` >
+ * the session's current branch > the registered project's checked-out branch.
+ * `origin_worktree` is true whenever the stamped cwd has the worktree path
+ * shape, regardless of whether the branch could be read.
  */
 export async function resolveScratchpadOrigin(params: {
   explicitBranch?: string | undefined;
   sessionState?: OriginSessionState | undefined;
   projectDetector?: ProjectDetector | undefined;
+  /**
+   * Registered path of the project the write is scoped to (from
+   * `resolveScopedTenant`). Lets a worktree cwd resolve its branch without a
+   * second detection pass; when absent, `projectDetector` is consulted.
+   */
+  projectPath?: string | undefined;
 }): Promise<ScratchpadOrigin> {
   const origin: ScratchpadOrigin = {};
 
   const cwd = resolveOriginCwd();
-  if (cwd) origin.origin_cwd = cwd;
+  if (nonEmpty(cwd)) origin.origin_cwd = cwd;
 
   const explicit = params.explicitBranch?.trim();
-  if (explicit && explicit !== '*') origin.origin_branch = explicit;
+  if (nonEmpty(explicit) && explicit !== '*') origin.origin_branch = explicit;
+
+  // Path shape of the cwd being stamped identifies a linked worktree (the same
+  // detection the read tools use for their worktree note). Its branch is NOT
+  // the session's nor the main checkout's: read the worktree's HEAD via the
+  // main repo.
+  const wt = nonEmpty(cwd) ? worktreeContextOf(cwd) : undefined;
+  if (wt) {
+    origin.origin_worktree = true;
+    if (origin.origin_branch === undefined) {
+      const mainPath = params.projectPath ?? (await detectProjectPath(params.projectDetector));
+      const branch = nonEmpty(mainPath) ? readLinkedWorktreeBranch(mainPath, wt.name) : null;
+      if (nonEmpty(branch)) origin.origin_branch = branch;
+      // else: unknown — omitted, never borrowed from the main checkout.
+    }
+    return origin;
+  }
 
   const session = params.sessionState;
   if (session) {
-    if (origin.origin_branch === undefined && session.currentBranch) {
+    if (origin.origin_branch === undefined && nonEmpty(session.currentBranch)) {
       origin.origin_branch = session.currentBranch;
     }
     origin.origin_worktree = session.isWorktree;
     return origin;
   }
 
-  if (!params.projectDetector) return origin;
   try {
-    const identity = await resolveProjectIdentity(params.projectDetector, undefined);
-    if (identity.projectPath) {
+    const projectPath = params.projectPath ?? (await detectProjectPath(params.projectDetector));
+    if (nonEmpty(projectPath)) {
       if (origin.origin_branch === undefined) {
-        const branch = getCurrentBranch(identity.projectPath);
-        if (branch && branch !== 'HEAD') origin.origin_branch = branch;
+        const branch = getCurrentBranch(projectPath);
+        if (nonEmpty(branch) && branch !== 'HEAD') origin.origin_branch = branch;
       }
-      origin.origin_worktree = isWorktree(identity.projectPath);
+      origin.origin_worktree = isWorktree(projectPath);
     }
   } catch {
     // Best-effort enrichment: detection failure must never block the write.

@@ -41,6 +41,7 @@ import { whitespaceSensitivityHint } from './exact-hints.js';
 import { lookupTestFlags } from './test-flag.js';
 import { fetchIndexingProgress } from './search-helpers.js';
 import { worktreeReadNote } from './worktree-note.js';
+import { projectEcho, type ProjectEcho, type ProjectSource } from './project-echo.js';
 
 /**
  * Conservative proxy for the size of the files that contain a grep match.
@@ -204,6 +205,11 @@ export interface GrepResponse {
   truncated: boolean;
   latency_ms: number;
   message?: string;
+  /** The project the grep ran against (project scope): tenant id, registered
+   *  path, and how it was resolved (`cwd` | `sticky-cwd` | `projectId`). */
+  project_id?: string;
+  project_path?: string;
+  project_source?: ProjectSource;
   /** Attached only when the response byte budget dropped trailing matches:
    *  `dropped` is how many were cut (the kept set always has >=1). Narrow
    *  with pathGlob, lower contextLines, or raise `maxResponseBytes` — or
@@ -561,7 +567,10 @@ export class GrepTool {
       startTime,
       eventId,
       shaping,
-      fallbackBranch
+      fallbackBranch,
+      // Read-side project echo, computed here where the explicit projectId and
+      // the registered path are in scope; executeSearch only knows the tenant.
+      projectEcho({ projectId: tenantId, projectPath }, projectId)
     );
   }
 
@@ -604,7 +613,8 @@ export class GrepTool {
     startTime: number,
     eventId: string,
     shaping: GrepShapingOptions,
-    fallbackBranch?: string
+    fallbackBranch?: string,
+    echo: ProjectEcho = {}
   ): Promise<GrepResponse> {
     try {
       // Paging is a client-side slice over the daemon's deterministic order
@@ -828,6 +838,7 @@ export class GrepTool {
       if (shaping.countOnly === true) {
         return {
           success: true,
+          ...echo,
           total_matches: totalMatchesOut,
           truncated,
           latency_ms: latencyMs,
@@ -836,6 +847,7 @@ export class GrepTool {
       }
       return {
         success: true,
+        ...echo,
         matches: shaped.matches,
         ...(wtNote ? { worktree: wtNote } : {}),
         // Report the deduped count. When the daemon truncated, its

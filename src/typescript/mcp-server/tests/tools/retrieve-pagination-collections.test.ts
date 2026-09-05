@@ -107,12 +107,14 @@ describe('RetrieveTool - pagination', () => {
       offset: 10,
     });
 
+    // Qdrant's scroll `offset` is a point-id CURSOR, not a numeric skip, so the
+    // skip is emulated client-side: over-fetch offset + limit + 1 (10 + 10 + 1)
+    // and slice locally — no `offset` ever reaches Qdrant.
     expect(scrollMock).toHaveBeenCalledWith(
       'projects',
-      expect.objectContaining({
-        offset: 10,
-      })
+      expect.not.objectContaining({ offset: expect.anything() })
     );
+    expect(scrollMock).toHaveBeenCalledWith('projects', expect.objectContaining({ limit: 21 }));
   });
 
   it('should indicate hasMore when more results exist', async () => {

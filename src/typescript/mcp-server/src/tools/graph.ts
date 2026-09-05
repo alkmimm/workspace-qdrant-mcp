@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import { resolveProjectIdentity } from './branch-scope.js';
+import { projectEcho } from './project-echo.js';
 import type {
   ImpactAnalysisRequest,
   PageRankRequest,
@@ -99,15 +100,23 @@ function computeNodeId(
     .slice(0, 32);
 }
 
-async function resolveTenant(args: JsonObject, projectDetector: ProjectDetector): Promise<string> {
+async function resolveTenantIdentity(
+  args: JsonObject,
+  projectDetector: ProjectDetector
+): Promise<{ projectId: string; projectPath?: string }> {
   const explicit = str(args, 'projectId') ?? str(args, 'tenantId');
-  if (explicit) return explicit;
+  if (explicit) return { projectId: explicit };
   // Resolve the caller's cwd to its project exactly like `search`/`grep`/`list`
   // (`getEffectiveCwd()` honours the `cwd` arg / X-MCP-Host-Cwd header). This is
   // what keeps `graph` on the same project as the rest of the tools.
   // `fallbackToSoleProject` covers the single-project convenience case.
   const detected = await resolveProjectIdentity(projectDetector, undefined);
-  if (detected.projectId) return detected.projectId;
+  if (detected.projectId) {
+    return {
+      projectId: detected.projectId,
+      ...(detected.projectPath ? { projectPath: detected.projectPath } : {}),
+    };
+  }
   // Deliberately NO "first active project" fallback: with multiple projects and
   // an unresolvable cwd it picked an arbitrary (wrong) project and returned its
   // graph silently. Fail loudly instead.
@@ -190,9 +199,28 @@ async function runGraphAction(
   }
   const args = rawArgs ?? {};
   const action = str(args, 'action') ?? 'stats';
-  const tenant = await resolveTenant(args, projectDetector);
+  const identity = await resolveTenantIdentity(args, projectDetector);
   const edgeTypes = strArray(args, 'edgeTypes');
+  const result = await dispatchGraphAction(
+    action,
+    args,
+    identity.projectId,
+    edgeTypes,
+    daemonClient
+  );
+  // Read-side project echo (shared with search/grep/list/retrieve): which
+  // tenant the graph answered for and how it was resolved.
+  const explicit = str(args, 'projectId') ?? str(args, 'tenantId');
+  return { ...result, ...projectEcho(identity, explicit) };
+}
 
+async function dispatchGraphAction(
+  action: string,
+  args: JsonObject,
+  tenant: string,
+  edgeTypes: ReturnType<typeof strArray>,
+  daemonClient: DaemonClient
+): Promise<Record<string, unknown>> {
   switch (action) {
     case 'stats': {
       const r = await daemonClient.getGraphStats({ tenant_id: tenant });

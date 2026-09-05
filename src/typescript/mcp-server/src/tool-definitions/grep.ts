@@ -82,7 +82,7 @@ export const grepToolDefinition = {
       cwd: {
         type: 'string',
         description:
-          'Absolute path of your current working directory. Pass this so the server can auto-detect the project over HTTP (it cannot otherwise observe your location). Ignored when projectId is provided.',
+          'Absolute path of your current working directory. Pass this so the server can auto-detect the project over HTTP (it cannot otherwise observe your location). The response echoes project_id + project_source (cwd | sticky-cwd | projectId): check they name the repo you meant — a cwd-less call may ride the session sticky cwd and answer from the previous project. Ignored when projectId is provided.',
       },
     },
     required: ['pattern'],
