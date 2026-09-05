@@ -29,9 +29,10 @@ import {
   FIELD_CONTENT,
   FIELD_TITLE,
 } from '../common/native-bridge.js';
-import { resolveScopedTenant } from './tenant-scope.js';
+import { resolveScopedTenant, type ScopedTenant } from './tenant-scope.js';
 import { resolveScratchpadOrigin } from './scratchpad-origin.js';
 import { applyByteBudget } from './response-budget.js';
+import { scopedTenantEcho, type ProjectSource } from './project-echo.js';
 import { DEFAULT_MAX_RESPONSE_BYTES } from './search-types.js';
 
 /** Preview length (chars) for summary-mode list entries. */
@@ -120,6 +121,11 @@ export interface ScratchpadResponse {
   hint?: string;
   queue_id?: string;
   tenant_id?: string;
+  /** Read-side project echo on list (parity with search/grep/list/retrieve/
+   *  graph): the tenant answered from and how it was resolved. */
+  project_id?: string;
+  project_path?: string;
+  project_source?: ProjectSource;
 }
 
 export interface ScratchpadToolConfig {
@@ -155,20 +161,20 @@ export class ScratchpadTool {
    * the store misroute — pass the tenant_id seen in a search/list result as
    * projectId to target a specific project's notes.
    */
-  private async resolveTenant(projectId: string | undefined): Promise<string> {
-    const scoped = await resolveScopedTenant({
+  private async resolveTenant(projectId: string | undefined): Promise<ScopedTenant> {
+    return resolveScopedTenant({
       explicitProjectId: projectId,
       projectDetector: this.projectDetector,
       stateManager: this.stateManager,
     });
-    return scoped.tenantId;
   }
 
   async execute(options: ScratchpadOptions): Promise<ScratchpadResponse> {
-    const tenantId = await this.resolveTenant(options.projectId);
+    const scoped = await this.resolveTenant(options.projectId);
+    const tenantId = scoped.tenantId;
     switch (options.action) {
       case 'list':
-        return this.list(tenantId, options);
+        return this.list(tenantId, options, scoped);
       case 'delete':
         return this.delete(tenantId, options);
       case 'update':
@@ -182,7 +188,11 @@ export class ScratchpadTool {
     }
   }
 
-  private async list(tenantId: string, options: ScratchpadOptions): Promise<ScratchpadResponse> {
+  private async list(
+    tenantId: string,
+    options: ScratchpadOptions,
+    scoped?: ScopedTenant
+  ): Promise<ScratchpadResponse> {
     const limit = options.limit ?? 50;
     const summary = options.summary ?? true;
     const budget = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
@@ -229,6 +239,7 @@ export class ScratchpadTool {
         entries: kept,
         count: kept.length,
         tenant_id: tenantId,
+        ...(scoped ? scopedTenantEcho(scoped) : {}),
         message: `Found ${kept.length} scratchpad entr${kept.length === 1 ? 'y' : 'ies'} for ${tenantId}`,
       };
       const firstDropped = entries[kept.length];
@@ -242,7 +253,7 @@ export class ScratchpadTool {
       if (total !== undefined) response.total = total;
       if (summary) {
         response.hint =
-          'Entries are summaries (preview + content_length). For one note\'s full ' +
+          "Entries are summaries (preview + content_length). For one note's full " +
           'text use retrieve (collection:"scratchpad", documentId:<id>) or pass ' +
           'summary:false; to find notes by content use search (collection:"scratchpad").';
       }
@@ -353,7 +364,7 @@ export class ScratchpadTool {
           message:
             `No scratchpad entry with point id "${id}" was found for ${tenantId}. ` +
             'Get the id from `scratchpad list` — note that ids are content-derived, ' +
-            'so a prior update changes the note\'s id.',
+            "so a prior update changes the note's id.",
           tenant_id: tenantId,
         },
       };

@@ -22,7 +22,8 @@ import { createHash } from 'node:crypto';
 
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
-import { resolveProjectIdentity } from './branch-scope.js';
+import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
+import { resolveProjectIdentity, type ProjectIdentity } from './branch-scope.js';
 import { projectEcho } from './project-echo.js';
 import type {
   ImpactAnalysisRequest,
@@ -102,20 +103,18 @@ function computeNodeId(
 
 async function resolveTenantIdentity(
   args: JsonObject,
-  projectDetector: ProjectDetector
-): Promise<{ projectId: string; projectPath?: string }> {
+  projectDetector: ProjectDetector,
+  stateManager: SqliteStateManager | undefined
+): Promise<ProjectIdentity & { projectId: string }> {
   const explicit = str(args, 'projectId') ?? str(args, 'tenantId');
-  if (explicit) return { projectId: explicit };
-  // Resolve the caller's cwd to its project exactly like `search`/`grep`/`list`
-  // (`getEffectiveCwd()` honours the `cwd` arg / X-MCP-Host-Cwd header). This is
-  // what keeps `graph` on the same project as the rest of the tools.
-  // `fallbackToSoleProject` covers the single-project convenience case.
-  const detected = await resolveProjectIdentity(projectDetector, undefined);
+  // The SAME shared resolver search/grep/list/retrieve use: an explicit id is
+  // completed with its registered path (so the echo carries project_path here
+  // too); otherwise the caller's cwd resolves (`getEffectiveCwd()` honours the
+  // `cwd` arg / X-MCP-Host-Cwd header) with the sole-project convenience
+  // fallback. This is what keeps `graph` on the same project as the other tools.
+  const detected = await resolveProjectIdentity(projectDetector, explicit, true, stateManager);
   if (detected.projectId) {
-    return {
-      projectId: detected.projectId,
-      ...(detected.projectPath ? { projectPath: detected.projectPath } : {}),
-    };
+    return { ...detected, projectId: detected.projectId };
   }
   // Deliberately NO "first active project" fallback: with multiple projects and
   // an unresolvable cwd it picked an arbitrary (wrong) project and returned its
@@ -184,22 +183,26 @@ function stripOneofMarkers<T>(value: T): T {
 export async function handleGraph(
   rawArgs: Record<string, unknown> | undefined,
   daemonClient: DaemonClient | undefined,
-  projectDetector: ProjectDetector
+  projectDetector: ProjectDetector,
+  stateManager?: SqliteStateManager
 ): Promise<unknown> {
-  return stripOneofMarkers(await runGraphAction(rawArgs, daemonClient, projectDetector));
+  return stripOneofMarkers(
+    await runGraphAction(rawArgs, daemonClient, projectDetector, stateManager)
+  );
 }
 
 async function runGraphAction(
   rawArgs: Record<string, unknown> | undefined,
   daemonClient: DaemonClient | undefined,
-  projectDetector: ProjectDetector
+  projectDetector: ProjectDetector,
+  stateManager: SqliteStateManager | undefined
 ): Promise<unknown> {
   if (!daemonClient) {
     throw new Error('graph requires a connected daemon client (gRPC unavailable)');
   }
   const args = rawArgs ?? {};
   const action = str(args, 'action') ?? 'stats';
-  const identity = await resolveTenantIdentity(args, projectDetector);
+  const identity = await resolveTenantIdentity(args, projectDetector, stateManager);
   const edgeTypes = strArray(args, 'edgeTypes');
   const result = await dispatchGraphAction(
     action,

@@ -324,7 +324,7 @@ async function routeToolInner(
       return handleWorkspaceIndex(args, daemonClient, projectDetector, probeQdrantPointCount);
     }
     case 'graph':
-      return handleGraph(args, daemonClient, projectDetector);
+      return handleGraph(args, daemonClient, projectDetector, components.stateManager);
     case 'search_eval':
       return runSearchEval(searchTool, projectDetector, args);
     default:

@@ -60,7 +60,7 @@ import {
   resolveProjectIdentity,
 } from './branch-scope.js';
 import { worktreeReadNote } from './worktree-note.js';
-import { projectEcho } from './project-echo.js';
+import { projectEcho, recordedIdentity } from './project-echo.js';
 
 import { determineCollections } from './search-filters.js';
 import { diagnoseEmptyResult, EMPTY_DIAGNOSIS_PROBE_LIMIT } from './empty-diagnosis.js';
@@ -271,15 +271,28 @@ export class SearchTool {
       if (wtNote) shaped.worktree = wtNote;
     }
     // Name the project the answer came from and HOW it was resolved (cwd /
-    // sticky-cwd / projectId): field feedback — a cwd-less search answered from
-    // the previous repo via the sticky cwd and nothing in the envelope said so.
-    if ((options.scope ?? 'project') === 'project') {
-      const identity = await resolveProjectIdentity(
-        this.projectDetector,
-        options.projectId,
-        true,
-        this._stateManager ?? undefined
-      );
+    // sticky-cwd / projectId / sole-project): field feedback — a cwd-less search
+    // answered from the previous repo via the sticky cwd and nothing in the
+    // envelope said so. Only tenant-addressed reads carry it: the exact path
+    // treats only scope "all" as unscoped (scope "global" is still tenant-
+    // filtered there) while semantic scope "global" is cross-tenant; and the
+    // libraries/rules collections are not tenant-addressed (parity with retrieve).
+    const scope = options.scope ?? 'project';
+    const tenantScoped = options.exact === true ? scope !== 'all' : scope === 'project';
+    const collection = options.collection;
+    const tenantAddressed =
+      collection === undefined || collection === 'projects' || collection === 'scratchpad';
+    if (tenantScoped && tenantAddressed) {
+      // The pipeline already resolved this identity (and recorded it on the
+      // request); only a cwd-less stdio call has nothing recorded.
+      const identity =
+        recordedIdentity() ??
+        (await resolveProjectIdentity(
+          this.projectDetector,
+          options.projectId,
+          true,
+          this._stateManager ?? undefined
+        ));
       Object.assign(shaped, projectEcho(identity, options.projectId));
     }
     return shaped;

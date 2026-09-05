@@ -53,7 +53,7 @@ function mapProjectRow(row: WatchFolderRow): RegisteredProject {
 function handleTableNotFound<T>(
   error: unknown,
   fallbackData: T,
-  tableName: string,
+  tableName: string
 ): DegradedQueryResult<T> {
   const errorMessage = error instanceof Error ? error.message : String(error);
   if (errorMessage.includes('no such table')) {
@@ -115,10 +115,7 @@ export function canonicalizeHostPath(p: string): string {
   return s;
 }
 
-function queryProjectByPath(
-  db: DatabaseType,
-  projectPath: string,
-): WatchFolderRow | undefined {
+function queryProjectByPath(db: DatabaseType, projectPath: string): WatchFolderRow | undefined {
   const rows = db
     .prepare(`${PROJECT_SELECT_FIELDS} WHERE collection = ?`)
     .all(COLLECTION_PROJECTS) as WatchFolderRow[];
@@ -141,16 +138,29 @@ function queryProjectByPath(
   return best;
 }
 
-function queryProjectById(
-  db: DatabaseType,
-  projectId: string,
-): WatchFolderRow | undefined {
-  return db
+function queryProjectById(db: DatabaseType, projectId: string): WatchFolderRow | undefined {
+  // A tenant with registered linked worktrees has several rows. The MAIN
+  // checkout is the project (its path drives branch scoping and the read
+  // echo's project_path), and a worktree row's path is nested under it
+  // (`<main>/.claude/worktrees/<name>`), so never let rowid order pick the
+  // worktree: prefer the first row that is not nested under another row of
+  // the tenant. Unrelated rows (clones, submodules) keep rowid order. (The
+  // `is_worktree` column is a daemon migration — v31 — that older rows and
+  // test fixtures lack; nesting needs no schema.)
+  const rows = db
     .prepare(
       `${PROJECT_SELECT_FIELDS}
-      WHERE tenant_id = ? AND collection = ?`
+      WHERE tenant_id = ? AND collection = ?
+      ORDER BY rowid ASC`
     )
-    .get(projectId, COLLECTION_PROJECTS) as WatchFolderRow | undefined;
+    .all(projectId, COLLECTION_PROJECTS) as WatchFolderRow[];
+  const nestedUnderAnother = (row: WatchFolderRow): boolean =>
+    rows.some(
+      (other) =>
+        other !== row &&
+        row.path.startsWith(other.path.endsWith('/') ? other.path : `${other.path}/`)
+    );
+  return rows.find((row) => !nestedUnderAnother(row)) ?? rows[0];
 }
 
 // ── Public API ────────────────────────────────────────────────────────────
@@ -162,7 +172,7 @@ function queryProjectById(
  */
 export function getProjectByPath(
   db: DatabaseType | null,
-  projectPath: string,
+  projectPath: string
 ): DegradedQueryResult<RegisteredProject | null> {
   if (!db) return noDatabaseResult(null);
 
@@ -179,7 +189,7 @@ export function getProjectByPath(
  */
 export function getProjectById(
   db: DatabaseType | null,
-  projectId: string,
+  projectId: string
 ): DegradedQueryResult<RegisteredProject | null> {
   if (!db) return noDatabaseResult(null);
 
@@ -195,7 +205,7 @@ export function getProjectById(
  * List all active projects from watch_folders table.
  */
 export function listActiveProjects(
-  db: DatabaseType | null,
+  db: DatabaseType | null
 ): DegradedQueryResult<RegisteredProject[]> {
   if (!db) return noDatabaseResult([]);
 
@@ -224,9 +234,7 @@ export function listActiveProjects(
  * be hidden by the strict-equality filter. The admin UI needs the full
  * inventory to render status pills correctly.
  */
-export function listAllProjects(
-  db: DatabaseType | null,
-): DegradedQueryResult<RegisteredProject[]> {
+export function listAllProjects(db: DatabaseType | null): DegradedQueryResult<RegisteredProject[]> {
   if (!db) return noDatabaseResult([]);
 
   try {

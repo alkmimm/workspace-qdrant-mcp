@@ -68,7 +68,7 @@ import {
 } from '../../utils/component-detector/index.js';
 import { buildTree } from './tree-builder.js';
 import type { SubmoduleEntry } from '../../clients/tracked-files-queries/index.js';
-import { renderTree, renderSummary, renderFlat } from './renderers.js';
+import { renderTree, renderFlat } from './renderers.js';
 import { countFolders } from './filters.js';
 
 // Re-export types for consumers
@@ -272,7 +272,8 @@ export class ListFilesTool {
         submodules,
         basePath,
         depth,
-        limit,
+        // The raw option: summary clamps entries to its own bound, not MAX_LIMIT.
+        requestedLimit: options.limit,
         totalMatching,
         projectPath,
         componentSummaries,
@@ -435,9 +436,6 @@ export class ListFilesTool {
     if (componentBasePaths && componentBasePaths.length > 0)
       baseOpts.componentBasePaths = componentBasePaths;
 
-    // Accurate total: COUNT(*) with all filters except the cursor
-    const totalMatching = this.stateManager.countTrackedFiles(baseOpts);
-
     // Paginated fetch: add cursor and page-size limit
     const pageOpts = { ...baseOpts, limit: pageSize };
     if (afterPath && !scanAll) pageOpts.afterPath = afterPath;
@@ -446,6 +444,15 @@ export class ListFilesTool {
     if (filesResult.status === 'degraded') {
       return { files: null, totalMatching: 0 };
     }
+
+    // Accurate total: COUNT(*) with all filters except the cursor. A summary
+    // scan that stayed under its cap already holds every matching row, so the
+    // count (and its search.db fallback pass) is only paid when paging or when
+    // the scan hit the cap.
+    const totalMatching =
+      scanAll && filesResult.data.length < SUMMARY_SCAN_CAP
+        ? filesResult.data.length
+        : this.stateManager.countTrackedFiles(baseOpts);
 
     return { files: filesResult.data, totalMatching };
   }
@@ -530,11 +537,8 @@ function renderFiles(
   limit: number
 ): { listing: string; renderedCount: number } {
   const root = buildTree(files, submodules, basePath);
+  // `summary` never reaches here: buildListResult routes it to summary.ts.
   switch (format) {
-    case 'summary': {
-      const { text, count } = renderSummary(root, depth, limit);
-      return { listing: text, renderedCount: count };
-    }
     case 'flat': {
       const { text, count } = renderFlat(files, limit);
       return { listing: text, renderedCount: count };

@@ -9,11 +9,18 @@
 import type { ProjectDetector, ProjectInfo } from '../utils/project-detector.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import { getCurrentBranch } from '../utils/git-utils.js';
-import { getEffectiveCwd } from '../utils/request-context.js';
+import {
+  getEffectiveCwd,
+  getRequestContext,
+  type ProjectResolutionSource,
+} from '../utils/request-context.js';
 
 export interface ProjectIdentity {
   projectId: string | undefined;
   projectPath: string | undefined;
+  /** Which rung resolved it (explicit id, the cwd, or the sole registered
+   *  project when the cwd matched none). Absent when nothing resolved. */
+  source?: ProjectResolutionSource;
 }
 
 export async function resolveProjectIdentity(
@@ -29,20 +36,32 @@ export async function resolveProjectIdentity(
     // then gets cross-branch results, including stale per-branch content
     // generations. (The exact/semantic paths did this lookup inline before;
     // it lives here now so every resolveProjectIdentity caller shares it.)
-    return {
+    return record({
       projectId: explicitProjectId,
       projectPath: stateManager?.getProjectById(explicitProjectId).data?.project_path,
-    };
+      source: 'projectId',
+    });
   }
   const projectInfo: ProjectInfo | null = await projectDetector.getProjectInfo(
     getEffectiveCwd(),
     false,
     { fallbackToSoleProject }
   );
-  return {
-    projectId: projectInfo?.projectId,
-    projectPath: projectInfo?.projectPath,
-  };
+  if (!projectInfo) return record({ projectId: undefined, projectPath: undefined });
+  return record({
+    projectId: projectInfo.projectId,
+    projectPath: projectInfo.projectPath,
+    // The detector marks the sole-project convenience fallback: the cwd matched
+    // NO registered project. Read echoes must not call that `cwd`.
+    source: projectInfo.resolvedBy === 'sole-project' ? 'sole-project' : 'cwd',
+  });
+}
+
+/** Record the resolution on the request so the response echo can reuse it. */
+function record(identity: ProjectIdentity): ProjectIdentity {
+  const ctx = getRequestContext();
+  if (ctx) ctx.resolvedIdentity = identity;
+  return identity;
 }
 
 export function resolveEffectiveBranch(params: {

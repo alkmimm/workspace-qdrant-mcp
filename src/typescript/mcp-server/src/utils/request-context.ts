@@ -39,10 +39,40 @@ export interface RequestContext {
    * cwd (and answered from the previous repo) is legible to the caller.
    */
   cwdSource?: CwdSource;
+  /**
+   * The project identity the shared resolver (`resolveProjectIdentity`) last
+   * produced for this request. Lets a tool that already scoped its read reuse
+   * that resolution for the response echo instead of resolving a second time.
+   */
+  resolvedIdentity?: ResolvedProjectIdentity;
 }
 
 /** Provenance of the effective host cwd bound to a request. */
 export type CwdSource = 'header' | 'body' | 'sticky';
+
+/** Which rung of `resolveProjectIdentity` produced a project: an explicit id,
+ *  the effective cwd, or the sole registered project when the cwd matched none. */
+export type ProjectResolutionSource = 'projectId' | 'cwd' | 'sole-project';
+
+export interface ResolvedProjectIdentity {
+  projectId: string | undefined;
+  projectPath: string | undefined;
+  source?: ProjectResolutionSource;
+}
+
+/**
+ * Bind a cwd (and where it came from) into a request context, preserving the
+ * transport-bound fields (mcpSessionId!). The single seam server.ts uses for
+ * body/sticky cwd binding — tested so the sticky provenance the read echo
+ * reports cannot silently detach from the binding.
+ */
+export function withBoundCwd(
+  ctx: RequestContext | undefined,
+  bind: string,
+  bindSource: 'body' | 'sticky' | undefined
+): RequestContext {
+  return { ...ctx, hostCwd: bind, ...(bindSource !== undefined ? { cwdSource: bindSource } : {}) };
+}
 
 const storage = new AsyncLocalStorage<RequestContext>();
 

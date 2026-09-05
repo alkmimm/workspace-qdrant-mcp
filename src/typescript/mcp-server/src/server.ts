@@ -20,6 +20,7 @@ import {
   resolveStickyCwd,
   runWithRequestContext,
 } from './utils/request-context.js';
+import { withBoundCwd } from './utils/request-context.js';
 import {
   SERVER_NAME,
   SERVER_VERSION,
@@ -172,12 +173,7 @@ export class WorkspaceQdrantMcpServer {
       // exactly the dominant HTTP path (body-`cwd` / sticky-cwd calls), so
       // every search event fell back to the per-process session key —
       // cross-linking followup/escalation signals between concurrent clients.
-      const bound = {
-        ...getRequestContext(),
-        hostCwd: bind,
-        ...(bindSource ? { cwdSource: bindSource } : {}),
-      };
-      return runWithRequestContext(bound, () =>
+      return runWithRequestContext(withBoundCwd(getRequestContext(), bind, bindSource), () =>
         dispatchToolCall(toolName, args, components, sessionState)
       );
     }

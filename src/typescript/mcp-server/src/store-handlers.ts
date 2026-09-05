@@ -229,7 +229,12 @@ export async function storeScratchpad(
   const origin = await resolveScratchpadOrigin({
     explicitBranch: args?.['branch'] as string | undefined,
     sessionState,
-    projectPath: scoped.projectPath,
+    projectDetector,
+    // Origin is WHERE THE WRITE CAME FROM: only a cwd-resolved tenant names
+    // the writer's own repo. When the note targets another project (explicit
+    // projectId / session rung) the writer's location is still the attribution
+    // and the detector resolves it from the cwd.
+    cwdProjectPath: scoped.source === 'cwd' ? scoped.projectPath : undefined,
   });
   const payload = buildScratchpadPayload(content, title, tags, origin);
 

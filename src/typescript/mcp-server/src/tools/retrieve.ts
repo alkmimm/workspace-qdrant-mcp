@@ -38,7 +38,7 @@ import {
   concreteBranchFilter,
   collapseResultBranchFields,
 } from './branch-scope.js';
-import { projectEcho } from './project-echo.js';
+import { projectEcho, recordedIdentity } from './project-echo.js';
 import { branchFilterClause } from './search-filters.js';
 // Shared with the help("exact") chapter — see retrieve-hints.ts.
 import { RETRIEVE_ID_FILTER_HINT, RETRIEVE_LOCATION_HINT } from './retrieve-hints.js';
@@ -309,12 +309,16 @@ export class RetrieveTool {
     // scoped collections only — libraries/rules are not tenant-addressed here.
     const collection = options.collection ?? 'projects';
     if (response.success && (collection === 'projects' || collection === 'scratchpad')) {
-      const identity = await resolveProjectIdentity(
-        this.projectDetector,
-        options.projectId,
-        true,
-        this.stateManager ?? undefined
-      );
+      // retrieveInner already resolved (and recorded) this identity; only a
+      // cwd-less stdio call has nothing recorded.
+      const identity =
+        recordedIdentity() ??
+        (await resolveProjectIdentity(
+          this.projectDetector,
+          options.projectId,
+          true,
+          this.stateManager ?? undefined
+        ));
       Object.assign(response, projectEcho(identity, options.projectId));
     }
     return response;
@@ -328,11 +332,14 @@ export class RetrieveTool {
       collection = 'projects',
       filter,
       limit = 10,
-      offset = 0,
+      offset: rawOffset = 0,
       projectId,
       libraryName,
       unknownArgs,
     } = options;
+    // Normalize the page offset like grep does: a negative, fractional or
+    // non-finite value is a client slip, never a Qdrant request parameter.
+    const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
 
     const startTime = Date.now();
     const eventId = randomUUID();
@@ -541,7 +548,10 @@ export class RetrieveTool {
       ...(filter ? { filter } : {}),
       pathLocator: filePath,
       limit: lineNumber !== undefined ? Math.max(limit, 1000) : limit,
-      offset,
+      // A line lookup must see every chunk of the file: a page offset would
+      // skip chunks BEFORE selectChunkForLine runs (it was inert here before
+      // the skip was emulated client-side).
+      offset: lineNumber !== undefined ? 0 : offset,
       projectId,
       libraryName,
       branchScope: branchScope ?? {},
@@ -725,6 +735,17 @@ export class RetrieveTool {
     } = params;
     const branch = branchScope?.branch;
     const fallbackBranch = branchScope?.fallbackBranch;
+
+    // The numeric skip is emulated by over-fetching offset+limit+1 payload-
+    // bearing points; bound it so a deep offset cannot ask Qdrant for an
+    // unbounded page (a line lookup uses limit 1000 with offset 0).
+    const MAX_FILTER_WINDOW = 2000;
+    if (offset + limit + 1 > MAX_FILTER_WINDOW) {
+      return failureResponse(
+        `offset ${offset} + limit ${limit} exceeds the ${MAX_FILTER_WINDOW}-point filter window.`,
+        'Narrow the filter (relative_path / document_id), lower offset or limit, or retrieve by point id.'
+      );
+    }
 
     const scroll = (useBranch: boolean) => {
       const qdrantFilter = this.buildFilter(

@@ -53,6 +53,9 @@ export interface ProjectInfo {
   projectPath: string;
   isActive: boolean;
   gitRemote?: string | undefined;
+  /** Set when the path matched nothing and the sole registered project was
+   *  assumed (see GetProjectInfoOptions.fallbackToSoleProject). */
+  resolvedBy?: 'sole-project';
 }
 
 export interface GetProjectInfoOptions {
@@ -169,7 +172,8 @@ export class ProjectDetector {
       return info;
     }
     if (options.fallbackToSoleProject) {
-      return this.soleRegisteredProject();
+      const sole = this.soleRegisteredProject();
+      return sole ? { ...sole, resolvedBy: 'sole-project' } : null;
     }
     return null;
   }
