@@ -391,6 +391,11 @@ export async function fallbackSearch(
   const queryLower = options.query.toLowerCase();
   const refusedCollections: string[] = [];
   let attemptedCollections = 0;
+  const limit = options.limit ?? DEFAULT_LIMIT;
+  // Honour the caller's page offset (parity with retrieve/grep): over-fetch
+  // deep enough to cover the window, then slice it out locally.
+  const rawOffset = options.offset ?? 0;
+  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
 
   for (const collection of collections) {
     const filter = buildFallbackFilter(collection, options, context);
@@ -402,7 +407,7 @@ export async function fallbackSearch(
     attemptedCollections += 1;
     try {
       const scrollResult = await qdrantClient.scroll(collection, {
-        limit: (options.limit ?? DEFAULT_LIMIT) * 3,
+        limit: (offset + limit) * 3,
         with_payload: true,
         filter,
       });
@@ -414,7 +419,7 @@ export async function fallbackSearch(
     }
   }
 
-  const limitedResults = results.slice(0, options.limit ?? DEFAULT_LIMIT);
+  const limitedResults = results.slice(offset, offset + limit);
   const scope = options.scope ?? 'project';
   const isDegraded = attemptedCollections === 0 && refusedCollections.length > 0;
   const statusReason = isDegraded

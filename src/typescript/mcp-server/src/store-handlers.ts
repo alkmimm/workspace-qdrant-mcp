@@ -229,6 +229,12 @@ export async function storeScratchpad(
   const origin = await resolveScratchpadOrigin({
     explicitBranch: args?.['branch'] as string | undefined,
     sessionState,
+    projectDetector,
+    // Origin is WHERE THE WRITE CAME FROM: only a cwd-resolved tenant names
+    // the writer's own repo. When the note targets another project (explicit
+    // projectId / session rung) the writer's location is still the attribution
+    // and the detector resolves it from the cwd.
+    cwdProjectPath: scoped.source === 'cwd' ? scoped.projectPath : undefined,
   });
   const payload = buildScratchpadPayload(content, title, tags, origin);
 
@@ -315,7 +321,8 @@ function isFeedbackCategory(value: unknown): value is FeedbackCategory {
 export async function storeFeedback(
   args: Record<string, unknown> | undefined,
   stateManager: SqliteStateManager,
-  sessionState: Pick<SessionState, 'projectId' | 'currentBranch' | 'isWorktree'>
+  sessionState: Pick<SessionState, 'projectId' | 'currentBranch' | 'isWorktree'>,
+  projectDetector?: ProjectDetector
 ): Promise<StoreResult> {
   const content = args?.['content'] as string;
   if (!content?.trim())
@@ -338,6 +345,7 @@ export async function storeFeedback(
   const origin = await resolveScratchpadOrigin({
     explicitBranch: args?.['branch'] as string | undefined,
     sessionState,
+    projectDetector,
   });
 
   // category + refTool are recorded as TAGS (`category:<c>` / `tool:<t>`), NOT as

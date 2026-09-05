@@ -38,6 +38,7 @@ import {
   concreteBranchFilter,
   collapseResultBranchFields,
 } from './branch-scope.js';
+import { projectEcho, recordedIdentity } from './project-echo.js';
 import { branchFilterClause } from './search-filters.js';
 // Shared with the help("exact") chapter — see retrieve-hints.ts.
 import { RETRIEVE_ID_FILTER_HINT, RETRIEVE_LOCATION_HINT } from './retrieve-hints.js';
@@ -106,7 +107,9 @@ function buildUnknownArgsHint(unknownArgs: string[]): string {
   if (
     unknownArgs.some((arg) => {
       const normalized = arg.toLowerCase();
-      return normalized === 'documentid' || normalized === 'document_id' || normalized === 'metadata';
+      return (
+        normalized === 'documentid' || normalized === 'document_id' || normalized === 'metadata'
+      );
     })
   ) {
     return `Use \`documentId\` for point IDs, \`filePath\` + \`lineNumber\` for exact-search locators, and \`filter\` for metadata lookups. ${RETRIEVE_ID_FILTER_HINT}`;
@@ -128,9 +131,10 @@ function buildNotFoundHint(documentId: string): string {
 }
 
 function buildLocationNotFoundHint(filePath: string, lineNumber?: number): string {
-  const base = lineNumber !== undefined
-    ? `If this came from an exact-search result, pass \`filePath\` + \`lineNumber\` from the metadata.`
-    : 'If this came from a search/list result, pass the result `id` field to `retrieve`.';
+  const base =
+    lineNumber !== undefined
+      ? `If this came from an exact-search result, pass \`filePath\` + \`lineNumber\` from the metadata.`
+      : 'If this came from a search/list result, pass the result `id` field to `retrieve`.';
   const fallback =
     lineNumber !== undefined
       ? `The locator already matched both the absolute \`file_path\` and the repo-relative \`relative_path\` automatically; verify the path and line number exist.`
@@ -142,7 +146,9 @@ function buildFallbackDocumentIdFilter(documentId: string): Record<string, strin
   return { document_id: documentId };
 }
 
-function parseLineScopedDocumentId(documentId: string): { filePath: string; lineNumber: number } | null {
+function parseLineScopedDocumentId(
+  documentId: string
+): { filePath: string; lineNumber: number } | null {
   const match = documentId.match(/^(.*):(\d+)$/);
   if (!match) return null;
   const lineNumber = Number(match[2]);
@@ -298,6 +304,27 @@ export class RetrieveTool {
   }
 
   async retrieve(options: RetrieveOptions): Promise<RetrieveResponse> {
+    const response = await this.retrieveInner(options);
+    // Read-side project echo (shared with search/grep/list/graph). Project-
+    // scoped collections only — libraries/rules are not tenant-addressed here.
+    const collection = options.collection ?? 'projects';
+    if (response.success && (collection === 'projects' || collection === 'scratchpad')) {
+      // retrieveInner already resolved (and recorded) this identity; only a
+      // cwd-less stdio call has nothing recorded.
+      const identity =
+        recordedIdentity() ??
+        (await resolveProjectIdentity(
+          this.projectDetector,
+          options.projectId,
+          true,
+          this.stateManager ?? undefined
+        ));
+      Object.assign(response, projectEcho(identity, options.projectId));
+    }
+    return response;
+  }
+
+  private async retrieveInner(options: RetrieveOptions): Promise<RetrieveResponse> {
     const {
       documentId,
       filePath,
@@ -305,11 +332,14 @@ export class RetrieveTool {
       collection = 'projects',
       filter,
       limit = 10,
-      offset = 0,
+      offset: rawOffset = 0,
       projectId,
       libraryName,
       unknownArgs,
     } = options;
+    // Normalize the page offset like grep does: a negative, fractional or
+    // non-finite value is a client slip, never a Qdrant request parameter.
+    const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
 
     const startTime = Date.now();
     const eventId = randomUUID();
@@ -375,9 +405,7 @@ export class RetrieveTool {
       filePath,
       typeof filter?.['document_id'] === 'string' ? (filter['document_id'] as string) : undefined,
     ].filter((r): r is string => typeof r === 'string' && r !== '');
-    logStart(
-      effectivenessTracker.findOrigin(currentSessionId(), escalationRefs, Date.now())
-    );
+    logStart(effectivenessTracker.findOrigin(currentSessionId(), escalationRefs, Date.now()));
 
     // F-002 / F-011: resolve the tenant context up front so that BOTH
     // by-id verification AND by-filter scoping share the same answer. For
@@ -520,7 +548,10 @@ export class RetrieveTool {
       ...(filter ? { filter } : {}),
       pathLocator: filePath,
       limit: lineNumber !== undefined ? Math.max(limit, 1000) : limit,
-      offset,
+      // A line lookup must see every chunk of the file: a page offset would
+      // skip chunks BEFORE selectChunkForLine runs (it was inert here before
+      // the skip was emulated client-side).
+      offset: lineNumber !== undefined ? 0 : offset,
       projectId,
       libraryName,
       branchScope: branchScope ?? {},
@@ -640,19 +671,13 @@ export class RetrieveTool {
           return fallback;
         }
 
-        return failureResponse(
-          `Document not found: ${documentId}`,
-          buildNotFoundHint(documentId)
-        );
+        return failureResponse(`Document not found: ${documentId}`, buildNotFoundHint(documentId));
       }
 
       // F-002: ownership check. A mismatch is reported as not-found —
       // we MUST NOT leak that the ID exists in a foreign tenant.
       if (!payloadMatchesScope(point.payload, collection, resolvedProjectId, libraryName)) {
-        return failureResponse(
-          `Document not found: ${documentId}`,
-          buildNotFoundHint(documentId)
-        );
+        return failureResponse(`Document not found: ${documentId}`, buildNotFoundHint(documentId));
       }
 
       const document: RetrievedDocument = {
@@ -711,6 +736,17 @@ export class RetrieveTool {
     const branch = branchScope?.branch;
     const fallbackBranch = branchScope?.fallbackBranch;
 
+    // The numeric skip is emulated by over-fetching offset+limit+1 payload-
+    // bearing points; bound it so a deep offset cannot ask Qdrant for an
+    // unbounded page (a line lookup uses limit 1000 with offset 0).
+    const MAX_FILTER_WINDOW = 2000;
+    if (offset + limit + 1 > MAX_FILTER_WINDOW) {
+      return failureResponse(
+        `offset ${offset} + limit ${limit} exceeds the ${MAX_FILTER_WINDOW}-point filter window.`,
+        'Narrow the filter (relative_path / document_id), lower offset or limit, or retrieve by point id.'
+      );
+    }
+
     const scroll = (useBranch: boolean) => {
       const qdrantFilter = this.buildFilter(
         collection,
@@ -721,14 +757,16 @@ export class RetrieveTool {
         useBranch ? branch : undefined,
         useBranch ? fallbackBranch : undefined
       );
+      // Qdrant's scroll `offset` is a point-id CURSOR, not a numeric skip: a
+      // number was looked up as a point id, sorted before every UUID, and the
+      // scroll restarted at page 1 — `offset` paging returned the same page
+      // forever. Emulate the numeric skip client-side: over-fetch, then slice.
       const scrollRequest: {
         limit: number;
-        offset?: number;
         with_payload: boolean;
         with_vector: boolean;
         filter?: Record<string, unknown>;
-      } = { limit: limit + 1, with_payload: true, with_vector: false };
-      if (offset > 0) scrollRequest.offset = offset;
+      } = { limit: offset + limit + 1, with_payload: true, with_vector: false };
       if (qdrantFilter) scrollRequest.filter = qdrantFilter;
       return this.qdrantClient.scroll(collectionName, scrollRequest);
     };
@@ -748,8 +786,9 @@ export class RetrieveTool {
         result = await scroll(false);
       }
 
-      const hasMore = result.points.length > limit;
-      const points = hasMore ? result.points.slice(0, limit) : result.points;
+      const pageWindow = offset > 0 ? result.points.slice(offset) : result.points;
+      const hasMore = pageWindow.length > limit;
+      const points = hasMore ? pageWindow.slice(0, limit) : pageWindow;
 
       const documents: RetrievedDocument[] = points.map((point) => ({
         id: String(point.id),

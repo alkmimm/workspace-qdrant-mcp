@@ -223,12 +223,17 @@ async function exactSearchInCollection(
   };
   const filter = buildFilter(filterParams);
   const limit = options.limit ?? 100;
+  // Honour the caller's page offset (parity with the projects FTS path and
+  // retrieve): skip the first `offset` matches, over-fetch to cover the window.
+  const rawOffset = options.offset ?? 0;
+  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
+  let skipped = 0;
   const needle = options.query;
   const results: SearchResult[] = [];
   try {
     const scrolled = await qdrantClient.scroll(collection, {
       // Over-fetch: the substring filter runs locally over the scrolled page.
-      limit: Math.max(limit * 4, 100),
+      limit: Math.max((offset + limit) * 4, 100),
       with_payload: true,
       ...(filter ? { filter } : {}),
     });
@@ -236,6 +241,10 @@ async function exactSearchInCollection(
       const content = (point.payload?.[FIELD_CONTENT] as string) ?? '';
       const title = (point.payload?.[FIELD_TITLE] as string) ?? '';
       if (!content.includes(needle) && !title.includes(needle)) continue;
+      if (skipped < offset) {
+        skipped += 1;
+        continue;
+      }
       const result: SearchResult = {
         id: String(point.id),
         score: 1.0 - results.length * 0.001,
@@ -262,11 +271,7 @@ async function exactSearchInCollection(
   }
   // Hard per-call exclude (`pathExclude`) — parity with the projects path. Rare
   // for scratchpad/libraries (they carry no file path), but honour it uniformly.
-  const finalResults = filterResultsByPathExclude(
-    results,
-    options.pathExclude,
-    options.pathGlob
-  );
+  const finalResults = filterResultsByPathExclude(results, options.pathExclude, options.pathGlob);
   stateManager.updateSearchEvent(eventId, {
     resultCount: finalResults.length,
     latencyMs: Date.now() - startTime,
@@ -387,9 +392,7 @@ async function executeAndLogSearch(
     const requestedBranch = concreteBranchFilter(options.branch);
     const primaryResponse = await daemonClient.textSearch(request);
     const responses = [primaryResponse];
-    const resultGroups: SearchResult[][] = [
-      mapExactResults(primaryResponse.matches),
-    ];
+    const resultGroups: SearchResult[][] = [mapExactResults(primaryResponse.matches)];
     if (fallbackBranch) {
       const fallbackResponse = await daemonClient.textSearch(
         buildExactSearchRequest({ ...options, branch: fallbackBranch }, tenantId)

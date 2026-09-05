@@ -97,7 +97,7 @@ export const graphToolDefinition = {
       cwd: {
         type: 'string',
         description:
-          'Absolute path of your current working directory. Pass this so the server can auto-detect the project over HTTP (same as search/grep/list). Ignored when projectId is provided.',
+          'Absolute path of your current working directory. Pass this so the server can auto-detect the project over HTTP (same as search/grep/list). Ignored when projectId is provided. The response echoes project_id + project_path + project_source (cwd | sticky-cwd | projectId | sole-project | server-default): check they name the repo you meant — a cwd-less call may ride the session sticky cwd and answer from the previous project.',
       },
     },
     required: ['action'],

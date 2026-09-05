@@ -29,8 +29,10 @@ function mockDetector(): ProjectDetector {
 
 /** The queue payload is the 5th positional arg of enqueueUnified. */
 function payloadOf(sm: SqliteStateManager): Record<string, unknown> {
-  return (sm.enqueueUnified as unknown as ReturnType<typeof vi.fn>).mock
-    .calls[0][4] as Record<string, unknown>;
+  return (sm.enqueueUnified as unknown as ReturnType<typeof vi.fn>).mock.calls[0][4] as Record<
+    string,
+    unknown
+  >;
 }
 
 /** The queue item branch is the 7th positional arg of enqueueUnified. */
@@ -42,10 +44,15 @@ describe('storeScratchpad — write-time provenance', () => {
   it('stamps origin_branch and origin_worktree from the session git state', async () => {
     const sm = mockStateManager();
 
-    await storeScratchpad({ content: 'note' }, sm, mockDetector(), {
-      projectId: 'proj-1',
-      currentBranch: 'feat/thing',
-      isWorktree: true,
+    // A plain (non-worktree) cwd: the session git state is the source of truth.
+    // (Unbound, the stdio cwd is the test process cwd — itself a worktree when
+    // the suite runs from one, which is exactly the case provenance now detects.)
+    await runWithRequestContext({ hostCwd: '/home/user/repos/app' }, async () => {
+      await storeScratchpad({ content: 'note' }, sm, mockDetector(), {
+        projectId: 'proj-1',
+        currentBranch: 'feat/thing',
+        isWorktree: true,
+      });
     });
 
     const payload = payloadOf(sm);
@@ -80,10 +87,12 @@ describe('storeScratchpad — write-time provenance', () => {
   it('omits origin_branch when nothing is known (no fabrication)', async () => {
     const sm = mockStateManager();
 
-    await storeScratchpad({ content: 'note' }, sm, mockDetector(), {
-      projectId: 'proj-1',
-      currentBranch: null,
-      isWorktree: false,
+    await runWithRequestContext({ hostCwd: '/home/user/repos/app' }, async () => {
+      await storeScratchpad({ content: 'note' }, sm, mockDetector(), {
+        projectId: 'proj-1',
+        currentBranch: null,
+        isWorktree: false,
+      });
     });
 
     const payload = payloadOf(sm);

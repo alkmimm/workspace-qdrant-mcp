@@ -1,3 +1,4 @@
+import type { ProjectSource } from './project-echo.js';
 /**
  * Rules tool types, interfaces, and constants.
  */
@@ -117,6 +118,11 @@ export interface RuleResponse {
   message?: string;
   fallback_mode?: 'unified_queue';
   queue_id?: string;
+  /** Read-side project echo on a project-scoped list (parity with the other
+   *  tenant-addressed reads): the tenant answered from and how it was resolved. */
+  project_id?: string;
+  project_path?: string;
+  project_source?: ProjectSource;
 }
 
 export interface RuleToolConfig {

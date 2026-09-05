@@ -19,7 +19,11 @@ describe('resolveProjectIdentity', () => {
 
     const identity = await resolveProjectIdentity(detector, 'tenant-a', true, stateManager);
 
-    expect(identity).toEqual({ projectId: 'tenant-a', projectPath: '/repo/a' });
+    expect(identity).toEqual({
+      projectId: 'tenant-a',
+      projectPath: '/repo/a',
+      source: 'projectId',
+    });
     expect(getProjectById).toHaveBeenCalledWith('tenant-a');
     // Explicit id short-circuits cwd detection entirely.
     expect(detector.getProjectInfo).not.toHaveBeenCalled();
@@ -28,7 +32,11 @@ describe('resolveProjectIdentity', () => {
   it('leaves projectPath undefined without a stateManager (no registry to ask)', async () => {
     const detector = { getProjectInfo: vi.fn() } as unknown as ProjectDetector;
     const identity = await resolveProjectIdentity(detector, 'tenant-a');
-    expect(identity).toEqual({ projectId: 'tenant-a', projectPath: undefined });
+    expect(identity).toEqual({
+      projectId: 'tenant-a',
+      projectPath: undefined,
+      source: 'projectId',
+    });
   });
 
   it('tolerates an unknown projectId (registry has no row)', async () => {
@@ -41,7 +49,7 @@ describe('resolveProjectIdentity', () => {
       true,
       stateManager
     );
-    expect(identity).toEqual({ projectId: 'ghost', projectPath: undefined });
+    expect(identity).toEqual({ projectId: 'ghost', projectPath: undefined, source: 'projectId' });
   });
 
   it('still detects by cwd when no explicit projectId is given', async () => {
@@ -51,6 +59,10 @@ describe('resolveProjectIdentity', () => {
         .mockResolvedValue({ projectId: 'detected', projectPath: '/repo/detected' }),
     } as unknown as ProjectDetector;
     const identity = await resolveProjectIdentity(detector, undefined);
-    expect(identity).toEqual({ projectId: 'detected', projectPath: '/repo/detected' });
+    expect(identity).toEqual({
+      projectId: 'detected',
+      projectPath: '/repo/detected',
+      source: 'cwd',
+    });
   });
 });

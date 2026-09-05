@@ -1,6 +1,7 @@
 /**
  * Types and constants for the list MCP tool.
  */
+import type { ProjectSource } from './project-echo.js';
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -91,6 +92,11 @@ export interface ListStats {
 export interface ListResponse {
   success: boolean;
   projectPath: string | null;
+  /** Tenant id of the project listed and how it was resolved (`cwd` |
+   *  `sticky-cwd` | `projectId`) — the read-side echo shared with search /
+   *  grep / retrieve / graph. Absent on failure responses. */
+  project_id?: string;
+  project_source?: ProjectSource;
   basePath: string;
   format: ListFormat;
   listing: string;

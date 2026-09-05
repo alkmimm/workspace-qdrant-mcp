@@ -192,7 +192,8 @@ async function dispatchStore(
     return storeUrl(args, components.stateManager, components.projectDetector, sessionState);
   if (storeType === 'scratchpad')
     return storeScratchpad(args, components.stateManager, components.projectDetector, sessionState);
-  if (storeType === 'feedback') return storeFeedback(args, components.stateManager, sessionState);
+  if (storeType === 'feedback')
+    return storeFeedback(args, components.stateManager, sessionState, components.projectDetector);
   return storeLibrary(args, components, sessionState);
 }
 
@@ -323,7 +324,7 @@ async function routeToolInner(
       return handleWorkspaceIndex(args, daemonClient, projectDetector, probeQdrantPointCount);
     }
     case 'graph':
-      return handleGraph(args, daemonClient, projectDetector);
+      return handleGraph(args, daemonClient, projectDetector, components.stateManager);
     case 'search_eval':
       return runSearchEval(searchTool, projectDetector, args);
     default:

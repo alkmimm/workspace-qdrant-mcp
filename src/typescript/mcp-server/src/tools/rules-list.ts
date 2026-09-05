@@ -10,6 +10,7 @@ import { RULES_COLLECTION, RULES_LIST_FETCH_LIMIT } from './rules-types.js';
 import { FIELD_PROJECT_ID, FIELD_CONTENT, FIELD_TITLE } from '../common/native-bridge.js';
 import { TENANT_GLOBAL } from '../constants/tenants.js';
 import { resolveProjectIdentity } from './branch-scope.js';
+import { projectEcho, type ProjectEcho } from './project-echo.js';
 import { applyByteBudget } from './response-budget.js';
 
 /**
@@ -202,7 +203,8 @@ function shapeRuleForList(rule: Rule, summary: boolean): Rule {
 function buildListResponse(
   rules: Rule[],
   options: RuleOptions,
-  nextPageOffset?: unknown
+  nextPageOffset?: unknown,
+  echo: ProjectEcho = {}
 ): RuleResponse {
   const summary = options.summary ?? false;
   const budget = options.maxResponseBytes ?? 0;
@@ -216,6 +218,7 @@ function buildListResponse(
     action: 'list',
     rules: kept,
     count: kept.length,
+    ...echo,
   };
   const firstDropped = shaped[kept.length];
   if (dropped > 0 && firstDropped) {
@@ -266,8 +269,15 @@ export async function listRules(
   } = options;
 
   let resolvedProjectId = projectId;
+  // Read-side project echo (parity with search/grep/list/retrieve/graph): a
+  // project-scoped rules listing names the tenant it answered from and how.
+  let echo: ProjectEcho = {};
   if (scope === 'project' && !resolvedProjectId) {
-    resolvedProjectId = (await resolveProjectIdentity(projectDetector, undefined)).projectId;
+    const identity = await resolveProjectIdentity(projectDetector, undefined);
+    resolvedProjectId = identity.projectId;
+    echo = projectEcho(identity);
+  } else if (scope === 'project' && resolvedProjectId) {
+    echo = projectEcho({ projectId: resolvedProjectId, source: 'projectId' }, resolvedProjectId);
   }
 
   // When a project-scoped list can't resolve a tenant, buildListFilter yields
@@ -288,7 +298,7 @@ export async function listRules(
       includeGlobal
     );
     if (!mirrorRules) return null;
-    const response = buildListResponse(mirrorRules, options);
+    const response = buildListResponse(mirrorRules, options, undefined, echo);
     response.message = `Found ${response.count} rule(s) from local mirror (Qdrant unavailable)`;
     return response;
   };
@@ -301,7 +311,7 @@ export async function listRules(
     );
     if (scrollResult) {
       const rules: Rule[] = scrollResult.points.map(pointToRule);
-      const response = buildListResponse(rules, options, scrollResult.next_page_offset);
+      const response = buildListResponse(rules, options, scrollResult.next_page_offset, echo);
       response.message = unresolvedProjectScope
         ? `Found ${response.count} rule(s) across ALL projects — the current project could not be detected, so this listing is not scoped. Each rule's "owner" field identifies its project (or "global"). Pass cwd or projectId to scope to one project.`
         : widenedToGlobal

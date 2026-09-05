@@ -10,7 +10,7 @@ export const listToolDefinition = {
     openWorldHint: false,
   },
   description:
-    'List the project file/folder structure from the index the daemon maintains (only indexed files — excludes gitignored, node_modules, etc; this is the daemon\'s indexed view, not a live filesystem walk). Use format "summary" first to understand project layout, then drill into specific folders with the path parameter.',
+    'List the project file/folder structure from the index the daemon maintains (only indexed files — excludes gitignored, node_modules, etc; this is the daemon\'s indexed view, not a live filesystem walk). Use format "summary" first to understand project layout, then drill into specific folders with the path parameter. "summary" aggregates directory counts over EVERY matching file in one shot (no cursor) — the reliable layout overview; "tree" and "flat" are paged windows (limit / next_token). Responses echo project_id + project_source (cwd | sticky-cwd | projectId | sole-project | server-default) so you can confirm which project answered.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -25,7 +25,8 @@ export const listToolDefinition = {
       format: {
         type: 'string',
         enum: ['tree', 'summary', 'flat'],
-        description: 'Output format (default: tree)',
+        description:
+          'Output format (default: tree). "summary": whole-project directory overview aggregated over ALL matching files, not paged — start here for layout. "tree": paged hierarchical listing (limit / next_token). "flat": paged relative paths.',
       },
       fileType: {
         type: 'string',
@@ -79,7 +80,7 @@ export const listToolDefinition = {
       cwd: {
         type: 'string',
         description:
-          'Absolute path of your current working directory. Pass this so the server can auto-detect the project over HTTP (it cannot otherwise observe your location). Ignored when projectId is provided.',
+          'Absolute path of your current working directory. Pass this so the server can auto-detect the project over HTTP (it cannot otherwise observe your location). The response echoes project_id + project_source (cwd | sticky-cwd | projectId | sole-project | server-default): check they name the repo you meant — a cwd-less call may ride the session sticky cwd and answer from the previous project. Ignored when projectId is provided.',
       },
       component: {
         type: 'string',

@@ -81,7 +81,10 @@ function buildRequestContext(req: IncomingMessage): RequestContext {
   const raw = req.headers[HOST_CWD_HEADER];
   const hostCwd = Array.isArray(raw) ? raw[0] : raw;
   const ctx: RequestContext = {};
-  if (hostCwd && hostCwd.length > 0) ctx.hostCwd = hostCwd;
+  if (hostCwd && hostCwd.length > 0) {
+    ctx.hostCwd = hostCwd;
+    ctx.cwdSource = 'header';
+  }
   // Session identity for effectiveness signals (spec 20 §1.2): the header is
   // absent only on the anonymous `initialize` request, which is never a tool
   // call, so tool events always see it.

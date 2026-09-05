@@ -27,6 +27,8 @@ import {
   resolveFallbackBranch,
   resolveProjectIdentity,
 } from '../branch-scope.js';
+import { projectEcho } from '../project-echo.js';
+import { SUMMARY_SCAN_CAP, assembleSummaryResponse } from './summary.js';
 
 /**
  * Approximate per-file byte cost the agent would pay if they ran
@@ -66,7 +68,7 @@ import {
 } from '../../utils/component-detector/index.js';
 import { buildTree } from './tree-builder.js';
 import type { SubmoduleEntry } from '../../clients/tracked-files-queries/index.js';
-import { renderTree, renderSummary, renderFlat } from './renderers.js';
+import { renderTree, renderFlat } from './renderers.js';
 import { countFolders } from './filters.js';
 
 // Re-export types for consumers
@@ -181,6 +183,13 @@ export class ListFilesTool {
       depth,
       limit
     );
+    if (response.success) {
+      // Read-side project echo (shared with search/grep/retrieve/graph): the
+      // tenant listed and how it was resolved. `projectPath` is already a field.
+      const echo = projectEcho(identity, options.projectId);
+      if (echo.project_id) response.project_id = echo.project_id;
+      if (echo.project_source) response.project_source = echo.project_source;
+    }
     this.finishList(eventId, response, startTime);
     return response;
   }
@@ -257,6 +266,22 @@ export class ListFilesTool {
 
     const submodules = this.stateManager.listSubmodules(watchFolderId).data;
 
+    if (format === 'summary') {
+      return assembleSummaryResponse({
+        files,
+        submodules,
+        basePath,
+        depth,
+        // The raw option: summary clamps entries to its own bound, not MAX_LIMIT.
+        requestedLimit: options.limit,
+        totalMatching,
+        projectPath,
+        componentSummaries,
+        options,
+        partialScan: files.length >= SUMMARY_SCAN_CAP,
+      });
+    }
+
     return this.assembleResponse(
       files,
       submodules,
@@ -305,10 +330,24 @@ export class ListFilesTool {
       let lo = 1; // always keep at least one entry
       let hi = pageFiles.length - 1;
       let best = 1;
-      let bestRender = renderFiles(pageFiles.slice(0, 1), submodules, basePath, format, depth, limit);
+      let bestRender = renderFiles(
+        pageFiles.slice(0, 1),
+        submodules,
+        basePath,
+        format,
+        depth,
+        limit
+      );
       while (lo <= hi) {
         const mid = (lo + hi) >> 1;
-        const probe = renderFiles(pageFiles.slice(0, mid), submodules, basePath, format, depth, limit);
+        const probe = renderFiles(
+          pageFiles.slice(0, mid),
+          submodules,
+          basePath,
+          format,
+          depth,
+          limit
+        );
         if (probe.listing.length <= budget) {
           best = mid;
           bestRender = probe;
@@ -376,10 +415,12 @@ export class ListFilesTool {
       ? Buffer.from(options.cursor, 'base64').toString('utf8')
       : undefined;
 
-    const pageSize = Math.min(
-      Math.max(options.pageSize ?? options.limit ?? DEFAULT_LIMIT, 1),
-      MAX_LIMIT
-    );
+    // `summary` aggregates over EVERY matching file (see ./summary.ts): one
+    // path-only scan up to SUMMARY_SCAN_CAP, no cursor. tree/flat stay paged.
+    const scanAll = options.format === 'summary';
+    const pageSize = scanAll
+      ? SUMMARY_SCAN_CAP
+      : Math.min(Math.max(options.pageSize ?? options.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
 
     const baseOpts: Parameters<typeof this.stateManager.listTrackedFiles>[0] = { watchFolderId };
     if (basePath) baseOpts.path = basePath;
@@ -395,17 +436,23 @@ export class ListFilesTool {
     if (componentBasePaths && componentBasePaths.length > 0)
       baseOpts.componentBasePaths = componentBasePaths;
 
-    // Accurate total: COUNT(*) with all filters except the cursor
-    const totalMatching = this.stateManager.countTrackedFiles(baseOpts);
-
     // Paginated fetch: add cursor and page-size limit
     const pageOpts = { ...baseOpts, limit: pageSize };
-    if (afterPath) pageOpts.afterPath = afterPath;
+    if (afterPath && !scanAll) pageOpts.afterPath = afterPath;
 
     const filesResult = this.stateManager.listTrackedFiles(pageOpts);
     if (filesResult.status === 'degraded') {
       return { files: null, totalMatching: 0 };
     }
+
+    // Accurate total: COUNT(*) with all filters except the cursor. A summary
+    // scan that stayed under its cap already holds every matching row, so the
+    // count (and its search.db fallback pass) is only paid when paging or when
+    // the scan hit the cap.
+    const totalMatching =
+      scanAll && filesResult.data.length < SUMMARY_SCAN_CAP
+        ? filesResult.data.length
+        : this.stateManager.countTrackedFiles(baseOpts);
 
     return { files: filesResult.data, totalMatching };
   }
@@ -445,7 +492,6 @@ export class ListFilesTool {
     }
     return { components: undefined, componentSummaries: undefined };
   }
-
 }
 
 function errorResponse(message: string, basePath: string, format: ListFormat): ListResponse {
@@ -491,11 +537,8 @@ function renderFiles(
   limit: number
 ): { listing: string; renderedCount: number } {
   const root = buildTree(files, submodules, basePath);
+  // `summary` never reaches here: buildListResult routes it to summary.ts.
   switch (format) {
-    case 'summary': {
-      const { text, count } = renderSummary(root, depth, limit);
-      return { listing: text, renderedCount: count };
-    }
     case 'flat': {
       const { text, count } = renderFlat(files, limit);
       return { listing: text, renderedCount: count };

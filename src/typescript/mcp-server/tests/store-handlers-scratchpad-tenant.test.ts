@@ -19,6 +19,7 @@ import { storeScratchpad } from '../src/store-handlers.js';
 import type { SqliteStateManager } from '../src/clients/sqlite-state-manager.js';
 import type { ProjectDetector } from '../src/utils/project-detector.js';
 import { TENANT_GLOBAL } from '../src/constants/tenants.js';
+import { runWithRequestContext } from '../src/utils/request-context.js';
 
 function mockStateManager(): SqliteStateManager {
   return {
@@ -49,11 +50,17 @@ describe('storeScratchpad — tenant resolution', () => {
     const sm = mockStateManager();
     const detector = mockDetector('detected-xyz');
 
-    const res = await storeScratchpad(
-      { content: 'note', projectId: 'explicit-123' },
-      sm,
-      detector,
-      session('session-abc')
+    // Bind a plain host cwd: tenant resolution must not consult the detector
+    // for an explicit projectId. (Unbound, the stdio cwd is the test process
+    // cwd — a worktree when the suite runs from one — and PROVENANCE would
+    // legitimately detect the writer's repo through the detector.)
+    const res = await runWithRequestContext({ hostCwd: '/home/user/repos/app' }, () =>
+      storeScratchpad(
+        { content: 'note', projectId: 'explicit-123' },
+        sm,
+        detector,
+        session('session-abc')
+      )
     );
 
     expect(res.success).toBe(true);
