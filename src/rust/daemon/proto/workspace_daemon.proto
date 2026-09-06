@@ -928,6 +928,16 @@ message TestGapsResponse {
     int64 query_time_ms = 5;
     uint32 test_nodes = 6;                        // Graph nodes classified as test (seeds of the reachability walk)
     optional string reliability_warning = 7;      // Set when test_nodes > 0 but coverage is implausibly low: the test->production edges did not resolve (DI containers, alias imports, dynamic dispatch), so the ranking is not trustworthy
+    uint32 excluded_non_production = 8;           // Candidates dropped from the denominator as TOOLING (scripts/), reported so a moved denominator is visible
+    repeated LanguageCoverageProto coverage_by_language = 9; // Coverage split by extension, largest first — a global ratio hides a per-language extraction failure
+}
+
+// Per-language slice of the coverage summary.
+message LanguageCoverageProto {
+    string extension = 1;                         // Lowercased, with the dot: ".dart"
+    uint32 production = 2;
+    uint32 covered = 3;
+    uint32 test_nodes = 4;                        // Test symbols in this language: many tests + near-zero coverage = extractor blind spot, not untested code
 }
 
 // A production definition no test reaches

@@ -14,8 +14,8 @@ use crate::proto::{
     CycleMemberProto, CycleProto, CycleRequest, CycleResponse, GraphMigrateRequest,
     GraphMigrateResponse, GraphStatsRequest, GraphStatsResponse, ImpactAnalysisRequest,
     ImpactAnalysisResponse, ImpactNodeProto, PageRankNodeProto, PageRankRequest, PageRankResponse,
-    QueryRelatedRequest, QueryRelatedResponse, TestGapProto, TestGapsRequest, TestGapsResponse,
-    TraversalNodeProto,
+    LanguageCoverageProto, QueryRelatedRequest, QueryRelatedResponse, TestGapProto, TestGapsRequest,
+    TestGapsResponse, TraversalNodeProto,
 };
 use crate::validation::extract_relative_path;
 
@@ -647,6 +647,17 @@ impl GraphService for GraphServiceImpl {
                     })
                     .collect();
 
+                let coverage_by_language: Vec<LanguageCoverageProto> = report
+                    .coverage_by_language
+                    .into_iter()
+                    .map(|l| LanguageCoverageProto {
+                        extension: l.extension,
+                        production: l.production,
+                        covered: l.covered,
+                        test_nodes: l.test_nodes,
+                    })
+                    .collect();
+
                 Ok(Response::new(TestGapsResponse {
                     gaps,
                     total_production: report.total_production,
@@ -657,6 +668,8 @@ impl GraphService for GraphServiceImpl {
                     // Carried verbatim from the core algorithm so the MCP tool
                     // and `wqm graph test_gaps` warn on identical terms.
                     reliability_warning: report.reliability_warning,
+                    excluded_non_production: report.excluded_non_production,
+                    coverage_by_language,
                 }))
             }
             Err(e) => {

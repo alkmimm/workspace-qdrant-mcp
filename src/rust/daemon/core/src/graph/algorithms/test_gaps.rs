@@ -32,7 +32,7 @@
 //! [`IMPLAUSIBLE_COVERAGE_RATIO`]. Reporting "0.6% covered" as a finding is a
 //! worse failure than reporting nothing at all.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,33 @@ pub struct TestGapsReport {
     /// to resolve rather than that the code is untested. `None` when the
     /// coverage figure is plausible (or when there is genuinely no test code).
     pub reliability_warning: Option<String>,
+    /// Candidates dropped from `total_production` as TOOLING (see
+    /// [`NON_PRODUCTION_PATH_SEGMENTS`]). Reported rather than silently
+    /// subtracted: a caller comparing two runs must be able to see that the
+    /// denominator moved because of the filter, not because of the code.
+    pub excluded_non_production: u32,
+    /// Coverage split by file extension, largest language first.
+    ///
+    /// The single most useful number for judging whether a report is REAL: a
+    /// global ratio hides a per-language extraction failure completely. Measured
+    /// 2026-09-06 — DOC-V2 (whose top-25 was full of demonstrably tested Flutter
+    /// primitives) reported 27.7% overall, and this repo's own healthy graph
+    /// reports 28.3%. The global figure carried no signal at all; a per-language
+    /// split does.
+    pub coverage_by_language: Vec<LanguageCoverage>,
+}
+
+/// Per-language slice of the coverage summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanguageCoverage {
+    /// Lowercased file extension including the dot, e.g. `.dart`.
+    pub extension: String,
+    pub production: u32,
+    pub covered: u32,
+    /// Test symbols written in this language — the seeds available to cover it.
+    /// A language with many test symbols and near-zero coverage is an extractor
+    /// blind spot, not an untested module.
+    pub test_nodes: u32,
 }
 
 /// Edge types that mean "exercised by": a test that CALLS production code, or
@@ -111,13 +138,21 @@ fn build_reliability_warning(
     total_production: u32,
     covered: u32,
     test_nodes: u32,
+    by_language: &[LanguageCoverage],
 ) -> Option<String> {
     if test_nodes == 0 || total_production == 0 {
         return None;
     }
     let ratio = f64::from(covered) / f64::from(total_production);
     if ratio >= IMPLAUSIBLE_COVERAGE_RATIO {
-        return None;
+        // The GLOBAL figure is plausible — but an average hides a language whose
+        // edges did not resolve at all. Apply the SAME already-calibrated floor
+        // per language rather than inventing a second threshold: "a real test
+        // suite does not measure this low" is exactly as true of one language as
+        // of a whole repo, and a polyglot repo can look healthy overall while one
+        // stack is entirely unmeasured. Requires the language to actually have
+        // test symbols, so an untested module stays an honest finding.
+        return language_reliability_warning(by_language, ratio);
     }
     Some(format!(
         "UNRELIABLE: {test_nodes} test symbols are indexed, yet only {covered} of \
@@ -129,6 +164,89 @@ fn build_reliability_warning(
          and confirm with a real coverage tool.",
         ratio * 100.0
     ))
+}
+
+/// Minimum production symbols before a language's ratio is worth judging — below
+/// this a handful of unresolved edges swings the percentage wildly.
+const LANGUAGE_MIN_PRODUCTION: u32 = 50;
+
+/// Warn when ONE language measures below the implausibility floor while the repo
+/// as a whole looks fine. That is the shape a global ratio cannot express: the
+/// gaps it produces are concentrated in the blind language, so they dominate the
+/// ranking an agent reads, while the healthy languages keep the average up.
+fn language_reliability_warning(
+    by_language: &[LanguageCoverage],
+    overall_ratio: f64,
+) -> Option<String> {
+    let blind: Vec<&LanguageCoverage> = by_language
+        .iter()
+        .filter(|lang| {
+            lang.production >= LANGUAGE_MIN_PRODUCTION
+                && lang.test_nodes > 0
+                && f64::from(lang.covered) / f64::from(lang.production) < IMPLAUSIBLE_COVERAGE_RATIO
+        })
+        .collect();
+    if blind.is_empty() {
+        return None;
+    }
+    let detail = blind
+        .iter()
+        .map(|lang| {
+            format!(
+                "{} ({} of {} production symbols covered, {} test symbols indexed)",
+                lang.extension,
+                lang.covered,
+                lang.production,
+                lang.test_nodes
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "PARTIALLY UNRELIABLE: overall coverage is {:.1}%, which looks plausible, but these \
+         languages measure below {:.0}% while HAVING indexed tests: {detail}. A real test suite \
+         does not measure this low — for those languages the test->production edges almost \
+         certainly failed to resolve, so their symbols are over-represented in the ranking below. \
+         Known blind spot: an idiom that REFERENCES a symbol without invoking it produces no edge \
+         (e.g. Flutter's `find.byType(Widget)` asserts on a type without constructing it), so the \
+         most-asserted primitives can rank as the most critical gaps. Judge each language on its \
+         own row in coverage_by_language, and confirm with a real coverage tool.",
+        overall_ratio * 100.0,
+        IMPLAUSIBLE_COVERAGE_RATIO * 100.0
+    ))
+}
+
+/// Path segments whose code is TOOLING, not the product: automation that ships
+/// in no artifact and is exercised by running it, not by unit tests. Counting it
+/// as production inflates the denominator and — because these scripts are often
+/// self-contained and widely self-referential — pushes their symbols high into
+/// the gap ranking. DOC-V2 (2026-09-06) had `doc-frontend/scripts/` guardrail
+/// checkers at positions 7 and 24 of the top-25.
+///
+/// `tools/` is deliberately NOT here: this very repo ships
+/// `src/rust/tools/registry-updater` as a real component. The bar for adding a
+/// segment is that its content cannot plausibly be product code.
+const NON_PRODUCTION_PATH_SEGMENTS: &[&str] = &["scripts"];
+
+/// Is this path tooling rather than product code? Matched on whole path
+/// SEGMENTS (never substrings) so `src/transcripts/` is untouched — the
+/// substring-vs-segment mistake that once made an ignore token swallow whole
+/// directories.
+fn is_non_production_path(file_path: &str) -> bool {
+    file_path
+        .split(['/', '\\'])
+        .any(|segment| NON_PRODUCTION_PATH_SEGMENTS.contains(&segment))
+}
+
+/// The file extension used to group coverage by language, e.g. `.dart`.
+/// Returns `None` for an extensionless path.
+fn language_key(file_path: &str) -> Option<String> {
+    let name = file_path.rsplit(['/', '\\']).next()?;
+    let dot = name.rfind('.')?;
+    if dot == 0 {
+        return None; // a dotfile, not an extension
+    }
+    Some(name[dot..].to_lowercase())
 }
 
 /// Symbol types that are meaningful test-gap CANDIDATES — the things one writes
@@ -168,6 +286,8 @@ pub async fn detect_test_gaps(
             gap_count: 0,
             test_nodes: 0,
             reliability_warning: None,
+            excluded_non_production: 0,
+            coverage_by_language: Vec::new(),
         });
     }
 
@@ -209,14 +329,41 @@ pub async fn detect_test_gaps(
     // not in `reached` is a gap, ranked by how many PRODUCTION nodes call it.
     let mut total_production = 0u32;
     let mut covered = 0u32;
+    let mut excluded_non_production = 0u32;
     let mut gaps: Vec<TestGap> = Vec::new();
+    // (production, covered) per language, keyed by extension. BTreeMap so the
+    // pre-sort order is deterministic for equal counts.
+    let mut per_language: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+    // Test symbols per language, so a blind language can be told apart from one
+    // that simply has no tests (see `language_reliability_warning`).
+    let mut test_nodes_per_language: BTreeMap<String, u32> = BTreeMap::new();
+    for id in &test_set {
+        if let Some(info) = graph.nodes.get(*id) {
+            if let Some(ext) = language_key(&info.file_path) {
+                *test_nodes_per_language.entry(ext).or_insert(0) += 1;
+            }
+        }
+    }
     for (id, info) in &graph.nodes {
         if test_set.contains(id.as_str()) || !is_testable_symbol_type(&info.symbol_type) {
             continue;
         }
+        // Tooling is not the product: excluded from the denominator, and
+        // counted so the caller can see the filter acted.
+        if is_non_production_path(&info.file_path) {
+            excluded_non_production += 1;
+            continue;
+        }
         total_production += 1;
+        let language = language_key(&info.file_path);
+        if let Some(ext) = language.clone() {
+            per_language.entry(ext).or_insert((0, 0)).0 += 1;
+        }
         if reached.contains(id.as_str()) {
             covered += 1;
+            if let Some(ext) = language {
+                per_language.entry(ext).or_insert((0, 0)).1 += 1;
+            }
             continue;
         }
         let production_dependents = graph
@@ -252,15 +399,38 @@ pub async fn detect_test_gaps(
     }
 
     let test_nodes = test_set.len() as u32;
-    let reliability_warning = build_reliability_warning(total_production, covered, test_nodes);
+
+    // Largest language first: the caller reads the top rows, and a stack with
+    // few symbols cannot say much about the report either way.
+    let mut coverage_by_language: Vec<LanguageCoverage> = per_language
+        .into_iter()
+        .map(|(extension, (production, covered))| LanguageCoverage {
+            test_nodes: test_nodes_per_language
+                .get(&extension)
+                .copied()
+                .unwrap_or(0),
+            extension,
+            production,
+            covered,
+        })
+        .collect();
+    coverage_by_language.sort_by(|a, b| {
+        b.production
+            .cmp(&a.production)
+            .then_with(|| a.extension.cmp(&b.extension))
+    });
+
+    let reliability_warning =
+        build_reliability_warning(total_production, covered, test_nodes, &coverage_by_language);
 
     info!(
-        "GraphService test-gaps: tenant={} production={} covered={} gaps={} test_nodes={} unreliable={}",
+        "GraphService test-gaps: tenant={} production={} covered={} gaps={} test_nodes={} excluded_tooling={} unreliable={}",
         tenant_id,
         total_production,
         covered,
         gap_count,
         test_nodes,
+        excluded_non_production,
         reliability_warning.is_some()
     );
 
@@ -271,6 +441,8 @@ pub async fn detect_test_gaps(
         gap_count,
         test_nodes,
         reliability_warning,
+        excluded_non_production,
+        coverage_by_language,
     })
 }
 
@@ -573,14 +745,90 @@ mod tests {
     /// boundary is inclusive, so exactly 5% is still trusted.
     #[test]
     fn threshold_boundary_is_inclusive() {
-        assert!(build_reliability_warning(100, 5, 1).is_none(), "5% passes");
         assert!(
-            build_reliability_warning(100, 4, 1).is_some(),
+            build_reliability_warning(100, 5, 1, &[]).is_none(),
+            "5% passes"
+        );
+        assert!(
+            build_reliability_warning(100, 4, 1, &[]).is_some(),
             "4% is flagged"
         );
         assert!(
-            build_reliability_warning(0, 0, 7).is_none(),
+            build_reliability_warning(0, 0, 7, &[]).is_none(),
             "no production candidates → nothing to judge"
         );
+    }
+
+    fn lang(extension: &str, production: u32, covered: u32, test_nodes: u32) -> LanguageCoverage {
+        LanguageCoverage {
+            extension: extension.to_string(),
+            production,
+            covered,
+            test_nodes,
+        }
+    }
+
+    /// The defect this guard exists for: a polyglot repo whose GLOBAL ratio is
+    /// perfectly normal while one stack resolved no test edges at all. Measured
+    /// 2026-09-06 — DOC-V2 reported 27.7% overall with a top-25 full of
+    /// demonstrably tested Flutter primitives, and this repo's healthy graph
+    /// reports 28.3%. The global number cannot separate them; a per-language
+    /// row can.
+    #[test]
+    fn a_blind_language_is_flagged_even_when_the_global_ratio_is_healthy() {
+        let by_language = [
+            lang(".java", 1000, 400, 500), // 40% — healthy, carries the average
+            lang(".dart", 800, 8, 900),    // 1% with 900 test symbols — impossible
+        ];
+        let warning = build_reliability_warning(1800, 408, 1400, &by_language)
+            .expect("a language below the floor must be flagged");
+        assert!(warning.contains("PARTIALLY UNRELIABLE"));
+        assert!(warning.contains(".dart"));
+        assert!(
+            !warning.contains(".java"),
+            "the healthy language must not be named as suspect"
+        );
+    }
+
+    /// A language with no tests at all measures 0% honestly — that is a finding,
+    /// not a malfunction, exactly as for a whole repo with no test code.
+    #[test]
+    fn a_language_without_tests_is_not_flagged() {
+        let by_language = [
+            lang(".java", 1000, 400, 500),
+            lang(".sql", 200, 0, 0), // no tests → an honest 0%
+        ];
+        assert!(build_reliability_warning(1200, 400, 500, &by_language).is_none());
+    }
+
+    /// Small languages swing wildly on a handful of unresolved edges, so they
+    /// are not judged.
+    #[test]
+    fn a_tiny_language_is_not_judged() {
+        let by_language = [
+            lang(".java", 1000, 400, 500),
+            lang(".lua", 10, 0, 3), // under LANGUAGE_MIN_PRODUCTION
+        ];
+        assert!(build_reliability_warning(1010, 400, 503, &by_language).is_none());
+    }
+
+    /// Tooling is not the product. Segment-matched, never substring — a
+    /// `transcripts/` directory must survive.
+    #[test]
+    fn tooling_paths_are_excluded_by_segment() {
+        assert!(is_non_production_path("doc-frontend/scripts/check_a11y.dart"));
+        assert!(is_non_production_path("scripts/build.ts"));
+        assert!(!is_non_production_path("src/transcripts/parser.rs"));
+        assert!(!is_non_production_path("src/scriptsupport/loader.rs"));
+        // `tools/` is production in this very repo (tools/registry-updater).
+        assert!(!is_non_production_path("src/rust/tools/registry-updater/main.rs"));
+    }
+
+    #[test]
+    fn language_key_reads_the_extension() {
+        assert_eq!(language_key("a/b/c.dart").as_deref(), Some(".dart"));
+        assert_eq!(language_key("a/b/C.JAVA").as_deref(), Some(".java"));
+        assert_eq!(language_key("Makefile"), None);
+        assert_eq!(language_key("a/.gitignore"), None, "a dotfile is not an extension");
     }
 }
