@@ -52,20 +52,59 @@ use super::super::types::{MultiTenantInitResult, StorageError};
 /// Verified missing on the live deployment 2026-09-05: `projects` published
 /// `tenant_id`, `branch`, `file_path`, `base_point`, `project_id` and nothing
 /// else, against 501k points.
+///
+/// `project_id` is NOT here, and the same probe is why: it was indexed on this
+/// collection with `points: 0` — nothing writes it to a `projects` payload and
+/// nothing filters it here (tenancy runs on `tenant_id`). It is a real filter
+/// field of the RULES collection, where it was missing; the index was simply on
+/// the wrong collection. Creating it here costs a per-restart round-trip and
+/// tells the next reader this collection is filtered by a field it never is.
+///
+/// `file_type` / `document_type` / `concept_tags` / `tags` are the semantic
+/// `search` filters (`fileType`, `tag`/`tags`, `excludeTests`) built in
+/// tools/search-filters.ts. All four ran unindexed. Measured 2026-09-05 against
+/// this tenant (42,675 of 501k points), exact count, best of three:
+///
+/// | filter                              | time   |
+/// |-------------------------------------|--------|
+/// | `tenant_id` alone (indexed)         |  ~10ms |
+/// | `+ file_type=code`                  | ~517ms |
+/// | `+ concept_tags=graph`              | ~510ms |
+/// | `NOT tags=test` (`excludeTests`)    | ~528ms |
+///
+/// ~50x, on the hottest read path in the server.
+///
+/// Two filter fields are deliberately ABSENT. `component_id` is matched both by
+/// value AND by `match: { text: … }` (the `daemon.` prefix form): this helper
+/// creates KEYWORD indexes only, which cannot serve the text half, so the
+/// condition would still scan — a real fix needs a full-text index and is a
+/// separate decision (measured ~520ms either way). `deleted` is a BOOL used
+/// only by the libraries `must_not`; a keyword index over a bool is the wrong
+/// index type and would just log a failed-create warning on every startup.
 pub(crate) const PROJECTS_PAYLOAD_INDEX_FIELDS: &[&str] = &[
     "tenant_id",
     "file_path",
     "relative_path",
     "branch",
-    "project_id",
     "base_point",
+    "file_type",
+    "document_type",
+    "concept_tags",
+    "tags",
 ];
 
 /// Payload-index fields for the `libraries` collection.
 ///
 /// Carries `relative_path` for the same reason as `projects`: `retrieve`'s
 /// file locator is collection-agnostic, so a libraries lookup by path hits the
-/// identical `file_path` OR `relative_path` disjunction.
+/// identical `file_path` OR `relative_path` disjunction. Same for the
+/// `file_type` / `document_type` / `concept_tags` trio: `buildFilter` applies
+/// the `fileType` and `tag` conditions to whichever collection is searched.
+///
+/// This collection is small today (304 points), so unlike `projects` these are
+/// not a measurable latency win — they are here so the SAME filter does not hit
+/// the 50x unindexed cliff if the collection grows, which is the shape that has
+/// now bitten this schema twice.
 pub(crate) const LIBRARIES_PAYLOAD_INDEX_FIELDS: &[&str] = &[
     "tenant_id",
     "library_name",
@@ -73,10 +112,28 @@ pub(crate) const LIBRARIES_PAYLOAD_INDEX_FIELDS: &[&str] = &[
     "relative_path",
     "branch",
     "base_point",
+    "file_type",
+    "document_type",
+    "concept_tags",
 ];
 
 /// Payload-index fields for the `rules` collection.
-pub(crate) const RULES_PAYLOAD_INDEX_FIELDS: &[&str] = &["tenant_id"];
+///
+/// `scope` and `project_id` are the fields the MCP `rules` tool actually
+/// filters on — `rules list` ORs the caller's project against the global scope
+/// (rules-list.ts), and both the duplicate-detection and idempotency filters
+/// pair `scope` with `project_id` (rules.ts, rules-mutation-helpers.ts). Only
+/// `tenant_id` was indexed, so every one of those ran unindexed; the live
+/// collection published exactly one indexed field on 2026-09-05.
+///
+/// The collection is small (82 points then), so this is not the latency fix
+/// `relative_path` was — it is the manifest invariant: the list must name every
+/// field a production filter uses, or the next reader cannot tell a deliberate
+/// omission from a forgotten one. `content` is deliberately excluded: the
+/// exact-content idempotency check pairs it with the indexed scope/tenant
+/// conditions, and a keyword index over full rule bodies buys little for its
+/// memory.
+pub(crate) const RULES_PAYLOAD_INDEX_FIELDS: &[&str] = &["tenant_id", "scope", "project_id"];
 
 /// Payload-index fields for the `scratchpad` collection.
 pub(crate) const SCRATCHPAD_PAYLOAD_INDEX_FIELDS: &[&str] = &["tenant_id"];
@@ -544,6 +601,66 @@ mod tests {
         assert!(
             RULES_PAYLOAD_INDEX_FIELDS.contains(&"tenant_id"),
             "rules needs tenant_id indexed for per-tenant scoping",
+        );
+    }
+
+    /// The `rules` tool filters on `scope` and `project_id` on every path that
+    /// matters: `rules list` (called at session start) ORs the caller's project
+    /// against the global scope, and duplicate/idempotency detection pairs the
+    /// two. Neither was in the manifest.
+    #[test]
+    fn rules_indexes_cover_the_mcp_scope_filters() {
+        for field in ["scope", "project_id"] {
+            assert!(
+                RULES_PAYLOAD_INDEX_FIELDS.contains(&field),
+                "rules.{field} is used by a production filter in the MCP rules \
+                 tool (rules-list.ts / rules-mutation-helpers.ts) but is not in \
+                 RULES_PAYLOAD_INDEX_FIELDS.",
+            );
+        }
+    }
+
+    /// The semantic `search` filters run against the SAME points the daemon
+    /// writes, and every one of them was unindexed — measured at ~50x the
+    /// indexed baseline on a 42k-point tenant (see the manifest doc). The two
+    /// knowingly-omitted fields are asserted absent so a later "just add them
+    /// all" does not create an index that cannot serve its condition.
+    #[test]
+    fn projects_indexes_cover_the_semantic_search_filters() {
+        for field in ["file_type", "document_type", "concept_tags", "tags"] {
+            assert!(
+                PROJECTS_PAYLOAD_INDEX_FIELDS.contains(&field),
+                "projects.{field} is used by a production filter in \
+                 tools/search-filters.ts but is not in \
+                 PROJECTS_PAYLOAD_INDEX_FIELDS — the filter degrades to a scan.",
+            );
+        }
+        for (field, why) in [
+            ("component_id", "matched by text as well as value; a KEYWORD index cannot serve the text half — needs a full-text index"),
+            ("deleted", "a bool; a keyword index is the wrong type and only produces a failed-create warning per startup"),
+        ] {
+            assert!(
+                !PROJECTS_PAYLOAD_INDEX_FIELDS.contains(&field),
+                "projects.{field} was added to the manifest, but it is omitted on \
+                 purpose: {why}. Fix the index TYPE first.",
+            );
+        }
+    }
+
+    /// `project_id` belongs to `rules`, not `projects`. It was indexed on
+    /// `projects` with zero points: nothing writes it into a projects payload
+    /// and nothing filters it there (tenancy is `tenant_id`). Pin the placement
+    /// so a future "add the missing field" reflex does not put it back.
+    #[test]
+    fn project_id_is_indexed_only_where_it_is_filtered() {
+        assert!(
+            RULES_PAYLOAD_INDEX_FIELDS.contains(&"project_id"),
+            "rules filters on project_id and needs the index",
+        );
+        assert!(
+            !PROJECTS_PAYLOAD_INDEX_FIELDS.contains(&"project_id"),
+            "projects does not write or filter project_id — indexing it there \
+             costs a round-trip per restart and misleads the next reader",
         );
     }
 

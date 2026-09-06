@@ -336,10 +336,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib storage::collections::multi_tenant \
         -- --test-threads=4 2>&1 | tee /tmp/payload-index.log; \
-    grep -q "^test result: ok\. 11 passed" /tmp/payload-index.log \
-    || { echo "GATE: expected exactly 11 payload-index manifest tests to run and \
+    grep -q "^test result: ok\. 14 passed" /tmp/payload-index.log \
+    || { echo "GATE: expected exactly 14 payload-index manifest tests to run and \
 pass — libtest exits 0 when a positional filter matches nothing, so moving the \
-module would silently un-gate the index manifests"; exit 1; }
+module would silently un-gate the index manifests. If you ADDED a test here, \
+bump this count."; exit 1; }
 
 # file_metadata branch-mirror reconcile tests run here, same rationale: hermetic
 # (in-memory / tempdir SQLite, no FTS5 trigram or timing dependence) and they

@@ -116,7 +116,11 @@ async fn projects_payload_indexes_round_trip_through_qdrant() {
         "file_path",
         "relative_path",
         "branch",
-        "project_id",
+        "base_point",
+        "file_type",
+        "document_type",
+        "concept_tags",
+        "tags",
     ];
     for field in expected_fields {
         client
