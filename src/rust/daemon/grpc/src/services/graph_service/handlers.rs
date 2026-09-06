@@ -13,9 +13,9 @@ use crate::proto::{
     BetweennessResponse, CommunityMemberProto, CommunityProto, CommunityRequest, CommunityResponse,
     CycleMemberProto, CycleProto, CycleRequest, CycleResponse, GraphMigrateRequest,
     GraphMigrateResponse, GraphStatsRequest, GraphStatsResponse, ImpactAnalysisRequest,
-    ImpactAnalysisResponse, ImpactNodeProto, PageRankNodeProto, PageRankRequest, PageRankResponse,
-    LanguageCoverageProto, QueryRelatedRequest, QueryRelatedResponse, TestGapProto, TestGapsRequest,
-    TestGapsResponse, TraversalNodeProto,
+    ImpactAnalysisResponse, ImpactNodeProto, LanguageCoverageProto, PageRankNodeProto,
+    PageRankRequest, PageRankResponse, QueryRelatedRequest, QueryRelatedResponse, TestGapProto,
+    TestGapsRequest, TestGapsResponse, TraversalNodeProto,
 };
 use crate::validation::extract_relative_path;
 

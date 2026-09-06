@@ -194,10 +194,7 @@ fn language_reliability_warning(
         .map(|lang| {
             format!(
                 "{} ({} of {} production symbols covered, {} test symbols indexed)",
-                lang.extension,
-                lang.covered,
-                lang.production,
-                lang.test_nodes
+                lang.extension, lang.covered, lang.production, lang.test_nodes
             )
         })
         .collect::<Vec<_>>()
@@ -816,12 +813,16 @@ mod tests {
     /// `transcripts/` directory must survive.
     #[test]
     fn tooling_paths_are_excluded_by_segment() {
-        assert!(is_non_production_path("doc-frontend/scripts/check_a11y.dart"));
+        assert!(is_non_production_path(
+            "doc-frontend/scripts/check_a11y.dart"
+        ));
         assert!(is_non_production_path("scripts/build.ts"));
         assert!(!is_non_production_path("src/transcripts/parser.rs"));
         assert!(!is_non_production_path("src/scriptsupport/loader.rs"));
         // `tools/` is production in this very repo (tools/registry-updater).
-        assert!(!is_non_production_path("src/rust/tools/registry-updater/main.rs"));
+        assert!(!is_non_production_path(
+            "src/rust/tools/registry-updater/main.rs"
+        ));
     }
 
     #[test]
@@ -829,6 +830,10 @@ mod tests {
         assert_eq!(language_key("a/b/c.dart").as_deref(), Some(".dart"));
         assert_eq!(language_key("a/b/C.JAVA").as_deref(), Some(".java"));
         assert_eq!(language_key("Makefile"), None);
-        assert_eq!(language_key("a/.gitignore"), None, "a dotfile is not an extension");
+        assert_eq!(
+            language_key("a/.gitignore"),
+            None,
+            "a dotfile is not an extension"
+        );
     }
 }
