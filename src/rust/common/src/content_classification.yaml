@@ -600,6 +600,12 @@ test_directories:
   - unit
   - functional
   - acceptance
+  # Gradle's testFixtures source set: shared test scaffolding (contract-test
+  # base classes, builders) that ships in NO production artifact. Missing here,
+  # DOC-V2's src/testFixtures/java/**/*ContractTest.java counted as production
+  # and filled 7 of the top-25 "untested" symbols (2026-09-06). Matched by
+  # directory NAME, lowercased — "testFixtures" arrives as "testfixtures".
+  - testfixtures
 
 # Compound tarball suffixes that map to build file_type
 tarball_suffixes:

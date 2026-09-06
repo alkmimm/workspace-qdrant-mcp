@@ -410,6 +410,27 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 pass — a rename silently empties a positional filter and libtest exits 0 when a filter \
 matches nothing (the v48 lesson). If you ADDED a test here, bump this count."; exit 1; }
 
+# File classification runs here for the same reason, and it is the widest-blast
+# gate in this list: `is_test_file` decides `is_test` for EVERY read surface
+# (search excludeTests, grep, list includeTests) and the test-gap denominator.
+# Both of its rules have been silently wrong. The JVM class convention
+# (`FooTest.java`) matched nothing at all, because every pattern keyed on `_` or
+# `.`; and Gradle's `testFixtures` source set was not a test directory. Measured
+# on DOC-V2 2026-09-06: contract-test base classes counted as production and took
+# 7 of the top-25 "most critical untested symbols". Hermetic — pure path
+# strings, no DB, no filesystem.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib file_classification \
+        -- --test-threads=4 2>&1 | tee /tmp/file-classification.log; \
+    grep -q "^test result: ok\. 28 passed" /tmp/file-classification.log \
+    || { echo "GATE: expected exactly 28 file_classification tests to run and pass — \
+libtest exits 0 when a positional filter matches nothing, so moving the module would \
+silently un-gate the classifier every read surface depends on. If you ADDED a test \
+here, bump this count."; exit 1; }
+
 # ─────────────────────────────────────────────
 # Stage 2c: static-checks — the cheap gates, on the CRITICAL PATH
 #
