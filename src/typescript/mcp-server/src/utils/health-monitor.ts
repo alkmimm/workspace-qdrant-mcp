@@ -70,7 +70,7 @@ export class HealthMonitor {
     this.qdrantClient = getQdrantClient({
       url: config.qdrantUrl,
       apiKey: config.qdrantApiKey,
-      timeout: config.qdrantTimeout ?? 5000,
+      timeout: config.qdrantTimeout,
     });
 
     // Initialize as healthy (will be updated on first check)

@@ -51,7 +51,7 @@ export class RulesTool {
     this.qdrantClient = getQdrantClient({
       url: config.qdrantUrl,
       apiKey: config.qdrantApiKey,
-      timeout: config.qdrantTimeout ?? 5000,
+      timeout: config.qdrantTimeout,
     });
     this.daemonClient = daemonClient;
     this.stateManager = stateManager;

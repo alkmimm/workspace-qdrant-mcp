@@ -118,7 +118,7 @@ export class SearchTool {
     this.qdrantClient = getQdrantClient({
       url: config.qdrantUrl,
       apiKey: config.qdrantApiKey,
-      timeout: config.qdrantTimeout ?? 5000,
+      timeout: config.qdrantTimeout,
     });
     this.daemonClient = daemonClient;
     this._stateManager = stateManager;
