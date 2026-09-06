@@ -255,4 +255,23 @@ export interface TestGapsResponse {
    *  test→production edges failed to resolve, so the ranking is not a finding.
    *  Surfaced to the agent as the response `hint`. */
   reliability_warning?: string;
+  /** Candidates dropped from the denominator as TOOLING (`scripts/`). Reported
+   *  so a moved denominator is visible rather than silent. */
+  excluded_non_production?: number;
+  /** Coverage split by file extension, largest language first. The global ratio
+   *  cannot express a per-language extraction failure — measured 2026-09-06,
+   *  a repo whose ranking was full of demonstrably tested Flutter widgets
+   *  reported 27.7% overall against this repo's healthy 28.3%. */
+  coverage_by_language?: LanguageCoverageProto[];
+}
+
+/** Per-language slice of the test-gap coverage summary. */
+export interface LanguageCoverageProto {
+  /** Lowercased extension including the dot, e.g. `.dart`. */
+  extension: string;
+  production: number;
+  covered: number;
+  /** Test symbols in this language. Many tests plus near-zero coverage is an
+   *  extractor blind spot, not untested code. */
+  test_nodes: number;
 }

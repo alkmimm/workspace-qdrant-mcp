@@ -405,8 +405,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib graph::algorithms::test_gaps \
         -- --test-threads=4 2>&1 | tee /tmp/test-gaps-guard.log; \
-    grep -q "^test result: ok\. 8 passed" /tmp/test-gaps-guard.log \
-    || { echo "GATE: expected exactly 8 tests in graph::algorithms::test_gaps to run and \
+    grep -q "^test result: ok\. 13 passed" /tmp/test-gaps-guard.log \
+    || { echo "GATE: expected exactly 13 tests in graph::algorithms::test_gaps to run and \
 pass — a rename silently empties a positional filter and libtest exits 0 when a filter \
 matches nothing (the v48 lesson). If you ADDED a test here, bump this count."; exit 1; }
 
