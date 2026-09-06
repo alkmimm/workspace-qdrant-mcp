@@ -37,6 +37,94 @@ export function matchesGlob(value: string, glob: string): boolean {
 }
 
 /**
+ * Ceiling on the patterns one glob may expand into. `{a,b}/{c,d}/{e,f}` is
+ * legitimate and small; a pathological nest is not worth compiling. On
+ * overflow the pattern is returned verbatim (today's behaviour: the braces
+ * match literally, which is a miss, not a wrong match).
+ */
+const MAX_BRACE_EXPANSIONS = 256;
+
+/** Locate the first brace group, honouring nesting. `undefined` when there is
+ *  no `{`, or when it is unbalanced — an unbalanced brace is a literal. */
+function findBraceGroup(glob: string): { open: number; close: number } | undefined {
+  const open = glob.indexOf('{');
+  if (open === -1) return undefined;
+  let depth = 0;
+  for (let index = open; index < glob.length; index += 1) {
+    const char = glob[index];
+    if (char === '{') depth += 1;
+    else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return { open, close: index };
+    }
+  }
+  return undefined;
+}
+
+/** Split a brace body on its TOP-LEVEL commas, so `{a,{b,c}}` yields
+ *  `["a", "{b,c}"]` rather than splitting the nested group open. */
+function splitTopLevelCommas(body: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const char of body) {
+    if (char === '{') {
+      depth += 1;
+      current += char;
+    } else if (char === '}') {
+      depth -= 1;
+      current += char;
+    } else if (char === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  parts.push(current);
+  return parts;
+}
+
+function expandBracesInto(glob: string, out: string[]): boolean {
+  if (out.length >= MAX_BRACE_EXPANSIONS) return false;
+  const group = findBraceGroup(glob);
+  if (group === undefined) {
+    out.push(glob);
+    return true;
+  }
+  const prefix = glob.slice(0, group.open);
+  const suffix = glob.slice(group.close + 1);
+  for (const alternative of splitTopLevelCommas(glob.slice(group.open + 1, group.close))) {
+    // Trimmed, matching the daemon's `expand_braces`: a human-typed
+    // `{rs, toml}` must behave like `{rs,toml}` rather than silently becoming
+    // the unmatchable `*. toml`.
+    if (!expandBracesInto(`${prefix}${alternative.trim()}${suffix}`, out)) return false;
+  }
+  return true;
+}
+
+/**
+ * Expand `{a,b}` alternation into one pattern per alternative, left to right.
+ *
+ * The daemon's FTS glob has supported braces since it shipped (`expand_braces`
+ * in `text_search/escaping.rs`), so `grep`/`exact` answered
+ * `pathGlob:"**\/*.{rs,ts}"` correctly while the TWO TypeScript engines —
+ * this matcher (semantic search, `search-db-reader`) and the SQLite `GLOB`
+ * clause behind `list` — treated the braces as literal characters and returned
+ * ZERO, silently. Measured 2026-09-05: the same glob gave 28 grep matches and
+ * 0 listed files.
+ *
+ * Nesting and multiple groups are handled (`{a,{b,c}}`, `{src,tests}/*.{rs,ts}`);
+ * an unbalanced brace stays literal, which is what a caller who meant a
+ * literal `{` gets today. Kept exported so the `list` SQL builder and the
+ * daemon-side normalizer can be asserted against the same semantics.
+ */
+export function expandBraces(glob: string): string[] {
+  const expanded: string[] = [];
+  return expandBracesInto(glob, expanded) && expanded.length > 0 ? expanded : [glob];
+}
+
+/**
  * Expand a wildcard-free path literal into the globs that let it scope to a
  * DIRECTORY, not just an equally-named file. `matchesGlob('**\/tool-builders')`
  * only matches a path ENDING in `tool-builders`, so a bare directory literal
@@ -64,10 +152,16 @@ function directoryAwareGlobs(glob: string): string[] {
  * {@link directoryAwareGlobs} so it scopes to a directory subtree, mirroring the
  * daemon-side `normalize_path_glob`. Single source of truth for both the exclude
  * and include matchers so their semantics can never drift apart.
+ *
+ * Brace alternation is expanded FIRST ({@link expandBraces}): each alternative
+ * is then floated and directory-shaped on its own, so `{src,tests}` scopes to
+ * both subtrees exactly as the two literals would separately.
  */
 function matchesFloatingGlob(value: string, glob: string): boolean {
-  return directoryAwareGlobs(glob).some(
-    (g) => matchesGlob(value, g) || matchesGlob(value, `**/${g}`)
+  return expandBraces(glob).some((alternative) =>
+    directoryAwareGlobs(alternative).some(
+      (g) => matchesGlob(value, g) || matchesGlob(value, `**/${g}`)
+    )
   );
 }
 

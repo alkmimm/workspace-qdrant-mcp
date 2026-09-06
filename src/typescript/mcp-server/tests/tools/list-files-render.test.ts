@@ -1,17 +1,18 @@
 /**
- * Tests for list-files tool — summary rendering, flat rendering, and glob matching
+ * Tests for list-files tool — summary rendering and flat rendering.
+ *
+ * Glob matching is NOT tested here any more: the dead `globToRegex` engine
+ * this file used to cover was removed (see `list-files/filters.ts`). The two
+ * live engines are covered where they run — `utils/path-glob.test.ts` for the
+ * shared matcher and the tracked-files query tests for the SQLite GLOB clause
+ * that `list` actually uses.
  */
 
 import { describe, it, expect } from 'vitest';
 
 import type { TrackedFileEntry, SubmoduleEntry } from '../../src/clients/tracked-files-queries.js';
 import type { FolderNode } from '../../src/tools/list-files-types.js';
-import {
-  buildTree,
-  renderSummary,
-  renderFlat,
-  globToRegex,
-} from '../../src/tools/list-files/index.js';
+import { buildTree, renderSummary, renderFlat } from '../../src/tools/list-files/index.js';
 
 // ── Test helpers ─────────────────────────────────────────────────────────
 
@@ -137,48 +138,5 @@ describe('renderFlat', () => {
     const files = Array.from({ length: 10 }, (_, i) => makeFile(`f${i}.ts`));
     const { count } = renderFlat(files, 3);
     expect(count).toBe(3);
-  });
-});
-
-// ── globToRegex ──────────────────────────────────────────────────────────
-
-describe('globToRegex', () => {
-  it('should match exact filename', () => {
-    const re = globToRegex('README.md');
-    expect(re.test('README.md')).toBe(true);
-    expect(re.test('src/README.md')).toBe(false);
-  });
-
-  it('should match * as non-slash wildcard', () => {
-    const re = globToRegex('*.ts');
-    expect(re.test('file.ts')).toBe(true);
-    expect(re.test('src/file.ts')).toBe(false);
-  });
-
-  it('should match ** as any-depth wildcard', () => {
-    const re = globToRegex('**/*.ts');
-    expect(re.test('file.ts')).toBe(true);
-    expect(re.test('src/file.ts')).toBe(true);
-    expect(re.test('a/b/c/file.ts')).toBe(true);
-    expect(re.test('a/b/c/file.rs')).toBe(false);
-  });
-
-  it('should match path prefix with **', () => {
-    const re = globToRegex('src/**/*.test.ts');
-    expect(re.test('src/tools/search.test.ts')).toBe(true);
-    expect(re.test('src/search.test.ts')).toBe(true);
-    expect(re.test('tests/search.test.ts')).toBe(false);
-  });
-
-  it('should escape regex special chars', () => {
-    const re = globToRegex('file.test.ts');
-    expect(re.test('file.test.ts')).toBe(true);
-    expect(re.test('filextest.ts')).toBe(false); // . should not match arbitrary char
-  });
-
-  it('should match ? as single non-slash char', () => {
-    const re = globToRegex('file?.ts');
-    expect(re.test('file1.ts')).toBe(true);
-    expect(re.test('fileAB.ts')).toBe(false);
   });
 });

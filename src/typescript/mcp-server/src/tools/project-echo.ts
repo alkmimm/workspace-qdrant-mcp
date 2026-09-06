@@ -39,14 +39,23 @@
 import { getRequestContext, type ResolvedProjectIdentity } from '../utils/request-context.js';
 import type { ScopedTenant } from './tenant-scope.js';
 
+/**
+ * Every rung the project of a read can be resolved by. Runtime array, with the
+ * type derived from it, so `help("http")` can be asserted to document all of
+ * them — a new rung an agent sees in `project_source` but cannot look up is
+ * worse than no echo at all.
+ */
+export const PROJECT_SOURCES = [
+  'projectId',
+  'cwd',
+  'sticky-cwd',
+  'sole-project',
+  'server-default',
+  'session',
+] as const;
+
 /** How the project of a read was resolved. */
-export type ProjectSource =
-  | 'projectId'
-  | 'cwd'
-  | 'sticky-cwd'
-  | 'sole-project'
-  | 'server-default'
-  | 'session';
+export type ProjectSource = (typeof PROJECT_SOURCES)[number];
 
 export interface ProjectEcho {
   project_id?: string;

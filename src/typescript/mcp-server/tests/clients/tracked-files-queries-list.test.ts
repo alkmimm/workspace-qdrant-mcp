@@ -378,6 +378,41 @@ describe('listTrackedFiles', () => {
       expect(result.data.map((f) => f.relativePath)).toContain('src/utils/helpers.rs');
     });
 
+    // `**/` means any depth INCLUDING ZERO. Collapsing it to `*/` forced a
+    // literal slash, so a root-level file was skipped while grep and semantic
+    // search — where `**/` is optional — matched it. Same glob, three surfaces,
+    // different sets.
+    it('matches a root-level file through a **/ prefix', () => {
+      seedFile(db, 'root.rs', { language: 'rust', fileType: 'code' });
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.rs' });
+      const paths = result.data.map((f) => f.relativePath);
+      expect(paths).toContain('root.rs'); // zero directories
+      expect(paths).toContain('src/utils/helpers.rs'); // and still any depth
+    });
+
+    it('matches a directory-level file through a mid-pattern **/', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'src/**/*.rs' });
+      const paths = result.data.map((f) => f.relativePath).sort();
+      expect(paths).toEqual(['src/lib.rs', 'src/main.rs', 'src/utils/helpers.rs']);
+    });
+
+    it('keeps a mid-pattern **/ from gaining subtree semantics', () => {
+      // `a/**/b` expands to `a/b` (zero dirs), which is wildcard-free — it must
+      // NOT be treated as a directory literal and pull in `a/b/anything`.
+      seedFile(db, 'pkg/mod.rs', { language: 'rust', fileType: 'code' });
+      seedFile(db, 'pkg/mod.rs.bak/inner.rs', { language: 'rust', fileType: 'code' });
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'pkg/**/mod.rs' });
+      expect(result.data.map((f) => f.relativePath)).toEqual(['pkg/mod.rs']);
+    });
+
+    it('countTrackedFiles agrees for a **/ pattern reaching the root', () => {
+      seedFile(db, 'root.rs', { language: 'rust', fileType: 'code' });
+      const list = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.rs' });
+      const count = countTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.rs' });
+      expect(count).toBe(list.data.length);
+      expect(count).toBe(5);
+    });
+
     it('countTrackedFiles agrees with listTrackedFiles for a floated glob', () => {
       seedFile(db, 'db/migration/V9__x.sql', { language: 'sql', extension: 'sql' });
       const list = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'V*.sql' });
@@ -453,6 +488,82 @@ describe('listTrackedFiles', () => {
       const count = countTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'src' });
       expect(count).toBe(list.data.length);
       expect(count).toBe(4);
+    });
+  });
+
+  // ── Brace alternation (regression) ────────────────────────────────────────
+  // SQLite's GLOB operator has no `{a,b}`, so a braced pattern reached the
+  // database as a literal and selected NOTHING — silently. The daemon-side FTS
+  // glob behind `grep` has always expanded braces, so the identical pattern
+  // answered from one tool and returned zero from `list`.
+  describe('brace alternation', () => {
+    it('expands {rs,ts} into both extensions', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.{rs,ts}' });
+      expect(result.status).toBe('ok');
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual([
+        'src/lib.rs',
+        'src/main.rs',
+        'src/server.ts',
+        'src/utils/helpers.rs',
+        'tests/test_main.rs',
+      ]);
+    });
+
+    it('tolerates whitespace after the comma, like the daemon expansion', () => {
+      const spaced = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.{rs, ts}' });
+      const tight = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.{rs,ts}' });
+      expect(spaced.data.map((f) => f.relativePath).sort()).toEqual(
+        tight.data.map((f) => f.relativePath).sort()
+      );
+      expect(spaced.data.length).toBe(5);
+    });
+
+    it('applies directory shaping to each wildcard-free alternative', () => {
+      const result = listTrackedFiles(db, {
+        watchFolderId: WATCH_ID,
+        glob: '{README.md,Cargo.toml}',
+      });
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual(['Cargo.toml', 'README.md']);
+    });
+
+    it('expands nested groups, splitting only on top-level commas', () => {
+      const result = listTrackedFiles(db, {
+        watchFolderId: WATCH_ID,
+        glob: '{src/{lib,main}.rs,README.md}',
+      });
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual([
+        'README.md',
+        'src/lib.rs',
+        'src/main.rs',
+      ]);
+    });
+
+    it('excludes every alternative (NOT GLOB joined by AND is the complement)', () => {
+      const result = listTrackedFiles(db, {
+        watchFolderId: WATCH_ID,
+        excludeGlob: '**/*.{md,toml,yaml}',
+      });
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual([
+        'src/lib.rs',
+        'src/main.rs',
+        'src/server.ts',
+        'src/utils/helpers.rs',
+        'tests/test_main.rs',
+      ]);
+    });
+
+    it('countTrackedFiles agrees with listTrackedFiles for a braced glob', () => {
+      const glob = '**/*.{rs,ts}';
+      const list = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob });
+      const count = countTrackedFiles(db, { watchFolderId: WATCH_ID, glob });
+      expect(count).toBe(list.data.length);
+      expect(count).toBe(5);
+    });
+
+    it('leaves an unbalanced brace literal (matches nothing here, never everything)', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.{rs' });
+      expect(result.status).toBe('ok');
+      expect(result.data).toHaveLength(0);
     });
   });
 });

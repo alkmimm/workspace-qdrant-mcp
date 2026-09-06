@@ -367,6 +367,10 @@ services:
       MCP_HTTP_TRUST_LOCALHOST: ${MCP_HTTP_TRUST_LOCALHOST:-1}
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      # Per-request Qdrant timeout for every MCP tool. Empty = the code default
+      # (30s). Raise it if reads abort with "This operation was aborted" while
+      # the daemon saturates Qdrant (folder-scan storm after a branch switch).
+      WQM_QDRANT_TIMEOUT_MS: ${WQM_QDRANT_TIMEOUT_MS:-}
       WQM_DAEMON_ENDPOINT: memexd:50051
       WQM_LOG_LEVEL: ${WQM_LOG_LEVEL:-INFO}
       WQM_LOG_DIR: /home/node/.local/share/workspace-qdrant/logs

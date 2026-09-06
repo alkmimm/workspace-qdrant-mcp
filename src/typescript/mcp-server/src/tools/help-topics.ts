@@ -120,7 +120,8 @@ export const HELP_TOPICS = {
     ].join(' '),
   },
   http: {
-    summary: 'Project detection over HTTP: the cwd argument and its precedence chain.',
+    summary:
+      'Project detection over HTTP: the cwd argument, its precedence chain, and the project echo.',
     content: [
       'Every project-scoped tool accepts a `cwd` argument. Over HTTP the server cannot observe',
       'your working directory, so pass your absolute cwd (or an explicit `projectId`) — front-load',
@@ -132,6 +133,17 @@ export const HELP_TOPICS = {
       'resolved tenant and project path back. Read tools refuse with "Could not detect project"',
       'when nothing resolves; a write instead lands in the GLOBAL tenant, where project-scoped',
       'search never resurfaces it (see the scratchpad topic).',
+      'ECHO: every project-scoped READ (search, grep, list, retrieve, graph, scratchpad, rules)',
+      'answers with `project_id`, `project_path` and `project_source` — CHECK them, because a call',
+      'that resolves to the wrong project still succeeds, it just answers about another repo.',
+      '`project_source` names which rung of the chain won: "cwd" (the cwd you passed on THIS call),',
+      '"sticky-cwd" (a cwd from an EARLIER call in this session — the usual cause of a surprising',
+      'answer, since a cwd-less call silently rides the previous project), "projectId" (you named',
+      'the tenant explicitly), "session" (the project this session activated), "sole-project" (the',
+      'server had exactly one indexed project and used it), or "server-default" (a configured',
+      'fallback — nothing about your call selected it). Anything but "cwd" or "projectId" means the',
+      'project was INFERRED: if the echoed path is not the repo you meant, re-issue the call with',
+      '`cwd` set.',
     ].join(' '),
   },
   rules: {

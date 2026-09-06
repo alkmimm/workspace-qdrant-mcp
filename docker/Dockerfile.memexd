@@ -323,6 +323,25 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib text_search::escaping -- --test-threads=4
 
+# Qdrant payload-index manifests run here, same rationale: hermetic (pure const
+# assertions, no Qdrant and no DB) and they guard a SILENT performance cliff —
+# a field used in a production filter but missing from the manifest makes that
+# filter a full collection scan, with no error anywhere. Two such holes have
+# shipped: tenant_id/file_path (2.3s per delete) and `relative_path`, which the
+# MCP `retrieve` path locator filters on and which was still unindexed against
+# 501k points when the live payload schema was read back on 2026-09-05.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib storage::collections::multi_tenant \
+        -- --test-threads=4 2>&1 | tee /tmp/payload-index.log; \
+    grep -q "^test result: ok\. 14 passed" /tmp/payload-index.log \
+    || { echo "GATE: expected exactly 14 payload-index manifest tests to run and \
+pass — libtest exits 0 when a positional filter matches nothing, so moving the \
+module would silently un-gate the index manifests. If you ADDED a test here, \
+bump this count."; exit 1; }
+
 # file_metadata branch-mirror reconcile tests run here, same rationale: hermetic
 # (in-memory / tempdir SQLite, no FTS5 trigram or timing dependence) and they
 # guard the field-reported duplicate-grep-hit fix — the search.db

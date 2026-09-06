@@ -111,7 +111,17 @@ async fn projects_payload_indexes_round_trip_through_qdrant() {
 
     // Mirror the PROJECTS_PAYLOAD_INDEX_FIELDS manifest. Keep in sync with
     // `src/storage/collections/multi_tenant.rs`.
-    let expected_fields = ["tenant_id", "file_path", "branch", "project_id"];
+    let expected_fields = [
+        "tenant_id",
+        "file_path",
+        "relative_path",
+        "branch",
+        "base_point",
+        "file_type",
+        "document_type",
+        "concept_tags",
+        "tags",
+    ];
     for field in expected_fields {
         client
             .create_payload_index(&collection, field)

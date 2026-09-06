@@ -13,6 +13,7 @@ import { describe, it, expect } from 'vitest';
 
 import { handleHelp } from '../../src/tools/help.js';
 import { HELP_TOPICS, HELP_TOPIC_IDS, helpRef } from '../../src/tools/help-topics.js';
+import { PROJECT_SOURCES } from '../../src/tools/project-echo.js';
 import { helpToolDefinition } from '../../src/tool-definitions/help.js';
 
 describe('help topics catalog', () => {
@@ -34,6 +35,23 @@ describe('help topics catalog', () => {
 
   it('helpRef renders a stable pointer shape', () => {
     expect(helpRef('http')).toBe('help("http")');
+  });
+
+  // The read surfaces echo `project_id`/`project_path`/`project_source` on
+  // every project-scoped answer, but the chapter an agent is pointed at said
+  // nothing about it — so a surprising `project_source:"sticky-cwd"` had no
+  // documented meaning anywhere.
+  it('the http chapter documents the read-side project echo', () => {
+    const http = HELP_TOPICS.http.content;
+    for (const field of ['project_id', 'project_path', 'project_source']) {
+      expect(http, field).toContain(field);
+    }
+  });
+
+  it('the http chapter documents EVERY project_source rung', () => {
+    for (const rung of PROJECT_SOURCES) {
+      expect(HELP_TOPICS.http.content, rung).toContain(`"${rung}"`);
+    }
   });
 });
 

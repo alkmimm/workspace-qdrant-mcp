@@ -27,9 +27,11 @@ function buildRulesTool(config: ReturnType<typeof loadConfig>): RulesTool {
   stateManager.setDaemonClient(daemonClient);
   stateManager.initialize();
   const projectDetector = new ProjectDetector();
+  // No `qdrantTimeout` here on purpose: the client factory resolves it
+  // (WQM_QDRANT_TIMEOUT_MS → DEFAULT_QDRANT_TIMEOUT_MS), so this path cannot
+  // pin a timeout the rest of the server does not share.
   const rulesToolConfig = {
     qdrantUrl: config.qdrant?.url ?? DEFAULT_CONFIG.qdrant.url,
-    qdrantTimeout: 5000,
   } as { qdrantUrl: string; qdrantApiKey?: string; qdrantTimeout?: number };
   if (config.qdrant?.apiKey) rulesToolConfig.qdrantApiKey = config.qdrant.apiKey;
   return new RulesTool(rulesToolConfig, daemonClient, stateManager, projectDetector);

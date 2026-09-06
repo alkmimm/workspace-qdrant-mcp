@@ -147,7 +147,7 @@ export class ScratchpadTool {
     this.qdrantClient = getQdrantClient({
       url: config.qdrantUrl,
       apiKey: config.qdrantApiKey,
-      timeout: config.qdrantTimeout ?? 5000,
+      timeout: config.qdrantTimeout,
     });
     this.stateManager = stateManager;
     this.projectDetector = projectDetector;
