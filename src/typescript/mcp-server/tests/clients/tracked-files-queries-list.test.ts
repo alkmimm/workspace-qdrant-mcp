@@ -378,6 +378,41 @@ describe('listTrackedFiles', () => {
       expect(result.data.map((f) => f.relativePath)).toContain('src/utils/helpers.rs');
     });
 
+    // `**/` means any depth INCLUDING ZERO. Collapsing it to `*/` forced a
+    // literal slash, so a root-level file was skipped while grep and semantic
+    // search — where `**/` is optional — matched it. Same glob, three surfaces,
+    // different sets.
+    it('matches a root-level file through a **/ prefix', () => {
+      seedFile(db, 'root.rs', { language: 'rust', fileType: 'code' });
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.rs' });
+      const paths = result.data.map((f) => f.relativePath);
+      expect(paths).toContain('root.rs'); // zero directories
+      expect(paths).toContain('src/utils/helpers.rs'); // and still any depth
+    });
+
+    it('matches a directory-level file through a mid-pattern **/', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'src/**/*.rs' });
+      const paths = result.data.map((f) => f.relativePath).sort();
+      expect(paths).toEqual(['src/lib.rs', 'src/main.rs', 'src/utils/helpers.rs']);
+    });
+
+    it('keeps a mid-pattern **/ from gaining subtree semantics', () => {
+      // `a/**/b` expands to `a/b` (zero dirs), which is wildcard-free — it must
+      // NOT be treated as a directory literal and pull in `a/b/anything`.
+      seedFile(db, 'pkg/mod.rs', { language: 'rust', fileType: 'code' });
+      seedFile(db, 'pkg/mod.rs.bak/inner.rs', { language: 'rust', fileType: 'code' });
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'pkg/**/mod.rs' });
+      expect(result.data.map((f) => f.relativePath)).toEqual(['pkg/mod.rs']);
+    });
+
+    it('countTrackedFiles agrees for a **/ pattern reaching the root', () => {
+      seedFile(db, 'root.rs', { language: 'rust', fileType: 'code' });
+      const list = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.rs' });
+      const count = countTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.rs' });
+      expect(count).toBe(list.data.length);
+      expect(count).toBe(5);
+    });
+
     it('countTrackedFiles agrees with listTrackedFiles for a floated glob', () => {
       seedFile(db, 'db/migration/V9__x.sql', { language: 'sql', extension: 'sql' });
       const list = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: 'V*.sql' });
@@ -504,13 +539,9 @@ describe('listTrackedFiles', () => {
     });
 
     it('excludes every alternative (NOT GLOB joined by AND is the complement)', () => {
-      // `*.{…}`, not `**/*.{…}`: this engine collapses `**` to `*` and SQLite
-      // GLOB then still requires the literal `/`, so a `**/`-prefixed pattern
-      // does not reach root-level files. That divergence from the TS matcher
-      // predates brace support and is deliberately not exercised here.
       const result = listTrackedFiles(db, {
         watchFolderId: WATCH_ID,
-        excludeGlob: '*.{md,toml,yaml}',
+        excludeGlob: '**/*.{md,toml,yaml}',
       });
       expect(result.data.map((f) => f.relativePath).sort()).toEqual([
         'src/lib.rs',
