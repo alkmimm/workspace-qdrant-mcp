@@ -39,21 +39,38 @@ use super::super::types::{MultiTenantInitResult, StorageError};
 /// Payload-index fields for the `projects` collection.
 ///
 /// MUST include every keyword field used in a filter expression against
-/// this collection. Adding a new filter field without updating this list
+/// this collection — by the daemon AND by the MCP read surfaces, which filter
+/// the same points. Adding a new filter field without updating this list
 /// is a performance bug; see `multi_tenant_indexes` test below.
+///
+/// `relative_path` is here because `retrieve` filters on it: both the explicit
+/// `filter: { relative_path: … }` form and the `filePath` locator, whose
+/// `should` clause matches EITHER `file_path` OR the repo-relative
+/// `relative_path` (tools/retrieve.ts). Without the index that half of the
+/// disjunction degrades to a scan of every point in the tenant — the same
+/// full-scan shape that made deletes cost 2.3s before `file_path` was indexed.
+/// Verified missing on the live deployment 2026-09-05: `projects` published
+/// `tenant_id`, `branch`, `file_path`, `base_point`, `project_id` and nothing
+/// else, against 501k points.
 pub(crate) const PROJECTS_PAYLOAD_INDEX_FIELDS: &[&str] = &[
     "tenant_id",
     "file_path",
+    "relative_path",
     "branch",
     "project_id",
     "base_point",
 ];
 
 /// Payload-index fields for the `libraries` collection.
+///
+/// Carries `relative_path` for the same reason as `projects`: `retrieve`'s
+/// file locator is collection-agnostic, so a libraries lookup by path hits the
+/// identical `file_path` OR `relative_path` disjunction.
 pub(crate) const LIBRARIES_PAYLOAD_INDEX_FIELDS: &[&str] = &[
     "tenant_id",
     "library_name",
     "file_path",
+    "relative_path",
     "branch",
     "base_point",
 ];
@@ -486,6 +503,31 @@ mod tests {
                 LIBRARIES_PAYLOAD_INDEX_FIELDS.contains(&field),
                 "libraries.{field} missing from LIBRARIES_PAYLOAD_INDEX_FIELDS",
             );
+        }
+    }
+
+    /// The MCP read surfaces filter the same points the daemon writes, so a
+    /// field only THEY filter on still needs an index here. `retrieve` accepts
+    /// a path locator that matches `file_path` OR `relative_path`
+    /// (tools/retrieve.ts) and an explicit `filter: { relative_path: … }`;
+    /// with only `file_path` indexed, half of every such lookup scanned the
+    /// whole tenant. The daemon never filters `relative_path` itself, which is
+    /// exactly why it went unnoticed until the live payload schema was read
+    /// back (2026-09-05).
+    #[test]
+    fn indexes_cover_mcp_retrieve_path_locator() {
+        for (name, fields) in [
+            ("projects", PROJECTS_PAYLOAD_INDEX_FIELDS),
+            ("libraries", LIBRARIES_PAYLOAD_INDEX_FIELDS),
+        ] {
+            for field in ["file_path", "relative_path"] {
+                assert!(
+                    fields.contains(&field),
+                    "{name}.{field} is one half of the retrieve() path locator \
+                     (file_path OR relative_path); without the index that lookup \
+                     degrades to a tenant-wide scan.",
+                );
+            }
         }
     }
 
