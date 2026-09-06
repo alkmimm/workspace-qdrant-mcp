@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import type { DegradedQueryResult } from '../sqlite-state-manager.js';
 import { handleTableNotFound } from './helpers.js';
 import { getSearchDatabasePath } from '../../utils/paths.js';
+import { expandBraces } from '../../utils/path-glob.js';
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -169,8 +170,9 @@ const FILE_TYPE_EXTENSIONS: Record<string, string[]> = {
 };
 
 /**
- * Append a floating SQLite GLOB path filter on `column` — the single source of
- * truth for both the include (`glob`) and the exclude (`excludeGlob`) so their
+ * The floating SQLite GLOB patterns ONE brace-free caller pattern expands to —
+ * the single source of truth for both the include (`glob`) and the exclude
+ * (`excludeGlob`), which apply it through {@link pushGlobClause} so their
  * semantics can never drift. Mirrors the daemon's `normalize_path_glob`
  * (src/rust/.../text_search/escaping.rs) and the TS `matchesFloatingGlob`
  * (src/.../utils/path-glob.ts):
@@ -186,8 +188,42 @@ const FILE_TYPE_EXTENSIONS: Record<string, string[]> = {
  *     dropped nothing — the files live UNDER the directory, not AT it.
  *
  * SQLite GLOB anchors both ends and its `*` crosses `/`, so `dir/*` already spans
- * an arbitrarily deep subtree. `negate` turns each `GLOB` into `NOT GLOB` and
- * every `OR` into `AND`, making the exclude the exact complement of the include.
+ * an arbitrarily deep subtree.
+ */
+function sqlGlobPatternsFor(glob: string): string[] {
+  const collapsed = glob.replace(/\*\*/g, '*');
+
+  // Explicit floating (leading `*`) or absolute (leading `/`) → matched verbatim.
+  if (collapsed.startsWith('*') || collapsed.startsWith('/')) {
+    return [collapsed];
+  }
+
+  // A relative pattern that still carries a wildcard floats at root + any depth.
+  if (/[*?[]/.test(collapsed)) {
+    return [collapsed, `*/${collapsed}`];
+  }
+
+  // Wildcard-free literal → exact path OR whole subtree at any depth; a trailing
+  // slash is directory-only.
+  const dir = collapsed.replace(/\/+$/, '');
+  const globs: string[] = [];
+  if (!collapsed.endsWith('/')) globs.push(dir, `*/${dir}`); // the exact file, root or nested
+  globs.push(`${dir}/*`, `*/${dir}/*`); // its subtree, root or nested
+  return globs;
+}
+
+/**
+ * Append the clause for one caller glob. Brace alternation is expanded first
+ * (`expandBraces`, the same helper the semantic matcher uses) and every
+ * alternative contributes its own patterns to the SAME clause.
+ *
+ * SQLite's `GLOB` operator implements `*`, `?` and `[…]` but NOT `{a,b}`, so
+ * before this a braced pattern reached the database as a literal and selected
+ * nothing — `list pattern:"**\/*.{rs,ts}"` returned zero files while the
+ * daemon-side FTS glob behind `grep` answered the identical pattern with 28
+ * matches (measured 2026-09-05). Union semantics hold under negation too:
+ * `negate` turns each `GLOB` into `NOT GLOB` and every `OR` into `AND`, so the
+ * exclude stays the exact complement of the include across every alternative.
  */
 function pushGlobClause(
   conditions: string[],
@@ -198,30 +234,9 @@ function pushGlobClause(
 ): void {
   const op = negate ? 'NOT GLOB' : 'GLOB';
   const join = negate ? ' AND ' : ' OR ';
-  const collapsed = glob.replace(/\*\*/g, '*');
-
-  // Explicit floating (leading `*`) or absolute (leading `/`) → matched verbatim.
-  if (collapsed.startsWith('*') || collapsed.startsWith('/')) {
-    conditions.push(`${column} ${op} ?`);
-    params.push(collapsed);
-    return;
-  }
-
-  // A relative pattern that still carries a wildcard floats at root + any depth.
-  if (/[*?[]/.test(collapsed)) {
-    conditions.push(`(${column} ${op} ?${join}${column} ${op} ?)`);
-    params.push(collapsed, `*/${collapsed}`);
-    return;
-  }
-
-  // Wildcard-free literal → exact path OR whole subtree at any depth; a trailing
-  // slash is directory-only.
-  const dir = collapsed.replace(/\/+$/, '');
-  const globs: string[] = [];
-  if (!collapsed.endsWith('/')) globs.push(dir, `*/${dir}`); // the exact file, root or nested
-  globs.push(`${dir}/*`, `*/${dir}/*`); // its subtree, root or nested
-  conditions.push(`(${globs.map(() => `${column} ${op} ?`).join(join)})`);
-  params.push(...globs);
+  const patterns = [...new Set(expandBraces(glob).flatMap(sqlGlobPatternsFor))];
+  conditions.push(`(${patterns.map(() => `${column} ${op} ?`).join(join)})`);
+  params.push(...patterns);
 }
 
 /** Build WHERE conditions and params from filter options. */

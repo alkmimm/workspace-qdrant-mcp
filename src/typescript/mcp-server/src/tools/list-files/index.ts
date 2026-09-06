@@ -77,7 +77,6 @@ export type { ListOptions, ListResponse } from '../list-files-types.js';
 // Re-export utilities used by tests
 export { buildTree } from './tree-builder.js';
 export { renderTree, renderSummary, renderFlat } from './renderers.js';
-export { globToRegex } from './filters.js';
 
 /**
  * List tool for project file and folder structure

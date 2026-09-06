@@ -56,27 +56,93 @@ pub(crate) fn extract_glob_prefix(glob: &str) -> Option<String> {
     }
 }
 
-/// Expand brace expressions in a glob pattern.
-///
-/// Handles a single level of `{a,b,c}` expansion. For example:
-/// `*.{rs,toml}` -> `["*.rs", "*.toml"]`
-///
-/// If no braces are present, returns the original pattern as a single-element vec.
-pub(crate) fn expand_braces(glob: &str) -> Vec<String> {
-    if let Some(open) = glob.find('{') {
-        if let Some(close) = glob[open..].find('}') {
-            let close = open + close;
-            let prefix = &glob[..open];
-            let suffix = &glob[close + 1..];
-            let alternatives = &glob[open + 1..close];
+/// Ceiling on how many patterns one glob may expand into. Real patterns
+/// (`*.{rs,ts}`, `{src,tests}/**`) are far below it; a pathological nest is not
+/// worth compiling. On overflow the pattern is returned verbatim — the braces
+/// then match literally, which is a MISS, never a wrong match.
+const MAX_BRACE_EXPANSIONS: usize = 256;
 
-            return alternatives
-                .split(',')
-                .map(|alt| format!("{}{}{}", prefix, alt.trim(), suffix))
-                .collect();
+/// Locate the first brace group, honouring nesting. `None` when there is no
+/// `{`, or when it is unbalanced — an unbalanced brace is a literal.
+fn find_brace_group(glob: &str) -> Option<(usize, usize)> {
+    let open = glob.find('{')?;
+    let mut depth = 0usize;
+    for (offset, ch) in glob[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((open, open + offset));
+                }
+            }
+            _ => {}
         }
     }
-    vec![glob.to_string()]
+    None
+}
+
+/// Split a brace body on its TOP-LEVEL commas, so `{a,{b,c}}` yields
+/// `["a", "{b,c}"]` instead of splitting the nested group open.
+fn split_top_level_commas(body: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (offset, ch) in body.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&body[start..offset]);
+                start = offset + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&body[start..]);
+    parts
+}
+
+fn expand_braces_into(glob: &str, out: &mut Vec<String>) -> bool {
+    if out.len() >= MAX_BRACE_EXPANSIONS {
+        return false;
+    }
+    let Some((open, close)) = find_brace_group(glob) else {
+        out.push(glob.to_string());
+        return true;
+    };
+    let prefix = &glob[..open];
+    let suffix = &glob[close + 1..];
+    for alternative in split_top_level_commas(&glob[open + 1..close]) {
+        let candidate = format!("{}{}{}", prefix, alternative.trim(), suffix);
+        if !expand_braces_into(&candidate, out) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Expand brace expressions in a glob pattern, left to right.
+///
+/// `*.{rs,toml}` -> `["*.rs", "*.toml"]`. Multiple groups and nesting are
+/// handled (`{src,tests}/*.{rs,ts}`, `{a,{b,c}}`); previously only the first
+/// group expanded and its closing brace was taken as the first `}` found,
+/// which splits a nested group in the wrong place. If no braces are present,
+/// returns the original pattern as a single-element vec.
+///
+/// The TypeScript side mirrors this exactly (`expandBraces` in
+/// `utils/path-glob.ts`), which is the point: this daemon-side expansion has
+/// always worked, so `grep pathGlob:"**/*.{rs,ts}"` answered correctly while
+/// the same glob returned zero from `list` and semantic `search`. Keep the two
+/// implementations in step — alternatives are trimmed on both sides, so a
+/// human-typed `{rs, toml}` behaves like `{rs,toml}`.
+pub(crate) fn expand_braces(glob: &str) -> Vec<String> {
+    let mut expanded = Vec::new();
+    if expand_braces_into(glob, &mut expanded) && !expanded.is_empty() {
+        expanded
+    } else {
+        vec![glob.to_string()]
+    }
 }
 
 /// Compile a glob pattern (with optional brace expansion) into a matcher.
@@ -383,6 +449,55 @@ mod tests {
     fn test_expand_braces_no_braces() {
         let expanded = expand_braces("**/*.rs");
         assert_eq!(expanded, vec!["**/*.rs"]);
+    }
+
+    /// Only the FIRST group used to expand, so a second group survived as a
+    /// literal and matched nothing.
+    #[test]
+    fn test_expand_braces_multiple_groups() {
+        let expanded = expand_braces("{src,tests}/*.{rs,ts}");
+        assert_eq!(
+            expanded,
+            vec!["src/*.rs", "src/*.ts", "tests/*.rs", "tests/*.ts"]
+        );
+    }
+
+    /// The closing brace used to be the first `}` found, which cuts a nested
+    /// group in the wrong place.
+    #[test]
+    fn test_expand_braces_nested() {
+        assert_eq!(expand_braces("{a,{b,c}}"), vec!["a", "b", "c"]);
+    }
+
+    /// The shape `normalize_path_glob` itself emits for a wildcard-free
+    /// literal: exact path OR whole subtree.
+    #[test]
+    fn test_expand_braces_empty_alternative() {
+        assert_eq!(
+            expand_braces("**/src/tools{,/**}"),
+            vec!["**/src/tools", "**/src/tools/**"]
+        );
+    }
+
+    /// An unbalanced brace is a literal — never an accidental match-all.
+    #[test]
+    fn test_expand_braces_unbalanced_is_literal() {
+        assert_eq!(expand_braces("*.{rs"), vec!["*.{rs"]);
+    }
+
+    /// Past the ceiling the pattern is returned verbatim: the braces then match
+    /// literally (a miss), rather than compiling thousands of patterns.
+    #[test]
+    fn test_expand_braces_ceiling_falls_back_to_verbatim() {
+        let pathological = "{a,b}".repeat(9); // 2^9 = 512 > MAX_BRACE_EXPANSIONS
+        assert_eq!(expand_braces(&pathological), vec![pathological]);
+    }
+
+    /// Parity with the TypeScript `expandBraces`: a human-typed space after the
+    /// comma must not become part of the pattern.
+    #[test]
+    fn test_expand_braces_trims_alternatives() {
+        assert_eq!(expand_braces("*.{rs, ts}"), vec!["*.rs", "*.ts"]);
     }
 
     #[test]

@@ -455,4 +455,84 @@ describe('listTrackedFiles', () => {
       expect(count).toBe(4);
     });
   });
+
+  // ── Brace alternation (regression) ────────────────────────────────────────
+  // SQLite's GLOB operator has no `{a,b}`, so a braced pattern reached the
+  // database as a literal and selected NOTHING — silently. The daemon-side FTS
+  // glob behind `grep` has always expanded braces, so the identical pattern
+  // answered from one tool and returned zero from `list`.
+  describe('brace alternation', () => {
+    it('expands {rs,ts} into both extensions', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.{rs,ts}' });
+      expect(result.status).toBe('ok');
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual([
+        'src/lib.rs',
+        'src/main.rs',
+        'src/server.ts',
+        'src/utils/helpers.rs',
+        'tests/test_main.rs',
+      ]);
+    });
+
+    it('tolerates whitespace after the comma, like the daemon expansion', () => {
+      const spaced = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.{rs, ts}' });
+      const tight = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.{rs,ts}' });
+      expect(spaced.data.map((f) => f.relativePath).sort()).toEqual(
+        tight.data.map((f) => f.relativePath).sort()
+      );
+      expect(spaced.data.length).toBe(5);
+    });
+
+    it('applies directory shaping to each wildcard-free alternative', () => {
+      const result = listTrackedFiles(db, {
+        watchFolderId: WATCH_ID,
+        glob: '{README.md,Cargo.toml}',
+      });
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual(['Cargo.toml', 'README.md']);
+    });
+
+    it('expands nested groups, splitting only on top-level commas', () => {
+      const result = listTrackedFiles(db, {
+        watchFolderId: WATCH_ID,
+        glob: '{src/{lib,main}.rs,README.md}',
+      });
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual([
+        'README.md',
+        'src/lib.rs',
+        'src/main.rs',
+      ]);
+    });
+
+    it('excludes every alternative (NOT GLOB joined by AND is the complement)', () => {
+      // `*.{…}`, not `**/*.{…}`: this engine collapses `**` to `*` and SQLite
+      // GLOB then still requires the literal `/`, so a `**/`-prefixed pattern
+      // does not reach root-level files. That divergence from the TS matcher
+      // predates brace support and is deliberately not exercised here.
+      const result = listTrackedFiles(db, {
+        watchFolderId: WATCH_ID,
+        excludeGlob: '*.{md,toml,yaml}',
+      });
+      expect(result.data.map((f) => f.relativePath).sort()).toEqual([
+        'src/lib.rs',
+        'src/main.rs',
+        'src/server.ts',
+        'src/utils/helpers.rs',
+        'tests/test_main.rs',
+      ]);
+    });
+
+    it('countTrackedFiles agrees with listTrackedFiles for a braced glob', () => {
+      const glob = '**/*.{rs,ts}';
+      const list = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob });
+      const count = countTrackedFiles(db, { watchFolderId: WATCH_ID, glob });
+      expect(count).toBe(list.data.length);
+      expect(count).toBe(5);
+    });
+
+    it('leaves an unbalanced brace literal (matches nothing here, never everything)', () => {
+      const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, glob: '**/*.{rs' });
+      expect(result.status).toBe('ok');
+      expect(result.data).toHaveLength(0);
+    });
+  });
 });
