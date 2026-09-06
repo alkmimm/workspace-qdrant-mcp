@@ -28,7 +28,31 @@ import {
   resolveProjectIdentity,
 } from '../branch-scope.js';
 import { projectEcho } from '../project-echo.js';
+import { listNoMatchMessage } from '../empty-diagnosis.js';
 import { SUMMARY_SCAN_CAP, assembleSummaryResponse } from './summary.js';
+
+/**
+ * Render the narrowing filters a listing actually applied, as the
+ * `name:"value"` fragments {@link listNoMatchMessage} reports back on a zero
+ * result.
+ *
+ * `branch` is deliberately NOT included: it is a default (the caller's current
+ * branch), not something they asked for, and counting it as an active filter
+ * would mask the genuinely different "nothing indexed here at all" verdict.
+ * The message covers branch scoping in prose instead.
+ */
+function describeListFilters(options: ListOptions, basePath: string): string[] {
+  const active: string[] = [];
+  if (basePath) active.push(`path:"${basePath}"`);
+  if (options.pattern) active.push(`pattern:"${options.pattern}"`);
+  if (options.pathExclude) active.push(`pathExclude:"${options.pathExclude}"`);
+  if (options.component) active.push(`component:"${options.component}"`);
+  if (options.fileType) active.push(`fileType:"${options.fileType}"`);
+  if (options.language) active.push(`language:"${options.language}"`);
+  if (options.extension) active.push(`extension:"${options.extension}"`);
+  if (options.includeTests === false) active.push('includeTests:false');
+  return active;
+}
 
 /**
  * Approximate per-file byte cost the agent would pay if they ran
@@ -188,6 +212,13 @@ export class ListFilesTool {
       const echo = projectEcho(identity, options.projectId);
       if (echo.project_id) response.project_id = echo.project_id;
       if (echo.project_source) response.project_source = echo.project_source;
+      // A zero-row listing used to be reported as `listing: ""` and nothing
+      // else — indistinguishable from an unindexed project, whatever the
+      // cause. Attached at this single exit so both the paged (tree/flat) and
+      // the whole-project `summary` path get it.
+      if (response.stats.totalMatching === 0) {
+        response.hint = listNoMatchMessage(describeListFilters(options, basePath));
+      }
     }
     this.finishList(eventId, response, startTime);
     return response;

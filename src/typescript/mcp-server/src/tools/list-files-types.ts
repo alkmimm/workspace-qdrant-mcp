@@ -102,6 +102,10 @@ export interface ListResponse {
   listing: string;
   stats: ListStats;
   message?: string;
+  /** Attached when the listing matched NOTHING: which filters were active and
+   *  what the glob syntax accepts, so a zero result is not mistaken for an
+   *  unindexed project (see `listNoMatchMessage`). */
+  hint?: string;
   /** Opaque cursor for fetching the next page; absent when no more pages */
   next_token?: string;
   /** Attached only when the response byte budget dropped trailing page

@@ -424,3 +424,36 @@ function tryCountFilesMatchingPathFilters(
     return 0;
   }
 }
+
+/**
+ * `list` selected zero rows.
+ *
+ * The FTS tools above can probe (drop the path filter, count again) because
+ * they have a pattern to re-run; `list` has none — the filter set IS the
+ * query. So the actionable content is different: WHICH filters were active,
+ * and what the glob syntax actually accepts. Until this existed the tool
+ * answered a zero-row filter with `listing: ""` and `files: 0` and nothing
+ * else, which reads exactly like an empty project — the shape that let a
+ * braced `pattern` fail silently for as long as it did (the SQLite `GLOB`
+ * operator has no `{a,b}`; see `pushGlobClause`).
+ *
+ * `activeFilters` are pre-rendered `name:"value"` fragments supplied by the
+ * caller, so this module stays free of the `list` option types.
+ */
+export function listNoMatchMessage(activeFilters: string[]): string {
+  if (activeFilters.length === 0) {
+    return (
+      'No indexed files for this project on this branch — no filter was applied, so this is the index ' +
+      'itself being empty here, not a filter mismatch. The listing is branch-scoped: pass branch:"*" to see ' +
+      'every branch. If the project was just registered or just switched branches, indexing may still be in ' +
+      'progress.'
+    );
+  }
+  return (
+    `No indexed file matched (filters: ${activeFilters.join(', ')}). The filter set selected zero rows — ` +
+    'this is not paging and not the response byte budget. `pattern`/`pathExclude` are matched against the ' +
+    'REPO-RELATIVE path and float (a bare file or folder name matches at any depth); they support `*`, `?`, ' +
+    '`[…]` and `{a,b}` alternation, but an ABSOLUTE path never matches. The listing is also branch-scoped — ' +
+    'pass branch:"*" to widen. Drop one filter at a time to find the one that empties the set.'
+  );
+}
