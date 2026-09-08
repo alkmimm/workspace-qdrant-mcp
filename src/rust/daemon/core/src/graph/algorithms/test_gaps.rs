@@ -170,20 +170,60 @@ fn build_reliability_warning(
 /// this a handful of unresolved edges swings the percentage wildly.
 const LANGUAGE_MIN_PRODUCTION: u32 = 50;
 
-/// Warn when ONE language measures below the implausibility floor while the repo
-/// as a whole looks fine. That is the shape a global ratio cannot express: the
-/// gaps it produces are concentrated in the blind language, so they dominate the
-/// ranking an agent reads, while the healthy languages keep the average up.
+/// Fraction of the repo's best-measuring language below which another language is
+/// treated as under-EXTRACTED rather than under-tested.
+///
+/// The absolute floor above only catches TOTAL failure. A PARTIAL one — a language
+/// whose edges resolve for some idioms and not others — sits comfortably above 5%
+/// and passes in silence, while its unresolved symbols still dominate the ranking
+/// an agent reads. Both known cases were silent under the absolute floor alone
+/// (measured 2026-09-08):
+///
+/// - DOC-V2: Dart 20.5% against Java 52.2%, overall 30.9% — no warning.
+/// - this repo: TypeScript 13.0% against Rust 44.7%, overall 37.7% — no warning.
+///
+/// 0.5 rather than 0.4: at 0.4 the DOC-V2 threshold lands on 20.9% against Dart's
+/// 20.5%, far too thin to hang a calibration on. At 0.5 neither repo gains a flag
+/// it did not deserve — every other language in both is either already caught by
+/// the absolute floor or below [`LANGUAGE_MIN_PRODUCTION`].
+const RELATIVE_COVERAGE_FLOOR: f64 = 0.5;
+
+/// Warn when a language measures far below what this repo demonstrably achieves,
+/// while the repo as a whole looks fine. That is the shape a global ratio cannot
+/// express: the gaps are concentrated in the blind language, so they dominate the
+/// ranking, while the healthy languages keep the average up.
+///
+/// Two bars, because there are two failure shapes. TOTAL failure trips the
+/// absolute floor. PARTIAL failure only shows as divergence from the repo's own
+/// best language — which is the right yardstick, since it is measured under the
+/// same extractor, the same edge types and the same conventions.
 fn language_reliability_warning(
     by_language: &[LanguageCoverage],
     overall_ratio: f64,
 ) -> Option<String> {
-    let blind: Vec<&LanguageCoverage> = by_language
+    fn ratio_of(lang: &LanguageCoverage) -> f64 {
+        f64::from(lang.covered) / f64::from(lang.production)
+    }
+    fn judgeable(lang: &&LanguageCoverage) -> bool {
+        lang.production >= LANGUAGE_MIN_PRODUCTION && lang.test_nodes > 0
+    }
+
+    // Baseline is the best-measuring JUDGEABLE language. With only one such
+    // language the relative rule is inert — nothing can sit below half of itself —
+    // which is correct: a lone language has nothing to diverge from.
+    let best = by_language
         .iter()
-        .filter(|lang| {
-            lang.production >= LANGUAGE_MIN_PRODUCTION
-                && lang.test_nodes > 0
-                && f64::from(lang.covered) / f64::from(lang.production) < IMPLAUSIBLE_COVERAGE_RATIO
+        .filter(judgeable)
+        .map(ratio_of)
+        .fold(0.0_f64, f64::max);
+    let relative_floor = best * RELATIVE_COVERAGE_FLOOR;
+
+    let blind: Vec<(&LanguageCoverage, f64)> = by_language
+        .iter()
+        .filter(judgeable)
+        .filter_map(|lang| {
+            let r = ratio_of(lang);
+            (r < IMPLAUSIBLE_COVERAGE_RATIO || r < relative_floor).then_some((lang, r))
         })
         .collect();
     if blind.is_empty() {
@@ -191,25 +231,33 @@ fn language_reliability_warning(
     }
     let detail = blind
         .iter()
-        .map(|lang| {
+        .map(|(lang, r)| {
             format!(
-                "{} ({} of {} production symbols covered, {} test symbols indexed)",
-                lang.extension, lang.covered, lang.production, lang.test_nodes
+                "{} ({:.1}%: {} of {} production symbols covered, {} test symbols indexed)",
+                lang.extension,
+                r * 100.0,
+                lang.covered,
+                lang.production,
+                lang.test_nodes
             )
         })
         .collect::<Vec<_>>()
         .join("; ");
     Some(format!(
         "PARTIALLY UNRELIABLE: overall coverage is {:.1}%, which looks plausible, but these \
-         languages measure below {:.0}% while HAVING indexed tests: {detail}. A real test suite \
-         does not measure this low — for those languages the test->production edges almost \
-         certainly failed to resolve, so their symbols are over-represented in the ranking below. \
-         Known blind spot: an idiom that REFERENCES a symbol without invoking it produces no edge \
-         (e.g. Flutter's `find.byType(Widget)` asserts on a type without constructing it), so the \
-         most-asserted primitives can rank as the most critical gaps. Judge each language on its \
-         own row in coverage_by_language, and confirm with a real coverage tool.",
+         languages measure far lower while HAVING indexed tests: {detail}. The bar is {:.0}% \
+         absolute, or {:.0}% of this repo's best-measuring language ({:.1}%) — a language does \
+         not fall this far behind its siblings, measured by the same extractor under the same \
+         conventions, because it is merely less tested. Its test->production edges most likely \
+         failed to resolve for some idiom, so its symbols are over-represented in the ranking \
+         below. Known blind spot: an idiom that REFERENCES a symbol without invoking it produces \
+         no edge (e.g. Flutter's `find.byType(Widget)` asserts on a type without constructing \
+         it), so the most-asserted primitives can rank as the most critical gaps. Judge each \
+         language on its own row in coverage_by_language, and confirm with a real coverage tool.",
         overall_ratio * 100.0,
-        IMPLAUSIBLE_COVERAGE_RATIO * 100.0
+        IMPLAUSIBLE_COVERAGE_RATIO * 100.0,
+        RELATIVE_COVERAGE_FLOOR * 100.0,
+        best * 100.0
     ))
 }
 
@@ -851,6 +899,61 @@ mod tests {
             !warning.contains(".java"),
             "the healthy language must not be named as suspect"
         );
+    }
+
+    // ── PARTIAL extraction failure: the shape the absolute floor cannot see ──
+    //
+    // Both fixtures are real measurements taken 2026-09-08, after the seed fix,
+    // and BOTH were silent under the absolute floor alone. A language does not
+    // fall this far behind its siblings — measured by the same extractor, the
+    // same edge types, the same conventions — because it is merely less tested.
+
+    #[test]
+    fn a_language_far_below_its_siblings_is_flagged() {
+        // DOC-V2 as measured: Dart 20.5% against Java 52.2%, overall 30.9%.
+        // Well clear of the 5% floor, and the top-25 was full of demonstrably
+        // tested Flutter primitives.
+        let by_language = [
+            lang(".java", 6509, 3397, 9966),
+            lang(".dart", 9299, 1909, 4396),
+        ];
+        let warning = build_reliability_warning(17196, 5306, 14362, &by_language)
+            .expect("a language at 39% of the repo's best must be flagged");
+        assert!(warning.contains(".dart"), "the diverging language is named");
+        assert!(
+            !warning.contains(".java"),
+            "the baseline language must not be named as suspect"
+        );
+
+        // This repo as measured: TypeScript 13.0% against Rust 44.7%.
+        let by_language = [lang(".rs", 7057, 3156, 6646), lang(".ts", 1396, 181, 604)];
+        let warning = build_reliability_warning(8842, 3337, 7658, &by_language)
+            .expect("29% of the best language must be flagged");
+        assert!(warning.contains(".ts"));
+        assert!(!warning.contains(".rs"));
+    }
+
+    #[test]
+    fn a_language_merely_lower_than_its_siblings_is_not_flagged() {
+        // 30% against 50% is 0.6 of the best — lower, but not the cliff that
+        // marks an extraction failure. Flagging this would train the reader to
+        // ignore the warning, which costs more than the miss.
+        let by_language = [lang(".java", 1000, 500, 800), lang(".dart", 1000, 300, 700)];
+        assert!(
+            build_reliability_warning(2000, 800, 1500, &by_language).is_none(),
+            "a merely-less-tested language must not be called unreliable"
+        );
+    }
+
+    #[test]
+    fn the_relative_rule_is_inert_with_a_single_judgeable_language() {
+        // Nothing can sit below half of itself. A lone language has no sibling to
+        // diverge from, so only the absolute floor can speak — and 40% is fine.
+        let by_language = [
+            lang(".rs", 1000, 400, 500),
+            lang(".sh", 10, 0, 3), // under LANGUAGE_MIN_PRODUCTION, not judgeable
+        ];
+        assert!(build_reliability_warning(1010, 400, 503, &by_language).is_none());
     }
 
     /// A language with no tests at all measures 0% honestly — that is a finding,
