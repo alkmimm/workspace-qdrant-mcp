@@ -74,7 +74,7 @@ pub async fn detect_cycles(
 ) -> Result<Vec<Cycle>, sqlx::Error> {
     let types = edge_types.unwrap_or(DEFAULT_CYCLE_EDGE_TYPES);
     // apply_genericity_filters = false: keep the raw resolved dependency graph.
-    let graph = load_adjacency_graph(pool, tenant_id, Some(types), false).await?;
+    let graph = load_adjacency_graph(pool, tenant_id, Some(types), false, false).await?;
     if graph.nodes.is_empty() {
         return Ok(Vec::new());
     }
