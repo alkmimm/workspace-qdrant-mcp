@@ -352,6 +352,47 @@ mod tests {
         );
     }
 
+    /// Java must classify records as types, not skip them.
+    ///
+    /// Found by the same audit as the Dart hole above, and larger: `usages` on a
+    /// record answered 0 because `record_declaration` matched no pattern group, so
+    /// `classify_node` returned `None` and no symbol was created. Measured on
+    /// DOC-V2 — 468 records against 728 classes, 39% of the declared types
+    /// invisible to the graph. A record's compact constructor and an `@interface`
+    /// are likewise their own node kinds rather than reusing the class-body forms.
+    #[test]
+    fn java_extracts_records_and_annotation_types() {
+        let provider = RegistryProvider::new().unwrap();
+        let java = provider
+            .definitions
+            .iter()
+            .find(|d| d.id() == "java")
+            .expect("missing language: java");
+        let patterns = java
+            .semantic_patterns
+            .as_ref()
+            .expect("java must have semantic patterns");
+
+        for (group, kinds, kind) in [
+            ("class", &patterns.class.node_types, "record_declaration"),
+            (
+                "interface",
+                &patterns.interface.node_types,
+                "annotation_type_declaration",
+            ),
+            (
+                "method",
+                &patterns.method.node_types,
+                "compact_constructor_declaration",
+            ),
+        ] {
+            assert!(
+                kinds.iter().any(|t| t == kind),
+                "java {group} must cover {kind}; got {kinds:?}"
+            );
+        }
+    }
+
     /// No language may list the same AST node kind in both `function.node_types`
     /// and `function.async_node_types`. The chunker flags a node async purely by
     /// `node.kind()` membership in `async_node_types` (it does not inspect for an

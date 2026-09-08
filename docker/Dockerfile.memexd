@@ -497,9 +497,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         test_semantic_patterns_present_for_extractors \
         test_async_node_types_disjoint_from_function_node_types \
         dart_extracts_top_level_bindings \
+        java_extracts_records_and_annotation_types \
         --test-threads=4 2>&1 | tee /tmp/registry-patterns.log; \
-    grep -q "^test result: ok\. 3 passed" /tmp/registry-patterns.log \
-    || { echo "GATE: expected exactly 3 language-registry pattern tests to run and pass — \
+    grep -q "^test result: ok\. 4 passed" /tmp/registry-patterns.log \
+    || { echo "GATE: expected exactly 4 language-registry pattern tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a rename would silently \
 un-gate the patterns every extractor depends on. If you ADDED a test here, bump this \
 count."; exit 1; }
