@@ -308,6 +308,50 @@ mod tests {
         }
     }
 
+    /// Dart must extract top-level bindings, not just callables and types.
+    ///
+    /// `final xProvider = Provider(…)` — the Riverpod idiom, and the shape most
+    /// Dart dependency wiring takes — matched NO pattern at all, so no graph node
+    /// was ever created and `usages` answered 0 against 71 real references on
+    /// disk (#369). A zero there is indistinguishable from "genuinely unused",
+    /// which is what made it a trap rather than a gap.
+    ///
+    /// Pinned by node kind rather than by `has_semantic_patterns()`: Dart passed
+    /// that coarser check throughout, because it had patterns — just not these.
+    #[test]
+    fn dart_extracts_top_level_bindings() {
+        let provider = RegistryProvider::new().unwrap();
+        let dart = provider
+            .definitions
+            .iter()
+            .find(|d| d.id() == "dart")
+            .expect("missing language: dart");
+        let patterns = dart
+            .semantic_patterns
+            .as_ref()
+            .expect("dart must have semantic patterns");
+
+        assert!(
+            patterns
+                .constant
+                .node_types
+                .iter()
+                .any(|t| t == "initialized_variable_definition"),
+            "dart must extract top-level bindings (Riverpod providers); constant.node_types = {:?}",
+            patterns.constant.node_types
+        );
+        // Function locals are deliberately NOT extracted — they are not a
+        // referenceable API and would only add noise to the graph.
+        assert!(
+            !patterns
+                .constant
+                .node_types
+                .iter()
+                .any(|t| t == "local_variable_declaration"),
+            "function locals must stay out of the graph"
+        );
+    }
+
     /// No language may list the same AST node kind in both `function.node_types`
     /// and `function.async_node_types`. The chunker flags a node async purely by
     /// `node.kind()` membership in `async_node_types` (it does not inspect for an
