@@ -752,9 +752,16 @@
       node_types: []
       async_node_types: []
     class:
-      node_types: [class_declaration]
+      # `record_declaration` is a nominal type declaration like a class, and the
+      # dominant shape of value objects in modern Java. Without it a record
+      # produced NO graph node: measured on DOC-V2, 468 records against 728
+      # classes — 39% of the declared types were invisible, so `usages` on any of
+      # them answered 0, indistinguishable from "unused" (#369 audit).
+      node_types: [class_declaration, record_declaration]
     method:
-      node_types: [method_declaration, constructor_declaration]
+      # A record's compact constructor is its own node kind, not a
+      # `constructor_declaration`.
+      node_types: [method_declaration, constructor_declaration, compact_constructor_declaration]
       context: inside_class
     struct:
       node_types: []
@@ -763,11 +770,14 @@
     trait:
       node_types: []
     interface:
-      node_types: [interface_declaration]
+      # `@interface` — an annotation type is an interface-like declaration.
+      node_types: [interface_declaration, annotation_type_declaration]
     module:
       node_types: []
     constant:
-      node_types: []
+      # Interface constants; the Java grammar gives these their own node kind
+      # rather than reusing `field_declaration`.
+      node_types: [constant_declaration]
     macro:
       node_types: []
     type_alias:
