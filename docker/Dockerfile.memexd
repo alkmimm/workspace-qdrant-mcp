@@ -450,6 +450,34 @@ libtest exits 0 when a positional filter matches nothing, so moving the module w
 silently un-gate the classifier every read surface depends on. If you ADDED a test \
 here, bump this count."; exit 1; }
 
+# Graph result determinism (#367) runs here: hermetic (tempdir SQLite graph
+# store, no embeddings, no network), and it guards an answer-correctness defect
+# every other assertion is blind to. `usages`/`impact` cap with `take(top_k)`,
+# and the traversal fed that cap by iterating a `HashMap`, whose order Rust
+# randomizes per instance — so the same question returned a different subset on
+# every call (measured live: 50 of 3644 usages, a different 50 each run) while
+# the response reported the truncated count as if it were the total. The suite
+# stayed green throughout, because every existing test used a cap no smaller
+# than its candidate set, which is exactly the case that cannot expose it.
+#
+# The filter is the three NAMES with no module path: libtest UNIONS positional
+# filters, so adding a path here would silently widen this back to the whole
+# module (the same lesson the test_gaps gate above records).
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-grpc --lib -- \
+        query_related_cap_keeps_strongest_not_arbitrary \
+        impact_analysis_cap_keeps_strongest_not_arbitrary \
+        repeated_queries_return_identical_order \
+        --test-threads=4 2>&1 | tee /tmp/graph-determinism.log; \
+    grep -q "^test result: ok\. 3 passed" /tmp/graph-determinism.log \
+    || { echo "GATE: expected exactly 3 graph determinism tests to run and pass — \
+libtest exits 0 when a positional filter matches nothing, so a rename would silently \
+un-gate the ordering that decides WHICH results a caller ever sees. If you ADDED a \
+test here, bump this count."; exit 1; }
+
 # ─────────────────────────────────────────────
 # Stage 2c: static-checks — the cheap gates, on the CRITICAL PATH
 #

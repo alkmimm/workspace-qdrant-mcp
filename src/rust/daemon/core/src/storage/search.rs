@@ -307,10 +307,23 @@ impl StorageClient {
             })
             .collect();
 
+        // Point id breaks score ties. `all_results` is a HashMap, so the Vec above
+        // starts in per-process random order, and `sort_by` is STABLE — without a
+        // tiebreaker, equally-scored hits keep that arbitrary order and the
+        // `truncate` below then drops a different one per run. RRF ties are not
+        // exotic: the score is weight/(60+rank), so a doc found only in the dense
+        // list at rank k and one found only in the sparse list at rank k collide
+        // exactly whenever the two weights are equal.
+        //
+        // No live reproduction — three identical queries returned identical
+        // results — so this is hardening against a latent class, not a fix for an
+        // observed defect. It is the same class as #367, where an unordered set
+        // feeding a cap made `usages` answer differently on every call.
         final_results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
         final_results.truncate(params.limit);
 

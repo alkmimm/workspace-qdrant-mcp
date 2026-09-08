@@ -138,6 +138,22 @@ impl GraphService for GraphServiceImpl {
 
         let query_time_ms = start.elapsed().as_millis() as i64;
         let total = nodes.len() as u32;
+        // `take` below is a CAP, so the order it cuts from decides the ANSWER, not
+        // merely the presentation. Order explicitly: nearest depth first (what the
+        // tool documentation already promises), then strongest confidence, then
+        // node id so the result is reproducible across calls and processes.
+        // Leaving this to the traversal's push order made the guarantee accidental
+        // and, once the traversal emitted from a HashMap, false (issue #367).
+        nodes.sort_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then_with(|| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.node_id.cmp(&b.node_id))
+        });
         let proto_nodes: Vec<TraversalNodeProto> = nodes
             .into_iter()
             .take(top_k.unwrap_or(usize::MAX))
@@ -225,6 +241,23 @@ impl GraphService for GraphServiceImpl {
                 // and correct when it did — no flag to drift from the helper's
                 // internal predicate.
                 let total_impacted = report.impacted_nodes.len() as u32;
+
+                // Same reasoning as QueryRelated above: `take` is a cap, so its
+                // input order decides which impacted nodes the caller ever sees.
+                // Nearest distance first, then confidence, then node id (#367).
+                // This is also what makes `usages` — which keeps only distance 1 —
+                // spend the whole budget on direct references instead of an
+                // arbitrary mix of depths.
+                report.impacted_nodes.sort_by(|a, b| {
+                    a.distance
+                        .cmp(&b.distance)
+                        .then_with(|| {
+                            b.confidence
+                                .partial_cmp(&a.confidence)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .then_with(|| a.node_id.cmp(&b.node_id))
+                });
 
                 let impacted_nodes: Vec<ImpactNodeProto> = report
                     .impacted_nodes
