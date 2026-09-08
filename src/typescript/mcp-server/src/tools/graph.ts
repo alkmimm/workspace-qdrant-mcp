@@ -247,20 +247,36 @@ async function dispatchGraphAction(
       const minConfidence = minConfidenceArg(args);
       // Bound the impacted-node list: the daemon caps to top_k (nearest-by-depth
       // first) and still returns the true total_impacted. topK<=0 = all.
+      const topK = num(args, 'topK') ?? 50;
       const req: ImpactAnalysisRequest = {
         tenant_id: tenant,
         symbol_name: symbol,
-        top_k: num(args, 'topK') ?? 50,
+        top_k: topK,
         ...(filePath ? { file_path: filePath } : {}),
         ...(minConfidence !== undefined ? { min_confidence: minConfidence } : {}),
       };
       const r = await daemonClient.impactAnalysis(req);
+      // The daemon caps at top_k AFTER ordering nearest-first, so a page that came
+      // back full may have cut nodes that did not fit. Only an unsaturated page
+      // proves the list is complete. Presenting a capped page as the whole answer
+      // is what let `usages` return a different arbitrary subset on every call and
+      // still read as authoritative (issue #367).
+      const returnedCount = (r.impacted_nodes ?? []).length;
+      const truncated = topK > 0 && returnedCount >= topK;
+      const raiseTopK =
+        `Truncated at topK=${topK}: more nodes exist beyond the cap. Re-run with a ` +
+        `larger topK (topK:0 removes the cap) before treating this list as complete.`;
       if (action === 'usages') {
         // Keep only direct references (1-hop). The daemon tags each node's
         // distance; distance===1 is a direct caller / reference / type-use. This
         // is what makes `usages` distinct from the transitive `impact`.
-        // total_impacted becomes the direct-reference count.
         const direct = (r.impacted_nodes ?? []).filter((n) => n.distance === 1);
+        // Both caveats can hold at once — a full page of distance>1 nodes yields
+        // zero direct references AND hides the rest — so collect them instead of
+        // letting one `hint` key silently overwrite the other.
+        const hints: string[] = [];
+        if (truncated) hints.push(raiseTopK);
+        if (direct.length === 0) hints.push(graphNoEdgesHint('usages'));
         return {
           success: true,
           action,
@@ -268,9 +284,19 @@ async function dispatchGraphAction(
           symbol,
           ...r,
           impacted_nodes: direct,
+          // The count of what is actually returned. When the page was truncated
+          // this is a FLOOR, not a total; `truncated` says so rather than letting
+          // the number pass for a complete answer.
           total_impacted: direct.length,
-          ...(direct.length === 0 ? { hint: graphNoEdgesHint('usages') } : {}),
+          truncated,
+          ...(truncated ? { total_impacted_all_depths: r.total_impacted } : {}),
+          ...(hints.length > 0 ? { hint: hints.join(' ') } : {}),
         };
+      }
+      const impactHints: string[] = [];
+      if (truncated) impactHints.push(raiseTopK);
+      if ((r.total_impacted ?? returnedCount) === 0) {
+        impactHints.push(graphNoEdgesHint('impact'));
       }
       return {
         success: true,
@@ -278,9 +304,8 @@ async function dispatchGraphAction(
         tenant_id: tenant,
         symbol,
         ...r,
-        ...((r.total_impacted ?? (r.impacted_nodes ?? []).length) === 0
-          ? { hint: graphNoEdgesHint('impact') }
-          : {}),
+        truncated,
+        ...(impactHints.length > 0 ? { hint: impactHints.join(' ') } : {}),
       };
     }
 
