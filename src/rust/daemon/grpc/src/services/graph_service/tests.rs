@@ -241,6 +241,85 @@ mod min_confidence_filter {
         })
     }
 
+    // ── #367: the cap must cut from a DEFINED order, not an arbitrary one ──
+    //
+    // The traversal emitted each depth's nodes by iterating a `HashMap`, whose
+    // order Rust randomizes per instance, and the handler then applied
+    // `take(top_k)` with no `sort` anywhere before it. A cap over more
+    // candidates than it keeps was therefore a coin flip: the same question
+    // answered differently on successive calls (field measurement: 50 of 3644
+    // usages, a different 50 each run), and nothing in the response said the
+    // answer was a sample. These pin both halves — which node survives, and
+    // that repeating the question repeats the answer.
+
+    #[tokio::test]
+    async fn query_related_cap_keeps_strongest_not_arbitrary() {
+        let (service, _tmp, hub_id) = seeded_service().await;
+
+        // No min_confidence: BOTH callees are candidates, so the cap alone
+        // decides. Under the old code this assertion failed roughly half the
+        // time — which is exactly why it is worth pinning.
+        let resp = service
+            .query_related(related_request(&hub_id, None, Some(1)))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.total, 2, "total must count the uncapped set");
+        assert_eq!(resp.nodes.len(), 1);
+        assert_eq!(
+            resp.nodes[0].symbol_name, "callee_strong",
+            "the cap must keep the highest-confidence node, not whichever one \
+             the hash map happened to yield first"
+        );
+    }
+
+    #[tokio::test]
+    async fn impact_analysis_cap_keeps_strongest_not_arbitrary() {
+        let (service, _tmp, _hub_id) = seeded_service().await;
+
+        let resp = service
+            .impact_analysis(impact_request(None, Some(1)))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.total_impacted, 2, "total must count the uncapped set");
+        assert_eq!(resp.impacted_nodes.len(), 1);
+        assert_eq!(
+            resp.impacted_nodes[0].symbol_name, "caller_strong",
+            "the cap must keep the highest-confidence caller"
+        );
+    }
+
+    /// The same question must return the same answer. `RandomState` reseeds per
+    /// map instance, so a fresh traversal per call is enough to expose the
+    /// reordering without needing a second process.
+    #[tokio::test]
+    async fn repeated_queries_return_identical_order() {
+        let (service, _tmp, hub_id) = seeded_service().await;
+
+        let mut seen: Vec<Vec<String>> = Vec::new();
+        for _ in 0..8 {
+            let resp = service
+                .query_related(related_request(&hub_id, None, None))
+                .await
+                .unwrap()
+                .into_inner();
+            seen.push(resp.nodes.into_iter().map(|n| n.symbol_name).collect());
+        }
+
+        assert_eq!(
+            seen[0],
+            vec!["callee_strong".to_string(), "callee_weak".to_string()],
+            "documented order is nearest depth first, then confidence descending"
+        );
+        assert!(
+            seen.windows(2).all(|w| w[0] == w[1]),
+            "identical queries returned different orders: {seen:?}"
+        );
+    }
+
     #[tokio::test]
     async fn query_related_filters_before_top_k_and_total() {
         let (service, _tmp, hub_id) = seeded_service().await;

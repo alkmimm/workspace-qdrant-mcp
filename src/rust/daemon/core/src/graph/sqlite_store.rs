@@ -585,7 +585,22 @@ impl GraphStore for SqliteGraphStore {
                         }
                     }
                 }
-                for (tgt, (edge_type, ppath, confidence)) in best {
+                // Deterministic emission. `best` is a HashMap and Rust randomizes
+                // its iteration order per process, so identical queries emitted a
+                // depth's nodes in different orders — which the downstream
+                // `take(top_k)` turned into different ANSWERS (issue #367).
+                // Highest confidence first, so a cap keeps the strongest paths;
+                // node id breaks ties, making the order total rather than merely
+                // reproducible within one run.
+                let mut ranked: Vec<(String, (String, String, f64))> = best.into_iter().collect();
+                ranked.sort_by(|(a_id, a_val), (b_id, b_val)| {
+                    b_val
+                        .2
+                        .partial_cmp(&a_val.2)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a_id.cmp(b_id))
+                });
+                for (tgt, (edge_type, ppath, confidence)) in ranked {
                     if !visited.insert(tgt.clone()) {
                         continue;
                     }
@@ -1408,7 +1423,19 @@ impl SqliteGraphStore {
                         }
                     }
                 }
-                for (src, (edge_type, confidence)) in best {
+                // Deterministic emission — same reason as the forward traversal
+                // above (issue #367): HashMap order is per-process random, and the
+                // impact cap downstream turned that into a different answer per
+                // call. Highest confidence first, node id as the tiebreaker.
+                let mut ranked: Vec<(String, (String, f64))> = best.into_iter().collect();
+                ranked.sort_by(|(a_id, a_val), (b_id, b_val)| {
+                    b_val
+                        .1
+                        .partial_cmp(&a_val.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a_id.cmp(b_id))
+                });
+                for (src, (edge_type, confidence)) in ranked {
                     if !visited.insert(src.clone()) {
                         continue;
                     }
