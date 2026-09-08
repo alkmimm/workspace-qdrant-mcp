@@ -274,7 +274,9 @@ pub async fn detect_test_gaps(
     // away for being "generic". The loader already drops stub nodes (empty
     // file_path), sub-0.6 ambiguous edges, and WQM_GRAPH_EXCLUDE paths, so
     // generated/legacy trees are out of the coverage picture too.
-    let graph = load_adjacency_graph(pool, tenant_id, Some(types), false).await?;
+    // `keep_test_nodes: true` — test files ARE the seeds of this measurement, so
+    // the ranking-oriented path exclude must not delete them (#370).
+    let graph = load_adjacency_graph(pool, tenant_id, Some(types), false, true).await?;
     if graph.nodes.is_empty() {
         return Ok(TestGapsReport {
             total_production: 0,
@@ -447,6 +449,10 @@ pub async fn detect_test_gaps(
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
+
+    // The node filter lives in the parent module (shared with centrality), but the
+    // regression it guards is this module's measurement, so the test lives here.
+    use super::super::node_is_filtered_out;
 
     const T: &str = "t1";
 
@@ -739,6 +745,66 @@ mod tests {
     }
 
     /// The threshold is a floor on the RATIO, not on the absolute count: the
+    // ── #370: the ranking exclude must not eat this measurement's seeds ──
+    //
+    // `WQM_GRAPH_EXCLUDE` legitimately lists test paths so tests do not inflate
+    // hotspots/bridges. The same list reached this module through the shared
+    // adjacency loader, deleting every test node while leaving the production
+    // denominator whole. Measured in this repo: TypeScript reported 0 of 1396
+    // symbols covered with 1634 tests passing, and Rust looked fine only because
+    // its tests are inline `#[cfg(test)]` in production files, which no pattern
+    // matches. The numbers were internally consistent, so nothing failed.
+
+    /// The reference `docker/.env` list, verbatim enough to be representative.
+    fn reference_exclude() -> Vec<String> {
+        [
+            "old_project/",
+            "/generated/",
+            "/tests/",
+            "_test.rs",
+            ".test.ts",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    #[test]
+    fn test_seeds_survive_the_ranking_exclude() {
+        let ex = reference_exclude();
+
+        for path in [
+            "src/typescript/mcp-server/tests/tools/graph.test.ts",
+            "src/rust/daemon/core/tests/graph_store_tests.rs",
+        ] {
+            assert!(
+                !node_is_filtered_out(path, &ex, true),
+                "{path} is a SEED of the test-gap measurement and must survive"
+            );
+            assert!(
+                node_is_filtered_out(path, &ex, false),
+                "{path} must still be dropped for centrality ranking"
+            );
+        }
+    }
+
+    #[test]
+    fn scope_excludes_still_apply_to_non_test_files() {
+        let ex = reference_exclude();
+
+        // Keeping the seeds must not turn the scope list off wholesale: a
+        // legacy/generated production file stays excluded in BOTH modes.
+        for path in ["old_project/src/legacy.ts", "src/generated/api.pb.ts"] {
+            assert!(
+                node_is_filtered_out(path, &ex, true),
+                "{path} is not a test file — the scope exclude still applies"
+            );
+        }
+
+        // And with no configured patterns nothing is filtered either way.
+        assert!(!node_is_filtered_out("src/a.ts", &[], false));
+    }
+
     /// boundary is inclusive, so exactly 5% is still trusted.
     #[test]
     fn threshold_boundary_is_inclusive() {

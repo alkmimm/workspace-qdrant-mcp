@@ -16,10 +16,13 @@ pub use pagerank::{compute_pagerank, PageRankConfig, PageRankEntry};
 pub use test_gaps::{detect_test_gaps, TestGap, TestGapsReport};
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use sqlx::{Row, SqlitePool};
 use tracing::debug;
+
+use crate::file_classification::is_test_file;
 
 // ─── Internal adjacency representation ─────────────────────────────────
 
@@ -88,6 +91,24 @@ const BUILTIN_GRAPH_EXCLUDED_SEGMENTS: &[&str] = &[
     "/venv/",
     "/.git/",
 ];
+
+/// Whether a node on `file_path` is dropped from the adjacency graph.
+///
+/// Split out of the loader so it is testable without the environment: the
+/// pattern list is parsed once per process behind a `OnceLock`, so a test cannot
+/// set `WQM_GRAPH_EXCLUDE` and observe the effect. Taking the patterns as an
+/// argument makes the #370 regression pinnable.
+///
+/// A test file is exempt when `keep_test_nodes` is set, because for a caller that
+/// MEASURES tests those nodes are the seeds — dropping them empties the numerator
+/// while the production denominator stays whole, which reads as "0% covered"
+/// rather than as a failure.
+fn node_is_filtered_out(file_path: &str, exclude: &[String], keep_test_nodes: bool) -> bool {
+    if keep_test_nodes && is_test_file(Path::new(file_path)) {
+        return false;
+    }
+    !exclude.is_empty() && is_graph_excluded(file_path, exclude)
+}
 
 /// True if `file_path` belongs to a built-in dependency/VCS tree or CONTAINS
 /// any user-configured graph-exclude pattern (substring match).
@@ -192,11 +213,26 @@ fn centrality_usage_threshold(total_definitions: usize) -> usize {
 /// `file_path`), the `weight >= 0.6` confidence gate, AND the graph-scope
 /// path-exclude (`WQM_GRAPH_EXCLUDE`) always apply — excluding a legacy/generated
 /// tree is a scope decision, so cycles honour it too.
+/// `keep_test_nodes` exempts TEST FILES from the user-configured path exclude.
+/// A caller that MEASURES tests must pass `true`. The reference config lists
+/// `/tests/`, `.test.ts`, `.spec.ts` and `_test.rs` in `WQM_GRAPH_EXCLUDE` to keep
+/// tests out of centrality RANKING — a legitimate use — but applying that same
+/// list to a test-coverage measurement deletes its SEEDS while leaving its
+/// production denominator untouched. TypeScript measured 0% of 1396 symbols in
+/// this repo for exactly that reason, with 1634 tests passing (#370); Rust looked
+/// healthy only because its tests are inline `#[cfg(test)]` inside production
+/// files, which no pattern matches.
+///
+/// Scope excludes (`old_project/`) still drop test files for every other caller,
+/// and keeping one here is harmless: a test in an excluded tree can only mark
+/// production nodes in that same excluded tree as covered, and those are absent
+/// from the denominator too.
 pub(super) async fn load_adjacency_graph(
     pool: &SqlitePool,
     tenant_id: &str,
     edge_types: Option<&[&str]>,
     apply_genericity_filters: bool,
+    keep_test_nodes: bool,
 ) -> Result<AdjacencyGraph, sqlx::Error> {
     // Load nodes
     let node_rows = sqlx::query(
@@ -275,7 +311,7 @@ pub(super) async fn load_adjacency_graph(
         // this applies to cycles too (a cycle inside old_project/ is scope noise).
         // Edges to them auto-drop (the same "endpoint absent from `nodes`" logic
         // that drops stub edges), so out-degrees stay accurate.
-        if !exclude.is_empty() && is_graph_excluded(&file_path, exclude) {
+        if node_is_filtered_out(&file_path, exclude, keep_test_nodes) {
             excluded += 1;
             continue;
         }
