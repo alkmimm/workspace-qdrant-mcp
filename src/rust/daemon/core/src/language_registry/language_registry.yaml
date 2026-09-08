@@ -377,11 +377,23 @@
       node_types: [enum_declaration]
     type_alias:
       node_types: [type_alias]
+    # Top-level and static bindings. Without these, `final xProvider = Provider(…)`
+    # — the Riverpod idiom, and the shape of most Dart dependency wiring — produced
+    # NO graph node at all, so `usages` answered 0 against 71 real references on
+    # disk (#369). The name is a direct child: `_declared_identifier` is a hidden
+    # rule, so tree-sitter inlines it and `name_node: identifier` resolves without
+    # a descend. `local_variable_declaration` is deliberately absent — function
+    # locals are not a referenceable API and would only add noise.
+    constant:
+      node_types: [initialized_variable_definition, static_final_declaration]
     name_node: identifier
     comment_nodes: [comment, documentation_comment]
     docstring_style: preceding_comments
     paired_body_node_types: [function_body]
-    name_descend_types: [function_signature, getter_signature, setter_signature, constructor_signature, factory_constructor_signature, constant_constructor_signature, operator_signature]
+    # `initialized_identifier` covers the second and later declarators of a
+    # multi-binding statement (`final a = 1, b = 2;`), where only the FIRST name
+    # is inlined into the parent.
+    name_descend_types: [function_signature, getter_signature, setter_signature, constructor_signature, factory_constructor_signature, constant_constructor_signature, operator_signature, initialized_identifier]
     call_arg_node_types: [argument_part]
   lsp_servers: []
 

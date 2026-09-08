@@ -478,6 +478,32 @@ libtest exits 0 when a positional filter matches nothing, so a rename would sile
 un-gate the ordering that decides WHICH results a caller ever sees. If you ADDED a \
 test here, bump this count."; exit 1; }
 
+# Language-registry pattern integrity runs here: hermetic (parses the bundled
+# YAML, no DB, no network) and it guards a failure mode that is invisible from
+# outside — a language whose patterns are PRESENT but incomplete. Dart had
+# semantic_patterns and still produced no node for `final xProvider = …`, the
+# Riverpod idiom, so `usages` answered 0 against 71 real references and a zero
+# read as "unused" rather than "not extracted" (#369). The coarse
+# has_semantic_patterns() check passed the whole time.
+#
+# Filtered by NAME (libtest unions positional filters), covering the three
+# pattern-integrity tests: presence across extractor languages, async/function
+# node-kind disjointness, and Dart's top-level bindings.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        test_semantic_patterns_present_for_extractors \
+        test_async_node_types_disjoint_from_function_node_types \
+        dart_extracts_top_level_bindings \
+        --test-threads=4 2>&1 | tee /tmp/registry-patterns.log; \
+    grep -q "^test result: ok\. 3 passed" /tmp/registry-patterns.log \
+    || { echo "GATE: expected exactly 3 language-registry pattern tests to run and pass — \
+libtest exits 0 when a positional filter matches nothing, so a rename would silently \
+un-gate the patterns every extractor depends on. If you ADDED a test here, bump this \
+count."; exit 1; }
+
 # ─────────────────────────────────────────────
 # Stage 2c: static-checks — the cheap gates, on the CRITICAL PATH
 #
