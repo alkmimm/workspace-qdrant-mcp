@@ -180,6 +180,39 @@ function stripOneofMarkers<T>(value: T): T {
   return out as T;
 }
 
+/**
+ * How many times the symbol appears in the text index, or `undefined` when the
+ * probe could not run.
+ *
+ * Called only on the `usages` zero-result path, which by definition has nothing
+ * to show — so one extra query buys the difference between "no edge models this"
+ * and "nothing references this". `textSearchCount` returns a count without
+ * transferring any match bodies.
+ *
+ * Every failure mode is swallowed on purpose. This is a courtesy on an already
+ * empty answer; it must never turn a valid empty result into an error.
+ */
+async function countTextOccurrences(
+  daemonClient: DaemonClient | undefined,
+  symbol: string,
+  tenantId: string | undefined
+): Promise<number | undefined> {
+  if (!daemonClient) return undefined;
+  try {
+    const response = await daemonClient.textSearchCount({
+      pattern: symbol,
+      regex: false,
+      case_sensitive: true,
+      context_lines: 0,
+      max_results: 1,
+      ...(tenantId ? { tenant_id: tenantId } : {}),
+    });
+    return response?.count;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function handleGraph(
   rawArgs: Record<string, unknown> | undefined,
   daemonClient: DaemonClient | undefined,
@@ -289,7 +322,31 @@ async function dispatchGraphAction(
               `topK (topK:0 removes it) before treating this list as complete.`
           );
         }
-        if (direct.length === 0) hints.push(graphNoEdgesHint('usages'));
+        // A zero here is the trap this tool is repeatedly reported for. The
+        // graph only models CALLS / USES_TYPE / IMPORTS, so an idiom that
+        // REFERENCES a symbol without invoking it produces no edge at all:
+        // `ref.watch(someProvider)` passes the symbol as an argument, and
+        // Flutter's `find.byType(Widget)` asserts on a type without
+        // constructing it. Measured on DOC-V2: `activeContextProvider` existed
+        // as a node with ZERO incoming edges against 71 references on disk, and
+        // 505 of 506 Dart constants were in the same position.
+        //
+        // Telling the caller "0" and leaving them to run grep is how "not used"
+        // gets concluded from "not modelled". Counting the text index here costs
+        // one extra query on a path that already has nothing to show, and turns
+        // an ambiguous zero into a specific statement.
+        let textOccurrences: number | undefined;
+        if (direct.length === 0) {
+          textOccurrences = await countTextOccurrences(daemonClient, symbol, tenant);
+          hints.push(graphNoEdgesHint('usages'));
+          if (textOccurrences !== undefined && textOccurrences > 0) {
+            hints.push(
+              `The text index holds ${textOccurrences} occurrence(s) of "${symbol}", so this 0 ` +
+                `means NOT MODELLED rather than unused: the graph has no edge type for a symbol ` +
+                `passed by reference (e.g. ref.watch(x), find.byType(X)). Use grep for the sites.`
+            );
+          }
+        }
         return {
           success: true,
           action,
@@ -303,6 +360,7 @@ async function dispatchGraphAction(
           total_impacted: direct.length,
           truncated,
           ...(truncated ? { total_impacted_all_depths: r.total_impacted } : {}),
+          ...(textOccurrences !== undefined ? { text_occurrences: textOccurrences } : {}),
           ...(hints.length > 0 ? { hint: hints.join(' ') } : {}),
         };
       }

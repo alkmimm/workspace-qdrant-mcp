@@ -17,6 +17,17 @@ function daemonReturning(response: Record<string, unknown>) {
   return { impactAnalysis: vi.fn().mockResolvedValue(response) } as never;
 }
 
+/** Daemon whose text index answers with `count`, or throws when `count` is null. */
+function daemonWithTextIndex(response: Record<string, unknown>, count: number | null) {
+  return {
+    impactAnalysis: vi.fn().mockResolvedValue(response),
+    textSearchCount:
+      count === null
+        ? vi.fn().mockRejectedValue(new Error('text index unavailable'))
+        : vi.fn().mockResolvedValue({ count, query_time_ms: 1 }),
+  } as never;
+}
+
 const projectDetector = {
   detectProject: vi.fn().mockResolvedValue({ projectId: 'tenant-1' }),
 } as never;
@@ -119,5 +130,75 @@ describe('graph usages/impact truncation is visible', () => {
 
     expect(out['truncated']).toBe(false);
     expect(out['total_impacted']).toBe(120);
+  });
+});
+
+describe('graph usages tells NOT MODELLED apart from unused', () => {
+  // The trap this tool is repeatedly reported for. The graph models CALLS /
+  // USES_TYPE / IMPORTS only, so an idiom that REFERENCES a symbol without
+  // invoking it produces no edge: `ref.watch(someProvider)` passes it as an
+  // argument, `find.byType(Widget)` asserts on a type without constructing it.
+  // Measured on DOC-V2: `activeContextProvider` was a real node with ZERO
+  // incoming edges against 71 references on disk.
+
+  it('reports the text-index count instead of a bare zero', async () => {
+    const out = (await handleGraph(
+      { action: 'usages', symbol: 'activeContextProvider', projectId: 'tenant-1' },
+      daemonWithTextIndex({ impacted_nodes: [], total_impacted: 0 }, 71),
+      projectDetector
+    )) as Record<string, unknown>;
+
+    expect(out['total_impacted']).toBe(0);
+    expect(out['text_occurrences']).toBe(71);
+
+    const hint = String(out['hint']);
+    expect(hint).toContain('71');
+    expect(hint).toContain('NOT MODELLED');
+    // The pre-existing "0 does not prove unused" caveat must survive alongside it.
+    expect(hint).toContain('grep');
+  });
+
+  it('claims nothing extra when the text index is also empty', async () => {
+    // Here the zero is honest: no edge AND no occurrence. Asserting
+    // "not modelled" would be a different kind of lie.
+    const out = (await handleGraph(
+      { action: 'usages', symbol: 'trulyUnused', projectId: 'tenant-1' },
+      daemonWithTextIndex({ impacted_nodes: [], total_impacted: 0 }, 0),
+      projectDetector
+    )) as Record<string, unknown>;
+
+    expect(out['text_occurrences']).toBe(0);
+    expect(String(out['hint'])).not.toContain('NOT MODELLED');
+  });
+
+  it('still answers when the text probe fails', async () => {
+    // The probe is a courtesy on an already-empty answer. It must never turn a
+    // valid empty result into an error.
+    const out = (await handleGraph(
+      { action: 'usages', symbol: 'x', projectId: 'tenant-1' },
+      daemonWithTextIndex({ impacted_nodes: [], total_impacted: 0 }, null),
+      projectDetector
+    )) as Record<string, unknown>;
+
+    expect(out['success']).toBe(true);
+    expect(out['total_impacted']).toBe(0);
+    expect(out).not.toHaveProperty('text_occurrences');
+  });
+
+  it('does not probe the text index when the graph HAS answers', async () => {
+    const daemon = daemonWithTextIndex(
+      { impacted_nodes: nodesAt(3, 1), total_impacted: 3 },
+      99
+    ) as unknown as { textSearchCount: { mock: { calls: unknown[] } } };
+
+    const out = (await handleGraph(
+      { action: 'usages', symbol: 'x', projectId: 'tenant-1' },
+      daemon as never,
+      projectDetector
+    )) as Record<string, unknown>;
+
+    expect(out['total_impacted']).toBe(3);
+    expect(out).not.toHaveProperty('text_occurrences');
+    expect(daemon.textSearchCount.mock.calls).toHaveLength(0);
   });
 });
