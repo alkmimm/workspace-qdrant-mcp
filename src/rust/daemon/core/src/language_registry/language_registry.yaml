@@ -377,23 +377,32 @@
       node_types: [enum_declaration]
     type_alias:
       node_types: [type_alias]
-    # Top-level and static bindings. Without these, `final xProvider = Provider(…)`
-    # — the Riverpod idiom, and the shape of most Dart dependency wiring — produced
-    # NO graph node at all, so `usages` answered 0 against 71 real references on
-    # disk (#369). The name is a direct child: `_declared_identifier` is a hidden
-    # rule, so tree-sitter inlines it and `name_node: identifier` resolves without
-    # a descend. `local_variable_declaration` is deliberately absent — function
-    # locals are not a referenceable API and would only add noise.
+    # Top-level bindings — `final xProvider = Provider(…)` is the Riverpod idiom
+    # and the shape most Dart dependency wiring takes (#369). The grammar puts
+    # every one of them behind a LIST wrapper, verified by parsing with this exact
+    # cached grammar:
+    #
+    #   const bool kX = false;   program > static_final_declaration_list > static_final_declaration
+    #   final p = Provider(…);   program > static_final_declaration_list > static_final_declaration
+    #   var counter = 0;         program > initialized_identifier_list   > initialized_identifier
+    #   late final String t;     program > initialized_identifier_list   > initialized_identifier
+    #
+    # So `root_wrappers` is load-bearing, exactly as it is for TypeScript's
+    # `lexical_declaration`: the walker classifies the ROOT child, and without the
+    # unwrap it sees only the list and never reaches the declaration. Listing the
+    # inner kinds alone (the first attempt at this) changes nothing.
+    #
+    # The list wrapper also makes `final a = 1, b = 2;` yield one node per binding
+    # rather than a single aggregate. `local_variable_declaration` stays out:
+    # function locals are not a referenceable API and would only add noise.
     constant:
-      node_types: [initialized_variable_definition, static_final_declaration]
+      node_types: [static_final_declaration, initialized_identifier]
+    root_wrappers: [static_final_declaration_list, initialized_identifier_list]
     name_node: identifier
     comment_nodes: [comment, documentation_comment]
     docstring_style: preceding_comments
     paired_body_node_types: [function_body]
-    # `initialized_identifier` covers the second and later declarators of a
-    # multi-binding statement (`final a = 1, b = 2;`), where only the FIRST name
-    # is inlined into the parent.
-    name_descend_types: [function_signature, getter_signature, setter_signature, constructor_signature, factory_constructor_signature, constant_constructor_signature, operator_signature, initialized_identifier]
+    name_descend_types: [function_signature, getter_signature, setter_signature, constructor_signature, factory_constructor_signature, constant_constructor_signature, operator_signature]
     call_arg_node_types: [argument_part]
   lsp_servers: []
 
