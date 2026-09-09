@@ -316,8 +316,28 @@ mod tests {
     /// disk (#369). A zero there is indistinguishable from "genuinely unused",
     /// which is what made it a trap rather than a gap.
     ///
-    /// Pinned by node kind rather than by `has_semantic_patterns()`: Dart passed
-    /// that coarser check throughout, because it had patterns — just not these.
+    /// The WRAPPER is the load-bearing half. Verified by parsing each form with
+    /// the cached grammar this daemon actually uses:
+    ///
+    /// ```text
+    /// const bool kX = false;   program > static_final_declaration_list > static_final_declaration
+    /// final p = Provider(…);   program > static_final_declaration_list > static_final_declaration
+    /// var counter = 0;         program > initialized_identifier_list   > initialized_identifier
+    /// late final String t;     program > initialized_identifier_list   > initialized_identifier
+    /// ```
+    ///
+    /// The walker classifies the ROOT child, so without `root_wrappers` it sees
+    /// only the list and never reaches the declaration. The first attempt at this
+    /// issue listed inner kinds alone and changed nothing: `.dart` still had ZERO
+    /// `constant` nodes while `.ts` had 3181, and `usages` still answered 0.
+    ///
+    /// **This test pins CONFIGURATION, not BEHAVIOUR — and that is a known
+    /// weakness, not an oversight.** The behaviour tests that would catch a
+    /// silently-non-extracting language live in `generic_extractor/tests.rs` and
+    /// are structurally inert (see #376): they gate on `get_language`, which is an
+    /// alias for a function whose whole body is `None`. Until #376 lands, the
+    /// strongest honest assertion here is that the pairing the grammar requires is
+    /// present. Do not read a green run as proof that extraction works.
     #[test]
     fn dart_extracts_top_level_bindings() {
         let provider = RegistryProvider::new().unwrap();
@@ -331,17 +351,38 @@ mod tests {
             .as_ref()
             .expect("dart must have semantic patterns");
 
+        for kind in ["static_final_declaration", "initialized_identifier"] {
+            assert!(
+                patterns.constant.node_types.iter().any(|t| t == kind),
+                "dart constant.node_types must cover {kind}; got {:?}",
+                patterns.constant.node_types
+            );
+        }
+        // Without these the node_types above are unreachable — the defect that
+        // made the first fix a no-op.
+        for wrapper in [
+            "static_final_declaration_list",
+            "initialized_identifier_list",
+        ] {
+            assert!(
+                patterns.root_wrappers.iter().any(|t| t == wrapper),
+                "dart root_wrappers must unwrap {wrapper}, or the walker never \
+                 reaches the declaration inside it; got {:?}",
+                patterns.root_wrappers
+            );
+        }
+        // `initialized_variable_definition` appears in NO top-level form — it was
+        // dead configuration in the first attempt, kept out so the registry
+        // describes the grammar rather than a guess about it.
         assert!(
-            patterns
+            !patterns
                 .constant
                 .node_types
                 .iter()
                 .any(|t| t == "initialized_variable_definition"),
-            "dart must extract top-level bindings (Riverpod providers); constant.node_types = {:?}",
-            patterns.constant.node_types
+            "a node kind no top-level form produces must not be listed"
         );
-        // Function locals are deliberately NOT extracted — they are not a
-        // referenceable API and would only add noise to the graph.
+        // Function locals stay out: not a referenceable API, pure graph noise.
         assert!(
             !patterns
                 .constant
