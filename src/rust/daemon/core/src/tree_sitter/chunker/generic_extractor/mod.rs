@@ -166,13 +166,25 @@ impl GenericExtractor {
             None => node.end_position().row + 1,
         };
 
+        // Two shapes of async, and only one was handled. A grammar may give async
+        // functions their OWN node kind, or keep one kind and mark it with an
+        // `async` MODIFIER TOKEN. Kind membership alone silently misses the second
+        // shape: tree-sitter-python produces `function_definition` with an `async`
+        // child for `async def`, so every Python coroutine was classified as a
+        // plain function while the registry carried a node kind
+        // (`async_function_definition`) the grammar does not emit at all. The same
+        // holds for JavaScript and TypeScript.
+        //
+        // The token is looked for among DIRECT children only. Dart writes `async`
+        // after the signature, inside the body, and must not be swept up by this.
         let is_async = matches!(chunk_type, ChunkType::Function | ChunkType::Method)
-            && self
+            && (self
                 .patterns
                 .function
                 .async_node_types
                 .iter()
-                .any(|t| t == node.kind());
+                .any(|t| t == node.kind())
+                || walker::has_async_modifier(node));
 
         let effective_type = if is_async && parent.is_none() {
             ChunkType::AsyncFunction

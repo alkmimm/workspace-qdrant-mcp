@@ -505,6 +505,64 @@ libtest exits 0 when a positional filter matches nothing, so a rename would sile
 un-gate the patterns every extractor depends on. If you ADDED a test here, bump this \
 count."; exit 1; }
 
+# Generic-extractor BEHAVIOUR runs here — the gate this repo did not have.
+#
+# These tests were structurally inert (#376): each opened with
+# `let Some(lang) = get_language("python") else { return; }`, and `get_language`
+# is an alias for a function whose entire body is `None`. All of them returned
+# before their first assertion and reported success, for as long as the module
+# existed. Two extraction defects shipped straight through that hole — Dart
+# top-level bindings (#369) and Java records, 468 of them invisible on DOC-V2
+# (#374) — each producing no graph node at all while the suite stayed green.
+#
+# They now load grammars the way production does, through GrammarManager, and
+# PANIC when one is unavailable. That makes this gate depend on the network at
+# build time, exactly as the ONNX, JDTLS and rust-analyzer downloads above
+# already do. A skipped test is not a gate; a loud failure is the point.
+# Grammar pre-warm, in its own layer on purpose.
+#
+# It is the only step here that needs the network, it caches across builds, and
+# it keeps the download AND the C compile out of the gating run below. That is
+# not about speed: with the fetch inside the gate, this suite returned two
+# different verdicts for the SAME commit — `test_python_function` failed on a
+# cold cache and passed on a warm one, with no change to the code it exercises.
+# A gate whose answer depends on cache state teaches the reader to re-run until
+# green, which is barely better than one that never runs.
+#
+# Single-threaded, and its own result is deliberately not the gate: what this
+# layer must produce is a complete cache, checked per language below.
+ENV WQM_TEST_GRAMMAR_CACHE=/opt/wqm-test-grammars
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib \
+        tree_sitter::chunker::generic_extractor::tests \
+        -- --test-threads=1 > /tmp/grammar-warm.log 2>&1 || true; \
+    for lang in python rust typescript dart; do \
+        find /opt/wqm-test-grammars -type d -name "$lang" 2>/dev/null | grep -q . \
+        || { echo "GATE: grammar pre-warm produced no cache for '$lang'; the extractor \
+gate below cannot run deterministically."; tail -40 /tmp/grammar-warm.log; exit 1; }; \
+    done
+
+# Generic-extractor BEHAVIOUR — the gate this repo did not have.
+#
+# `WQM_TEST_GRAMMAR_NO_DOWNLOAD` makes a missing grammar a loud failure rather
+# than a silent fetch, so this run reads only what the layer above prepared.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    WQM_TEST_GRAMMAR_NO_DOWNLOAD=1 \
+    cargo test -p workspace-qdrant-core --lib \
+        tree_sitter::chunker::generic_extractor::tests \
+        -- --test-threads=4 2>&1 | tee /tmp/extractor-behaviour.log; \
+    grep -q "^test result: ok\. 10 passed" /tmp/extractor-behaviour.log \
+    || { echo "GATE: expected exactly 10 generic_extractor tests to run and pass. This is \
+the suite that must FAIL when a language stops being extracted — if it reports fewer, \
+something reverted to skipping instead of asserting (#376). If you ADDED a test here, \
+bump this count."; exit 1; }
+
 # ─────────────────────────────────────────────
 # Stage 2c: static-checks — the cheap gates, on the CRITICAL PATH
 #
