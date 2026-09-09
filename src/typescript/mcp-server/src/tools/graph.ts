@@ -275,7 +275,20 @@ async function dispatchGraphAction(
         // zero direct references AND hides the rest — so collect them instead of
         // letting one `hint` key silently overwrite the other.
         const hints: string[] = [];
-        if (truncated) hints.push(raiseTopK);
+        // `usages` needs its OWN wording. The cap applies to the TRANSITIVE page
+        // the daemon returns, and only afterwards does the distance===1 filter
+        // run here — so a reader sees a count well below topK next to
+        // `truncated: true` and reasonably concludes the flag is wrong. Field
+        // report: 22 nodes returned with topK 40, flagged truncated, no
+        // explanation of the gap. Name both numbers so the arithmetic is visible.
+        if (truncated) {
+          hints.push(
+            `Truncated: the daemon returned the first ${topK} impacted nodes across ALL ` +
+              `depths (nearest first), and ${direct.length} of those are DIRECT references. ` +
+              `Further direct references may sit beyond that cap — re-run with a larger ` +
+              `topK (topK:0 removes it) before treating this list as complete.`
+          );
+        }
         if (direct.length === 0) hints.push(graphNoEdgesHint('usages'));
         return {
           success: true,

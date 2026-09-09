@@ -47,6 +47,27 @@ describe('graph usages/impact truncation is visible', () => {
     expect(String(out['hint'])).toContain('topK');
   });
 
+  it('explains why the direct count sits below topK', async () => {
+    // The exact field report: 22 nodes returned with topK 40, flagged
+    // truncated, and nothing said why 22 < 40. The cap applies to the
+    // TRANSITIVE page; the distance===1 filter runs afterwards. A reader who
+    // cannot see that arithmetic reasonably concludes the flag is wrong.
+    const page = [...nodesAt(22, 1), ...nodesAt(18, 2)];
+    const out = (await handleGraph(
+      { action: 'usages', symbol: 'x', topK: 40, projectId: 'tenant-1' },
+      daemonReturning({ impacted_nodes: page, total_impacted: 4000 }),
+      projectDetector
+    )) as Record<string, unknown>;
+
+    expect(out['truncated']).toBe(true);
+    expect(out['impacted_nodes']).toHaveLength(22);
+
+    const hint = String(out['hint']);
+    expect(hint).toContain('40'); // the cap that was applied
+    expect(hint).toContain('22'); // how many survived the direct filter
+    expect(hint).toContain('DIRECT');
+  });
+
   it('does not flag an unsaturated page — there the count IS the total', async () => {
     const out = (await handleGraph(
       { action: 'usages', symbol: 'x', topK: 50, projectId: 'tenant-1' },
