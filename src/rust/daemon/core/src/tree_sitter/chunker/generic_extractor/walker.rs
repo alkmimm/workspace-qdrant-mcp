@@ -16,6 +16,28 @@ pub(super) fn matches_any(kind: &str, types: &[String]) -> bool {
     types.iter().any(|t| t == kind)
 }
 
+/// Whether a definition carries an `async` MODIFIER TOKEN.
+///
+/// Grammars split two ways on async. Some give it a distinct node kind, which
+/// `async_node_types` covers. Others keep one kind and mark it with a token —
+/// tree-sitter-python emits `function_definition` with an `async` child for
+/// `async def`, and JavaScript/TypeScript do the same. Classifying by kind alone
+/// misses that entire second shape in silence: Python coroutines read as plain
+/// functions, and the registry carried `async_function_definition`, a kind the
+/// grammar never produces.
+///
+/// DIRECT children only. Dart writes `async` after the signature, inside the
+/// body (`Future<void> f() async {}`), and must not be caught here.
+pub(super) fn has_async_modifier(node: &Node) -> bool {
+    let mut cursor = node.walk();
+    // Bound rather than returned in tail position: the iterator borrows
+    // `cursor`, which would otherwise drop while still borrowed.
+    let found = node
+        .children(&mut cursor)
+        .any(|child| !child.is_named() && child.kind() == "async");
+    found
+}
+
 /// The definition body when the grammar attaches it as a *following sibling* of
 /// the signature node rather than nesting it (Dart's `function_signature` /
 /// `method_signature` followed by `function_body`). Returns `None` for every

@@ -1,9 +1,73 @@
 use super::*;
+use crate::config::GrammarConfig;
+use crate::language_registry::providers::registry::RegistryProvider;
 use crate::language_registry::types::{
     DocstringStyle, FunctionPatternGroup, MethodPatternGroup, PatternGroup, SemanticPatterns,
 };
-use crate::tree_sitter::parser::get_language;
+use crate::tree_sitter::GrammarManager;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+/// Load a grammar the way production does — dynamically, through
+/// `GrammarManager` — and PANIC when it is unavailable.
+///
+/// These tests used to call `get_language`, which is an alias for a function
+/// whose entire body is `None`, inside `let Some(lang) = … else { return; }`.
+/// Every one of them returned before its first assertion and reported success,
+/// for as long as the module has existed (#376). Two extraction defects shipped
+/// straight through that hole — Dart top-level bindings (#369) and Java records
+/// (#374) — each producing no graph node at all while the suite stayed green.
+///
+/// Panicking is the point. A test that skips itself when its subject is missing
+/// is not a gate; it is a green light with no bulb behind it.
+///
+/// The manager is `static` on purpose, and that is load-bearing rather than an
+/// optimisation. A `Language` obtained this way points INTO a shared object the
+/// manager opened with `dlopen`; drop the manager and the library unloads,
+/// leaving the `Language` dangling. A first version of this helper built the
+/// manager inside the closure and returned the `Language` — every test then died
+/// with SIGSEGV. Production never hits this because its manager is long-lived.
+///
+/// `GrammarManager` already caches what it loads, so repeated calls are cheap.
+///
+/// Two environment knobs, both for the container gate:
+///
+/// - `WQM_TEST_GRAMMAR_CACHE` — read grammars from a prepared directory.
+/// - `WQM_TEST_GRAMMAR_NO_DOWNLOAD` — refuse to fetch anything.
+///
+/// Together they take the download and the C compile OFF the gating run. That
+/// matters beyond speed: with the download in the critical path this suite gave
+/// two different verdicts for the same commit — `test_python_function` failed on
+/// a cold cache and passed on a warm one, with no change to the code it
+/// exercises. A gate whose answer depends on cache state teaches the reader to
+/// re-run until green, which is barely better than one that never runs.
+fn grammar(language: &str) -> Language {
+    static MANAGER: OnceLock<Mutex<GrammarManager>> = OnceLock::new();
+    let manager = MANAGER.get_or_init(|| {
+        let mut config = GrammarConfig::default();
+        if let Ok(dir) = std::env::var("WQM_TEST_GRAMMAR_CACHE") {
+            config.cache_dir = dir.into();
+        }
+        if std::env::var("WQM_TEST_GRAMMAR_NO_DOWNLOAD").is_ok() {
+            config.auto_download = false;
+        }
+        Mutex::new(GrammarManager::new(config))
+    });
+
+    let mut guard = manager.lock().expect("grammar manager poisoned");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime for grammar download")
+        .block_on(guard.get_grammar(language))
+        .unwrap_or_else(|e| {
+            panic!(
+                "grammar '{language}' could not be loaded: {e}\n\
+                 These tests exercise the REAL extractor and are meaningless without it \
+                 (#376). Warm the grammar cache or allow auto_download to reach the network."
+            )
+        })
+}
 
 fn python_patterns() -> SemanticPatterns {
     SemanticPatterns {
@@ -124,9 +188,7 @@ fn typescript_patterns() -> SemanticPatterns {
 
 #[test]
 fn test_python_function() {
-    let Some(lang) = get_language("python") else {
-        return;
-    };
+    let lang = grammar("python");
     let source = r#"
 def hello():
     """Say hello."""
@@ -138,20 +200,32 @@ def hello():
         .unwrap();
 
     let func = chunks.iter().find(|c| c.chunk_type == ChunkType::Function);
-    assert!(func.is_some(), "Should find a function chunk");
+    assert!(
+        func.is_some(),
+        "no Function chunk; got {:?}",
+        chunks
+            .iter()
+            .map(|c| (&c.chunk_type, c.symbol_name.as_str()))
+            .collect::<Vec<_>>()
+    );
     let func = func.unwrap();
     assert_eq!(func.symbol_name, "hello");
-    assert!(func
-        .docstring
-        .as_ref()
-        .is_some_and(|d| d.contains("Say hello")));
+    // The message carries the actual value on purpose: a bare `assert!` here
+    // says only "false", which is the least useful thing a failing extraction
+    // test can report.
+    assert!(
+        func.docstring
+            .as_ref()
+            .is_some_and(|d| d.contains("Say hello")),
+        "docstring not extracted for `hello`; got {:?} (chunk types present: {:?})",
+        func.docstring,
+        chunks.iter().map(|c| &c.chunk_type).collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn test_python_class_with_methods() {
-    let Some(lang) = get_language("python") else {
-        return;
-    };
+    let lang = grammar("python");
     let source = r#"
 class Person:
     """A person."""
@@ -179,9 +253,7 @@ class Person:
 
 #[test]
 fn test_python_preamble() {
-    let Some(lang) = get_language("python") else {
-        return;
-    };
+    let lang = grammar("python");
     let source = r#"
 import os
 from typing import List
@@ -203,9 +275,7 @@ def main():
 
 #[test]
 fn test_python_async_function() {
-    let Some(lang) = get_language("python") else {
-        return;
-    };
+    let lang = grammar("python");
     let source = r#"
 async def fetch_data():
     """Fetch data."""
@@ -216,17 +286,27 @@ async def fetch_data():
         .extract_chunks(source, &PathBuf::from("test.py"))
         .unwrap();
 
+    // Python has no distinct async node kind — `async def` is a
+    // `function_definition` carrying an `async` modifier token — so this only
+    // passes once the extractor reads the token. The registry previously listed
+    // `async_function_definition`, a kind the grammar never emits, and every
+    // Python coroutine was classified as a plain function.
     let async_fn = chunks
         .iter()
         .find(|c| c.chunk_type == ChunkType::AsyncFunction);
-    assert!(async_fn.is_some());
+    assert!(
+        async_fn.is_some(),
+        "`async def` must classify as AsyncFunction; got {:?}",
+        chunks
+            .iter()
+            .map(|c| (&c.chunk_type, c.symbol_name.as_str()))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn test_python_decorated_function() {
-    let Some(lang) = get_language("python") else {
-        return;
-    };
+    let lang = grammar("python");
     let source = r#"
 @decorator
 def decorated_func():
@@ -244,9 +324,7 @@ def decorated_func():
 
 #[test]
 fn test_rust_struct_and_impl() {
-    let Some(lang) = get_language("rust") else {
-        return;
-    };
+    let lang = grammar("rust");
     let source = r#"
 use std::fmt;
 
@@ -284,9 +362,7 @@ impl Point {
 
 #[test]
 fn test_rust_inline_test_detection() {
-    let Some(lang) = get_language("rust") else {
-        return;
-    };
+    let lang = grammar("rust");
     // Production `parse`, a `#[cfg(test)] mod tests` with a non-`#[test]` HELPER
     // and a `#[test]` fn, plus a top-level `#[test]` fn outside any cfg(test)
     // module. `#[cfg(test)]` and `#[test]` are preceding-sibling attributes, so
@@ -368,9 +444,7 @@ fn cfg_gated_helper() -> u8 {
 
 #[test]
 fn test_non_rust_never_flagged_as_test() {
-    let Some(lang) = get_language("python") else {
-        return;
-    };
+    let lang = grammar("python");
     // A Python function named like a test must NOT be flagged — inline-test
     // detection is Rust-gated (attributes/cfg(test) are Rust syntax).
     let source = "def test_something():\n    assert True\n";
@@ -386,9 +460,7 @@ fn test_non_rust_never_flagged_as_test() {
 
 #[test]
 fn test_typescript_exported_function_and_const_chunks() {
-    let Some(lang) = get_language("typescript") else {
-        return;
-    };
+    let lang = grammar("typescript");
     let source = r#"
 import type { SearchMode } from './types';
 
@@ -410,4 +482,76 @@ export function applyRRFFusion(results: string[], mode: SearchMode): string[] {
     assert!(chunks
         .iter()
         .any(|c| { c.chunk_type == ChunkType::Function && c.symbol_name == "applyRRFFusion" }));
+}
+
+/// Dart top-level bindings must reach the walker — with the SHIPPED patterns.
+///
+/// This is the test #369 needed and did not get. Two attempts at that issue were
+/// gated only by "the registry YAML lists this node kind", which passes whether
+/// or not anything is extracted: the first attempt shipped, produced ZERO `.dart`
+/// constant nodes in the live graph, and its gate stayed green.
+///
+/// So the patterns come from the REGISTRY, not from a fixture written here. A
+/// fixture would test the extractor against a hand-made config and prove nothing
+/// about what ships.
+///
+/// `final xProvider = Provider(…)` is the Riverpod idiom. The grammar puts every
+/// top-level binding behind a list wrapper — `static_final_declaration_list` for
+/// `final`/`const`, `initialized_identifier_list` for `var`/`late final` — so
+/// `root_wrappers` is load-bearing and listing the inner kinds alone changes
+/// nothing.
+#[test]
+fn dart_top_level_bindings_become_constant_chunks() {
+    let lang = grammar("dart");
+    let provider = RegistryProvider::new().expect("bundled registry must parse");
+    let patterns = provider
+        .definitions()
+        .iter()
+        .find(|d| d.id() == "dart")
+        .expect("missing language: dart")
+        .semantic_patterns
+        .clone()
+        .expect("dart must have semantic patterns");
+
+    let source = r#"
+const bool kBillingEnabled = false;
+final activeContextProvider = Provider<int>((ref) => 1);
+var counter = 0;
+
+class Widget {
+  void build() {}
+}
+"#;
+    let extractor = GenericExtractor::new("dart", lang, patterns);
+    let chunks = extractor
+        .extract_chunks(source, &PathBuf::from("providers.dart"))
+        .unwrap();
+
+    for name in ["kBillingEnabled", "activeContextProvider", "counter"] {
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.chunk_type == ChunkType::Constant && c.symbol_name == name),
+            "dart top-level binding '{name}' must produce a Constant chunk; got {:?}",
+            chunks
+                .iter()
+                .map(|c| (&c.chunk_type, c.symbol_name.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // The name must be the BINDING, never the type annotation — `const bool kX`
+    // has an identifier for each and the wrong one is silently plausible.
+    assert!(
+        !chunks
+            .iter()
+            .any(|c| c.chunk_type == ChunkType::Constant && c.symbol_name == "bool"),
+        "the type annotation must not be extracted as the binding name"
+    );
+
+    // Regression cover for the rest of the entry, so a future edit to the
+    // constant group cannot quietly cost the callable/type extraction.
+    assert!(chunks
+        .iter()
+        .any(|c| { c.chunk_type == ChunkType::Class && c.symbol_name == "Widget" }));
 }

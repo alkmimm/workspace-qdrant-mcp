@@ -1326,11 +1326,17 @@
       node_types: [import_statement, import_from_statement, future_import_statement]
     function:
       node_types: [function_definition]
-      async_node_types: [async_function_definition]
+      # Python has NO distinct async node kind — verified by parsing with the
+      # cached grammar: `async def` yields `function_definition` whose children
+      # are ['async', 'def', 'identifier', 'parameters', ':', 'block']. The
+      # `async_function_definition` listed here was dead configuration, so no
+      # Python coroutine was ever classified as async. The extractor now reads
+      # the modifier TOKEN, which is how every modifier-async grammar works.
+      async_node_types: []
     class:
       node_types: [class_definition]
     method:
-      node_types: [function_definition, async_function_definition]
+      node_types: [function_definition]
       context: inside_class
     struct:
       node_types: []
@@ -1470,11 +1476,13 @@
     function:
       node_types: [function_item]
       # Rust has no distinct async node kind: `async fn` and `fn` are both
-      # `function_item` (async is a child modifier token). The extractor flags
-      # async purely by node.kind() membership here, so listing `function_item`
-      # marked EVERY function async. Empty, matching every other modifier-async
-      # grammar in this registry (JS/TS/Go/Kotlin/C#…); only Python, which has a
-      # real `async_function_definition` node, populates async_node_types.
+      # `function_item` (async is a child modifier token). Listing `function_item`
+      # here would mark EVERY function async. Empty, matching every modifier-async
+      # grammar in this registry — which, as of 2026-09-09, is ALL of them: Python
+      # was the one entry claiming a distinct `async_function_definition` node and
+      # the grammar does not produce it. The extractor reads the modifier token
+      # instead, so this group stays empty unless a grammar genuinely splits the
+      # kind.
       async_node_types: []
     class:
       node_types: []
