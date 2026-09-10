@@ -308,6 +308,21 @@ async function dispatchGraphAction(
         // zero direct references AND hides the rest — so collect them instead of
         // letting one `hint` key silently overwrite the other.
         const hints: string[] = [];
+        // A threshold that removed nothing produces a response byte-identical to
+        // omitting it, so the caller cannot tell "my filter ran and kept
+        // everything" from "my filter did nothing" (#383). On a real result the
+        // confidences cluster at 1.00 / 0.95 / 0.85, which makes 0.5 — the
+        // natural "medium confidence" choice — a no-op. Say so, and name where
+        // the cut points actually are.
+        if (minConfidence !== undefined && (r.filtered_by_min_confidence ?? 0) === 0) {
+          hints.push(
+            `minConfidence:${minConfidence} removed nothing — this result is identical to ` +
+              `omitting it. Reported confidences are the best-path edge-weight product and ` +
+              `in practice cluster at 1.00 (precise), 0.95, 0.85, with 0.7 for a ` +
+              `tenant-unique name; a same-name fan-out scores ~1/N. Useful cut points start ` +
+              `around 0.85, not 0.5.`
+          );
+        }
         // `usages` needs its OWN wording. The cap applies to the TRANSITIVE page
         // the daemon returns, and only afterwards does the distance===1 filter
         // run here — so a reader sees a count well below topK next to
@@ -342,8 +357,11 @@ async function dispatchGraphAction(
           if (textOccurrences !== undefined && textOccurrences > 0) {
             hints.push(
               `The text index holds ${textOccurrences} occurrence(s) of "${symbol}", so this 0 ` +
-                `means NOT MODELLED rather than unused: the graph has no edge type for a symbol ` +
-                `passed by reference (e.g. ref.watch(x), find.byType(X)). Use grep for the sites.`
+                `means NOT MODELLED rather than unused. A symbol passed by reference is modelled ` +
+                `for Dart lower-camel identifiers (REFERENCES edges), but NOT for other ` +
+                `languages, and not for type-shaped names such as find.byType(X) in any ` +
+                `language. Existing data also needs a graph rebuild before those edges appear. ` +
+                `Use grep for the sites.`
             );
           }
         }

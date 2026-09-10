@@ -70,6 +70,11 @@ export interface QueryRelatedResponse {
   nodes: TraversalNodeProto[];
   total: number;
   query_time_ms: number;
+  /**
+   * How many nodes `min_confidence` removed. Zero is the value worth reading: a
+   * threshold that drops nothing is otherwise byte-identical to passing none.
+   */
+  filtered_by_min_confidence: number;
 }
 
 export interface TraversalNodeProto {
@@ -98,6 +103,11 @@ export interface ImpactAnalysisResponse {
   impacted_nodes: ImpactNodeProto[];
   total_impacted: number;
   query_time_ms: number;
+  /**
+   * How many nodes `min_confidence` removed. Zero is the value worth reading: a
+   * threshold that drops nothing is otherwise byte-identical to passing none.
+   */
+  filtered_by_min_confidence: number;
 }
 
 export interface ImpactNodeProto {

@@ -506,6 +506,29 @@ pass. libtest exits 0 when a filter matches nothing, so a module rename would si
 un-gate the filter that keeps fabricated cross-file cycles out of the answer. If you \
 ADDED a test here, bump this count."; exit 1; }
 
+# minConfidence honesty runs here: hermetic (pure vector filtering, no DB) and
+# it guards a parameter that lied about what it did. On a real usages result the
+# confidences take three values, all >= 0.85, so every threshold from 0.1 to
+# 0.85 — including the natural "medium" 0.5 — removes NOTHING and returns a
+# response byte-identical to omitting the parameter. Reported from the field as
+# "0.5 is the floor of almost everything, not a filter" (#383).
+#
+# The count is what makes a no-op visible, so the tests pin BOTH directions: a
+# threshold below the population reports 0, and one that bites reports the real
+# number. Pinning only the second would let a regression that always reports 0
+# pass, which is exactly the state being fixed.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-grpc --lib retain_min_confidence \
+        -- --test-threads=4 2>&1 | tee /tmp/min-confidence.log; \
+    grep -q "^test result: ok\. 5 passed" /tmp/min-confidence.log \
+    || { echo "GATE: expected exactly 5 retain_min_confidence tests to run and pass. libtest \
+exits 0 when a filter matches nothing, so a rename would silently un-gate the count that \
+tells a caller their threshold was inert. If you ADDED a test here, bump this count."; \
+exit 1; }
+
 # Argument-position REFERENCES edges run here: hermetic (text parsing plus an
 # in-memory SQLite store) and they guard a blind spot that read as a fact about
 # the code. A symbol passed by reference — `ref.watch(activeContextProvider)`,
