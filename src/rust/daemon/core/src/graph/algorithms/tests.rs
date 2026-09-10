@@ -662,10 +662,15 @@ async fn test_load_adjacency_drops_use_ubiquitous_node() {
 
     // The middle setting drops the hub on in-degree alone, without the
     // name-keyed axes that could hide a genuine cycle.
-    let usage_only =
-        load_adjacency_graph(&pool, "t1", None, GenericityFilter::UsageUbiquityOnly, false)
-            .await
-            .unwrap();
+    let usage_only = load_adjacency_graph(
+        &pool,
+        "t1",
+        None,
+        GenericityFilter::UsageUbiquityOnly,
+        false,
+    )
+    .await
+    .unwrap();
     assert!(
         !usage_only.nodes.contains_key("hub"),
         "use-ubiquity alone must still drop the hub"

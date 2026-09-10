@@ -421,7 +421,11 @@ mod tests {
         node(&pool, "c", "c", "c.rs").await;
         edge(&pool, "a", "b", 1.0).await;
         edge(&pool, "b", "c", 1.0).await;
-        assert!(detect_cycles(&pool, "t", None, 2).await.unwrap().cycles.is_empty());
+        assert!(detect_cycles(&pool, "t", None, 2)
+            .await
+            .unwrap()
+            .cycles
+            .is_empty());
     }
 
     #[tokio::test]
@@ -434,7 +438,11 @@ mod tests {
         // (weight 0.2 < the 0.6 gate) → must be ignored → no cycle.
         edge(&pool, "b", "a", 0.2).await;
         assert!(
-            detect_cycles(&pool, "t", None, 2).await.unwrap().cycles.is_empty(),
+            detect_cycles(&pool, "t", None, 2)
+                .await
+                .unwrap()
+                .cycles
+                .is_empty(),
             "sub-0.6 back-edge must not create a cycle"
         );
     }
@@ -544,7 +552,11 @@ mod tests {
         edge(&pool, "a", "c", 1.0).await;
         edge(&pool, "b", "d", 1.0).await;
         edge(&pool, "c", "d", 1.0).await;
-        assert!(detect_cycles(&pool, "t", None, 2).await.unwrap().cycles.is_empty());
+        assert!(detect_cycles(&pool, "t", None, 2)
+            .await
+            .unwrap()
+            .cycles
+            .is_empty());
     }
 
     /// Two disjoint cycles plus an acyclic tail → exactly two cycles.
@@ -574,7 +586,11 @@ mod tests {
         node(&pool, "r", "recurse", "r.rs").await;
         edge(&pool, "r", "r", 1.0).await;
         assert!(
-            detect_cycles(&pool, "t", None, 2).await.unwrap().cycles.is_empty(),
+            detect_cycles(&pool, "t", None, 2)
+                .await
+                .unwrap()
+                .cycles
+                .is_empty(),
             "min 2 skips self-loops"
         );
         let with1 = detect_cycles(&pool, "t", None, 1).await.unwrap().cycles;
@@ -615,7 +631,13 @@ mod tests {
         // A genuine two-node cycle between two low-traffic symbols, to prove the
         // filter removes the artefact without flattening real findings.
         node(&pool, "svc", "getViewUrl", "resources_service.dart").await;
-        node(&pool, "repo", "getResourceViewUrl", "resources_repository.dart").await;
+        node(
+            &pool,
+            "repo",
+            "getResourceViewUrl",
+            "resources_repository.dart",
+        )
+        .await;
         edge(&pool, "svc", "repo", 1.0).await;
         edge(&pool, "repo", "svc", 1.0).await;
 
