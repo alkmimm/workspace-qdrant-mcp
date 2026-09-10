@@ -123,6 +123,19 @@ pub enum EdgeType {
     Extends,
     /// Trait/interface implementation.
     Implements,
+    /// A symbol named in argument position without being invoked —
+    /// `ref.watch(activeContextProvider)`, `find.byType(HomePage)`.
+    ///
+    /// This is neither a call (the call is to `watch`) nor a type use, so
+    /// before this edge existed such a symbol had NO incoming edge at all and
+    /// `usages` answered 0 for it. Measured on DOC-V2: 1 of 506 Dart top-level
+    /// constants had any inbound edge, while `activeContextProvider` alone is
+    /// named in argument position 16 times.
+    ///
+    /// Deliberately NOT part of the test-gap edge defaults: "referenced" is a
+    /// weaker claim than "exercised", and widening the coverage denominator is
+    /// a separate judgement from fixing `usages`.
+    References,
 }
 
 impl EdgeType {
@@ -134,6 +147,7 @@ impl EdgeType {
             EdgeType::UsesType => "USES_TYPE",
             EdgeType::Extends => "EXTENDS",
             EdgeType::Implements => "IMPLEMENTS",
+            EdgeType::References => "REFERENCES",
         }
     }
 
@@ -145,6 +159,7 @@ impl EdgeType {
             "USES_TYPE" => Some(EdgeType::UsesType),
             "EXTENDS" => Some(EdgeType::Extends),
             "IMPLEMENTS" => Some(EdgeType::Implements),
+            "REFERENCES" => Some(EdgeType::References),
             _ => None,
         }
     }

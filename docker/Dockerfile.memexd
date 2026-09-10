@@ -506,6 +506,41 @@ pass. libtest exits 0 when a filter matches nothing, so a module rename would si
 un-gate the filter that keeps fabricated cross-file cycles out of the answer. If you \
 ADDED a test here, bump this count."; exit 1; }
 
+# Argument-position REFERENCES edges run here: hermetic (text parsing plus an
+# in-memory SQLite store) and they guard a blind spot that read as a fact about
+# the code. A symbol passed by reference — `ref.watch(activeContextProvider)`,
+# `find.byType(HomePage)` — is neither called nor used as a type, so it had no
+# incoming edge at all and `usages` answered 0 for it (#369). Measured on
+# DOC-V2: 1 of 506 Dart top-level constants had any inbound edge, while that one
+# provider is named in argument position 16 times.
+#
+# Two halves are gated together because each is worthless alone. The extractor
+# parses chunk TEXT (the AST route would force a CHUNKER_LOGIC_VERSION bump and
+# a full re-chunk), so it is deliberately permissive and the resolver is what
+# pays for that by deleting references that never resolve to a file-backed
+# symbol. That drop is the difference between 1,719 persisted edges (+0.28%) and
+# 51,199 (+8.5%) — a regression that keeps the permissive half and loses the
+# drop would not fail any assertion about `usages`, only the edge table.
+#
+# The filter is a UNION of a module path and three test NAMES; libtest unions
+# positional filters and exits 0 when one matches nothing, so the count is the
+# only thing holding this together.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        graph::extractor::reference_analysis \
+        test_extract_edges_dart_argument_reference \
+        test_extract_edges_reference_is_dart_only_for_now \
+        resolve_drops_unresolved_references_and_keeps_resolved_ones \
+        --test-threads=4 2>&1 | tee /tmp/references-edge.log; \
+    grep -q "^test result: ok\. 13 passed" /tmp/references-edge.log \
+    || { echo "GATE: expected exactly 13 REFERENCES tests to run and pass (10 parser + 2 \
+extractor + 1 resolver-drop). A rename would silently un-gate either the extraction that \
+makes a passed-by-reference symbol visible, or the drop that keeps it from inflating the \
+edge table. If you ADDED a test here, bump this count."; exit 1; }
+
 # Language-registry pattern integrity runs here: hermetic (parses the bundled
 # YAML, no DB, no network) and it guards a failure mode that is invisible from
 # outside — a language whose patterns are PRESENT but incomplete. Dart had

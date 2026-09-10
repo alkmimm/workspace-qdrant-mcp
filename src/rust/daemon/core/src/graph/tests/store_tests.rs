@@ -2,6 +2,95 @@
 
 use super::*;
 
+// -- REFERENCES resolution and drop (#369) --
+
+/// The whole economics of the REFERENCES edge live here.
+///
+/// The extractor parses chunk TEXT, so it cannot tell a top-level provider from
+/// a local variable and emits both. This is the step that separates them: a
+/// reference that resolves to a file-backed symbol survives; one that never
+/// resolves is deleted rather than left as a stub edge. Measured on DOC-V2 that
+/// is 1,719 persisted edges instead of 51,199.
+///
+/// Asserting only the survivor would let a regression that keeps everything
+/// pass, so both halves are pinned.
+#[tokio::test]
+async fn resolve_drops_unresolved_references_and_keeps_resolved_ones() {
+    let store = test_store().await;
+
+    let consumer = GraphNode::new(TENANT, "lib/home.dart", "build", NodeType::Method);
+    // A real top-level binding, file-backed — the provider.
+    let provider = GraphNode::new(
+        TENANT,
+        "lib/providers.dart",
+        "activeContextProvider",
+        NodeType::Constant,
+    );
+    store
+        .upsert_nodes(&[consumer.clone(), provider.clone()])
+        .await
+        .unwrap();
+
+    // Two extractor-shaped reference edges: one to a name that exists in the
+    // tenant, one to a local variable that never will.
+    let real_stub = GraphNode::stub(TENANT, "activeContextProvider", NodeType::Constant);
+    let bogus_stub = GraphNode::stub(TENANT, "localCounter", NodeType::Constant);
+    store
+        .upsert_nodes(&[real_stub.clone(), bogus_stub.clone()])
+        .await
+        .unwrap();
+    store
+        .insert_edges(&[
+            GraphEdge::new(
+                TENANT,
+                &consumer.node_id,
+                &real_stub.node_id,
+                EdgeType::References,
+                "lib/home.dart",
+            ),
+            GraphEdge::new(
+                TENANT,
+                &consumer.node_id,
+                &bogus_stub.node_id,
+                EdgeType::References,
+                "lib/home.dart",
+            ),
+        ])
+        .await
+        .unwrap();
+
+    store.resolve_stub_edges(TENANT).await.unwrap();
+
+    let surviving: Vec<(String,)> = sqlx::query_as(
+        "SELECT target_node_id FROM graph_edges
+         WHERE tenant_id = ?1 AND edge_type = 'REFERENCES'",
+    )
+    .bind(TENANT)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+
+    assert_eq!(
+        surviving.len(),
+        1,
+        "the unresolved reference must not persist"
+    );
+    assert_eq!(
+        surviving[0].0, provider.node_id,
+        "the surviving edge must point at the file-backed provider, not the stub"
+    );
+
+    // And the symbol is now reachable in reverse — which is what `usages` asks.
+    let dangling: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM graph_nodes WHERE tenant_id = ?1 AND file_path = ''",
+    )
+    .bind(TENANT)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(dangling.0, 0, "both stubs are collected once edgeless");
+}
+
 // -- Upsert node --
 
 #[tokio::test]
