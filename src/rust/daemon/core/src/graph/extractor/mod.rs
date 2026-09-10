@@ -4,6 +4,7 @@
 //! pairs for CONTAINS, CALLS, IMPORTS, and USES_TYPE relationships.
 
 pub(crate) mod import_parsers;
+mod reference_analysis;
 mod type_analysis;
 
 #[cfg(test)]
@@ -15,6 +16,7 @@ use crate::TextChunk;
 use super::{EdgeType, GraphEdge, GraphNode, NodeType};
 
 use import_parsers::extract_imports_from_content;
+use reference_analysis::extract_argument_references;
 pub use type_analysis::{extract_type_references, parse_qualified_name};
 
 /// Result of extracting graph relationships from a set of semantic chunks.
@@ -62,6 +64,29 @@ fn extract_chunk_edges(
             file_path,
         );
         result.nodes.push(callee_stub);
+        result.edges.push(edge);
+    }
+
+    // Symbols named in argument position without being invoked (#369). The
+    // target is stubbed as a Constant because the population this addresses is
+    // top-level bindings (Riverpod providers, feature flags); a stub that never
+    // resolves to a file-backed symbol has its edge dropped by
+    // `resolve_stub_edges` before it persists, which is what keeps this from
+    // inflating the edge table — measured on DOC-V2, 51,199 candidates become
+    // 1,719 persisted edges (+0.28% rather than +8.5%).
+    for reference in extract_argument_references(&chunk.content, &chunk.language) {
+        if !is_valid_symbol_name(&reference) {
+            continue;
+        }
+        let ref_stub = GraphNode::stub(tenant_id, &reference, NodeType::Constant);
+        let edge = GraphEdge::new(
+            tenant_id,
+            &node.node_id,
+            &ref_stub.node_id,
+            EdgeType::References,
+            file_path,
+        );
+        result.nodes.push(ref_stub);
         result.edges.push(edge);
     }
 

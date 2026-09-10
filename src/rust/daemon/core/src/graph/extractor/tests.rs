@@ -411,6 +411,75 @@ fn test_extract_edges_calls() {
     assert_eq!(call_edges.len(), 2);
 }
 
+/// The reported case, end to end at the extractor (#369): a Dart consumer that
+/// names a provider in argument position must produce a REFERENCES edge to it.
+///
+/// Before this, `ref.watch(activeContextProvider)` produced a CALLS edge to
+/// `watch` and nothing at all for the provider, so `usages` on it answered 0
+/// while the symbol had 16 argument-position references on disk.
+#[test]
+fn test_extract_edges_dart_argument_reference() {
+    let mut chunk = SemanticChunk::new(
+        ChunkType::Method,
+        "build",
+        "Widget build(BuildContext context, WidgetRef ref) {\n  \
+         final ctx = ref.watch(activeContextProvider);\n  return Text(ctx.name);\n}",
+        1,
+        4,
+        "dart",
+        "lib/home.dart",
+    );
+    chunk.calls = vec!["ref.watch".to_string()];
+
+    let result = extract_edges(&[chunk], "t1", "lib/home.dart");
+
+    let referenced: Vec<&str> = result
+        .edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::References)
+        .filter_map(|e| {
+            result
+                .nodes
+                .iter()
+                .find(|n| n.node_id == e.target_node_id)
+                .map(|n| n.symbol_name.as_str())
+        })
+        .collect();
+    assert_eq!(referenced, vec!["activeContextProvider"]);
+
+    // The call itself is unchanged — this adds an edge, it does not replace one.
+    assert!(result
+        .edges
+        .iter()
+        .any(|e| e.edge_type == EdgeType::Calls));
+}
+
+/// Other languages must be untouched until their own blast radius is measured.
+/// A Rust chunk with the same shape produces no REFERENCES edge.
+#[test]
+fn test_extract_edges_reference_is_dart_only_for_now() {
+    let mut chunk = SemanticChunk::new(
+        ChunkType::Function,
+        "main",
+        "fn main() { register(some_provider); }",
+        1,
+        3,
+        "rust",
+        "src/main.rs",
+    );
+    chunk.calls = vec!["register".to_string()];
+
+    let result = extract_edges(&[chunk], "t1", "src/main.rs");
+
+    assert!(
+        !result
+            .edges
+            .iter()
+            .any(|e| e.edge_type == EdgeType::References),
+        "REFERENCES must stay Dart-scoped"
+    );
+}
+
 #[test]
 fn test_extract_edges_uses_type() {
     let mut chunk = SemanticChunk::new(

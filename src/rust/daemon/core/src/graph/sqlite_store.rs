@@ -1283,6 +1283,31 @@ impl GraphStore for SqliteGraphStore {
 
         tx.commit().await?;
 
+        // Drop REFERENCES edges that never resolved (#369).
+        //
+        // Unlike a CALLS stub — where "a callee we could not place" is honest
+        // information worth keeping — an unresolved REFERENCES edge is almost
+        // always a local variable or parameter that merely looked like a
+        // top-level symbol at extraction time. The extractor is deliberately
+        // permissive (it parses chunk text, not the AST), and THIS is the step
+        // that pays for that: on DOC-V2 it turns 51,199 candidate edges into
+        // 1,719 persisted ones, +0.28% on the edge table instead of +8.5%.
+        //
+        // It runs before the orphan sweep below so the stubs left behind are
+        // collected by the cleanup that already exists.
+        let dropped_refs = sqlx::query(
+            "DELETE FROM graph_edges
+             WHERE tenant_id = ?1 AND edge_type = 'REFERENCES'
+               AND target_node_id IN (
+                   SELECT node_id FROM graph_nodes
+                   WHERE tenant_id = ?1 AND file_path = ''
+               )",
+        )
+        .bind(tenant_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
         // Drop stub nodes that no longer have any edges.
         sqlx::query(
             "DELETE FROM graph_nodes
@@ -1298,11 +1323,13 @@ impl GraphStore for SqliteGraphStore {
         .await?;
 
         debug!(
-            "Resolved {} stub edges for tenant {} ({} target + {} source dangling examined)",
+            "Resolved {} stub edges for tenant {} ({} target + {} source dangling examined, \
+             {} unresolved REFERENCES dropped)",
             repointed,
             tenant_id,
             target_dangling.len(),
-            source_dangling.len()
+            source_dangling.len(),
+            dropped_refs
         );
         Ok(repointed)
     }
