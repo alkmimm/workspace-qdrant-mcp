@@ -582,7 +582,7 @@ async fn test_load_adjacency() {
     let pool = setup_graph_pool().await;
     build_diamond(&pool).await;
 
-    let graph = load_adjacency_graph(&pool, "t1", None, true, false)
+    let graph = load_adjacency_graph(&pool, "t1", None, GenericityFilter::All, false)
         .await
         .unwrap();
     assert_eq!(graph.nodes.len(), 4);
@@ -600,7 +600,7 @@ async fn test_load_adjacency_filtered() {
     insert_edge(&pool, "t1", "a", "b", "IMPORTS").await;
 
     // Filter to CALLS only
-    let graph = load_adjacency_graph(&pool, "t1", Some(&["CALLS"]), true, false)
+    let graph = load_adjacency_graph(&pool, "t1", Some(&["CALLS"]), GenericityFilter::All, false)
         .await
         .unwrap();
     let out = graph.outgoing.get("a").unwrap();
@@ -630,7 +630,7 @@ async fn test_load_adjacency_drops_use_ubiquitous_node() {
     insert_edge(&pool, "t1", "c0", "norm", "CALLS").await;
     insert_edge(&pool, "t1", "c1", "norm", "CALLS").await;
 
-    let graph = load_adjacency_graph(&pool, "t1", None, true, false)
+    let graph = load_adjacency_graph(&pool, "t1", None, GenericityFilter::All, false)
         .await
         .unwrap();
 
@@ -643,14 +643,33 @@ async fn test_load_adjacency_drops_use_ubiquitous_node() {
         "a normally-referenced node (in-degree 2) must be kept"
     );
     assert!(graph.nodes.contains_key("c0"), "caller nodes must be kept");
+    assert_eq!(graph.suppressed_ubiquitous, 1, "the hub, and only the hub");
 
-    // With genericity filters OFF (structural callers like cycle detection), the
-    // same use-ubiquitous node is KEPT — a real cycle may pass through it.
-    let raw = load_adjacency_graph(&pool, "t1", None, false, false)
+    // `None` keeps the ubiquitous node. `test_gaps` relies on this: dropping a
+    // hub would delete it from the production denominator while its callers
+    // stay. Cycle detection used to share this setting on the reasoning that a
+    // real cycle might pass through such a node — it no longer does, because
+    // measurement showed the setting fabricated every cross-file cycle it
+    // reported on a Dart tenant (see `cycles`).
+    let raw = load_adjacency_graph(&pool, "t1", None, GenericityFilter::None, false)
         .await
         .unwrap();
     assert!(
         raw.nodes.contains_key("hub"),
         "with genericity filters off, the ubiquitous node must be retained"
     );
+    assert_eq!(raw.suppressed_ubiquitous, 0);
+
+    // The middle setting drops the hub on in-degree alone, without the
+    // name-keyed axes that could hide a genuine cycle.
+    let usage_only =
+        load_adjacency_graph(&pool, "t1", None, GenericityFilter::UsageUbiquityOnly, false)
+            .await
+            .unwrap();
+    assert!(
+        !usage_only.nodes.contains_key("hub"),
+        "use-ubiquity alone must still drop the hub"
+    );
+    assert!(usage_only.nodes.contains_key("norm"));
+    assert_eq!(usage_only.suppressed_ubiquitous, 1);
 }

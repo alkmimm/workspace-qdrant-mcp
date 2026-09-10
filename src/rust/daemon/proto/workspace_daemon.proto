@@ -894,6 +894,10 @@ message CycleResponse {
     repeated CycleProto cycles = 1;
     uint32 total = 2;
     int64 query_time_ms = 3;
+    // Nodes the use-ubiquity filter removed before running Tarjan. A suppressed
+    // node cannot appear in any cycle, so this is what separates "no cycles" as
+    // a fact about the code from "no cycles" as a consequence of filtering.
+    uint32 suppressed_ubiquitous = 4;
 }
 
 // A detected dependency cycle (a strongly-connected component)

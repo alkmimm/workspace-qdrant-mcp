@@ -10,14 +10,32 @@
 //! failure the graph traversal fixed by going iterative (#176). Runs over dense
 //! integer node indices (like `community`) to avoid per-edge string hashing.
 //!
-//! **Precision caveat (observed on the live graph):** cross-file 2-cycles
-//! through generic method names (`execute`, `new`, …) can be by-name resolution
-//! artifacts rather than true dependency cycles. The `weight >= 0.6` gate drops
-//! the 1/N ambiguous fan-out, but a uniquely-yet-wrongly-resolved generic call
-//! can still close a spurious cycle. The tool surfaces *candidates* ranked
-//! cross-file-first; the caller judges. Same-file mutual recursion (the measured
-//! majority — 58/62 on this repo, 46/47 on example-monorepo) is reported but flagged
-//! `cross_file = false`, so it never buries the rare cross-file smells.
+//! **The SDK-name collision, and why the confidence gate cannot catch it.**
+//! A method call on a receiver whose type comes from the language SDK has no
+//! stdlib node to resolve to, because the indexer only knows symbols defined in
+//! the tenant. So `_pending.add(x)` on a Dart `List<String>` resolves to
+//! whatever the USER named `add` — and when that name is unique in the tenant
+//! the resolver scores it 0.7, clearing the `weight >= 0.6` gate. Pair one such
+//! fabricated edge with one real edge and you get a two-node "cycle" that does
+//! not exist.
+//!
+//! This was previously documented as a caveat for the caller to judge. Measured
+//! on a Flutter tenant, that did not work: **both** cross-file cycles reported
+//! were artifacts of exactly this, and cross-file cycles are the ones ranked
+//! first and labelled the layering smell. Confidence carries no signal to
+//! separate them — the real edge and the fabricated one both scored 0.85 in the
+//! verified case.
+//!
+//! In-degree does separate them. A genuine domain method has a handful of
+//! callers; a name that collides with an SDK method collects hundreds (328 /
+//! 304 / 189 for the fabricated hubs, against 4 and 1 for the real methods in
+//! the same cycles). So detection now applies the USE-ubiquity axis
+//! (`GenericityFilter::UsageUbiquityOnly`) and reports how many nodes that
+//! removed, so a shorter list is never mistaken for a cleaner codebase.
+//!
+//! Same-file mutual recursion (the measured majority — 58/62 on this repo,
+//! 46/47 on example-monorepo) is reported but flagged `cross_file = false`, so
+//! it never buries the rare cross-file smells.
 
 use std::collections::HashMap;
 
@@ -25,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tracing::info;
 
-use super::load_adjacency_graph;
+use super::{load_adjacency_graph, GenericityFilter};
 
 /// A member node of a dependency cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +66,21 @@ pub struct Cycle {
     pub cross_file: bool,
 }
 
+/// The cycles found, plus what the ubiquity filter removed to find them.
+///
+/// The count is carried out of the algorithm rather than logged because a
+/// suppressed node cannot appear in any cycle: without it, a caller reading a
+/// short list has no way to tell a clean codebase from a heavily filtered one.
+/// That is the same silent-zero shape as a filter that reports nothing about
+/// what it dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CycleReport {
+    pub cycles: Vec<Cycle>,
+    /// Nodes dropped by the USE-ubiquity axis (SDK-name collisions and genuine
+    /// high-traffic utilities alike — the graph cannot tell them apart).
+    pub suppressed_ubiquitous: usize,
+}
+
 /// Default dependency edge types considered for cycles. CALLS/IMPORTS plus the
 /// type/inheritance relations are the meaningful dependency edges. CONTAINS
 /// (structural parent→child) is excluded: it would make every class trivially
@@ -57,26 +90,38 @@ const DEFAULT_CYCLE_EDGE_TYPES: &[&str] =
 
 /// Detect dependency cycles for a tenant.
 ///
-/// Builds the directed, high-confidence (weight ≥ 0.6) dependency graph WITHOUT
-/// the centrality genericity filters — a real cycle may legitimately pass
-/// through a high-in-degree node, so those precision-for-ranking filters would
-/// hide cycles. The weight ≥ 0.6 gate is kept: it drops the 1/N ambiguous
-/// fan-out that would otherwise fabricate spurious cycles.
+/// Builds the directed, high-confidence (weight ≥ 0.6) dependency graph and
+/// applies the USE-ubiquity axis only (see the module docs for the measurement
+/// that motivated it). The name-keyed axes stay OFF: they drop a node because
+/// of what it is called, which could hide a genuine cycle through a
+/// commonly-named method. The in-degree axis drops a node because of how many
+/// callers resolved to it, which is the one signal that separates a real
+/// dependency edge from an SDK-name collision.
 ///
 /// Returns every SCC with at least `min_cycle_size` members (a self-loop counts
 /// as a size-1 cycle when `min_cycle_size <= 1`), cross-file cycles first, then
-/// larger first.
+/// larger first, alongside the number of nodes the ubiquity axis suppressed.
 pub async fn detect_cycles(
     pool: &SqlitePool,
     tenant_id: &str,
     edge_types: Option<&[&str]>,
     min_cycle_size: usize,
-) -> Result<Vec<Cycle>, sqlx::Error> {
+) -> Result<CycleReport, sqlx::Error> {
     let types = edge_types.unwrap_or(DEFAULT_CYCLE_EDGE_TYPES);
-    // apply_genericity_filters = false: keep the raw resolved dependency graph.
-    let graph = load_adjacency_graph(pool, tenant_id, Some(types), false, false).await?;
+    let graph = load_adjacency_graph(
+        pool,
+        tenant_id,
+        Some(types),
+        GenericityFilter::UsageUbiquityOnly,
+        false,
+    )
+    .await?;
+    let suppressed_ubiquitous = graph.suppressed_ubiquitous;
     if graph.nodes.is_empty() {
-        return Ok(Vec::new());
+        return Ok(CycleReport {
+            cycles: Vec::new(),
+            suppressed_ubiquitous,
+        });
     }
 
     // Intern node ids → dense indices, sorted so output is deterministic.
@@ -160,9 +205,13 @@ pub async fn detect_cycles(
     info!(
         tenant_id,
         cycles = cycles.len(),
+        suppressed_ubiquitous,
         "Dependency cycle detection complete"
     );
-    Ok(cycles)
+    Ok(CycleReport {
+        cycles,
+        suppressed_ubiquitous,
+    })
 }
 
 /// Iterative Tarjan strongly-connected-components over dense integer adjacency.
@@ -356,7 +405,7 @@ mod tests {
         edge(&pool, "b", "c", 1.0).await;
         edge(&pool, "c", "a", 1.0).await;
 
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap();
+        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
         assert_eq!(cycles.len(), 1, "one cycle");
         let c = &cycles[0];
         assert_eq!(c.members.len(), 3);
@@ -372,7 +421,7 @@ mod tests {
         node(&pool, "c", "c", "c.rs").await;
         edge(&pool, "a", "b", 1.0).await;
         edge(&pool, "b", "c", 1.0).await;
-        assert!(detect_cycles(&pool, "t", None, 2).await.unwrap().is_empty());
+        assert!(detect_cycles(&pool, "t", None, 2).await.unwrap().cycles.is_empty());
     }
 
     #[tokio::test]
@@ -385,7 +434,7 @@ mod tests {
         // (weight 0.2 < the 0.6 gate) → must be ignored → no cycle.
         edge(&pool, "b", "a", 0.2).await;
         assert!(
-            detect_cycles(&pool, "t", None, 2).await.unwrap().is_empty(),
+            detect_cycles(&pool, "t", None, 2).await.unwrap().cycles.is_empty(),
             "sub-0.6 back-edge must not create a cycle"
         );
     }
@@ -397,7 +446,7 @@ mod tests {
         node(&pool, "b", "b", "same.rs").await;
         edge(&pool, "a", "b", 1.0).await;
         edge(&pool, "b", "a", 1.0).await;
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap();
+        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
         assert_eq!(cycles.len(), 1);
         assert!(
             !cycles[0].cross_file,
@@ -429,7 +478,7 @@ mod tests {
         node(&pool, "svc", "getViewUrl", "resources_service.dart").await;
         edge(&pool, "repo", "svc", 1.0).await;
         edge(&pool, "svc", "repo", 1.0).await;
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap();
+        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
         assert_eq!(cycles.len(), 1);
         assert_eq!(cycles[0].members.len(), 2);
         assert!(cycles[0].cross_file);
@@ -457,7 +506,7 @@ mod tests {
         edge(&pool, "x", "y", 1.0).await;
         edge(&pool, "y", "x", 1.0).await;
 
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap();
+        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
         assert_eq!(cycles.len(), 4, "3 same-file + 1 cross-file");
         assert!(cycles[0].cross_file, "the cross-file cycle sorts first");
         assert!(
@@ -477,7 +526,7 @@ mod tests {
         edge(&pool, "b", "c", 1.0).await;
         edge(&pool, "c", "d", 1.0).await;
         edge(&pool, "d", "a", 1.0).await;
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap();
+        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
         assert_eq!(cycles.len(), 1);
         assert_eq!(cycles[0].members.len(), 4);
         assert!(cycles[0].cross_file);
@@ -495,7 +544,7 @@ mod tests {
         edge(&pool, "a", "c", 1.0).await;
         edge(&pool, "b", "d", 1.0).await;
         edge(&pool, "c", "d", 1.0).await;
-        assert!(detect_cycles(&pool, "t", None, 2).await.unwrap().is_empty());
+        assert!(detect_cycles(&pool, "t", None, 2).await.unwrap().cycles.is_empty());
     }
 
     /// Two disjoint cycles plus an acyclic tail → exactly two cycles.
@@ -510,7 +559,7 @@ mod tests {
         edge(&pool, "c", "d", 1.0).await;
         edge(&pool, "d", "c", 1.0).await; // cycle 2
         edge(&pool, "a", "e", 1.0).await; // acyclic tail
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap();
+        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
         assert_eq!(cycles.len(), 2);
         assert!(cycles.iter().all(|c| c.members.len() == 2));
     }
@@ -525,12 +574,98 @@ mod tests {
         node(&pool, "r", "recurse", "r.rs").await;
         edge(&pool, "r", "r", 1.0).await;
         assert!(
-            detect_cycles(&pool, "t", None, 2).await.unwrap().is_empty(),
+            detect_cycles(&pool, "t", None, 2).await.unwrap().cycles.is_empty(),
             "min 2 skips self-loops"
         );
-        let with1 = detect_cycles(&pool, "t", None, 1).await.unwrap();
+        let with1 = detect_cycles(&pool, "t", None, 1).await.unwrap().cycles;
         assert_eq!(with1.len(), 1, "min 1 reports the self-loop");
         assert_eq!(with1[0].members.len(), 1);
         assert!(!with1[0].cross_file);
+    }
+
+    // ── SDK-name collision (the fabricated cross-file cycle) ────────────
+
+    /// Reproduces the field-reported false cycle, transcribed from the live
+    /// Flutter tenant it was measured on:
+    ///
+    /// * `ListsUseCases.add` really calls `coalescer.record(item)` — a genuine
+    ///   edge, and the file really does import the coalescer.
+    /// * `ListsAddCoalescer.record` runs `_pendingNames.add(item.name)` on a
+    ///   Dart `List<String>`. There is no stdlib node to resolve `add` to, so it
+    ///   resolves to the only user-defined `add` — fabricating the return edge.
+    ///
+    /// Both edges were measured at weight 0.85, so the `weight >= 0.6` gate is
+    /// powerless here; that is asserted below rather than assumed, because a
+    /// fixture that the gate quietly filtered would prove nothing.
+    ///
+    /// The 60 extra callers stand in for the 304 the real `add` node had. The
+    /// usage threshold is corpus-derived with a floor of 50 and cannot be moved
+    /// from a test (`OnceLock`, one value per process), so the fixture has to
+    /// clear the real floor rather than lower it.
+    #[tokio::test]
+    async fn sdk_name_collision_does_not_fabricate_a_cycle() {
+        let pool = mem_pool().await;
+        node(&pool, "uc_add", "add", "lists_use_cases.dart").await;
+        node(&pool, "co_record", "record", "lists_add_coalescer.dart").await;
+        // Real: `coalescer.record(item)`.
+        edge(&pool, "uc_add", "co_record", 0.85).await;
+        // Fabricated: `_pendingNames.add(...)` on a List<String>.
+        edge(&pool, "co_record", "uc_add", 0.85).await;
+
+        // A genuine two-node cycle between two low-traffic symbols, to prove the
+        // filter removes the artefact without flattening real findings.
+        node(&pool, "svc", "getViewUrl", "resources_service.dart").await;
+        node(&pool, "repo", "getResourceViewUrl", "resources_repository.dart").await;
+        edge(&pool, "svc", "repo", 1.0).await;
+        edge(&pool, "repo", "svc", 1.0).await;
+
+        for i in 0..60 {
+            let caller = format!("caller{i}");
+            node(&pool, &caller, &format!("caller{i}"), "widget.dart").await;
+            edge(&pool, &caller, "uc_add", 0.85).await;
+        }
+
+        // Guard: without the ubiquity axis the artefact IS reported, at a weight
+        // the confidence gate lets through. If this ever stops holding, the
+        // fixture has drifted and the assertions below would pass vacuously.
+        let raw = load_adjacency_graph(&pool, "t", None, GenericityFilter::None, false)
+            .await
+            .unwrap();
+        assert!(
+            raw.nodes.contains_key("uc_add"),
+            "fixture must survive the 0.6 gate — otherwise this tests nothing"
+        );
+        assert_eq!(raw.suppressed_ubiquitous, 0, "None suppresses nothing");
+        assert!(
+            raw.outgoing
+                .get("co_record")
+                .is_some_and(|t| t.iter().any(|n| n == "uc_add")),
+            "the fabricated return edge must be present in the raw graph"
+        );
+
+        let report = detect_cycles(&pool, "t", None, 2).await.unwrap();
+        assert_eq!(
+            report.suppressed_ubiquitous, 1,
+            "exactly the ubiquitous `add` node is suppressed"
+        );
+        assert!(
+            !report
+                .cycles
+                .iter()
+                .any(|c| c.members.iter().any(|m| m.node_id == "uc_add")),
+            "the fabricated add/record cycle must be gone, got {:?}",
+            report.cycles
+        );
+        assert_eq!(
+            report.cycles.len(),
+            1,
+            "the genuine service/repository cycle survives"
+        );
+        let kept = &report.cycles[0];
+        assert!(kept.cross_file);
+        assert_eq!(
+            kept.files,
+            vec!["resources_repository.dart", "resources_service.dart"]
+        );
     }
 }

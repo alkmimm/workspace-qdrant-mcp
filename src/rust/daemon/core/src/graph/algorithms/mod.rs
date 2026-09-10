@@ -11,7 +11,7 @@ mod test_gaps;
 
 pub use betweenness::{compute_betweenness_centrality, BetweennessEntry};
 pub use community::{detect_communities, Community, CommunityConfig, CommunityMember};
-pub use cycles::{detect_cycles, Cycle, CycleMember};
+pub use cycles::{detect_cycles, Cycle, CycleMember, CycleReport};
 pub use pagerank::{compute_pagerank, PageRankConfig, PageRankEntry};
 pub use test_gaps::{detect_test_gaps, TestGap, TestGapsReport};
 
@@ -47,6 +47,59 @@ pub(super) struct AdjacencyGraph {
     pub(super) outgoing: HashMap<String, Vec<String>>,
     /// node_id → set of incoming neighbor node_ids (reverse edges)
     pub(super) incoming: HashMap<String, Vec<String>>,
+    /// How many nodes the USE-ubiquity axis dropped (see `GenericityFilter`).
+    /// Reported so a filtered result is never mistaken for a clean one: a
+    /// suppressed node cannot appear in a cycle, and a caller that sees fewer
+    /// cycles deserves to know a filter — not the codebase — produced that.
+    pub(super) suppressed_ubiquitous: usize,
+}
+
+/// Which centrality precision filters a caller wants applied on top of the
+/// always-on gates (stub drop, `weight >= 0.6`, `WQM_GRAPH_EXCLUDE`).
+///
+/// This is an enum rather than a third `bool` parameter on purpose: the axes
+/// are not independent knobs a call site should mix freely, and a run of
+/// same-typed positional bools is exactly how a call site silently ends up
+/// with the wrong behaviour.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum GenericityFilter {
+    /// No precision filters — the raw resolved dependency graph.
+    /// `test_gaps` needs this: dropping a hub would delete it from the
+    /// production denominator while its callers stay, skewing the ratio.
+    None,
+    /// USE-ubiquity axis ONLY: drop a node whose high-confidence in-degree
+    /// exceeds the corpus-derived threshold.
+    ///
+    /// For cycle detection this is the axis that matters and the other two are
+    /// the ones that would hide a real cycle. A method call on a receiver whose
+    /// type comes from the language SDK (`List.add`, `Iterable.map`,
+    /// `String.contains`) has no stdlib node to resolve to, so it resolves to a
+    /// same-named symbol the USER defined — at 0.7 when that name is unique in
+    /// the tenant, which clears the 0.6 confidence gate. One real edge plus one
+    /// fabricated return edge is a two-node "cycle" that does not exist.
+    ///
+    /// In-degree separates the two cleanly: measured on a Flutter repo, the
+    /// fabricated hubs carried 328 / 304 / 189 inbound calls while the genuine
+    /// domain methods in the same reported cycles carried 4 and 1.
+    UsageUbiquityOnly,
+    /// Every precision filter (definition-ubiquity, use-ubiquity, manual skip).
+    /// Centrality callers (PageRank, betweenness, communities) rank only
+    /// resolved, non-generic nodes.
+    All,
+}
+
+impl GenericityFilter {
+    /// Definition-ubiquity + the manual symbol-name skip list. Both drop a node
+    /// by NAME alone, which can hide a genuine cycle through a commonly-named
+    /// method, so cycle detection opts out.
+    fn drops_by_name(self) -> bool {
+        matches!(self, Self::All)
+    }
+
+    /// The use-ubiquity axis, keyed on a node's measured in-degree.
+    fn drops_by_usage(self) -> bool {
+        matches!(self, Self::All | Self::UsageUbiquityOnly)
+    }
 }
 
 /// Path patterns that exclude a node from ALL graph analysis — centrality
@@ -205,11 +258,15 @@ fn centrality_usage_threshold(total_definitions: usize) -> usize {
 
 /// Load the full adjacency graph for a tenant from SQLite.
 ///
-/// `apply_genericity_filters` gates the CENTRALITY-only precision filters
-/// (definition/usage-ubiquity drops, manual symbol skip). Centrality callers pass
-/// `true` (rank only resolved, non-generic nodes); structural callers like cycle
-/// detection pass `false` — a real dependency cycle may pass through a
-/// high-in-degree node, so those filters would hide it. The stub drop (empty
+/// `genericity` selects which precision filters apply (see `GenericityFilter`).
+/// Centrality callers pass `All` (rank only resolved, non-generic nodes).
+/// Cycle detection passes `UsageUbiquityOnly`: the name-keyed axes could hide a
+/// genuine cycle through a commonly-named method, but the in-degree axis is the
+/// only thing that separates a real dependency edge from one fabricated by an
+/// SDK-method name collision — and without it, every cross-file cycle this
+/// repo's own graph reported for a Flutter tenant was an artefact (2 of 2).
+/// `test_gaps` passes `None`: dropping a hub would delete it from the production
+/// denominator while its callers remain. The stub drop (empty
 /// `file_path`), the `weight >= 0.6` confidence gate, AND the graph-scope
 /// path-exclude (`WQM_GRAPH_EXCLUDE`) always apply — excluding a legacy/generated
 /// tree is a scope decision, so cycles honour it too.
@@ -231,7 +288,7 @@ pub(super) async fn load_adjacency_graph(
     pool: &SqlitePool,
     tenant_id: &str,
     edge_types: Option<&[&str]>,
-    apply_genericity_filters: bool,
+    genericity: GenericityFilter,
     keep_test_nodes: bool,
 ) -> Result<AdjacencyGraph, sqlx::Error> {
     // Load nodes
@@ -263,7 +320,7 @@ pub(super) async fn load_adjacency_graph(
     // in-degree matches the graph centrality will actually walk. Skipped entirely
     // when the filter is disabled (threshold = usize::MAX).
     let mut indeg_by_node: HashMap<String, usize> = HashMap::new();
-    if apply_genericity_filters && usage_threshold != usize::MAX {
+    if genericity.drops_by_usage() && usage_threshold != usize::MAX {
         let indeg_rows = if let Some(types) = edge_types {
             let placeholders: Vec<String> = types.iter().map(|t| format!("'{}'", t)).collect();
             let query = format!(
@@ -293,6 +350,7 @@ pub(super) async fn load_adjacency_graph(
     let mut nodes = HashMap::with_capacity(node_rows.len());
     let exclude = graph_exclude_patterns();
     let mut excluded = 0usize;
+    let mut suppressed_ubiquitous = 0usize;
     for row in &node_rows {
         let file_path: String = row.get("file_path");
         // Skip unresolved stub nodes. `GraphNode::stub` keys a node on its bare
@@ -327,12 +385,22 @@ pub(super) async fn load_adjacency_graph(
         //      with a stdlib builtin (collect/iter/Result), which axis 1 cannot
         //      see (def_count == 1). Also unglues the giant catch-all community.
         // Plus the optional manual symbol-name env override.
-        if apply_genericity_filters
+        if genericity.drops_by_name()
             && (def_count.get(&symbol_name).copied().unwrap_or(0) > generic_threshold
-                || indeg_by_node.get(&node_id).copied().unwrap_or(0) > usage_threshold
                 || manual_skip.contains(&symbol_name))
         {
             excluded += 1;
+            continue;
+        }
+        // Counted separately from `excluded` because this is the axis cycle
+        // detection turns on alone, and a caller that suppresses cycles must be
+        // able to say how many nodes it removed rather than present a shorter
+        // list as a cleaner codebase.
+        if genericity.drops_by_usage()
+            && indeg_by_node.get(&node_id).copied().unwrap_or(0) > usage_threshold
+        {
+            excluded += 1;
+            suppressed_ubiquitous += 1;
             continue;
         }
         nodes.insert(
@@ -401,6 +469,7 @@ pub(super) async fn load_adjacency_graph(
         edges = edge_rows.len(),
         dropped_dangling,
         excluded,
+        suppressed_ubiquitous,
         "Loaded adjacency graph"
     );
 
@@ -408,6 +477,7 @@ pub(super) async fn load_adjacency_graph(
         nodes,
         outgoing,
         incoming,
+        suppressed_ubiquitous,
     })
 }
 

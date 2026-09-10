@@ -594,7 +594,9 @@ impl GraphService for GraphServiceImpl {
         let pool = guard.pool();
 
         match detect_cycles(pool, &req.tenant_id, edge_refs.as_deref(), min_cycle_size).await {
-            Ok(mut cycles) => {
+            Ok(report) => {
+                let suppressed_ubiquitous = report.suppressed_ubiquitous as u32;
+                let mut cycles = report.cycles;
                 let total = cycles.len() as u32;
 
                 if let Some(k) = req.top_k {
@@ -627,6 +629,7 @@ impl GraphService for GraphServiceImpl {
                     cycles: proto_cycles,
                     total,
                     query_time_ms,
+                    suppressed_ubiquitous,
                 }))
             }
             Err(e) => {
