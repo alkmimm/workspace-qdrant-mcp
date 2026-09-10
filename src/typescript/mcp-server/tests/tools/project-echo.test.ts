@@ -18,9 +18,14 @@ import {
 } from '../../src/utils/request-context.js';
 
 describe('projectEcho', () => {
-  it('is empty when no project resolved (the tool reports that itself)', () => {
-    expect(projectEcho(undefined)).toEqual({});
-    expect(projectEcho({ projectId: undefined, projectPath: '/p' })).toEqual({});
+  // Was: "is empty when no project resolved (the tool reports that itself)".
+  // The tools did not report it — an unresolved read answered 0 with no echo at
+  // all, which read as an empty project (#384). The state is now named.
+  it('reports source "unresolved" when no project resolved', () => {
+    expect(projectEcho(undefined)).toEqual({ project_source: 'unresolved' });
+    expect(projectEcho({ projectId: undefined, projectPath: '/p' })).toEqual({
+      project_source: 'unresolved',
+    });
   });
 
   it('reports source "projectId" for an explicit tenant id', () => {
@@ -94,7 +99,11 @@ describe('scopedTenantEcho (write-side resolution, scratchpad list)', () => {
       project_id: 't1',
       project_source: 'session',
     });
-    expect(scopedTenantEcho({ tenantId: 'global', source: 'fallback' })).toEqual({});
+    // The global fallback is the scratchpad's unresolved rung — the one that
+    // produced "the scratchpad is empty despite dozens of sessions" (#384).
+    expect(scopedTenantEcho({ tenantId: 'global', source: 'fallback' })).toEqual({
+      project_source: 'unresolved',
+    });
   });
 
   it('labels the cwd rung from the request provenance', () => {

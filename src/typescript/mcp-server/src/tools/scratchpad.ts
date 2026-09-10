@@ -32,7 +32,12 @@ import {
 import { resolveScopedTenant, type ScopedTenant } from './tenant-scope.js';
 import { resolveScratchpadOrigin } from './scratchpad-origin.js';
 import { applyByteBudget } from './response-budget.js';
-import { scopedTenantEcho, type ProjectSource } from './project-echo.js';
+import {
+  scopedTenantEcho,
+  UNRESOLVED_ECHO,
+  UNRESOLVED_PROJECT_HINT,
+  type ProjectSource,
+} from './project-echo.js';
 import { DEFAULT_MAX_RESPONSE_BYTES } from './search-types.js';
 
 /** Preview length (chars) for summary-mode list entries. */
@@ -239,9 +244,18 @@ export class ScratchpadTool {
         entries: kept,
         count: kept.length,
         tenant_id: tenantId,
-        ...(scoped ? scopedTenantEcho(scoped) : {}),
+        // Always echo. An ABSENT echo was the reported defect (#384): with no
+        // cwd this listed 0 entries and said nothing about why, which read as
+        // "the scratchpad is empty despite dozens of sessions" when the notes
+        // were sitting under a project that simply never got resolved.
+        ...(scoped ? scopedTenantEcho(scoped) : { ...UNRESOLVED_ECHO }),
         message: `Found ${kept.length} scratchpad entr${kept.length === 1 ? 'y' : 'ies'} for ${tenantId}`,
       };
+      // An empty list that no project backs is not a fact about the project.
+      // Say what to do about it, next to the zero that prompted the question.
+      if (kept.length === 0 && (scoped === undefined || scoped.source === 'fallback')) {
+        response.hint = UNRESOLVED_PROJECT_HINT;
+      }
       const firstDropped = entries[kept.length];
       if (dropped > 0 && firstDropped) {
         response.budget_truncated = { dropped };
