@@ -134,7 +134,12 @@ impl GraphService for GraphServiceImpl {
         // Precision filter (MCP `minConfidence`): drop low-confidence homonym
         // fan-out BEFORE the top_k cap and `total`, so top_k fills with passing
         // nodes and `total` reflects the filtered set. 0/absent = no filter.
-        retain_min_confidence(&mut nodes, req.min_confidence, |n| n.confidence);
+        // The COUNT it dropped is carried out because zero is the interesting
+        // answer: on a real result the confidences cluster at/above 0.85, so a
+        // "medium" threshold of 0.5 removes nothing and looks identical to
+        // passing no threshold (#383).
+        let filtered_by_min_confidence =
+            retain_min_confidence(&mut nodes, req.min_confidence, |n| n.confidence) as u32;
 
         let query_time_ms = start.elapsed().as_millis() as i64;
         let total = nodes.len() as u32;
@@ -173,6 +178,7 @@ impl GraphService for GraphServiceImpl {
             nodes: proto_nodes,
             total,
             query_time_ms,
+            filtered_by_min_confidence,
         }))
     }
 
@@ -233,9 +239,13 @@ impl GraphService for GraphServiceImpl {
                 // Precision filter (MCP `minConfidence`): drop low-confidence
                 // nodes BEFORE the top_k cap and total_impacted, so both reflect
                 // the filtered set. 0/absent = no filter (CLI output unchanged).
-                retain_min_confidence(&mut report.impacted_nodes, req.min_confidence, |n| {
-                    n.confidence
-                });
+                // See QueryRelated above: the count is reported because a
+                // threshold that removes nothing is otherwise indistinguishable
+                // from no threshold (#383).
+                let filtered_by_min_confidence =
+                    retain_min_confidence(&mut report.impacted_nodes, req.min_confidence, |n| {
+                        n.confidence
+                    }) as u32;
                 // Both backends set total_impacted = impacted_nodes.len(), so
                 // recomputing unconditionally is an identity when no filter ran
                 // and correct when it did — no flag to drift from the helper's
@@ -277,6 +287,7 @@ impl GraphService for GraphServiceImpl {
                     impacted_nodes,
                     total_impacted,
                     query_time_ms,
+                    filtered_by_min_confidence,
                 }))
             }
             Err(e) => {

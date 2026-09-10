@@ -38,16 +38,27 @@ pub(crate) fn parse_edge_type_filter(types: &[String]) -> Result<Option<Vec<Stri
 /// shortest-path-first semantics (same-depth ties keep the strongest edge; a
 /// longer stronger path does not override a shorter weaker one). Thresholds
 /// > 1.0 are rejected at the handlers before this helper is reached.
+///
+/// Returns HOW MANY nodes were dropped, because a threshold that removes
+/// nothing is otherwise byte-identical to passing no threshold at all (#383).
+/// On a real `usages` result the confidences take three values, all >= 0.85, so
+/// `minConfidence: 0.5` — the natural "medium" choice — is a no-op, and the
+/// caller has no way to tell "my filter ran and kept everything" from "my
+/// filter did nothing". Zero dropped is the answer worth reporting, not the one
+/// worth hiding.
 pub(crate) fn retain_min_confidence<T>(
     nodes: &mut Vec<T>,
     min_confidence: Option<f64>,
     confidence_of: impl Fn(&T) -> f64,
-) {
+) -> usize {
     if let Some(min) = min_confidence {
         if min > 0.0 {
+            let before = nodes.len();
             nodes.retain(|n| confidence_of(n) >= min);
+            return before - nodes.len();
         }
     }
+    0
 }
 
 #[cfg(test)]
@@ -79,7 +90,40 @@ mod tests {
         // (~0.167, e.g. six same-named `is_empty` candidates) is dropped at the
         // typical precision threshold.
         let mut v = vec![0.7_f64, 0.9, 0.166_66, 0.166_66];
-        retain_min_confidence(&mut v, Some(0.5), |c| *c);
+        let dropped = retain_min_confidence(&mut v, Some(0.5), |c| *c);
         assert_eq!(v, vec![0.7, 0.9]);
+        assert_eq!(dropped, 2, "the count must match what was removed");
+    }
+
+    /// The reported defect (#383): a threshold below the lowest confidence in
+    /// the result removes nothing, and the response was byte-identical to
+    /// passing no threshold at all. The count is what makes that visible, so a
+    /// no-op has to be distinguishable from a disabled filter — both leave the
+    /// list untouched, and only the caller's intent differs.
+    #[test]
+    fn retain_min_confidence_reports_zero_for_a_no_op_threshold() {
+        // Transcribed from a live `usages` result: three stops, all >= 0.85.
+        let measured = vec![1.0_f64, 1.0, 0.95, 0.85];
+
+        for threshold in [0.1_f64, 0.5, 0.6, 0.7, 0.8, 0.85] {
+            let mut v = measured.clone();
+            let dropped = retain_min_confidence(&mut v, Some(threshold), |c| *c);
+            assert_eq!(v, measured, "{threshold} must keep every node");
+            assert_eq!(dropped, 0, "{threshold} is a no-op and must report 0");
+        }
+
+        // And the first threshold that actually bites reports a non-zero count.
+        let mut v = measured.clone();
+        assert_eq!(retain_min_confidence(&mut v, Some(0.9), |c| *c), 1);
+        assert_eq!(v, vec![1.0, 1.0, 0.95]);
+    }
+
+    #[test]
+    fn retain_min_confidence_disabled_reports_zero_dropped() {
+        let mut v = vec![0.1_f64, 0.7, 1.0];
+        assert_eq!(retain_min_confidence(&mut v, None, |c| *c), 0);
+        assert_eq!(retain_min_confidence(&mut v, Some(0.0), |c| *c), 0);
+        assert_eq!(retain_min_confidence(&mut v, Some(-1.0), |c| *c), 0);
+        assert_eq!(v.len(), 3);
     }
 }

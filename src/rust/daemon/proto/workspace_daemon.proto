@@ -746,6 +746,9 @@ message QueryRelatedResponse {
     repeated TraversalNodeProto nodes = 1;        // Related nodes with path context
     uint32 total = 2;                             // Total related nodes found
     int64 query_time_ms = 3;                      // Query execution time in ms
+    // How many nodes min_confidence removed. Zero is the interesting value: a
+    // threshold that drops nothing is otherwise byte-identical to passing none.
+    uint32 filtered_by_min_confidence = 4;
 }
 
 // A node discovered during graph traversal
@@ -774,6 +777,9 @@ message ImpactAnalysisResponse {
     repeated ImpactNodeProto impacted_nodes = 1;
     uint32 total_impacted = 2;
     int64 query_time_ms = 3;                      // Query execution time in ms
+    // How many nodes min_confidence removed. Zero is the interesting value: a
+    // threshold that drops nothing is otherwise byte-identical to passing none.
+    uint32 filtered_by_min_confidence = 4;
 }
 
 // A node impacted by a symbol change

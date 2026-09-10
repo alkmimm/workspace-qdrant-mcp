@@ -69,7 +69,7 @@ export const graphToolDefinition = {
       minConfidence: {
         type: 'number',
         description:
-          "For 'relations'/'impact'/'usages': drop nodes whose best-path `confidence` is below this (0-1), applied at the daemon BEFORE topK and the reported total (so topK fills with passing nodes). Each node's confidence is the best-path edge-weight product: ~1.0 precise, 0.7 tenant-unique name, ~1/N (e.g. 0.17) an ambiguous same-name fan-out. Use ~0.5 for a precise view that suppresses homonym noise. Omitted/0 = no filter; values outside [0,1] are rejected (confidence is a product, not a percentage).",
+          "For 'relations'/'impact'/'usages': drop nodes whose best-path `confidence` is below this (0-1), applied at the daemon BEFORE topK and the reported total (so topK fills with passing nodes). Each node's confidence is the best-path edge-weight product: ~1.0 precise, 0.7 tenant-unique name, ~1/N (e.g. 0.17) an ambiguous same-name fan-out. Do NOT reach for 0.5 expecting a medium cut: measured on a real usages result the confidences take three values, all >= 0.85 (1.00 precise / 0.95 / 0.85), so every threshold from 0.1 to 0.85 removes NOTHING and returns a response identical to omitting the parameter. Useful cut points start at 0.85. The response reports `filtered_by_min_confidence`, and a threshold that removed nothing says so in `hint` rather than looking like a filter that worked. Omitted/0 = no filter; values outside [0,1] are rejected (confidence is a product, not a percentage).",
       },
       minSize: {
         type: 'number',
