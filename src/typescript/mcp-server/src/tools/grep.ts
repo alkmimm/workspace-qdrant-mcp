@@ -570,7 +570,12 @@ export class GrepTool {
       fallbackBranch,
       // Read-side project echo, computed here where the explicit projectId and
       // the registered path are in scope; executeSearch only knows the tenant.
-      projectEcho({ projectId: tenantId, projectPath }, projectId)
+      //
+      // A cross-project sweep gets NO echo rather than `unresolved`. Nothing
+      // failed to resolve there — the caller asked to span every project on
+      // purpose, and labelling that a failure would be the same kind of
+      // misleading signal this echo exists to prevent (#384).
+      scope === 'all' ? {} : projectEcho({ projectId: tenantId, projectPath }, projectId)
     );
   }
 

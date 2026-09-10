@@ -27,6 +27,17 @@
  *                      resolved the project, not the caller's
  *   - `session`        the session's activated project (a write-side rung the
  *                      scratchpad tool's list can land on)
+ *   - `unresolved`     NO project was resolved. The result is not a statement
+ *                      about any repository.
+ *
+ * That last rung exists because the original design assumed the opposite. This
+ * file used to return an EMPTY echo when nothing resolved, on the reasoning
+ * that "the tool already reports that failure in its own words". Measured, the
+ * tools did not: `scratchpad list` without `cwd` answered `total: 0` with no
+ * echo and no hint, byte-identical to a genuinely empty project — and it was
+ * reported from the field as "the scratchpad is empty despite dozens of
+ * sessions". The scratchpad held 16 notes for one project and 52 for another.
+ * An absent field cannot carry that distinction; a named one can.
  *
  * Intentionally WITHOUT the echo: `search_eval` (a benchmark harness that
  * already returns its `projectId`), `workspace_index` (registry mutations that
@@ -52,6 +63,7 @@ export const PROJECT_SOURCES = [
   'sole-project',
   'server-default',
   'session',
+  'unresolved',
 ] as const;
 
 /** How the project of a read was resolved. */
@@ -91,18 +103,33 @@ function cwdSource(identity: IdentityLike): ProjectSource {
 }
 
 /**
- * Build the echo for a resolved identity. Empty when nothing resolved — the
- * tool already reports that failure in its own words. Fields the server does
- * not know are omitted, never fabricated (no `project_path` without a registry
- * entry).
+ * The echo for a call where no project resolved. Says so in the field an agent
+ * already reads to learn WHICH project answered, rather than leaving that field
+ * out and letting the emptiness pass for a fact about the code.
+ */
+export const UNRESOLVED_ECHO: ProjectEcho = { project_source: 'unresolved' };
+
+/**
+ * A caveat for an empty result that no project backs. Phrased as what the
+ * caller must do, because the previous behaviour left them nothing to act on.
+ */
+export const UNRESOLVED_PROJECT_HINT =
+  'No project was resolved for this call, so this result says nothing about any ' +
+  'repository — it is not evidence that the project is empty. Pass `cwd` (an ' +
+  'absolute path inside the repo) or an explicit `projectId`, then re-run.';
+
+/**
+ * Build the echo for a resolved identity. Reports `unresolved` when nothing
+ * resolved. Fields the server does not know are omitted, never fabricated (no
+ * `project_path` without a registry entry).
  */
 export function projectEcho(
   identity: IdentityLike | undefined,
   explicitProjectId?: string
 ): ProjectEcho {
-  if (identity === undefined) return {};
+  if (identity === undefined) return { ...UNRESOLVED_ECHO };
   const projectId = identity.projectId;
-  if (projectId === undefined || projectId === '') return {};
+  if (projectId === undefined || projectId === '') return { ...UNRESOLVED_ECHO };
   const echo: ProjectEcho = { project_id: projectId };
   const projectPath = identity.projectPath;
   if (projectPath !== undefined && projectPath !== '') echo.project_path = projectPath;
@@ -119,7 +146,9 @@ export function projectEcho(
  * so its recorded rung (sole-project) and the request's cwd provenance apply.
  */
 export function scopedTenantEcho(scoped: ScopedTenant): ProjectEcho {
-  if (scoped.source === 'fallback') return {};
+  // `fallback` is the scratchpad's unresolved rung — the exact path that
+  // produced the reported "the scratchpad is empty" (#384).
+  if (scoped.source === 'fallback') return { ...UNRESOLVED_ECHO };
   const echo: ProjectEcho = { project_id: scoped.tenantId };
   if (scoped.projectPath !== undefined && scoped.projectPath !== '') {
     echo.project_path = scoped.projectPath;
