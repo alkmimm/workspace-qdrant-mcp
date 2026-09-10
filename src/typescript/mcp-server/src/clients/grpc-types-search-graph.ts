@@ -222,6 +222,12 @@ export interface CycleResponse {
   cycles: CycleProto[];
   total: number;
   query_time_ms: number;
+  /**
+   * Nodes the use-ubiquity filter removed before Tarjan ran. A suppressed node
+   * cannot appear in any cycle, so this is what separates "no cycles" as a fact
+   * about the code from "no cycles" as a consequence of filtering.
+   */
+  suppressed_ubiquitous: number;
 }
 
 export interface TestGapsRequest {

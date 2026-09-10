@@ -14,7 +14,7 @@ const BETWEENNESS_TIME_BUDGET: Duration = Duration::from_secs(20);
 use sqlx::SqlitePool;
 use tracing::info;
 
-use super::load_adjacency_graph;
+use super::{load_adjacency_graph, GenericityFilter};
 
 /// Betweenness centrality score for a node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +36,8 @@ pub async fn compute_betweenness_centrality(
     edge_types: Option<&[&str]>,
     max_samples: Option<usize>,
 ) -> Result<Vec<BetweennessEntry>, sqlx::Error> {
-    let graph = load_adjacency_graph(pool, tenant_id, edge_types, true, false).await?;
+    let graph =
+        load_adjacency_graph(pool, tenant_id, edge_types, GenericityFilter::All, false).await?;
 
     if graph.nodes.len() < 3 {
         return Ok(graph

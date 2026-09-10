@@ -478,6 +478,34 @@ libtest exits 0 when a positional filter matches nothing, so a rename would sile
 un-gate the ordering that decides WHICH results a caller ever sees. If you ADDED a \
 test here, bump this count."; exit 1; }
 
+# Dependency-cycle precision runs here: hermetic (in-memory SQLite, no
+# embeddings, no network) and it guards a defect that produced confident,
+# well-formed, entirely fictional output. A method call on a receiver typed by
+# the language SDK (`List.add`, `Iterable.map`) has no stdlib node to resolve
+# to, so it resolves to a same-named symbol the USER defined — scored 0.7 when
+# that name is unique in the tenant, which clears the `weight >= 0.6` gate. One
+# real edge plus one fabricated return edge is a two-node "cycle" that does not
+# exist. Measured on a Flutter tenant: BOTH cross-file cycles reported were
+# artifacts of this, and cross-file is the class the tool ranks first and calls
+# a layering smell. Confidence cannot separate them — the real edge and the
+# fabricated one both scored 0.85 — so only the in-degree axis can.
+#
+# The whole module is gated rather than the one new test: the fixture only
+# proves anything while the surrounding Tarjan behaviour still holds, and a
+# regression that re-admits the artefact would most likely arrive as a change to
+# how the graph is loaded, not to the test that names it.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib graph::algorithms::cycles \
+        -- --test-threads=4 2>&1 | tee /tmp/cycles-precision.log; \
+    grep -q "^test result: ok\. 16 passed" /tmp/cycles-precision.log \
+    || { echo "GATE: expected exactly 16 tests in graph::algorithms::cycles to run and \
+pass. libtest exits 0 when a filter matches nothing, so a module rename would silently \
+un-gate the filter that keeps fabricated cross-file cycles out of the answer. If you \
+ADDED a test here, bump this count."; exit 1; }
+
 # Language-registry pattern integrity runs here: hermetic (parses the bundled
 # YAML, no DB, no network) and it guards a failure mode that is invisible from
 # outside — a language whose patterns are PRESENT but incomplete. Dart had

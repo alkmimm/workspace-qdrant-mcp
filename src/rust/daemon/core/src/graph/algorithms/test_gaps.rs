@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tracing::info;
 
-use super::load_adjacency_graph;
+use super::{load_adjacency_graph, GenericityFilter};
 use crate::file_classification::is_test_file;
 
 /// A production definition that no test reaches over the call graph.
@@ -324,7 +324,8 @@ pub async fn detect_test_gaps(
     // generated/legacy trees are out of the coverage picture too.
     // `keep_test_nodes: true` — test files ARE the seeds of this measurement, so
     // the ranking-oriented path exclude must not delete them (#370).
-    let graph = load_adjacency_graph(pool, tenant_id, Some(types), false, true).await?;
+    let graph =
+        load_adjacency_graph(pool, tenant_id, Some(types), GenericityFilter::None, true).await?;
     if graph.nodes.is_empty() {
         return Ok(TestGapsReport {
             total_production: 0,

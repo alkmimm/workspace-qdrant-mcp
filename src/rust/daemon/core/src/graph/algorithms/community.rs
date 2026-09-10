@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
 
-use super::load_adjacency_graph;
+use super::{load_adjacency_graph, GenericityFilter};
 
 /// A detected community (cluster) of nodes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,7 +64,8 @@ pub async fn detect_communities(
     config: &CommunityConfig,
     edge_types: Option<&[&str]>,
 ) -> Result<Vec<Community>, sqlx::Error> {
-    let graph = load_adjacency_graph(pool, tenant_id, edge_types, true, false).await?;
+    let graph =
+        load_adjacency_graph(pool, tenant_id, edge_types, GenericityFilter::All, false).await?;
 
     if graph.nodes.is_empty() {
         return Ok(Vec::new());

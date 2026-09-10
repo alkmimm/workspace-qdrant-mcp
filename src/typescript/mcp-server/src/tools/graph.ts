@@ -417,7 +417,25 @@ async function dispatchGraphAction(
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
       };
       const r = await daemonClient.detectCycles(req);
-      return { success: true, action, tenant_id: tenant, ...r };
+      // A node the ubiquity filter removed cannot appear in ANY cycle, so a
+      // short list is not by itself evidence of a clean codebase. Say what was
+      // dropped, and lead with it — same channel and same ordering as the
+      // test_gaps reliability warning, for the same reason: an agent reading
+      // top-down must see "this was filtered" before the list it would act on.
+      // `?? 0` is not redundant against the type: a daemon deployed before this
+      // field existed omits it on the wire, and NaN in a hint reads as a bug.
+      const suppressed = r.suppressed_ubiquitous ?? 0;
+      const hint =
+        suppressed > 0
+          ? `${suppressed} symbol(s) were excluded before cycle detection because too many callers resolved to them — the shape of a name that collides with a language SDK method (List.add, Iterable.map), which the confidence gate cannot catch because a tenant-unique name scores 0.7. They cannot appear in any cycle below. Genuine high-traffic utilities are dropped by the same rule.`
+          : undefined;
+      return {
+        success: true,
+        action,
+        tenant_id: tenant,
+        ...(hint !== undefined ? { hint } : {}),
+        ...r,
+      };
     }
 
     case 'test_gaps': {

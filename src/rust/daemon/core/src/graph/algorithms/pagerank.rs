@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tracing::{debug, info};
 
-use super::{load_adjacency_graph, AdjacencyGraph};
+use super::{load_adjacency_graph, AdjacencyGraph, GenericityFilter};
 
 /// PageRank score for a graph node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +48,8 @@ pub async fn compute_pagerank(
     config: &PageRankConfig,
     edge_types: Option<&[&str]>,
 ) -> Result<Vec<PageRankEntry>, sqlx::Error> {
-    let graph = load_adjacency_graph(pool, tenant_id, edge_types, true, false).await?;
+    let graph =
+        load_adjacency_graph(pool, tenant_id, edge_types, GenericityFilter::All, false).await?;
 
     if graph.nodes.is_empty() {
         return Ok(Vec::new());

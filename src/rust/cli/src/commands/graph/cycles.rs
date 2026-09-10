@@ -38,6 +38,19 @@ pub async fn cycles(
         .context("DetectCycles RPC failed")?
         .into_inner();
 
+    // Printed before the cycles (or before the zero message) because a node the
+    // ubiquity filter removed cannot appear in any cycle: the reader has to know
+    // the list was filtered before drawing a conclusion from its length.
+    if resp.suppressed_ubiquitous > 0 {
+        println!(
+            "Note: {} symbol(s) excluded before detection — too many callers resolved to them, \
+             the shape of a name colliding with a language SDK method (List.add, Iterable.map). \
+             The confidence gate cannot catch those: a tenant-unique name scores 0.7. Genuine \
+             high-traffic utilities are dropped by the same rule.",
+            resp.suppressed_ubiquitous
+        );
+    }
+
     if resp.cycles.is_empty() {
         // Parity with the MCP `graph` tool's action description (CLAUDE.md
         // shared-behaviour rule): the zero-result message must say what the
