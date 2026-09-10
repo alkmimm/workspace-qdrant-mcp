@@ -697,6 +697,7 @@ RUN set -eux; \
     bash scripts/ci/forbid_canonicalize.sh /repo; \
     bash scripts/ci/hooks-claude-path-audit.sh /repo; \
     ONNX_VERSION="${ONNX_VERSION}" bash scripts/check-version-consistency.sh; \
+    sh scripts/git-hooks/test-install.sh; \
     touch /static-checks.ok
 
 # ─────────────────────────────────────────────

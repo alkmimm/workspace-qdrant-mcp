@@ -448,10 +448,7 @@ fn test_extract_edges_dart_argument_reference() {
     assert_eq!(referenced, vec!["activeContextProvider"]);
 
     // The call itself is unchanged — this adds an edge, it does not replace one.
-    assert!(result
-        .edges
-        .iter()
-        .any(|e| e.edge_type == EdgeType::Calls));
+    assert!(result.edges.iter().any(|e| e.edge_type == EdgeType::Calls));
 }
 
 /// Other languages must be untouched until their own blast radius is measured.

@@ -81,13 +81,12 @@ async fn resolve_drops_unresolved_references_and_keeps_resolved_ones() {
     );
 
     // And the symbol is now reachable in reverse — which is what `usages` asks.
-    let dangling: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM graph_nodes WHERE tenant_id = ?1 AND file_path = ''",
-    )
-    .bind(TENANT)
-    .fetch_one(store.pool())
-    .await
-    .unwrap();
+    let dangling: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM graph_nodes WHERE tenant_id = ?1 AND file_path = ''")
+            .bind(TENANT)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     assert_eq!(dangling.0, 0, "both stubs are collected once edgeless");
 }
 

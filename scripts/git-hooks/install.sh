@@ -180,7 +180,10 @@ fi
   printf 'Pass --wqm-script <path> to override.\n' >&2
   exit 1
 }
-chmod +x "$WQM_SCRIPT" 2>/dev/null || true  # bind-mounted hosts may refuse chmod
+# Convenience only — the generated hooks invoke the script through `sh`, so a
+# host that refuses chmod (bind mounts, filesystems with no exec bit) no longer
+# turns branch sync into a silent no-op. The file also ships mode 755 in git.
+chmod +x "$WQM_SCRIPT" 2>/dev/null || true
 
 WQM_SCRIPT="$(_translate_to_host "$WQM_SCRIPT")"
 # WQM_HOOK_LOG inside each hook is opened by wqm-sync-branch.sh running on
@@ -230,6 +233,19 @@ write_hook() {
     _checkout_guard='if [ "${3:-}" = "0" ]; then exit 0; fi'
   fi
 
+  # The sync script is invoked through `sh` rather than executed directly.
+  # Its shebang is already `#!/bin/sh`, so this is the same interpreter — but it
+  # means the hook does NOT depend on the executable bit surviving the trip to
+  # the developer's machine. It previously did, and when the bit was missing the
+  # failure was invisible: exec failed, `>/dev/null 2>&1` ate the message,
+  # `|| true` ate the status, `exit 0` reported success, and branch sync simply
+  # never happened. Sourcing still resolves via `$0`, which `sh <script>` sets
+  # to the script path, so `../lib/path-resolver.sh` is found either way.
+  #
+  # stdout stays discarded — a hook must not print into `git checkout` output —
+  # but stderr now appends to the log the script already writes to. `|| true`
+  # and `exit 0` are kept deliberately: a hook that fails must never block a git
+  # operation. The goal is to make failure VISIBLE, not blocking.
   cat > "$_target" <<EOF
 #!/bin/sh
 $MARKER
@@ -242,7 +258,13 @@ WQM_MCP_TOKEN="$TOKEN" \\
 WQM_HOOK_LOG="$LOG_FILE_EMBED" \\
 WQM_HOST_DEV_ROOT="$HOST_DEV_ROOT" \\
 WQM_DEV_ROOT="$CONTAINER_DEV_ROOT" \\
-"$WQM_SCRIPT" "$_hook_name" >/dev/null 2>&1 || true
+# Probe the log before relying on it. A redirection that FAILS stops the command
+# from running at all, so pointing stderr at an unwritable path would turn this
+# hook into the very no-op it is meant to expose. Fall back to /dev/null.
+_wqm_err="$LOG_FILE_EMBED"
+mkdir -p "\$(dirname "\$_wqm_err")" 2>/dev/null || true
+: >>"\$_wqm_err" 2>/dev/null || _wqm_err=/dev/null
+sh "$WQM_SCRIPT" "$_hook_name" >/dev/null 2>>"\$_wqm_err" || true
 exit 0
 EOF
   chmod +x "$_target" 2>/dev/null || true  # bind-mounted hosts may refuse chmod; files are usually +x already
