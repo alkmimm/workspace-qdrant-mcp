@@ -125,6 +125,32 @@ if curl -fsS -o /dev/null -m 3 "http://localhost:$QDRANT_HTTP_PORT/collections";
 if (exec 3<>/dev/tcp/localhost/"$MEMEXD_GRPC_PORT") 2>/dev/null; then say "[OK]" "memexd gRPC :$MEMEXD_GRPC_PORT"; else say "[FAIL]" "memexd gRPC :$MEMEXD_GRPC_PORT"; warn=$((warn + 1)); fi
 
 echo ""
+echo "=== 5. build identity (can the RUNNING server say which commit it is?) ==="
+# The mcp image only knows its commit when the build passed WQM_BUILD_SHA (the
+# Makefile does; a bare `docker compose build` does not). Without it the
+# compiled build-info reads BUILD_SHA="unknown" and `serverInfo.version` on
+# `initialize` is "0.1.0-beta1 (0000)" — a running stack that cannot be tied
+# to a commit, which is exactly the state a measurement must never be taken
+# in. Found live on 2026-09-16 after a rebuild that bypassed the Makefile.
+mcp_sha=$(docker exec wqm-mcp sh -c \
+  'grep -h "BUILD_SHA" /app/src/typescript/mcp-server/dist/build-info.js 2>/dev/null' 2>/dev/null \
+  | sed -E 's/.*BUILD_SHA = "([^"]*)".*/\1/' | head -n1)
+if [[ -z "$mcp_sha" ]]; then
+  say "[?]" "wqm-mcp: could not read dist/build-info.js"
+elif [[ "$mcp_sha" == "unknown" || "$mcp_sha" == "0000" ]]; then
+  say "[FAIL]" "wqm-mcp reports BUILD_SHA=$mcp_sha — rebuild via 'make redeploy' (passes WQM_BUILD_SHA), never a bare 'docker compose build'"
+  warn=$((warn + 1))
+else
+  head_sha=$(git -C "$(dirname "$0")/.." rev-parse --short HEAD 2>/dev/null || echo "")
+  if [[ -n "$head_sha" && "$mcp_sha" != "$head_sha"* && "$head_sha" != "$mcp_sha"* ]]; then
+    say "[WARN]" "wqm-mcp was built from $mcp_sha but the checkout is at $head_sha"
+    warn=$((warn + 1))
+  else
+    say "[OK]" "wqm-mcp built from commit $mcp_sha"
+  fi
+fi
+
+echo ""
 if [[ $warn -eq 0 ]]; then
   echo "verify-deploy: all checks passed."
 else
