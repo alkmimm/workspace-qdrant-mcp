@@ -292,3 +292,68 @@ fn encode_contains_lsp_metric_names() {
     // Label wiring sanity: the language label is present in the exposition.
     assert!(out.contains("language=\"rust\""));
 }
+
+/// The divergence that hid the tsserver leak: the registry said 5 servers
+/// while 60 processes sat under the daemon, and no series could show it.
+/// These two must be exposed SIDE BY SIDE with names a panel can subtract.
+#[test]
+fn lsp_os_processes_exposed_beside_the_registry_count() {
+    let m = DaemonMetrics::new();
+    m.set_lsp_snapshot(8, 5);
+    m.set_lsp_os_processes(10, 50, 4_000_000_000);
+
+    assert_eq!(m.lsp_active_servers.get(), 5);
+    assert_eq!(m.lsp_os_processes.with_label_values(&["child"]).get(), 10);
+    assert_eq!(
+        m.lsp_os_processes.with_label_values(&["descendant"]).get(),
+        50
+    );
+    assert_eq!(m.lsp_os_processes_rss_bytes.get(), 4_000_000_000);
+
+    let out = m.encode().expect("encode ok");
+    assert!(out.contains("memexd_lsp_os_processes{depth=\"child\"} 10"));
+    assert!(out.contains("memexd_lsp_os_processes{depth=\"descendant\"} 50"));
+    assert!(out.contains("memexd_lsp_os_processes_rss_bytes 4000000000"));
+}
+
+/// The failover switch used to be a log line. Both labels must be written on
+/// every transition so a dashboard reads the state, never infers it from an
+/// absent series.
+#[test]
+fn embedding_endpoint_gauge_writes_both_labels_on_every_transition() {
+    let m = DaemonMetrics::new();
+
+    m.set_embedding_endpoint(true);
+    assert_eq!(
+        m.embedding_endpoint_active
+            .with_label_values(&["primary"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        m.embedding_endpoint_active
+            .with_label_values(&["fallback"])
+            .get(),
+        0
+    );
+
+    m.set_embedding_endpoint(false);
+    m.embedding_failover();
+    assert_eq!(
+        m.embedding_endpoint_active
+            .with_label_values(&["primary"])
+            .get(),
+        0
+    );
+    assert_eq!(
+        m.embedding_endpoint_active
+            .with_label_values(&["fallback"])
+            .get(),
+        1
+    );
+    assert_eq!(m.embedding_failover_total.get(), 1);
+
+    let out = m.encode().expect("encode ok");
+    assert!(out.contains("memexd_embedding_endpoint_active{endpoint=\"fallback\"} 1"));
+    assert!(out.contains("memexd_embedding_failover_total 1"));
+}

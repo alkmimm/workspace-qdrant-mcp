@@ -14,6 +14,7 @@
 mod background;
 mod database;
 mod grpc_setup;
+mod pressure_metrics;
 mod queue_init;
 mod relative_path_hook;
 mod shutdown;

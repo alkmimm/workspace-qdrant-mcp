@@ -1,7 +1,9 @@
 # Prometheus alerting rules for workspace-qdrant-mcp v0.1.3.
 #
-# Six rules cover queue freshness, daemon availability, Qdrant reachability,
-# and MCP session activity. Wire into Prometheus via `rule_files:` in
+# Rules cover queue freshness, daemon availability, Qdrant reachability,
+# MCP session activity and (group `resource-pressure`) container / VM / GPU
+# resource pressure plus the daemon's own LSP process tree and embedding
+# endpoint. Wire into Prometheus via `rule_files:` in
 # prometheus.yml and mount the file read-only into the Prometheus container.
 #
 # Metric-name note:
@@ -124,3 +126,192 @@ groups:
         annotations:
           summary: "MCP session active but idle"
           description: "An MCP session is registered but no tool invocations have been recorded in the last 15 minutes."
+
+  # ── Container id → name (recording rules) ───────────────────────
+  # cAdvisor reads containerd (see docker-compose.yml), which only knows the
+  # 64-hex container id. The docker_inventory job carries the Docker name as
+  # target labels on its `up` series; these rules join the two so every
+  # panel and alert can say "wqm-embeddings" instead of "7dae6f98…".
+  # Dependent rules are evaluated in order within the group.
+  - name: resource-pressure-recording
+    interval: 15s
+    rules:
+      - record: wqm:container_info
+        # `up * 0 + 1`: the info series must be 1 whether or not the dummy
+        # scrape behind docker_inventory succeeded.
+        expr: max by (container_id, container_name, service) (up{job="docker_inventory"}) * 0 + 1
+      # Every series below is normalised to exactly {container_id,
+      # container_name, service} (the `by (container_id)` before the join
+      # drops cAdvisor's id/image), so consumers can divide them with a plain
+      # `/` and keep container_name — `/ on (container_id)` one-to-one would
+      # strip every label but the join key.
+      - record: wqm:container_cpu_cores:rate2m
+        expr: |
+          sum by (container_id) (rate(container_cpu_usage_seconds_total{job="cadvisor"}[2m]))
+            * on (container_id) group_left (container_name, service) wqm:container_info
+      - record: wqm:container_cpu_limit_cores
+        expr: |
+          max by (container_id) (container_spec_cpu_quota{job="cadvisor"} / container_spec_cpu_period{job="cadvisor"} > 0)
+            * on (container_id) group_left (container_name, service) wqm:container_info
+      - record: wqm:container_memory_working_set_bytes
+        expr: |
+          max by (container_id) (container_memory_working_set_bytes{job="cadvisor"})
+            * on (container_id) group_left (container_name, service) wqm:container_info
+      - record: wqm:container_memory_limit_bytes
+        expr: |
+          # Unlimited is 0 on cgroup v2 (measured here: ws/0 = +Inf fired the
+          # alert on 15 containers) and 2^63 on v1 - both excluded.
+          max by (container_id) (container_spec_memory_limit_bytes{job="cadvisor"} > 0 < 1e15)
+            * on (container_id) group_left (container_name, service) wqm:container_info
+      - record: wqm:container_processes
+        expr: |
+          max by (container_id) (container_processes{job="cadvisor"})
+            * on (container_id) group_left (container_name, service) wqm:container_info
+      - record: wqm:container_oom_events:increase1h
+        expr: |
+          max by (container_id) (increase(container_oom_events_total{job="cadvisor"}[1h]))
+            * on (container_id) group_left (container_name, service) wqm:container_info
+
+  # ── Resource pressure ───────────────────────────────────────────
+  # One rule per blind spot that hid in 2026-09 (see the exporters block in
+  # docker-compose.yml). Thresholds sit ABOVE what a healthy stack shows so
+  # they fire on the failure shape, not on a busy reindex.
+  - name: resource-pressure
+    interval: 30s
+    rules:
+
+      - alert: LspProcessDivergence
+        # The registry said 1 server while ~50 tsserver sat under the daemon.
+        # A healthy server owns up to ~4 OS processes (tsserver = wrapper +
+        # 2 children); more than that per tracked server, sustained, is a
+        # leak or an orphan the registry has stopped counting.
+        expr: sum(memexd_lsp_os_processes) > 4 * memexd_lsp_active_servers + 4
+        for: 10m
+        labels:
+          severity: warning
+          component: daemon
+        annotations:
+          summary: "More OS processes under memexd than its LSP registry accounts for"
+          description: "memexd_lsp_os_processes (child+descendant) exceeds 4x memexd_lsp_active_servers + 4 for 10 minutes. Compare `ps --ppid <memexd>` with `memexd_lsp_server_state`; a health probe or restart path is leaking children."
+
+      - alert: LspProcessGrowth
+        # Growth is the leak signature independent of any absolute count:
+        # +10 processes in 30 minutes with a stable registry is never idle.
+        expr: |
+          (sum(memexd_lsp_os_processes) - sum(memexd_lsp_os_processes offset 30m)) > 10
+          and (memexd_lsp_active_servers - memexd_lsp_active_servers offset 30m) <= 0
+        for: 10m
+        labels:
+          severity: critical
+          component: daemon
+        annotations:
+          summary: "OS processes under memexd growing while the LSP registry is flat"
+          description: "More than 10 new processes under memexd in 30 minutes without a matching rise in tracked servers. This is the 2026-09 tsserver leak shape (8 GB/h). Check `docker exec wqm-memexd ps -o pid,ppid,rss,cmd`."
+
+      - alert: LspProcessRssHigh
+        expr: memexd_lsp_os_processes_rss_bytes > 6 * 1024 * 1024 * 1024
+        for: 10m
+        labels:
+          severity: warning
+          component: daemon
+        annotations:
+          summary: "LSP process tree above 6 GiB RSS"
+          description: "The summed RSS of every process under memexd is above 6 GiB for 10 minutes. One server (intelephense measured 2.4 GB) is normal; the tree at 6 GiB is a leak or an oversized project set."
+
+      - alert: EmbeddingOnFallback
+        # The switch used to be a log line; the daemon ran on the CPU standby
+        # for hours while the GPU backend was simply not started.
+        expr: memexd_embedding_endpoint_active{endpoint="fallback"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          component: daemon
+        annotations:
+          summary: "memexd embedding on the fallback endpoint"
+          description: "The primary embedding endpoint has been down for 5+ minutes and every embed is going to the fallback (CPU standby, ~10x slower). Check `docker compose ps embeddings-gpu` and the primary's /health."
+
+      - alert: EmbeddingFailoverFlapping
+        expr: increase(memexd_embedding_failover_total[10m]) > 3
+        for: 1m
+        labels:
+          severity: warning
+          component: daemon
+        annotations:
+          summary: "Embedding primary flapping"
+          description: "More than 3 primary->fallback switches in 10 minutes. The primary answers /health but fails under load (OOM, VRAM) or the network between daemon and backend is unstable."
+
+      - alert: QueueFailedBacklog
+        # 1,571 failed items sat unnoticed because nothing keyed off the
+        # `failed` status. They need `wqm queue retry`, never self-heal.
+        expr: sum(memexd_unified_queue_depth{status="failed"}) > 100
+        for: 15m
+        labels:
+          severity: warning
+          component: daemon
+        annotations:
+          summary: "Failed queue items piling up"
+          description: "More than 100 queue items are in status=failed for 15 minutes. Failed items are never retried on their own: inspect `wqm queue list --status failed`, fix the cause (usually the embedding backend), then `wqm queue retry --all`."
+
+      - alert: ContainerPinnedAtCpuLimit
+        # The CPU embedding standby ran at 1214% (every core) while serving
+        # nothing. A container at its own quota for 30 minutes is either a
+        # runaway or a limit set too low; both need a look.
+        expr: |
+          wqm:container_cpu_cores:rate2m{container_name=~"wqm-.*"}
+            / wqm:container_cpu_limit_cores
+            > 0.9
+        for: 30m
+        labels:
+          severity: warning
+          component: infra
+        annotations:
+          summary: "{{ $labels.container_name }} pinned at its CPU limit"
+          description: "{{ $labels.container_name }} has used more than 90% of its cgroup CPU quota for 30 minutes. `docker stats {{ $labels.container_name }}` shows the live number; the limits are in docker-compose.yml deploy.resources."
+
+      - alert: ContainerNearMemoryLimit
+        expr: |
+          wqm:container_memory_working_set_bytes{container_name=~"wqm-.*"}
+            / wqm:container_memory_limit_bytes
+            > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          component: infra
+        annotations:
+          summary: "{{ $labels.container_name }} within 10% of its memory limit"
+          description: "{{ $labels.container_name }} working set is above 90% of its cgroup memory limit for 10 minutes; the next allocation burst is an OOM kill. Raise the limit in docker-compose.yml or find what grew (`make mem-watch-start` for memexd)."
+
+      - alert: VmMemoryStall
+        # PSI full-stall: the whole guest waited on memory for >10% of the
+        # last 5 minutes. This is the minute before the host froze.
+        expr: rate(node_pressure_memory_stalled_seconds_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          component: infra
+        annotations:
+          summary: "WSL2 guest stalling on memory"
+          description: "Memory pressure full-stall above 10% for 5 minutes. Free something now: stop a GPU service (VRAM spills into host commit under WSL2), or `docker compose stop embeddings`. Check `free -g` and `cat /proc/pressure/memory` inside the distro."
+
+      - alert: VmMemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: infra
+        annotations:
+          summary: "WSL2 guest below 5% available memory"
+          description: "MemAvailable is under 5% of the guest total for 5 minutes. The .wslconfig cap is about to be hit; see which container holds it on the resource-pressure dashboard."
+
+      - alert: GpuMemoryHigh
+        # 96% VRAM at idle (LLM + embeddings + reranker resident) is what
+        # spilled into 188 GB of host commit. Under WSL2 GPU-PV the spill is
+        # invisible to the guest, so the only early signal is VRAM itself.
+        expr: nvidia_smi_memory_used_bytes / nvidia_smi_memory_total_bytes > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          component: infra
+        annotations:
+          summary: "GPU memory above 90%"
+          description: "VRAM has been above 90% for 10 minutes. Under WSL2 the overflow lands in host RAM commit (vmmemWSL), not in a CUDA OOM. Move a model off the card: `llm-cpu` profile instead of `llm-gpu`, or drop a served model from embeddings-gpu."

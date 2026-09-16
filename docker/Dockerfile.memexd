@@ -575,6 +575,43 @@ drop-kills + group-kill). libtest exits 0 when a filter matches nothing, so a re
 silently un-gate a check that keeps language-server processes from outliving the daemon's \
 view of them. If you ADDED a test here, bump this count."; exit 1; }
 
+# Resource-pressure gauges: the blind spots above only became visible after
+# the fact, because the daemon exported its REGISTRY view of LSP servers (1)
+# and nothing exported the OS view (~50 tsserver, 8 GB/h). These four tests
+# pin the two new series pairs: `lsp_os_processes{depth}` + `_rss_bytes`
+# sampled from /proc (the parser survives a hostile comm with ") " in it, and
+# the walk counts a real forked grandchild), and `embedding_endpoint_active`
+# writing BOTH labels on every transition so a panel reads the state instead
+# of inferring it from an absent series. The core tests are in the lib; the
+# /proc sampler and the queue-status fill (`failed` exported as 0, never absent)
+# live in the memexd binary's `pressure_metrics` module, so two invocations —
+# each with an exact count.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        lsp_os_processes_exposed_beside_the_registry_count \
+        embedding_endpoint_gauge_writes_both_labels_on_every_transition \
+        2>&1 | tee /tmp/pressure-core.log; \
+    grep -q "^test result: ok\. 2 passed" /tmp/pressure-core.log \
+    || { echo "GATE: expected exactly 2 resource-pressure metric tests in workspace-qdrant-core \
+(lsp_os_processes + embedding_endpoint). libtest exits 0 on an empty filter, so a rename would \
+silently un-gate the series the resource-pressure dashboard and alerts key off. If you ADDED \
+a test here, bump this count."; exit 1; }
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p memexd --bin memexd -- \
+        pressure_metrics:: \
+        2>&1 | tee /tmp/pressure-proc.log; \
+    grep -q "^test result: ok\. 3 passed" /tmp/pressure-proc.log \
+    || { echo "GATE: expected exactly 3 pressure_metrics tests in memexd (/proc parser, real \
+forking tree, failed-status fill). libtest exits 0 on an empty filter, so a module rename would \
+silently un-gate the sampler behind memexd_lsp_os_processes. If you ADDED a test there, bump \
+this count."; exit 1; }
+
 # Argument-position REFERENCES edges run here: hermetic (text parsing plus an
 # in-memory SQLite store) and they guard a blind spot that read as a fact about
 # the code. A symbol passed by reference — `ref.watch(activeContextProvider)`,

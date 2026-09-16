@@ -610,6 +610,159 @@ services:
       <<: *watchtower-off
 
   # ───────────────────────────────────────────────
+  # Resource-pressure exporters — what the daemon cannot see about itself
+  #
+  # Three blind spots hid in a row (2026-09): ~50 tsserver processes under
+  # one tracked LSP server, an embedding CPU standby at 1214%, and 96% VRAM
+  # at idle spilling into host commit (vmmemWSL 188 GB on a 127 GB host).
+  # None of them was in any series. The daemon now exports its own process
+  # tree and endpoint choice (memexd_lsp_os_processes*,
+  # memexd_embedding_endpoint_active); the services below cover container,
+  # VM and GPU. Dashboard: docker/grafana/dashboards/resource-pressure.json.
+  # ───────────────────────────────────────────────
+  cadvisor:
+    # Per-container CPU / memory / PID counts (container_* series), read
+    # straight from the cgroups. It talks to CONTAINERD, not the Docker
+    # socket: this engine runs the containerd image store (`docker info` →
+    # Storage Driver: overlayfs) and cAdvisor's docker handler fails on every
+    # container there ("failed to identify the read-write layer ID", measured
+    # on v0.49.1 and v0.52.1 — zero named series). Through containerd's
+    # `moby` namespace every container is seen, but only by its 64-hex id;
+    # the docker_inventory scrape job + the wqm:container_* recording rules
+    # in docker/prometheus/alerts.yml stamp the container name back on.
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    container_name: wqm-cadvisor
+    <<: *restart
+    logging: *default-logging
+    command:
+      - --containerd=/run/containerd/containerd.sock
+      - --containerd-namespace=moby
+      - --housekeeping_interval=10s
+      - --store_container_labels=false
+      # The container id is enough; the per-cpu / per-disk / tcp families
+      # multiply cardinality for nothing this dashboard asks.
+      - --disable_metrics=percpu,sched,tcp,udp,advtcp,disk,diskIO,hugetlb,referenced_memory,cpu_topology,resctrl,memory_numa
+    volumes:
+      - /:/rootfs:ro
+      - /sys:/sys:ro
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+    devices:
+      # OOM-kill events (container_oom_events_total) come from the kernel log.
+      - /dev/kmsg
+    expose:
+      - "8080"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256m
+    networks:
+      - workspace-network
+    labels:
+      <<: *watchtower-off
+
+  docker-socket-proxy:
+    # Read-only, containers+networks-list-only view of the Docker API for Prometheus'
+    # docker_sd (the docker_inventory job): it needs the id → name mapping
+    # and runs as `nobody`, which cannot open the root:docker socket. The
+    # proxy is the standard answer — no per-host gid knob, and Prometheus
+    # never sees exec/volumes/images endpoints.
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: wqm-docker-socket-proxy
+    <<: *restart
+    logging: *default-logging
+    environment:
+      # Prometheus' docker_sd lists containers AND networks (it labels each
+      # target with its network); without NETWORKS it 403s on /networks and
+      # yields zero targets. Everything else stays denied.
+      CONTAINERS: "1"
+      NETWORKS: "1"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    expose:
+      - "2375"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 64m
+    networks:
+      - workspace-network
+    labels:
+      <<: *watchtower-off
+
+  node-exporter:
+    # VM-level memory, PSI (pressure stall), CPU and load. Under WSL2 this is
+    # the guest kernel: node_memory_* answers "is the .wslconfig cap being
+    # hit" and node_pressure_* shows the stall building before a freeze.
+    image: prom/node-exporter:v1.8.2
+    container_name: wqm-node-exporter
+    <<: *restart
+    logging: *default-logging
+    command:
+      - --path.rootfs=/host
+      - --collector.disable-defaults
+      - --collector.cpu
+      - --collector.loadavg
+      - --collector.meminfo
+      - --collector.pressure
+      - --collector.vmstat
+      - --collector.filesystem
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+|mnt/.+)($|/)
+    pid: host
+    volumes:
+      # Plain `ro`: the upstream recipe's `rslave` is refused here because the
+      # WSL2 rootfs is not a shared mount ("path / is mounted on / but it is
+      # not a shared or slave mount"). Mounts added after start are not seen,
+      # which this collector set does not need.
+      - /:/host:ro
+    expose:
+      - "9100"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128m
+    networks:
+      - workspace-network
+    labels:
+      <<: *watchtower-off
+
+  gpu-exporter:
+    # VRAM used/total and GPU utilisation (nvidia_smi_memory_*_bytes,
+    # nvidia_smi_utilization_gpu_ratio). NVIDIA's DCGM exporter is not
+    # supported under WSL2 GPU-PV; this one shells out to nvidia-smi, which
+    # the container toolkit injects (capabilities: utility) and which does
+    # work here. Rides the GPU profiles: VRAM only matters while a service
+    # is on the card, and those are the profiles that put one there.
+    image: utkuozdemir/nvidia_gpu_exporter:1.2.1
+    container_name: wqm-gpu-exporter
+    <<: *restart
+    logging: *default-logging
+    command:
+      - --query-field-names=name,memory.used,memory.total,utilization.gpu,utilization.memory,temperature.gpu,power.draw
+    expose:
+      - "9835"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128m
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility]
+    networks:
+      - workspace-network
+    profiles:
+      - embeddings-gpu
+      - llm-gpu
+    labels:
+      <<: *watchtower-off
+
+  # ───────────────────────────────────────────────
   # Caddy - TLS reverse proxy for MCP HTTP
   # ───────────────────────────────────────────────
   caddy:

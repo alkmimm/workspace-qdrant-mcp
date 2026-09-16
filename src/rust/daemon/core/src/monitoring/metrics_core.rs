@@ -7,8 +7,8 @@
 
 use once_cell::sync::Lazy;
 use prometheus::{
-    self, Encoder, Gauge, GaugeVec, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Registry,
-    TextEncoder,
+    self, Encoder, Gauge, GaugeVec, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Registry, TextEncoder,
 };
 
 use super::metrics_factories::{
@@ -17,7 +17,8 @@ use super::metrics_factories::{
     create_per_tenant_eta_metric, create_per_tenant_indexing_metric, create_queue_metrics,
     create_search_adoption_metrics, create_session_metrics, create_system_metrics,
     create_telemetry_extension_metrics, create_tenant_metrics, create_token_economy_metrics,
-    create_unified_queue_metrics, create_watch_metrics, int_counter_vec, register_all,
+    create_unified_queue_metrics, create_watch_metrics, int_counter_vec, int_gauge_vec,
+    register_all,
 };
 
 /// Global metrics registry
@@ -261,6 +262,35 @@ pub struct DaemonMetrics {
     /// Number of LSP server instances currently running across all projects.
     pub lsp_active_servers: IntGauge,
 
+    /// OS processes under memexd's pid, sampled from /proc. Labels: depth
+    /// (`child` = spawned directly, `descendant` = anything deeper — the
+    /// tsserver pairs a language server forks, pyright/bash-ls workers).
+    ///
+    /// `lsp_active_servers` above counts REGISTRY entries; this counts what
+    /// actually exists. The two diverged silently for a whole day: the registry
+    /// said 5 while 10 servers plus 50 tsserver processes sat under the daemon,
+    /// and nothing on the dashboard could show it. When these disagree, the
+    /// daemon has lost track of something it spawned.
+    pub lsp_os_processes: IntGaugeVec,
+
+    /// Resident memory of every process counted by `lsp_os_processes`, summed.
+    /// A leak that adds 67 MB per interval is invisible in the daemon's own RSS
+    /// and obvious here.
+    pub lsp_os_processes_rss_bytes: IntGauge,
+
+    // ── Embedding failover observability ──────────────────────────────────
+    /// Which embedding endpoint the daemon is currently routing to: 1 for the
+    /// active one, 0 for the other. Labels: endpoint (`primary`, `fallback`).
+    ///
+    /// The switch was previously a WARN log line and nothing else. Measured:
+    /// the CPU standby served every batch for minutes at 1214% CPU while the
+    /// GPU sat idle, and the only way to learn that was `docker stats`.
+    pub embedding_endpoint_active: IntGaugeVec,
+
+    /// Times the daemon switched from the primary embedding endpoint to the
+    /// fallback. A rate here is a GPU under pressure before it is an outage.
+    pub embedding_failover_total: IntCounter,
+
     // ── Code-relationship graph observability ─────────────────────────────
     /// Graph node count by tenant and node type. Labels: tenant_id, node_type
     pub graph_nodes: IntGaugeVec,
@@ -371,6 +401,10 @@ struct CreatedMetrics {
     lsp_server_state: IntGaugeVec,
     lsp_available_languages: IntGauge,
     lsp_active_servers: IntGauge,
+    lsp_os_processes: IntGaugeVec,
+    lsp_os_processes_rss_bytes: IntGauge,
+    embedding_endpoint_active: IntGaugeVec,
+    embedding_failover_total: IntCounter,
     graph_nodes: IntGaugeVec,
     graph_nodes_by_language: IntGaugeVec,
     graph_edges: IntGaugeVec,
@@ -494,6 +528,33 @@ fn create_all_metrics() -> CreatedMetrics {
     )
     .expect("metric can be created");
 
+    let lsp_os_processes = int_gauge_vec(
+        "lsp_os_processes",
+        "OS processes under the memexd pid sampled from /proc: child = spawned \
+         directly, descendant = forked by a language server (tsserver pairs, \
+         pyright/bash-ls workers). Compare with lsp_active_servers: when they \
+         diverge the daemon has lost track of something it spawned",
+        &["depth"],
+    );
+
+    let lsp_os_processes_rss_bytes = IntGauge::new(
+        "memexd_lsp_os_processes_rss_bytes",
+        "Resident memory of every process counted by lsp_os_processes, summed",
+    )
+    .expect("metric can be created");
+
+    let embedding_endpoint_active = int_gauge_vec(
+        "embedding_endpoint_active",
+        "Embedding endpoint the daemon currently routes to (1 = active, 0 = not)",
+        &["endpoint"],
+    );
+
+    let embedding_failover_total = IntCounter::new(
+        "memexd_embedding_failover_total",
+        "Times the daemon switched from the primary embedding endpoint to the fallback",
+    )
+    .expect("metric can be created");
+
     let (
         graph_nodes,
         graph_nodes_by_language,
@@ -572,6 +633,10 @@ fn create_all_metrics() -> CreatedMetrics {
         lsp_server_state,
         lsp_available_languages,
         lsp_active_servers,
+        lsp_os_processes,
+        lsp_os_processes_rss_bytes,
+        embedding_endpoint_active,
+        embedding_failover_total,
         graph_nodes,
         graph_nodes_by_language,
         graph_edges,
@@ -652,6 +717,10 @@ fn register_metrics(registry: &Registry, m: &CreatedMetrics) {
             Box::new(m.lsp_server_state.clone()),
             Box::new(m.lsp_available_languages.clone()),
             Box::new(m.lsp_active_servers.clone()),
+            Box::new(m.lsp_os_processes.clone()),
+            Box::new(m.lsp_os_processes_rss_bytes.clone()),
+            Box::new(m.embedding_endpoint_active.clone()),
+            Box::new(m.embedding_failover_total.clone()),
             Box::new(m.graph_nodes.clone()),
             Box::new(m.graph_nodes_by_language.clone()),
             Box::new(m.graph_edges.clone()),
@@ -739,6 +808,10 @@ impl DaemonMetrics {
             lsp_server_state: m.lsp_server_state,
             lsp_available_languages: m.lsp_available_languages,
             lsp_active_servers: m.lsp_active_servers,
+            lsp_os_processes: m.lsp_os_processes,
+            lsp_os_processes_rss_bytes: m.lsp_os_processes_rss_bytes,
+            embedding_endpoint_active: m.embedding_endpoint_active,
+            embedding_failover_total: m.embedding_failover_total,
             graph_nodes: m.graph_nodes,
             graph_nodes_by_language: m.graph_nodes_by_language,
             graph_edges: m.graph_edges,
