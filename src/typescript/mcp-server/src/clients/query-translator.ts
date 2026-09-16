@@ -237,9 +237,36 @@ export function createQueryTranslatorFromEnv(
     return null;
   }
 
+  // The 3 s default was sized for the 7B on a GPU (~180 ms). The same model on
+  // CPU answers in seconds, and fail-open means an over-tight timeout does not
+  // error — it silently searches WITHOUT the translation, every time, while
+  // the config says translation is on. A deployment that moves the sidecar off
+  // the GPU must be able to widen this, or the feature is off without saying so.
+  const timeoutMs = parseTimeoutMs(env[TRANSLATE_TIMEOUT_ENV]);
+
   return new QueryTranslator({
     baseUrl,
     model,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     ...(fetchImpl ? { fetchImpl } : {}),
   });
+}
+
+/** Env var overriding the request timeout in milliseconds (positive integer). */
+export const TRANSLATE_TIMEOUT_ENV = 'WQM_TRANSLATE_TIMEOUT_MS';
+
+/**
+ * A positive integer, or `undefined` (keep the default) for anything else.
+ * A bad value is logged rather than treated as zero: zero would time out every
+ * call instantly, which fail-open turns into "translation silently never runs".
+ */
+function parseTimeoutMs(raw: string | undefined): number | undefined {
+  const text = (raw ?? '').trim();
+  if (text.length === 0) return undefined;
+  const value = Number(text);
+  if (!Number.isInteger(value) || value <= 0) {
+    logDebug(`${TRANSLATE_TIMEOUT_ENV}="${text}" is not a positive integer — keeping the default`);
+    return undefined;
+  }
+  return value;
 }

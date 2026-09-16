@@ -6,6 +6,7 @@ import {
   sanitizeTranslation,
   TRANSLATE_BASE_URL_ENV,
   TRANSLATE_MODEL_ENV,
+  TRANSLATE_TIMEOUT_ENV,
   type FetchLike,
 } from '../../src/clients/query-translator.js';
 
@@ -167,5 +168,61 @@ describe('createQueryTranslatorFromEnv', () => {
       [TRANSLATE_MODEL_ENV]: 'Qwen/Qwen2.5-1.5B-Instruct-GGUF',
     });
     expect(built?.endpointUrl).toBe('http://wqm-llm-gpu:8080/v1/chat/completions');
+  });
+
+  /**
+   * The timeout knob exists because the sidecar moved off the GPU. Measured on
+   * the CPU sidecar: 1.1–3.9 s per translation against a 3 s default — and
+   * fail-open means the over-tight default does not error, it silently
+   * searches without the translation on every slow call while the config says
+   * the feature is on. These pin that the env var actually reaches the
+   * request deadline, behaviourally: a fetch that answers after 150 ms must
+   * be accepted under a 400 ms budget and dropped under a 40 ms one.
+   */
+  describe(`${TRANSLATE_TIMEOUT_ENV} reaches the request deadline`, () => {
+    const answersAfter = (ms: number): FetchLike =>
+      vi.fn(
+        (_url, init) =>
+          new Promise((resolve, reject) => {
+            const t = setTimeout(
+              () =>
+                resolve({
+                  ok: true,
+                  status: 200,
+                  json: async () => ({ choices: [{ message: { content: EN } }] }),
+                } as unknown as Response),
+              ms
+            );
+            init.signal?.addEventListener('abort', () => {
+              clearTimeout(t);
+              reject(new Error('aborted'));
+            });
+          })
+      );
+
+    const env = (timeout: string) => ({
+      [TRANSLATE_BASE_URL_ENV]: 'http://wqm-llm-cpu:8080',
+      [TRANSLATE_MODEL_ENV]: 'Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M',
+      [TRANSLATE_TIMEOUT_ENV]: timeout,
+    });
+
+    it('a widened budget lets a slow CPU answer through', async () => {
+      const built = createQueryTranslatorFromEnv(env('400'), answersAfter(150));
+      await expect(built!.translateToEnglish(PT)).resolves.toBe(EN);
+    });
+
+    it('a tight budget still fails open on the same answer', async () => {
+      const built = createQueryTranslatorFromEnv(env('40'), answersAfter(150));
+      await expect(built!.translateToEnglish(PT)).resolves.toBeNull();
+    });
+
+    it('a malformed value keeps the default rather than becoming zero', async () => {
+      // Zero would abort every call instantly — "translation on" that never
+      // translates. The default is 3000 ms, so a 150 ms answer must pass.
+      for (const bad of ['0', '-5', 'abc', '1.5']) {
+        const built = createQueryTranslatorFromEnv(env(bad), answersAfter(150));
+        await expect(built!.translateToEnglish(PT)).resolves.toBe(EN);
+      }
+    });
   });
 });
