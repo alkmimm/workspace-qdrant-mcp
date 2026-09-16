@@ -118,3 +118,25 @@ describe('tool output schemas', () => {
     }
   });
 });
+
+describe('tool-definition input schemas', () => {
+  // The JSON-Schema `default` keyword is a trap, not a convenience: at least
+  // one MCP client (Claude Code desktop, observed 2026-09-16) compiles a
+  // property that carries `default` into a NON-optional field, so every call
+  // that omits it is rejected client-side with "expected nonoptional, received
+  // undefined" and never reaches the server. `graph` was the only tool using
+  // it, and it made the tool fail on first use for any agent that followed the
+  // documented defaults. State defaults in the description instead.
+  it('never declares a JSON-Schema `default` on any property', () => {
+    const offenders: string[] = [];
+    for (const def of getToolDefinitions()) {
+      const props = def.inputSchema.properties as Record<string, Record<string, unknown>>;
+      for (const [prop, schema] of Object.entries(props)) {
+        if (schema !== null && typeof schema === 'object' && 'default' in schema) {
+          offenders.push(`${def.name}.${prop}`);
+        }
+      }
+    }
+    expect(offenders, 'move the default into the description').toEqual([]);
+  });
+});
