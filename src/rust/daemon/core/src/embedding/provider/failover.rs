@@ -23,6 +23,7 @@ use tracing::{debug, info, warn};
 
 use super::DenseProvider;
 use crate::embedding::types::{DenseEmbedding, EmbeddingError};
+use crate::monitoring::METRICS;
 
 /// How long a primary failure is memoized before the primary is retried.
 const PRIMARY_RETRY_SECS: u64 = 60;
@@ -63,6 +64,10 @@ impl FailoverDenseProvider {
             primary.provider_label(),
             fallback.provider_label()
         );
+        // Publish the initial state, so the series exists (primary=1,
+        // fallback=0) from the first scrape rather than appearing only once
+        // something goes wrong.
+        METRICS.set_embedding_endpoint(true);
         Self {
             primary,
             fallback,
@@ -83,7 +88,18 @@ impl FailoverDenseProvider {
 
     fn memoize_primary_down(&self) {
         let mut guard = self.primary_down_until.lock().expect("memo lock poisoned");
+        // Count the TRANSITION, not every failed call: while the memo is
+        // active the primary is not dialed, so the first memo per outage is the
+        // only one that represents a switch.
+        let was_up = guard.is_none();
         *guard = Some(Instant::now() + self.retry_after);
+        if was_up {
+            METRICS.embedding_failover();
+        }
+        // The switchover used to be a WARN line and nothing else; measured, the
+        // CPU standby served every batch for minutes at 1214% CPU and the only
+        // way to know was `docker stats`. Now it is a series.
+        METRICS.set_embedding_endpoint(false);
     }
 
     fn clear_primary_down(&self) {
@@ -94,6 +110,7 @@ impl FailoverDenseProvider {
                 "Primary embedding endpoint recovered — leaving fallback"
             );
         }
+        METRICS.set_embedding_endpoint(true);
     }
 }
 

@@ -66,6 +66,17 @@ FROM rust:${RUST_VERSION}-${DEBIAN_CODENAME} AS builder
 
 ARG TARGETPLATFORM
 ARG ONNX_VERSION
+# Parallelism of every cargo invocation in this stage and the ones derived
+# from it (`validate`). `default` is cargo's own default — EVERY core the
+# builder can see, 32 on the reference host. That is right for a CI box and
+# wrong for a developer's workstation: a full rebuild pinned the machine while
+# its owner was working on it, and combined with an embedding failover it
+# pushed the host into swap. Pass `--build-arg CARGO_BUILD_JOBS=8` (or set
+# CARGO_BUILD_JOBS in docker/.env — compose forwards it) to leave cores for
+# the person. The literal `default` is load-bearing: cargo REJECTS an empty
+# value ("could not parse ``"), so an unset ARG must not become "".
+ARG CARGO_BUILD_JOBS=default
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 # System dependencies for the build.
 # git is required by daemon/memexd/build.rs (git rev-list --count HEAD → BUILD_NUMBER).
@@ -528,6 +539,78 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 exits 0 when a filter matches nothing, so a rename would silently un-gate the count that \
 tells a caller their threshold was inert. If you ADDED a test here, bump this count."; \
 exit 1; }
+
+# LSP health-probe hygiene runs here: hermetic (a Python stand-in LSP server
+# over stdio — python3 ships in the rust base image) and it guards the process
+# leak that ate the host. The probe used to send `shutdown` as a ping and then
+# `initialize` again on the same connection — a protocol violation that
+# typescript-language-server honoured by spawning a fresh tsserver pair per
+# `initialize` while the previous pair stayed alive: measured live at one new
+# pair every probe interval, 67 MB each, ~8 GB/hour, unbounded (78 processes /
+# 2.9 GB after 38 minutes).
+#
+# The fake answers MethodNotFound to EVERYTHING, so the broken and the fixed
+# probe both read as "healthy" — the outcome cannot tell them apart, only the
+# wire can. The test asserts the exact method log, so a regression to `shutdown`
+# or a reintroduced re-`initialize` fails here rather than on the host.
+#
+# Two sibling leaks are gated with it, both measured on the same host: a server
+# instance REPLACED in the registry map dropped its handle without killing the
+# process (5 tracked servers, 10 processes under memexd), and `stop_process`
+# killed only the direct child, so a server's forked workers were reparented to
+# init and never reaped. `kill_on_drop` plus a process-group kill close both;
+# the tests spawn a real forking process and assert the grandchild dies.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        health_probe_sends_only_a_side_effect_free_ping \
+        dropping_the_handle_kills_the_process \
+        stop_process_kills_the_forked_grandchild_too \
+        --test-threads=4 2>&1 | tee /tmp/lsp-probe.log; \
+    grep -q "^test result: ok\. 3 passed" /tmp/lsp-probe.log \
+    || { echo "GATE: expected exactly 3 LSP process-hygiene tests to run and pass (probe + \
+drop-kills + group-kill). libtest exits 0 when a filter matches nothing, so a rename would \
+silently un-gate a check that keeps language-server processes from outliving the daemon's \
+view of them. If you ADDED a test here, bump this count."; exit 1; }
+
+# Resource-pressure gauges: the blind spots above only became visible after
+# the fact, because the daemon exported its REGISTRY view of LSP servers (1)
+# and nothing exported the OS view (~50 tsserver, 8 GB/h). These four tests
+# pin the two new series pairs: `lsp_os_processes{depth}` + `_rss_bytes`
+# sampled from /proc (the parser survives a hostile comm with ") " in it, and
+# the walk counts a real forked grandchild), and `embedding_endpoint_active`
+# writing BOTH labels on every transition so a panel reads the state instead
+# of inferring it from an absent series. The core tests are in the lib; the
+# /proc sampler and the queue-status fill (`failed` exported as 0, never absent)
+# live in the memexd binary's `pressure_metrics` module, so two invocations —
+# each with an exact count.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        lsp_os_processes_exposed_beside_the_registry_count \
+        embedding_endpoint_gauge_writes_both_labels_on_every_transition \
+        2>&1 | tee /tmp/pressure-core.log; \
+    grep -q "^test result: ok\. 2 passed" /tmp/pressure-core.log \
+    || { echo "GATE: expected exactly 2 resource-pressure metric tests in workspace-qdrant-core \
+(lsp_os_processes + embedding_endpoint). libtest exits 0 on an empty filter, so a rename would \
+silently un-gate the series the resource-pressure dashboard and alerts key off. If you ADDED \
+a test here, bump this count."; exit 1; }
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p memexd --bin memexd -- \
+        pressure_metrics:: \
+        2>&1 | tee /tmp/pressure-proc.log; \
+    grep -q "^test result: ok\. 3 passed" /tmp/pressure-proc.log \
+    || { echo "GATE: expected exactly 3 pressure_metrics tests in memexd (/proc parser, real \
+forking tree, failed-status fill). libtest exits 0 on an empty filter, so a module rename would \
+silently un-gate the sampler behind memexd_lsp_os_processes. If you ADDED a test there, bump \
+this count."; exit 1; }
 
 # Argument-position REFERENCES edges run here: hermetic (text parsing plus an
 # in-memory SQLite store) and they guard a blind spot that read as a fact about

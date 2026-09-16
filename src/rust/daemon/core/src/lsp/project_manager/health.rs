@@ -83,12 +83,14 @@ impl LanguageServerManager {
             let mut inst_guard = instance.lock().await;
 
             // Warm-up exemption: a server still building its initial index (a large
-            // Dart/Java monorepo takes minutes) cannot answer the RPC ping in time —
-            // and the ping is a `shutdown` request, so sending it to a busy server
-            // risks leaving it half-shut. While the server is not yet ready, only
-            // verify the OS process is alive; skip the RPC probe entirely so we never
-            // restart a server mid-analysis (which merely restarts the analysis and
-            // loops forever). A dead process is still detected and restarted.
+            // Dart/Java monorepo takes minutes) cannot answer the RPC ping in time.
+            // While the server is not yet ready, only verify the OS process is
+            // alive; skip the RPC probe entirely so we never restart a server
+            // mid-analysis (which merely restarts the analysis and loops forever).
+            // A dead process is still detected and restarted. (The probe itself is
+            // now side-effect free — `$/wqm/ping`, see `HEALTH_PROBE_METHOD` — so
+            // the old worry about leaving a busy server half-shut no longer applies;
+            // the exemption stays for the timeout reason alone.)
             if !Self::server_is_ready(&key, ready_at, ready_signals).await {
                 if !inst_guard.is_alive().await {
                     Self::handle_unhealthy_server(&key, &mut inst_guard, servers, max_restarts)

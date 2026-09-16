@@ -86,6 +86,7 @@ pub fn start_uptime_tracker() -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut last_cpu = read_proc_cpu_seconds();
         let mut last_at = std::time::Instant::now();
+        let mut tick: u64 = 0;
         loop {
             METRICS.set_uptime(start_time.elapsed().as_secs_f64());
 
@@ -104,6 +105,20 @@ pub fn start_uptime_tracker() -> JoinHandle<()> {
             }
             last_cpu = now_cpu;
             last_at = now_at;
+
+            // Every 10th tick, count what the OS says lives under this pid.
+            // `lsp_active_servers` is what the daemon BELIEVES it runs; this is
+            // what exists. They diverged silently for a day — 5 believed, 10
+            // servers plus 50 tsserver processes real — and the dashboard had
+            // no series that could have shown it. A /proc walk is a few
+            // milliseconds; 10 s keeps it negligible while still catching a
+            // 2-processes-per-minute leak within a single scrape interval.
+            tick = tick.wrapping_add(1);
+            if tick % 10 == 0 {
+                let (children, descendants, rss) =
+                    crate::pressure_metrics::sample_process_tree(std::process::id());
+                METRICS.set_lsp_os_processes(children as i64, descendants as i64, rss as i64);
+            }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
@@ -300,6 +315,9 @@ pub fn start_queue_depth_exporter(pool: SqlitePool) -> JoinHandle<()> {
                         METRICS.set_unified_queue_depth(&item_type, &status, count);
                         seen.insert((item_type, status));
                     }
+                    // `failed` must exist at 0, not be absent, or a panel reads
+                    // "no data" as "no failures" (1,571 sat unseen in 2026-09).
+                    crate::pressure_metrics::fill_missing_queue_statuses(&mut seen);
                     // Zero-out any (item_type, status) pairs we've seen before
                     // but aren't present now, so gauges don't get stuck.
                     let mut guard = known_pairs.lock().await;

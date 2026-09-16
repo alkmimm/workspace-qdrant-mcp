@@ -4,7 +4,7 @@
 # reference for users who run their own Prometheus against this project's
 # services.
 #
-# For an external Prometheus, paste the three scrape_configs blocks below
+# For an external Prometheus, paste the scrape_configs blocks below
 # into the existing prometheus.yml and reload with:
 #   curl -X POST http://localhost:9090/-/reload
 #
@@ -42,4 +42,64 @@ scrape_configs:
   - job_name: otel-collector
     static_configs:
       - targets: [otel-collector:8888]
+    metrics_path: /metrics
+
+  # ── Resource-pressure exporters (see the matching compose block) ──
+  # Per-container CPU / memory / PIDs. cAdvisor reads containerd here, so
+  # `name` arrives as the 64-hex container id: it is renamed to
+  # `container_id`, the join key the docker_inventory job below and the
+  # wqm:container_* recording rules (alerts.yml) use to stamp the real
+  # container name on. Series without an id are cgroup parents (/, init.scope)
+  # and are dropped so panels never double-count.
+  - job_name: cadvisor
+    static_configs:
+      - targets: [cadvisor:8080]
+    metrics_path: /metrics
+    metric_relabel_configs:
+      - source_labels: [name]
+        regex: ""
+        action: drop
+      - source_labels: [name]
+        target_label: container_id
+      - regex: name
+        action: labeldrop
+
+  # id → name inventory. Docker SD (over the read-only socket proxy) yields
+  # one target per container; every target is pointed at the same cheap,
+  # always-valid endpoint and ALL its samples are dropped — what survives is
+  # the synthetic `up` series carrying container_id / container_name /
+  # service as target labels. That is the whole point: a 1-per-container
+  # info series Prometheus can join on, without cAdvisor ever seeing Docker.
+  - job_name: docker_inventory
+    docker_sd_configs:
+      - host: tcp://docker-socket-proxy:2375
+        refresh_interval: 30s
+    scrape_interval: 60s
+    metrics_path: /metrics
+    relabel_configs:
+      - source_labels: [__meta_docker_container_id]
+        target_label: container_id
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.*)
+        target_label: container_name
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - target_label: __address__
+        replacement: node-exporter:9100
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: .*
+        action: drop
+
+  # WSL2 guest kernel: memory, PSI, load, CPU.
+  - job_name: node
+    static_configs:
+      - targets: [node-exporter:9100]
+    metrics_path: /metrics
+
+  # VRAM / GPU utilisation. Only up while a GPU profile is active, so
+  # `up{job="gpu"} == 0` is expected on a CPU-only stack, not an outage.
+  - job_name: gpu
+    static_configs:
+      - targets: [gpu-exporter:9835]
     metrics_path: /metrics

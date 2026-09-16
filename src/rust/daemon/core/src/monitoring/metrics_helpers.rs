@@ -161,6 +161,36 @@ impl DaemonMetrics {
         self.process_cpu_percent.set(percent);
     }
 
+    /// Record what the OS says lives under the daemon: direct children,
+    /// deeper descendants, and their summed RSS. Sampled from /proc, so it is
+    /// the ground truth `lsp_active_servers` can be compared against.
+    pub fn set_lsp_os_processes(&self, children: i64, descendants: i64, rss_bytes: i64) {
+        self.lsp_os_processes
+            .with_label_values(&["child"])
+            .set(children);
+        self.lsp_os_processes
+            .with_label_values(&["descendant"])
+            .set(descendants);
+        self.lsp_os_processes_rss_bytes.set(rss_bytes);
+    }
+
+    /// Record which embedding endpoint is routing. Both labels are always
+    /// written so a dashboard never has to infer "fallback" from an absent
+    /// series.
+    pub fn set_embedding_endpoint(&self, primary_active: bool) {
+        self.embedding_endpoint_active
+            .with_label_values(&["primary"])
+            .set(i64::from(primary_active));
+        self.embedding_endpoint_active
+            .with_label_values(&["fallback"])
+            .set(i64::from(!primary_active));
+    }
+
+    /// Count a primary → fallback switch.
+    pub fn embedding_failover(&self) {
+        self.embedding_failover_total.inc();
+    }
+
     /// Record an ingestion error
     pub fn ingestion_error(&self, error_type: &str) {
         self.ingestion_errors_total

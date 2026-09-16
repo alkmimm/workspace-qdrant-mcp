@@ -35,12 +35,6 @@ impl ServerInstance {
         debug!("LSP server {} initialized successfully", self.metadata.name);
         Ok(())
     }
-
-    /// Re-initialize server after a health-check shutdown/restart cycle
-    pub(super) async fn reinitialize_after_health_check(&self) -> LspResult<()> {
-        let _ = self.initialize_lsp().await;
-        Ok(())
-    }
 }
 
 /// Build the LSP `initialize` request parameters
