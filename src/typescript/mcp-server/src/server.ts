@@ -47,11 +47,15 @@ import { loadAuthConfig, requireAuth } from './auth-middleware.js';
 
 import { buildServerComponents } from './server-factory.js';
 import type { ServerComponents } from './server-factory.js';
-import { getToolDefinitions } from './tool-definitions/index.js';
+import {
+  exposedToolNames,
+  getExposedToolDefinitions,
+  MCP_TOOLS_ENV,
+} from './tool-definitions/index.js';
 import { initializeSession, startHeartbeat, sendHeartbeat, cleanup } from './session-lifecycle.js';
 import { recordSessionStart, recordSessionEnd } from './telemetry/metrics.js';
 import { dispatchToolCall } from './tool-dispatcher.js';
-import { SERVER_INSTRUCTIONS } from './server-instructions.js';
+import { resolveServerInstructions } from './server-instructions.js';
 import { seedDefaultRule } from './rule-seeder.js';
 
 /**
@@ -106,14 +110,34 @@ export class WorkspaceQdrantMcpServer {
   }
 
   private createMcpServer(): Server {
+    const instructions = resolveServerInstructions();
     return new Server(
       { name: SERVER_NAME, version: SERVER_VERSION },
       {
         capabilities: { tools: {} },
-        instructions: SERVER_INSTRUCTIONS,
+        ...(instructions !== undefined ? { instructions } : {}),
       }
     );
   }
+
+  /**
+   * The tool surface this deployment exposes when `WQM_MCP_TOOLS` narrows it;
+   * `undefined` when the full catalog is advertised (nothing to enforce — an
+   * unknown name then falls through to the dispatcher's "Unknown tool").
+   * Resolved once per process: the env does not change under a running
+   * server, and the unknown-name warning belongs at startup, not on every
+   * ListTools.
+   */
+  private readonly exposedTools = ((): Set<string> | undefined => {
+    if (exposedToolNames() === undefined) return undefined;
+    const { tools, unknown } = getExposedToolDefinitions();
+    if (unknown.length > 0) {
+      logInfo(`${MCP_TOOLS_ENV} names tools this server does not have; ignored`, {
+        unknown,
+      });
+    }
+    return new Set(tools.map((t) => t.name));
+  })();
 
   private setupHandlers(
     server: Server,
@@ -121,10 +145,26 @@ export class WorkspaceQdrantMcpServer {
     sessionState: SessionState
   ): void {
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: getToolDefinitions(),
+      tools: getExposedToolDefinitions().tools,
     }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      // A tool the deployment does not advertise is not callable either — a
+      // client that remembers the full catalog from another deployment must
+      // get a refusal, not a result the surface was configured to exclude.
+      if (this.exposedTools !== undefined && !this.exposedTools.has(request.params.name)) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `Tool "${request.params.name}" is not exposed on this deployment ` +
+                `(${MCP_TOOLS_ENV}). Available: ${[...this.exposedTools].join(', ')}.`,
+            },
+          ],
+          isError: true,
+        };
+      }
       return this.handleToolCall(
         request.params.name,
         request.params.arguments,

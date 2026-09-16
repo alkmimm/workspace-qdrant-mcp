@@ -84,6 +84,36 @@ describe('Server Integration Tests', () => {
       expect(result.content[0].text).toContain('Unknown tool');
     });
 
+    it('refuses a call to a tool WQM_MCP_TOOLS does not expose, and lists what is', async () => {
+      // The surface is resolved when the server is CONSTRUCTED, so narrow the
+      // env and build a fresh instance (the beforeEach one saw the full catalog).
+      await server.stop();
+      const saved = process.env['WQM_MCP_TOOLS'];
+      process.env['WQM_MCP_TOOLS'] = 'grep,list';
+      try {
+        server = new WorkspaceQdrantMcpServer({ config, stdio: false });
+        await server.start();
+        const mcpServer = server.getMcpServer();
+        const calls = vi.mocked(mcpServer.setRequestHandler).mock.calls;
+        const listHandler = calls[0][1];
+        const callHandler = calls[1][1];
+
+        const listed = await listHandler({ method: 'tools/list', params: {} });
+        expect(listed.tools.map((t: { name: string }) => t.name)).toEqual(['grep', 'list']);
+
+        const result = await callHandler({
+          method: 'tools/call',
+          params: { name: 'search', arguments: { query: 'anything' } },
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('not exposed on this deployment');
+        expect(result.content[0].text).toContain('Available: grep, list');
+      } finally {
+        if (saved === undefined) delete process.env['WQM_MCP_TOOLS'];
+        else process.env['WQM_MCP_TOOLS'] = saved;
+      }
+    });
+
     it('should handle tool execution errors gracefully', async () => {
       // Make the daemon client throw an error
       mockDaemonClient.embedText.mockRejectedValueOnce(new Error('Daemon unavailable'));
