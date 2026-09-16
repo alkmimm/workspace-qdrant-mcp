@@ -22,6 +22,7 @@ import type {
   SearchResult,
   FilterParams,
   SearchCollectionParams,
+  RerankOutcome,
 } from './search-types.js';
 import {
   PROJECTS_COLLECTION,
@@ -613,6 +614,30 @@ export async function searchAllCollections(
  *  crowd code hits or inflate the response. */
 export const SCRATCHPAD_LANE_LIMIT = 3;
 
+/** Env var that sets the DEPLOYMENT default of the scratchpad recall lane.
+ *  `0` turns the lane off unless a call passes `includeScratchpad:true`. */
+export const SCRATCHPAD_LANE_ENV = 'WQM_SEARCH_SCRATCHPAD_LANE';
+
+/**
+ * Whether the recall lane runs for this call. An explicit per-call
+ * `includeScratchpad` always wins; otherwise the deployment default applies
+ * (on, unless `WQM_SEARCH_SCRATCHPAD_LANE=0`).
+ *
+ * Why a deployment knob: the lane feeds notes agents WROTE back into every
+ * project-scoped search. That is the point of it for an interactive session,
+ * and a contamination channel for any measurement that runs the same task more
+ * than once — run N stores what it learned, run N+1 is handed it. A benchmark
+ * cannot rely on every agent remembering to pass `includeScratchpad:false`, so
+ * the deployment has to be able to turn the lane off for everyone.
+ */
+export function scratchpadLaneEnabled(
+  includeScratchpad: boolean | undefined,
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  if (includeScratchpad !== undefined) return includeScratchpad;
+  return (env[SCRATCHPAD_LANE_ENV] ?? '').trim() !== '0';
+}
+
 /**
  * Project-memory recall lane: a small, tenant-filtered scratchpad query whose
  * hits are appended AFTER the code results so notes never displace code in the
@@ -1131,20 +1156,20 @@ async function rerankResults(
   results: SearchResult[],
   limit: number,
   weight: number
-): Promise<SearchResult[]> {
-  if (results.length <= 1) return results;
+): Promise<{ results: SearchResult[]; outcome: RerankOutcome }> {
+  if (results.length <= 1) return { results, outcome: 'skipped' };
   const poolSize = Math.min(results.length, Math.max(limit, RERANK_POOL));
   const pool = results.slice(0, poolSize);
   const documents = pool.map((r) => (r.content ?? '').slice(0, RERANK_DOCUMENT_CHARS));
   try {
     const resp = await daemonClient.rerank({ query, documents });
-    if (!resp.success || resp.results.length === 0) return results;
+    if (!resp.success || resp.results.length === 0) return { results, outcome: 'failed' };
     const rerankScores = new Map<number, number>();
     for (const rr of resp.results) {
       if (rr.index < 0 || rr.index >= pool.length || rerankScores.has(rr.index)) continue;
       rerankScores.set(rr.index, rr.score);
     }
-    if (rerankScores.size === 0) return results;
+    if (rerankScores.size === 0) return { results, outcome: 'failed' };
     const blended = blendPoolScores(
       pool.map((r) => r.score),
       rerankScores,
@@ -1169,12 +1194,16 @@ async function rerankResults(
       scored.push(item);
     });
     scored.sort((a, b) => (b.rerankScore ?? 0) - (a.rerankScore ?? 0));
-    return [...scored, ...leftover, ...results.slice(poolSize)];
+    return { results: [...scored, ...leftover, ...results.slice(poolSize)], outcome: 'applied' };
   } catch (err) {
+    // Fail OPEN — the search must never fail because the reranker did — but
+    // never fail SILENTLY: the outcome travels on the response as
+    // `pipeline.rerank`, so a degraded call is distinguishable from an exact
+    // one by anyone comparing results (a benchmark, an experiment, a bisect).
     logDebug('Rerank failed; using pre-rerank order', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return results;
+    return { results, outcome: 'failed' };
   }
 }
 
@@ -1322,10 +1351,11 @@ export async function finalizeResults(
   // out of the fused/deduped/ranked list AFTER fusion, so pages never overlap.
   const offset = Math.max(0, params.options.offset ?? 0);
   const windowEnd = offset + params.limit;
-  const ranked =
+  const reranked =
     rerankEnabled && rerankWeight > 0
       ? await rerankResults(daemonClient, params.query, deduped, windowEnd, rerankWeight)
-      : deduped;
+      : { results: deduped, outcome: 'off' as RerankOutcome };
+  const ranked = reranked.results;
   const { page: finalResults, hasMore } = paginateRanked(ranked, offset, params.limit);
   // Body-dedup can shrink the over-fetched pool below the window probe even
   // though more ranked candidates exist upstream (the pool was fetched at
@@ -1375,6 +1405,9 @@ export async function finalizeResults(
     { ...params, collectionsToSearch: collectionsSearched },
     params.searchStartMs
   );
+  // The orchestrator stamps `translation` on top of this once it knows how the
+  // second leg ended; this leg only knows about its own rerank.
+  response.pipeline = { rerank: reranked.outcome };
   await attachIndexingProgress(
     response,
     daemonClient,
