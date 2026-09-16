@@ -114,6 +114,27 @@ metric** — `bytes_in` / `bytes_out` / `hits_truncated` are captured here and
 written to `search_events`. See
 [20-token-economy-instrumentation.md](20-token-economy-instrumentation.md).
 
+**Pipeline report (`pipeline`):** every ranked (semantic/hybrid) response carries
+which OPTIONAL stages actually ran, because each of them fails open:
+
+```json
+"pipeline": { "translation": "already-english", "rerank": "applied" }
+```
+
+- `translation`: `disabled` · `no-translator` · `already-english` · `translated`
+  · `translation-failed` (SLM timeout/HTTP/implausible output → single leg)
+  · `leg-skipped` (translated, but its embedding degraded to a fallback provider).
+- `rerank`: `off` · `applied` · `failed` (rerank on, sidecar/daemon call failed →
+  pre-rerank order, no `rerankScore` on hits) · `skipped` (≤1 candidate).
+
+A degraded call returns the plain answer — right for an interactive session,
+a silent confound for anything that compares calls. Deployments that need
+reproducibility pin the stages instead (see
+[docs/runbooks/experiment-freeze.md](../runbooks/experiment-freeze.md)):
+`WQM_QDRANT_EXACT_SEARCH=1` (brute-force instead of HNSW),
+`WQM_SEARCH_SCRATCHPAD_LANE=0` (no recall lane by default), `WQM_MCP_TOOLS`
+(advertised tool subset), `WQM_MCP_INSTRUCTIONS_FILE` (instructions override).
+
 #### retrieve
 
 Direct document access for chunk-by-chunk retrieval.
@@ -361,6 +382,21 @@ graph({
 - `hotspots`: most central symbols (PageRank)
 - `bridges`: bottleneck symbols on many shortest paths (betweenness)
 - `modules`: code clusters (community detection)
+
+**Determinism.** Every action is a function of the graph's CONTENT: node ids
+are content hashes, adjacency lists and sampled source sets are sorted, and
+every ranking breaks ties on `node_id` (`usages`/`impact` since #367:
+depth → confidence → node id). Two identical calls against an unchanged graph
+return byte-identical lists.
+
+**Budget-cut passes are labelled.** `bridges` and `modules` run under a
+20 s wall-clock budget. When it fires the daemon returns what it has and the
+response says so — `partial: true`, a leading `hint`, plus
+`sources_processed`/`sources_total` (bridges) or `iterations`/`converged`
+(modules). Such an answer is a load-dependent approximation: an identical call
+may return different scores and a different top-K. Discard it, or bound
+`bridges` with `maxSamples` ≤ `sources_processed` so every run walks the same
+(sorted) source set. `partial` is always present (`false` on a complete pass).
 
 **Use case:** "What calls this function?", "What breaks if I change X?", "What are the most central functions?" — answered from the daemon's relationship graph instead of inferring from search hits.
 
