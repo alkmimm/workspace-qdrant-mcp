@@ -423,6 +423,11 @@ services:
       # entirely, so the search path is byte-identical to today.
       WQM_TRANSLATE_BASE_URL: ${WQM_TRANSLATE_BASE_URL:-}
       WQM_TRANSLATE_MODEL: ${WQM_TRANSLATE_MODEL:-}
+      # Request deadline in ms; empty = the 3000 ms default sized for the GPU
+      # sidecar (~180 ms). The CPU sidecar (`llm-cpu`) answers in 1–4 s, and
+      # fail-open turns an over-tight deadline into "translation silently never
+      # runs" — so a deployment that moves the sidecar off the GPU MUST set this.
+      WQM_TRANSLATE_TIMEOUT_MS: ${WQM_TRANSLATE_TIMEOUT_MS:-}
       # "1" arms the second leg. Separate from the endpoint on purpose: the
       # sidecar can be up and reachable while the feature stays off, which is
       # what makes an A/B a container recreate rather than a redeploy.
@@ -665,6 +670,13 @@ services:
       - cpu
     environment:
       DO_NOT_TRACK: "1"
+      # PyTorch sizes its thread pool from the CPUs it can SEE, which is the
+      # host's full count regardless of the cgroup quota below — so without
+      # this it spawns 32 threads and time-slices them over 6 cores, which is
+      # slower than 6 threads AND still shows as a 32-way spike. Keep the two
+      # in step. (Measured: this standby hit 1214% CPU during a GPU failover.)
+      OMP_NUM_THREADS: "${WQM_EMBEDDINGS_CPU_CORES:-6}"
+      MKL_NUM_THREADS: "${WQM_EMBEDDINGS_CPU_CORES:-6}"
     healthcheck:
       test:
         [
@@ -679,6 +691,19 @@ services:
       - infinity_data:/app/.cache
     networks:
       - workspace-network
+    # This is the WARM STANDBY. Its job is to keep indexing alive while the GPU
+    # endpoint is unavailable — not to be fast. Uncapped, a failover hands it
+    # every batch and Infinity-on-CPU takes every core on the host: measured at
+    # 1214% (12 cores) on a 32-core machine while the GPU sat at 15%, and the
+    # user's own work stalled. Six cores is enough to drain a backlog at a
+    # tolerable rate; the daemon returns to the GPU within ~60 s of recovery.
+    # Memory is model weights (anon, not page cache), so a hard cap is safe
+    # here — the memexd caveat about cache-driven OOM loops does not apply.
+    deploy:
+      resources:
+        limits:
+          cpus: "${WQM_EMBEDDINGS_CPU_CORES:-6}"
+          memory: 8g
     profiles:
       - embeddings-cpu
 
@@ -730,6 +755,12 @@ services:
       - workspace-network
     deploy:
       resources:
+        # The work is on the GPU; the CPU side is tokenisation and I/O, which
+        # a few cores cover (measured 15% while the CPU standby was at 1214%).
+        # Memory is weights + CUDA host buffers — anon, so a hard cap is safe.
+        limits:
+          cpus: "4"
+          memory: 8g
         reservations:
           devices:
             - driver: nvidia
@@ -797,6 +828,15 @@ services:
       - workspace-network
     deploy:
       resources:
+        # llama-server offloads layers to the GPU; what stays on CPU is the
+        # sampler and any layers that did not fit. Six cores keeps a partial
+        # CPU fallback usable without taking the machine. The GGUF is mmap'd
+        # (~5.3 GB of file cache for the 7B Q4) — that is reclaimable and is
+        # NOT what a hard limit should be sized for; 12g covers the mapped
+        # model plus KV cache and leaves headroom.
+        limits:
+          cpus: "6"
+          memory: 12g
         reservations:
           devices:
             - driver: nvidia
@@ -804,6 +844,80 @@ services:
               capabilities: [gpu]
     profiles:
       - llm-gpu
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Translation LLM on CPU — the same model, no VRAM.
+  #
+  # Translation only RUNS during a non-English search, but a GPU-resident model
+  # is RESIDENT all day: measured 96% VRAM at 1% GPU utilisation with zero
+  # translation requests in the preceding five minutes. With embeddings and the
+  # reranker on the same 16 GB card there was no headroom, an embedding burst
+  # spilled CUDA allocations to host memory, and WSL backed that spill with
+  # commit the `.wslconfig` cap does not govern — vmmemWSL reached 188 GB
+  # private on a 127 GB host and the machine paged itself to a halt.
+  #
+  # On CPU the model is an mmap'd file (reclaimable page cache, ~5.3 GB) and
+  # idle costs nothing. The price is latency: seconds per translation rather
+  # than ~180 ms. Acceptable for an infrequent, non-English-only leg — BUT the
+  # MCP's translation timeout must be widened to match (WQM_TRANSLATE_TIMEOUT_MS)
+  # or fail-open turns the feature off silently. The 7B is required: the 1.5B
+  # measurably fails at following the instruction (echoes/answers in PT).
+  #
+  # Swap in docker/.env: replace `llm-gpu` with `llm-cpu` in COMPOSE_PROFILES
+  # and point WQM_TRANSLATE_BASE_URL at http://wqm-llm-cpu:8080. Keep `llm-gpu`
+  # for benchmark runs where latency is under measurement.
+  # ─────────────────────────────────────────────────────────────────────────
+  llm-cpu:
+    image: ${WQM_LLM_CPU_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    container_name: wqm-llm-cpu
+    <<: *restart
+    logging: *default-logging
+    command:
+      - -hf
+      - ${WQM_TRANSLATE_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --n-gpu-layers
+      - "0"
+      # Threads = the cgroup quota below. llama.cpp defaults to every core it
+      # can see, which is the host's 32 regardless of the quota — the same
+      # oversubscription the CPU embedding standby showed at 1214%.
+      - --threads
+      - "${WQM_LLM_CPU_THREADS:-12}"
+      - --ctx-size
+      - "2048"
+      - --parallel
+      - "2"
+    environment:
+      LLAMA_CACHE: /models
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:8080/health || exit 1",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 300s
+    volumes:
+      - llm_data:/models
+    networks:
+      - workspace-network
+    deploy:
+      resources:
+        # Twelve cores makes a 7B Q4 answer a short translation in ~1–3 s on
+        # this host; fewer stretches it past a usable timeout, more takes the
+        # machine from the person using it. Memory is the mmap'd GGUF plus KV
+        # cache; the model pages are actively touched during inference, so
+        # they are resident for the call, and 12g leaves room for that.
+        limits:
+          cpus: "${WQM_LLM_CPU_THREADS:-12}"
+          memory: 12g
+    profiles:
+      - llm-cpu
 
 # ── Networks ─────────────────────────────────────────────────────────────────
 
