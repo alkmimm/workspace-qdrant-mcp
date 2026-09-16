@@ -356,6 +356,22 @@ impl ServerInstance {
             command.env(key, value);
         }
 
+        // Last-resort ownership: if this `Child` is ever dropped without an
+        // explicit stop — an instance replaced in the registry map, an error
+        // path, a future refactor — the OS process dies with the handle instead
+        // of living on as an orphan under memexd. Measured before this: the
+        // daemon reported 5 active servers while 10 language-server processes
+        // sat directly under it, the other 5 unreachable by anything.
+        command.kill_on_drop(true);
+
+        // Own process group, so a stop can take the server's CHILDREN with it.
+        // typescript-language-server forks a tsserver pair; pyright and
+        // bash-language-server fork workers. Killing only the direct child
+        // reparents those to init inside the container, where nothing ever
+        // reaps them.
+        #[cfg(unix)]
+        command.process_group(0);
+
         let child = command.spawn()?;
 
         Ok(child)
@@ -396,9 +412,24 @@ impl ServerInstance {
         // Wait for graceful shutdown
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        // Force kill if still running
+        // Force kill if still running — the whole process GROUP, not just the
+        // direct child. The server was spawned as its own group leader (see
+        // `spawn_process`), so its forked workers (tsserver pairs, pyright and
+        // bash-ls workers) share the group id and go down with it. `child.kill()`
+        // alone reparents them to init inside the container, where nothing reaps
+        // them; that is how tsserver processes outlived every restart.
         let mut process_guard = self.process.lock().await;
         if let Some(mut child) = process_guard.take() {
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                // Negative pid addresses the group. Best-effort: the group may
+                // already be gone, and a failure here must not block the stop.
+                // SAFETY: plain libc call with a validated argument; no memory
+                // is shared or aliased.
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+            }
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
@@ -662,5 +693,127 @@ mod tests {
 
         // Verify it was set
         assert_eq!(instance.working_directory(), project_root);
+    }
+
+    /// True while `pid` exists (signal 0 probes without delivering). Zombies
+    /// count as existing, so callers reap first where that matters.
+    #[cfg(unix)]
+    fn pid_exists(pid: u32) -> bool {
+        // SAFETY: kill(2) with signal 0 only checks for existence and permission.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    /// Spawn a server that forks a long-lived worker and reports the worker's
+    /// pid on stdout, the way typescript-language-server forks tsserver. Uses
+    /// `spawn_process` — the real path — so the group and drop settings under
+    /// test are the ones production uses.
+    #[cfg(unix)]
+    async fn spawn_forking_server() -> (
+        ServerInstance,
+        tokio::process::Child,
+        u32,
+        tempfile::TempDir,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::AsyncBufReadExt;
+
+        // A script rather than `sh -c`: launch args come from the server NAME
+        // (`server_launch_args`), and an unknown name gets `--stdio`, which the
+        // script simply receives as `$1` and ignores.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("forking-fake");
+        // Fork a sleeper, print its pid, then wait — the parent stays alive
+        // like a real server would.
+        std::fs::write(&script, "#!/bin/sh\nsleep 300 & echo $!; wait\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let detected = DetectedServer {
+            name: "forking-fake".to_string(),
+            path: script,
+            languages: vec![Language::TypeScript],
+            version: None,
+            capabilities: ServerCapabilities::default(),
+            priority: 1,
+        };
+        let instance = ServerInstance::new(detected, LspConfig::default())
+            .await
+            .unwrap();
+        let mut child = instance.spawn_process().await.unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let grandchild: u32 = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("forking server must print its worker pid within 5s")
+            .unwrap()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        (instance, child, grandchild, dir)
+    }
+
+    /// The orphan leak (C): a replaced or dropped instance used to leave its
+    /// process running under memexd — 10 processes for 5 tracked servers,
+    /// measured. `kill_on_drop` makes that impossible by construction.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_the_handle_kills_the_process() {
+        let (_instance, child, _grandchild, _dir) = spawn_forking_server().await;
+        let pid = child.id().unwrap();
+        assert!(pid_exists(pid), "server must be running before the drop");
+
+        drop(child);
+
+        // The kill is asynchronous to the drop; give the OS a moment.
+        for _ in 0..50 {
+            if !pid_exists(pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // A killed-but-unreaped child shows as a zombie, which `kill(0)` still
+        // sees. Distinguish "alive" from "zombie" via /proc before failing.
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        assert!(
+            state.contains(") Z ") || !pid_exists(pid),
+            "dropped Child must not leave a RUNNING process (pid {pid} state: {state})"
+        );
+    }
+
+    /// The grandchild leak: `stop_process` used to kill only the direct child,
+    /// so the workers a server forked were reparented to init and lived on —
+    /// that is how tsserver processes survived every restart. With the server
+    /// as its own group leader, the stop takes the group.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_process_kills_the_forked_grandchild_too() {
+        let (mut instance, child, grandchild, _dir) = spawn_forking_server().await;
+        let pid = child.id().unwrap();
+        *instance.process.lock().await = Some(child);
+        assert!(
+            pid_exists(grandchild),
+            "worker must be alive before the stop"
+        );
+
+        instance.stop_process().await.unwrap();
+
+        assert!(
+            !pid_exists(pid) || {
+                let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+                s.contains(") Z ")
+            }
+        );
+        // The grandchild is reparented to init on the parent's death and is
+        // NOT reaped by us; a running one is the leak, a zombie is not.
+        for _ in 0..50 {
+            let s = std::fs::read_to_string(format!("/proc/{grandchild}/stat")).unwrap_or_default();
+            if s.is_empty() || s.contains(") Z ") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!(
+            "forked worker {grandchild} survived stop_process — the process-group kill regressed"
+        );
     }
 }

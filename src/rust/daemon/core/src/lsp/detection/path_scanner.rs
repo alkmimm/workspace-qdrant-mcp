@@ -154,6 +154,11 @@ async fn get_server_version(path: &Path, version_args: &[&str]) -> Option<String
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null())
+        // The timeout below is there precisely for a server that ignores
+        // `--version` and starts serving on stdio. Without this, hitting the
+        // timeout drops the `Child` and LEAVES THAT SERVER RUNNING — one
+        // orphan per detection pass, forever, doing nothing.
+        .kill_on_drop(true)
         .spawn()
         .ok()?;
 

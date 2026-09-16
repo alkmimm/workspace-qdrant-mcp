@@ -63,6 +63,37 @@ impl LanguageServerManager {
             }
         }
 
+        // A stale instance (Failed / Stopped / Degraded) is still holding an OS
+        // process. `register_server` below overwrites the map entry, and until
+        // this step existed that overwrite was the ONLY thing that happened to
+        // the old instance: its handle was dropped, its process was not killed,
+        // and it lived on as an orphan under memexd. Measured: 5 tracked servers,
+        // 10 processes. Take it out of the map and shut it down first, so a
+        // replacement never coexists with what it replaces.
+        let stale = {
+            let mut instances = self.instances.write().await;
+            instances.remove(&key)
+        };
+        if let Some(stale) = stale {
+            tracing::info!(
+                project_id = project_id,
+                language = ?language,
+                "Shutting down stale server instance before starting a replacement"
+            );
+            let mut inst = stale.lock().await;
+            if let Err(e) = inst.shutdown().await {
+                // Not fatal: kill_on_drop + the process-group kill in
+                // stop_process make a leak impossible even if the graceful
+                // path errors. Say so, then proceed.
+                tracing::warn!(
+                    project_id = project_id,
+                    language = ?language,
+                    error = %e,
+                    "Stale server shutdown reported an error; proceeding (process is force-killed on drop)"
+                );
+            }
+        }
+
         // Global fan-out guard: LSP servers are multi-GB each, so cap the TOTAL
         // running across all projects. Without this, N active projects × M
         // languages eagerly spawn N×M heavyweight processes and exhaust host

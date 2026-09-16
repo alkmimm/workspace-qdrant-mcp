@@ -80,6 +80,11 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.memexd
+      args:
+        # Cap cargo's parallelism on a workstation (see the ARG in the
+        # Dockerfile). Unset = `default` = every core. Cargo rejects "", so the
+        # fallback here must be the literal word, never empty.
+        CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-default}
     image: workspace-qdrant-mcp-memexd:local
     container_name: wqm-memexd
     # Explicit command override: the entrypoint VALIDATES /etc/wqm/config.yaml
