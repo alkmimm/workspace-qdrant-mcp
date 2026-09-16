@@ -16,6 +16,12 @@ import { effectivenessTracker } from '../clients/effectiveness-signals.js';
 import { createQueryTranslatorFromEnv, type QueryTranslator } from '../clients/query-translator.js';
 import { fuseQueryLegs } from './search-query-fusion.js';
 import { resolveTranslatedQuery } from './search-translated-leg.js';
+
+/** Record how the translation leg ended on the outgoing response, keeping the
+ *  rerank outcome finalizeResults already stamped for that leg. */
+function stampTranslation(response: SearchResponse, outcome: TranslationOutcome): void {
+  response.pipeline = { ...(response.pipeline ?? { rerank: 'off' }), translation: outcome };
+}
 import { recordTranslatedLegHits, recordTranslatedLegSkipped } from '../telemetry/metrics.js';
 import { logInfo } from '../utils/logger.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
@@ -45,6 +51,7 @@ import type {
   SearchToolConfig,
   ParentContext,
   SearchResult,
+  TranslationOutcome,
 } from './search-types.js';
 import {
   DEFAULT_LIMIT,
@@ -74,6 +81,7 @@ import {
   generateEmbeddings,
   searchAllCollections,
   searchScratchpadLane,
+  scratchpadLaneEnabled,
   finalizeResults,
   reconcileNextOffset,
   unresolvedProjectResponse,
@@ -408,6 +416,11 @@ export class SearchTool {
     const primaryPromise = runFinalize(effectiveOptions, fallbackBranch);
     const translation = await translationPromise;
 
+    // How the second leg ended, stamped on whatever response goes out below.
+    // `reason` covers the gates; a leg that was produced and then dropped for a
+    // degraded embedding is its own outcome, because "translated" would claim
+    // a fusion that never happened.
+    let translationOutcome: TranslationOutcome = translation.reason;
     let primary: SearchResponse;
     if (translation.query === null) {
       primary = await primaryPromise;
@@ -431,6 +444,7 @@ export class SearchTool {
       // hits reads as a useless feature.
       if ('fallback' in translatedEmbeddings) {
         recordTranslatedLegSkipped();
+        translationOutcome = 'leg-skipped';
       } else {
         const translatedLeg = await this.runSearchAndFinalize(
           translatedOptions,
@@ -487,6 +501,7 @@ export class SearchTool {
         };
       }
     }
+    stampTranslation(primary, translationOutcome);
 
     // Auto-widen on empty (parity with grep / search_exact): a branch-scoped
     // semantic search that finds nothing may be missing content the daemon
@@ -515,6 +530,7 @@ export class SearchTool {
         // done: this fires only when the fused result was already empty, and it
         // would double the cost of an already-degraded path.
         if (translation.query !== null) widened.translated_query = translation.query;
+        stampTranslation(widened, translationOutcome);
         return widened;
       }
     }
@@ -610,7 +626,7 @@ export class SearchTool {
     const laneProjectId =
       scope === 'project' &&
       !options.collection &&
-      options.includeScratchpad !== false &&
+      scratchpadLaneEnabled(options.includeScratchpad) &&
       offset === 0
         ? currentProjectId
         : undefined;

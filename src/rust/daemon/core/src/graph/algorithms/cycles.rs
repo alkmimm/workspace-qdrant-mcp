@@ -195,11 +195,21 @@ pub async fn detect_cycles(
         });
     }
 
-    // Cross-file cycles first (the valuable ones), then larger first.
+    // Cross-file cycles first (the valuable ones), then larger first. Tarjan
+    // emits SCCs in an order that depends on the (sorted) DFS start, which is
+    // stable — but only by construction; the tiebreak on the first member
+    // (members are file/name-sorted above) makes the top_k cut a stated
+    // property of the result rather than a side effect of the traversal.
     cycles.sort_by(|a, b| {
         b.cross_file
             .cmp(&a.cross_file)
             .then_with(|| b.members.len().cmp(&a.members.len()))
+            .then_with(|| {
+                let fa = a.members.first();
+                let fb = b.members.first();
+                fa.map(|m| (&m.file_path, &m.symbol_name))
+                    .cmp(&fb.map(|m| (&m.file_path, &m.symbol_name)))
+            })
     });
 
     info!(

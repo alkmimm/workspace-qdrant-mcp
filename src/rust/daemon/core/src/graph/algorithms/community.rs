@@ -48,6 +48,27 @@ impl Default for CommunityConfig {
 /// it — past this budget we stop and return the current (partial) labelling.
 const LP_TIME_BUDGET: Duration = Duration::from_secs(20);
 
+/// How the label-propagation pass ended. `budget_hit` is the fact a caller
+/// must see: a labelling the time budget interrupted is a snapshot of an
+/// unfinished iteration, and how far it got depends on machine load — so two
+/// identical calls need not return the same clusters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabelPropagationOutcome {
+    /// Iterations completed (a budget-interrupted iteration is not counted).
+    pub iterations: usize,
+    /// True when an iteration changed no label (the labelling is a fixpoint).
+    pub converged: bool,
+    /// True when the wall-clock budget stopped the pass before convergence.
+    pub budget_hit: bool,
+}
+
+/// Communities plus the provenance of the pass that produced them.
+#[derive(Debug, Clone)]
+pub struct CommunityReport {
+    pub communities: Vec<Community>,
+    pub outcome: LabelPropagationOutcome,
+}
+
 /// Detect communities using label propagation algorithm.
 ///
 /// Each node starts with a unique label. In each iteration, each node adopts the
@@ -64,11 +85,33 @@ pub async fn detect_communities(
     config: &CommunityConfig,
     edge_types: Option<&[&str]>,
 ) -> Result<Vec<Community>, sqlx::Error> {
+    detect_communities_report(pool, tenant_id, config, edge_types, LP_TIME_BUDGET)
+        .await
+        .map(|r| r.communities)
+}
+
+/// [`detect_communities`] with the pass outcome attached. The budget is a
+/// parameter so a test can drive the interrupted path with `Duration::ZERO`
+/// instead of constructing a graph that oscillates for 20 s.
+pub async fn detect_communities_report(
+    pool: &SqlitePool,
+    tenant_id: &str,
+    config: &CommunityConfig,
+    edge_types: Option<&[&str]>,
+    budget: Duration,
+) -> Result<CommunityReport, sqlx::Error> {
     let graph =
         load_adjacency_graph(pool, tenant_id, edge_types, GenericityFilter::All, false).await?;
 
     if graph.nodes.is_empty() {
-        return Ok(Vec::new());
+        return Ok(CommunityReport {
+            communities: Vec::new(),
+            outcome: LabelPropagationOutcome {
+                iterations: 0,
+                converged: true,
+                budget_hit: false,
+            },
+        });
     }
 
     // Intern node ids → dense indices. Sorted so the labelling is deterministic
@@ -82,17 +125,24 @@ pub async fn detect_communities(
         .collect();
 
     let neighbors = build_index_neighbors(&graph.outgoing, &id_to_idx);
-    let labels = run_label_propagation(&neighbors, config.max_iterations, tenant_id);
+    let (labels, outcome) =
+        run_label_propagation(&neighbors, config.max_iterations, tenant_id, budget);
     let communities =
         assemble_communities(&labels, &idx_to_id, &graph.nodes, config.min_community_size);
 
     info!(
         tenant_id,
         communities = communities.len(),
+        iterations = outcome.iterations,
+        converged = outcome.converged,
+        budget_hit = outcome.budget_hit,
         "Community detection complete"
     );
 
-    Ok(communities)
+    Ok(CommunityReport {
+        communities,
+        outcome,
+    })
 }
 
 /// Build an undirected adjacency list over dense node indices from the directed
@@ -127,21 +177,28 @@ fn build_index_neighbors(
 }
 
 /// Run label-propagation over integer-indexed adjacency until convergence,
-/// `max_iterations`, or [`LP_TIME_BUDGET`] (whichever comes first). Returns the
-/// label assigned to each node index.
+/// `max_iterations`, or `budget` (whichever comes first). Returns the label
+/// assigned to each node index plus how the pass ended.
 fn run_label_propagation(
     neighbors: &[Vec<usize>],
     max_iterations: usize,
     tenant_id: &str,
-) -> Vec<u32> {
+    budget: Duration,
+) -> (Vec<u32>, LabelPropagationOutcome) {
     let n = neighbors.len();
     let mut labels: Vec<u32> = (0..n as u32).collect();
     let start = Instant::now();
     // Reused across nodes/iterations to avoid a per-node allocation.
     let mut counts: HashMap<u32, usize> = HashMap::new();
+    let mut outcome = LabelPropagationOutcome {
+        iterations: 0,
+        converged: false,
+        budget_hit: false,
+    };
 
     for iteration in 0..max_iterations {
-        if start.elapsed() >= LP_TIME_BUDGET {
+        if start.elapsed() >= budget {
+            outcome.budget_hit = true;
             warn!(
                 tenant_id,
                 iterations = iteration,
@@ -171,7 +228,9 @@ fn run_label_propagation(
                 changed = true;
             }
         }
+        outcome.iterations = iteration + 1;
         if !changed {
+            outcome.converged = true;
             debug!(
                 tenant_id,
                 iterations = iteration + 1,
@@ -180,7 +239,7 @@ fn run_label_propagation(
             break;
         }
     }
-    labels
+    (labels, outcome)
 }
 
 /// Group labeled node indices into Community values and sort by size descending.
@@ -207,7 +266,13 @@ fn assemble_communities(
         .into_values()
         .filter(|m| m.len() >= min_size)
         .map(|mut m| {
-            m.sort_by(|a, b| a.symbol_name.cmp(&b.symbol_name));
+            // Symbol name first (what a reader scans), node id to settle the
+            // homonyms — `Clone` impls alone appear dozens of times.
+            m.sort_by(|a, b| {
+                a.symbol_name
+                    .cmp(&b.symbol_name)
+                    .then_with(|| a.node_id.cmp(&b.node_id))
+            });
             Community {
                 community_id: 0,
                 members: m,
@@ -215,11 +280,29 @@ fn assemble_communities(
         })
         .collect();
 
-    communities.sort_by_key(|c| std::cmp::Reverse(c.members.len()));
+    // `groups` is a HashMap, so equal-size communities arrived in an arbitrary
+    // order and a size-only (stable) sort kept it — the community_id numbering
+    // and the top_k cut then changed between calls. The smallest member node id
+    // is a content-defined key that every community has.
+    communities.sort_by(|a, b| {
+        b.members
+            .len()
+            .cmp(&a.members.len())
+            .then_with(|| min_node_id(a).cmp(min_node_id(b)))
+    });
     for (i, c) in communities.iter_mut().enumerate() {
         c.community_id = i as u32;
     }
     communities
+}
+
+/// Smallest member node id — the content-defined identity of a community.
+fn min_node_id(c: &Community) -> &str {
+    c.members
+        .iter()
+        .map(|m| m.node_id.as_str())
+        .min()
+        .unwrap_or("")
 }
 
 #[cfg(test)]
@@ -262,7 +345,8 @@ mod tests {
     #[test]
     fn lp_separates_two_disjoint_triangles() {
         let nb = nbrs_from_edges(6, &[(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5)]);
-        let labels = run_label_propagation(&nb, 50, "t");
+        let (labels, outcome) = run_label_propagation(&nb, 50, "t", LP_TIME_BUDGET);
+        assert!(outcome.converged && !outcome.budget_hit);
         assert_eq!(labels[0], labels[1]);
         assert_eq!(labels[1], labels[2]);
         assert_eq!(labels[3], labels[4]);
@@ -288,10 +372,25 @@ mod tests {
             edges.push((a, a + 2));
         }
         let nb = nbrs_from_edges(TRIS * 3, &edges);
-        let labels = run_label_propagation(&nb, 50, "t");
+        let (labels, _) = run_label_propagation(&nb, 50, "t", LP_TIME_BUDGET);
         assert_eq!(labels[0], labels[2], "triangle members share a label");
         assert_ne!(labels[0], labels[3], "distinct triangles differ");
         let distinct: std::collections::HashSet<u32> = labels.iter().copied().collect();
         assert_eq!(distinct.len(), TRIS, "one community per triangle");
+    }
+
+    /// A pass the budget stops must SAY so: the labelling it returns is a
+    /// snapshot whose depth depends on machine load, and a caller comparing two
+    /// calls has to be able to tell "converged" from "interrupted".
+    #[test]
+    fn lp_zero_budget_reports_budget_hit_not_convergence() {
+        let nb = nbrs_from_edges(6, &[(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5)]);
+        let (labels, outcome) = run_label_propagation(&nb, 50, "t", Duration::ZERO);
+        assert!(outcome.budget_hit, "zero budget must be reported as hit");
+        assert!(!outcome.converged);
+        assert_eq!(outcome.iterations, 0, "no iteration completed");
+        // The initial (unique-label) state is what comes back: nothing merged.
+        let distinct: std::collections::HashSet<u32> = labels.iter().copied().collect();
+        assert_eq!(distinct.len(), 6);
     }
 }

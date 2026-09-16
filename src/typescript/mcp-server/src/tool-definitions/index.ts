@@ -67,6 +67,54 @@ export interface McpToolDefinition {
 }
 
 /**
+ * Env var: comma-separated tool names this deployment EXPOSES. Unset/empty =
+ * every tool. Names not in the catalog are ignored (with a warning), so a typo
+ * narrows the surface rather than silently widening it back to everything.
+ *
+ * Why: the catalog is ~53 KB of JSON (~15k tokens) and its `instructions`
+ * steer the agent toward `search` and `graph` by name. A deployment that
+ * wants to offer ONLY a lexical surface (grep/list/retrieve), or a semantic
+ * one without the graph, could not: a client-side allowlist blocks the CALLS
+ * but the agent still sees, reads and reasons about every tool. Exposing a
+ * subset at the server is what makes "condition B = lexical only" a property
+ * of the deployment instead of a hope about agent behaviour.
+ */
+export const MCP_TOOLS_ENV = 'WQM_MCP_TOOLS';
+
+/** Parse `WQM_MCP_TOOLS`; `undefined` means "expose everything". */
+export function exposedToolNames(
+  env: Record<string, string | undefined> = process.env
+): Set<string> | undefined {
+  const raw = (env[MCP_TOOLS_ENV] ?? '').trim();
+  if (raw.length === 0) return undefined;
+  return new Set(
+    raw
+      .split(',')
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0)
+  );
+}
+
+/**
+ * The tool definitions this deployment advertises: the full catalog, narrowed
+ * by `WQM_MCP_TOOLS` when set. Returns the unknown names too, so the caller can
+ * log them once instead of every ListTools.
+ */
+export function getExposedToolDefinitions(env: Record<string, string | undefined> = process.env): {
+  tools: McpToolDefinition[];
+  unknown: string[];
+} {
+  const all = getToolDefinitions();
+  const allow = exposedToolNames(env);
+  if (!allow) return { tools: all, unknown: [] };
+  const known = new Set(all.map((t) => t.name));
+  return {
+    tools: all.filter((t) => allow.has(t.name)),
+    unknown: [...allow].filter((n) => !known.has(n)).sort(),
+  };
+}
+
+/**
  * Returns the full list of tool definitions for the ListTools MCP response
  */
 export function getToolDefinitions(): McpToolDefinition[] {

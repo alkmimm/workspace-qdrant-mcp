@@ -277,6 +277,36 @@ export interface IndexingProgress {
   eta_seconds?: number;
 }
 
+/** How the query-translation leg ended (see search-translated-leg.ts). */
+export type TranslationOutcome =
+  | 'disabled'
+  | 'no-translator'
+  | 'already-english'
+  | 'translation-failed'
+  | 'translated'
+  /** A translation was produced but its embedding degraded to a fallback
+   *  provider, so the leg was dropped and the single-leg answer returned. */
+  | 'leg-skipped';
+
+/** How the cross-encoder rerank ended for this response. */
+export type RerankOutcome =
+  /** Rerank disabled (deployment default or per-call `rerank:false` / weight 0). */
+  | 'off'
+  /** The reranker scored the pool and its blend decided the order. */
+  | 'applied'
+  /** Rerank was ON but the daemon/sidecar call failed or returned nothing —
+   *  the pre-rerank order stands. The hits carry no `rerankScore`. */
+  | 'failed'
+  /** Nothing to rerank (0 or 1 candidate). */
+  | 'skipped';
+
+export interface SearchPipelineReport {
+  /** Absent on responses that never pass through the translation gate
+   *  (exact mode); stamped by the orchestrator on every ranked search. */
+  translation?: TranslationOutcome;
+  rerank: RerankOutcome;
+}
+
 export interface SearchResponse {
   results: SearchResult[];
   total: number;
@@ -317,6 +347,13 @@ export interface SearchResponse {
    *  translation was attempted and rejected. Surfaced so a caller can see that
    *  its results are a fusion of two queries — and which one. */
   translated_query?: string;
+  /** Which OPTIONAL ranking stages actually ran on THIS response. Every stage
+   *  here fails OPEN (a timeout or a dead sidecar degrades the pipeline and
+   *  returns the plain answer), which is right for an interactive session and
+   *  wrong for any comparison across calls: two byte-identical requests can be
+   *  served by different pipelines depending on machine load, and without this
+   *  field nothing in the response says so. Always present on a ranked search. */
+  pipeline?: SearchPipelineReport;
   /** Set when more code candidates exist beyond the returned page — pass it back
    *  as `offset` to fetch the next page. Absent on the last page. */
   next_offset?: number;

@@ -9,8 +9,13 @@ mod cycles;
 mod pagerank;
 mod test_gaps;
 
-pub use betweenness::{compute_betweenness_centrality, BetweennessEntry};
-pub use community::{detect_communities, Community, CommunityConfig, CommunityMember};
+pub use betweenness::{
+    compute_betweenness_centrality, compute_betweenness_report, BetweennessEntry, BetweennessReport,
+};
+pub use community::{
+    detect_communities, detect_communities_report, Community, CommunityConfig, CommunityMember,
+    CommunityReport, LabelPropagationOutcome,
+};
 pub use cycles::{detect_cycles, Cycle, CycleMember, CycleReport};
 pub use pagerank::{compute_pagerank, PageRankConfig, PageRankEntry};
 pub use test_gaps::{detect_test_gaps, TestGap, TestGapsReport};
@@ -461,6 +466,19 @@ pub(super) async fn load_adjacency_graph(
         }
         outgoing.entry(src.clone()).or_default().push(tgt.clone());
         incoming.entry(tgt).or_default().push(src);
+    }
+
+    // Content-defined adjacency order. The edge SELECT above has no ORDER BY, so
+    // each neighbour list came back in SQLite scan order — stable for one
+    // database file, but not a property of the graph: two indexes built from
+    // the same commit can store the same edges in a different physical order.
+    // PageRank sums a node's predecessors in list order (floating-point
+    // addition is not associative, so the order leaks into the last bits of
+    // every score) and Brandes accumulates path counts in neighbour order.
+    // Sorting here, once, makes every algorithm downstream a function of the
+    // graph's CONTENT (node ids are content hashes) rather than of the file.
+    for list in outgoing.values_mut().chain(incoming.values_mut()) {
+        list.sort_unstable();
     }
 
     debug!(

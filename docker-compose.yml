@@ -448,6 +448,15 @@ services:
       # p=0.14. Set to `rrf` to trade those ranks back for one query that
       # slides 5->9 under best-rank.
       WQM_TRANSLATE_FUSION: ${WQM_TRANSLATE_FUSION:-}
+      # Measurement-freeze knobs (all off/empty by default; see
+      # docs/runbooks/experiment-freeze.md and docker/.env.example). Exact
+      # vector search instead of HNSW, scratchpad recall lane default, the
+      # advertised tool subset, and an instructions-file override — the four
+      # things a benchmark has to pin that an interactive session wants loose.
+      WQM_QDRANT_EXACT_SEARCH: ${WQM_QDRANT_EXACT_SEARCH:-}
+      WQM_SEARCH_SCRATCHPAD_LANE: ${WQM_SEARCH_SCRATCHPAD_LANE:-}
+      WQM_MCP_TOOLS: ${WQM_MCP_TOOLS:-}
+      WQM_MCP_INSTRUCTIONS_FILE: ${WQM_MCP_INSTRUCTIONS_FILE:-}
       # Trust the bind-mounted repo: git's "dubious ownership" check
       # otherwise rejects every command because the bind mount preserves
       # host uids that don't match the container's `node` user.

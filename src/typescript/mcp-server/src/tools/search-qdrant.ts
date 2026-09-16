@@ -21,6 +21,29 @@ import {
 import { buildFilter } from './search-filters.js';
 import { FIELD_CONTENT, FIELD_TITLE, FIELD_PARENT_UNIT_ID } from '../common/native-bridge.js';
 
+/** Env var: `1` makes every vector search EXACT (brute-force) instead of ANN. */
+export const QDRANT_EXACT_SEARCH_ENV = 'WQM_QDRANT_EXACT_SEARCH';
+
+/**
+ * Qdrant `params` for the vector legs, or `undefined` for the collection
+ * defaults (HNSW, approximate).
+ *
+ * Why a deployment knob: HNSW is a randomized structure. The graph Qdrant
+ * builds for the same points differs between builds and is rebuilt by the
+ * background optimizer as segments merge, so a query's nearest-neighbour set
+ * is a property of the index's PHYSICAL state, not of its content — two
+ * indexes of the same commit, or one index before and after an optimizer
+ * pass, can return different top-k for the same vector. Exact search removes
+ * that variable at the cost of latency, which is the right trade for a
+ * measurement that must be reproducible (a benchmark, an experiment) and the
+ * wrong one for an interactive session; hence a knob, off by default.
+ */
+export function qdrantSearchParams(
+  env: Record<string, string | undefined> = process.env
+): { exact: boolean } | undefined {
+  return (env[QDRANT_EXACT_SEARCH_ENV] ?? '').trim() === '1' ? { exact: true } : undefined;
+}
+
 /** Map a Qdrant search hit to a SearchResult. */
 function hitToResult(
   hit: { id: string | number; score: number; payload?: Record<string, unknown> | null },
@@ -53,6 +76,7 @@ async function searchDense(
       score_threshold: number;
       with_payload: boolean;
       filter?: Record<string, unknown>;
+      params?: { exact: boolean };
     } = {
       vector: { name: DENSE_VECTOR_NAME, vector: params.denseEmbedding },
       limit: params.limit,
@@ -60,6 +84,8 @@ async function searchDense(
       with_payload: true,
     };
     if (params.filter) req.filter = params.filter;
+    const searchParams = qdrantSearchParams();
+    if (searchParams) req.params = searchParams;
     const hits = await qdrantClient.search(params.collection, req);
     return hits.map((h) => hitToResult(h, params.collection, 'semantic'));
   } catch {
@@ -83,6 +109,7 @@ async function searchSparse(
       score_threshold: number;
       with_payload: boolean;
       filter?: Record<string, unknown>;
+      params?: { exact: boolean };
     } = {
       vector: { name: SPARSE_VECTOR_NAME, vector: { indices, values } },
       limit: params.limit,
@@ -90,6 +117,8 @@ async function searchSparse(
       with_payload: true,
     };
     if (params.filter) req.filter = params.filter;
+    const searchParams = qdrantSearchParams();
+    if (searchParams) req.params = searchParams;
     const hits = await qdrantClient.search(params.collection, req);
     return hits.map((h) => hitToResult(h, params.collection, 'keyword'));
   } catch {

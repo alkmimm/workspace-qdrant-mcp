@@ -182,6 +182,15 @@ export interface CommunityResponse {
   communities: CommunityProto[];
   total_communities: number;
   query_time_ms: number;
+  /** Label propagation stopped on its wall-clock budget before converging: the
+   *  clusters are a load-dependent snapshot, not a fixpoint, and two identical
+   *  calls need not agree. Absent on the wire from a daemon that predates the
+   *  field (proto3 omits false). */
+  partial?: boolean;
+  /** Label-propagation iterations completed. */
+  iterations?: number;
+  /** True when an iteration changed no label. */
+  converged?: boolean;
 }
 
 export interface BetweennessRequest {
@@ -203,6 +212,13 @@ export interface BetweennessResponse {
   entries: BetweennessNodeProto[];
   total: number;
   query_time_ms: number;
+  /** The Brandes loop stopped on its wall-clock budget: scores are an
+   *  approximation over `sources_processed` of `sources_total` sorted sources,
+   *  and the cut point depends on machine load — two identical calls need not
+   *  agree. Absent on the wire from a daemon that predates the field. */
+  partial?: boolean;
+  sources_processed?: number;
+  sources_total?: number;
 }
 
 export interface CycleRequest {

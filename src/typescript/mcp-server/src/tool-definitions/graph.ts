@@ -16,6 +16,14 @@ export const graphToolDefinition = {
     'Use this to understand how code connects before editing — e.g. "what calls this function?", "what breaks if I change X?", "what are the most central functions?". ' +
     'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules/cycles/test_gaps → none (project-wide). ' +
     'Each relations/impact/usages node carries a `confidence` (best-path certainty): ~1.0 precise, 0.7 tenant-unique name, ~1/N (e.g. 0.17) an ambiguous same-name fan-out; pass `minConfidence` (e.g. 0.5) to suppress the low-confidence homonym noise.',
+  // Defaults are stated in each `description`, NEVER as the JSON-Schema
+  // `default` keyword. This was the one tool that used the keyword, and at
+  // least one MCP client (Claude Code desktop, 2026-09) compiles `default`
+  // into a NON-optional field — every call that omitted symbolType / maxHops /
+  // topK / minSize / memberLimit was rejected with "Input validation error:
+  // expected nonoptional, received undefined" before it reached this server.
+  // The other tools only ever described their defaults, and never hit it.
+  // tests/tool-definitions.test.ts pins this for every tool.
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -33,7 +41,7 @@ export const graphToolDefinition = {
           'test_gaps',
         ],
         description:
-          'stats: node/edge counts. relations: a symbol\'s dependencies (calls/uses-type/imports/inheritance) — excludes CONTAINS membership by default, so a large class returns its dependencies, not its member list (pass edgeTypes:["CONTAINS"] to list members). impact: transitive change blast-radius (direct + indirect dependents). usages: DIRECT references only (1-hop "find references"). hotspots: most central symbols (PageRank). bridges: bottleneck symbols on many shortest paths (betweenness). modules: code clusters. cycles: circular dependencies (Tarjan SCC over CALLS/IMPORTS) — CROSS-FILE cycles are returned FIRST as they are the layering smells (e.g. repository <-> service); same-file cycles are usually benign mutual recursion. Zero cycles means none among the CALLS/IMPORTS edges that were EXTRACTED: dynamic dispatch, string-keyed DI, and generated-code references are not edges, so it is not proof that no circular coupling exists. Symbols that too many callers resolve to are excluded BEFORE detection and cannot appear in any cycle — that is what keeps a call on an SDK type (`List.add`, `Iterable.map`) from resolving to a same-named user symbol and fabricating a cross-file cycle, which the confidence gate cannot catch because a tenant-unique name scores 0.7. `suppressed_ubiquitous` reports how many were dropped; when it is non-zero a `hint` says so, and genuine high-traffic utilities are dropped by the same rule. test_gaps: production symbols NO test reaches over the call graph — ranked by production_dependents (most-relied-on untested code first), with total_production/covered/gap_count. This is call-graph REACHABILITY from test code (an approximation), NOT execution coverage. Tests are detected by file path AND by symbol — Rust INLINE #[cfg(test)] / #[test] unit tests (which share a production file) ARE counted, alongside TS/JS separate test files and tests/ dirs (a tenant must be re-indexed after the schema bump for inline tests to register). A gap whose only test edge is below the graph 0.6 ambiguity gate can still read as untested. Use it to prioritize where tests are missing, then confirm with a coverage tool. When the repo has indexed tests but almost none of them resolve into production code (DI containers, path-aliased imports, dynamic dispatch), the measurement is broken rather than alarming — the response then carries a `hint` saying so, and the gap ranking must be discarded, not acted on; `test_nodes` reports how many test symbols seeded the walk. The OVERALL ratio carries little signal on its own (a repo full of misclassified gaps measured 27.7% against a healthy repo\'s 28.3%): read `coverage_by_language` and judge each stack on its own row — a language with many `test_nodes` and near-zero coverage is an extractor blind spot, not untested code, and the same `hint` names it. An idiom that REFERENCES a symbol without invoking it yields no edge (Flutter\'s `find.byType(Widget)` asserts on a type without constructing it), so the most-asserted primitives can rank as the most critical gaps. `excluded_non_production` counts tooling (`scripts/`) dropped from the denominator. Default: \'stats\'.',
+          "stats: node/edge counts. relations: a symbol's dependencies (calls/uses-type/imports/inheritance) — excludes CONTAINS membership by default, so a large class returns its dependencies, not its member list (pass edgeTypes:[\"CONTAINS\"] to list members). impact: transitive change blast-radius (direct + indirect dependents). usages: DIRECT references only (1-hop \"find references\"). hotspots: most central symbols (PageRank). bridges: bottleneck symbols on many shortest paths (betweenness). modules: code clusters. cycles: circular dependencies (Tarjan SCC over CALLS/IMPORTS) — CROSS-FILE cycles are returned FIRST as they are the layering smells (e.g. repository <-> service); same-file cycles are usually benign mutual recursion. Zero cycles means none among the CALLS/IMPORTS edges that were EXTRACTED: dynamic dispatch, string-keyed DI, and generated-code references are not edges, so it is not proof that no circular coupling exists. Symbols that too many callers resolve to are excluded BEFORE detection and cannot appear in any cycle — that is what keeps a call on an SDK type (`List.add`, `Iterable.map`) from resolving to a same-named user symbol and fabricating a cross-file cycle, which the confidence gate cannot catch because a tenant-unique name scores 0.7. `suppressed_ubiquitous` reports how many were dropped; when it is non-zero a `hint` says so, and genuine high-traffic utilities are dropped by the same rule. test_gaps: production symbols NO test reaches over the call graph — ranked by production_dependents (most-relied-on untested code first), with total_production/covered/gap_count. This is call-graph REACHABILITY from test code (an approximation), NOT execution coverage. Tests are detected by file path AND by symbol — Rust INLINE #[cfg(test)] / #[test] unit tests (which share a production file) ARE counted, alongside TS/JS separate test files and tests/ dirs (a tenant must be re-indexed after the schema bump for inline tests to register). A gap whose only test edge is below the graph 0.6 ambiguity gate can still read as untested. Use it to prioritize where tests are missing, then confirm with a coverage tool. When the repo has indexed tests but almost none of them resolve into production code (DI containers, path-aliased imports, dynamic dispatch), the measurement is broken rather than alarming — the response then carries a `hint` saying so, and the gap ranking must be discarded, not acted on; `test_nodes` reports how many test symbols seeded the walk. The OVERALL ratio carries little signal on its own (a repo full of misclassified gaps measured 27.7% against a healthy repo's 28.3%): read `coverage_by_language` and judge each stack on its own row — a language with many `test_nodes` and near-zero coverage is an extractor blind spot, not untested code, and the same `hint` names it. An idiom that REFERENCES a symbol without invoking it yields no edge (Flutter's `find.byType(Widget)` asserts on a type without constructing it), so the most-asserted primitives can rank as the most critical gaps. `excluded_non_production` counts tooling (`scripts/`) dropped from the denominator. Default: 'stats'.",
       },
       symbol: {
         type: 'string',
@@ -46,18 +54,15 @@ export const graphToolDefinition = {
       },
       symbolType: {
         type: 'string',
-        default: 'function',
         description:
           "Symbol kind for 'relations' node lookup. Valid: function, async_function, method, struct, class, enum, interface, trait, type_alias, constant, module, macro, impl. Default: 'function'. If it doesn't match what the indexer stored (e.g. an async fn is 'async_function', not 'function'), relations now falls back to resolving the node by NAME — so a wrong symbolType no longer silently returns 0.",
       },
       maxHops: {
         type: 'number',
-        default: 1,
         description: "Traversal depth for 'relations' (1-5, default 1).",
       },
       topK: {
         type: 'number',
-        default: 20,
         description:
           "Max results: top symbols for 'hotspots'/'bridges', top-K largest clusters for 'modules', top-K cycles for 'cycles' (cross-file first; all default 20), and max nodes returned for 'impact'/'usages'/'relations' (nearest-first, default 50; 0 = all — the true total is still reported; when minConfidence is set, totals count the filtered set).",
       },
@@ -73,13 +78,11 @@ export const graphToolDefinition = {
       },
       minSize: {
         type: 'number',
-        default: 2,
         description:
           "Minimum size for 'modules' (community members) and 'cycles' (SCC members; pass 1 to include single-node self-recursion). Default 2.",
       },
       memberLimit: {
         type: 'number',
-        default: 10,
         description:
           "For 'modules': members listed per community (default 10). Each community also reports its true `member_count`; the largest clusters hold thousands of members, so this keeps the response agent-sized. Use 0 for all members.",
       },

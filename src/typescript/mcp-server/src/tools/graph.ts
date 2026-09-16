@@ -136,6 +136,34 @@ async function resolveTenantIdentity(
  * DI, or generated-code references. Leading a caller to "nobody uses X" from a
  * graph 0 is the exact failure this prevents.
  */
+/**
+ * The caveat for a betweenness run the wall-clock budget cut short. Stated in
+ * terms the caller can ACT on: bound the work with `maxSamples` at or below
+ * the number of sources this run reached, and every run walks the same
+ * (sorted) source set — reproducible, if approximate.
+ */
+export function partialBetweennessHint(processed: number, total: number): string {
+  return (
+    `PARTIAL: the betweenness pass hit its time budget after ${processed} of ${total} ` +
+    `source nodes. These scores are an approximation whose cut point depends on machine ` +
+    `load, so an identical call can return different scores and a different top-K. ` +
+    `Do not compare this result across calls. For a reproducible (still approximate) ` +
+    `answer pass maxSamples at or below ${processed}; for an exact one, narrow the graph ` +
+    `with edgeTypes or run off-peak.`
+  );
+}
+
+/** The caveat for a community pass the budget interrupted before convergence. */
+export function partialCommunityHint(iterations: number): string {
+  return (
+    `PARTIAL: label propagation hit its time budget after ${iterations} completed ` +
+    `iteration(s) without converging. The clusters are a snapshot of an unfinished pass ` +
+    `whose depth depends on machine load, so an identical call can return different ` +
+    `communities. Do not compare this result across calls; narrow the graph with ` +
+    `edgeTypes or run off-peak for a converged answer.`
+  );
+}
+
 function graphNoEdgesHint(kind: 'usages' | 'impact' | 'relations'): string {
   const what =
     kind === 'relations'
@@ -419,7 +447,26 @@ async function dispatchGraphAction(
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
       };
       const r = await daemonClient.computeBetweenness(req);
-      return { success: true, action, tenant_id: tenant, ...r };
+      // A budget-cut run is NOT a smaller answer, it is a different one each
+      // time: which sources the loop reached before the clock ran out depends
+      // on machine load, and the scores (and the top_k boundary) move with it.
+      // Measured live on a 17k-node graph: two identical calls, both cut at
+      // ~20 s, every score different, last entry different — and nothing in
+      // the old response distinguished that from an exact result. Lead with
+      // the caveat so a reader sees it before the list it would act on.
+      const hint = r.partial
+        ? partialBetweennessHint(r.sources_processed ?? 0, r.sources_total ?? 0)
+        : undefined;
+      return {
+        success: true,
+        action,
+        tenant_id: tenant,
+        ...(hint !== undefined ? { hint } : {}),
+        ...r,
+        // Always present so a caller can assert on it without a presence check
+        // (proto3 drops a false bool from the wire).
+        partial: r.partial === true,
+      };
     }
 
     case 'cycles': {
@@ -517,13 +564,21 @@ async function dispatchGraphAction(
           members: memberLimit > 0 ? members.slice(0, memberLimit) : members,
         };
       });
+      // Same contract as `bridges`: a labelling the budget interrupted is a
+      // load-dependent snapshot, and the caller must be told before the list.
+      const partial = r.partial === true;
+      const hint = partial ? partialCommunityHint(r.iterations ?? 0) : undefined;
       return {
         success: true,
         action,
         tenant_id: tenant,
+        ...(hint !== undefined ? { hint } : {}),
         total_communities: r.total_communities,
         query_time_ms: r.query_time_ms,
         member_limit: memberLimit,
+        partial,
+        ...(r.iterations !== undefined ? { iterations: r.iterations } : {}),
+        ...(r.converged !== undefined ? { converged: r.converged } : {}),
         communities,
       };
     }
