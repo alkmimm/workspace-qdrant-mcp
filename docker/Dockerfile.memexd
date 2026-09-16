@@ -489,6 +489,35 @@ libtest exits 0 when a positional filter matches nothing, so a rename would sile
 un-gate the ordering that decides WHICH results a caller ever sees. If you ADDED a \
 test here, bump this count."; exit 1; }
 
+# Graph-WIDE result determinism runs here (the same defect class as #367, one
+# door over): hotspots / bridges / modules each iterated a HashMap on the path
+# that decides which entries sit at the top_k boundary — the sampled source set
+# (bridges), the floating-point summation order (hotspots), equal-size community
+# order (modules) — and bridges/modules stop on a wall-clock budget whose cut
+# point depends on machine load. Measured live: two identical `bridges` calls,
+# both cut at ~20 s, every score different, last entry different, nothing in
+# the response saying so. These pin sorted sources, node-id tiebreaks, bit-
+# identical repeats, and that a budget-cut pass REPORTS itself as partial
+# (the interrupted path is driven with Duration::ZERO, so it is hermetic).
+# Same filter discipline as above: NAMES only, exact count asserted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        betweenness_sampled_sources_are_sorted_and_repeats_are_bit_identical \
+        betweenness_zero_budget_reports_budget_hit_with_finite_scores \
+        pagerank_repeats_are_bit_identical_and_ties_are_node_id_ordered \
+        communities_equal_size_order_is_by_smallest_node_id_and_repeatable \
+        communities_zero_budget_reports_budget_hit \
+        lp_zero_budget_reports_budget_hit_not_convergence \
+        --test-threads=4 2>&1 | tee /tmp/graph-wide-determinism.log; \
+    grep -q "^test result: ok\. 6 passed" /tmp/graph-wide-determinism.log \
+    || { echo "GATE: expected exactly 6 graph-wide determinism tests to run and pass — \
+libtest exits 0 when a positional filter matches nothing, so a rename would silently \
+un-gate the ordering AND the partial-result flag of hotspots/bridges/modules. If you \
+ADDED a test here, bump this count."; exit 1; }
+
 # Dependency-cycle precision runs here: hermetic (in-memory SQLite, no
 # embeddings, no network) and it guards a defect that produced confident,
 # well-formed, entirely fictional output. A method call on a receiver typed by

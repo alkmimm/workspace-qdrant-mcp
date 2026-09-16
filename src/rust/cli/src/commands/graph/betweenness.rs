@@ -43,6 +43,17 @@ pub async fn betweenness(
         return Ok(());
     }
 
+    // Same caveat the MCP tool leads with: a budget-cut run is a load-dependent
+    // approximation, not a smaller exact answer, so say so BEFORE the table.
+    if resp.partial {
+        output::warning(format!(
+            "PARTIAL: the time budget stopped the pass after {} of {} source nodes; \
+             scores are approximate and an identical run may differ. Pass --max-samples {} \
+             or lower for a reproducible source set.",
+            resp.sources_processed, resp.sources_total, resp.sources_processed
+        ));
+    }
+
     println!("{:<10} {:<30} {:<12} FILE", "SCORE", "SYMBOL", "TYPE");
     for e in &resp.entries {
         let loc = if e.file_path.is_empty() {

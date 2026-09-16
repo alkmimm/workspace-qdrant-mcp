@@ -3,7 +3,7 @@
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 use workspace_qdrant_core::graph::algorithms::{
-    compute_betweenness_centrality, compute_pagerank, detect_communities, detect_cycles,
+    compute_betweenness_report, compute_pagerank, detect_communities_report, detect_cycles,
     detect_test_gaps, CommunityConfig, PageRankConfig,
 };
 use workspace_qdrant_core::graph::EdgeType;
@@ -21,6 +21,15 @@ use crate::validation::extract_relative_path;
 
 use super::helpers::{parse_edge_type_filter, retain_min_confidence};
 use super::service_impl::GraphServiceImpl;
+
+/// Wall-clock budgets for the graph-wide passes. They live HERE, at the gRPC
+/// boundary, because they are a property of the call (the client-side timeout
+/// they must undercut), not of the algorithm: the core functions take the
+/// budget as a parameter so a test can drive the interrupted path with
+/// `Duration::ZERO`. Whichever way a pass ends, the response says so
+/// (`partial`), so a load-dependent cut is never read as a complete answer.
+const BETWEENNESS_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+const COMMUNITY_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[tonic::async_trait]
 impl GraphService for GraphServiceImpl {
@@ -432,8 +441,18 @@ impl GraphService for GraphServiceImpl {
         let guard = self.graph_store.read().await;
         let pool = guard.pool();
 
-        match detect_communities(pool, &req.tenant_id, &config, edge_refs.as_deref()).await {
-            Ok(mut communities) => {
+        match detect_communities_report(
+            pool,
+            &req.tenant_id,
+            &config,
+            edge_refs.as_deref(),
+            COMMUNITY_TIME_BUDGET,
+        )
+        .await
+        {
+            Ok(report) => {
+                let outcome = report.outcome;
+                let mut communities = report.communities;
                 let total_communities = communities.len() as u32;
 
                 // Return only the top K largest communities when requested.
@@ -488,6 +507,9 @@ impl GraphService for GraphServiceImpl {
                     communities: proto_communities,
                     total_communities,
                     query_time_ms,
+                    partial: outcome.budget_hit,
+                    iterations: outcome.iterations as u32,
+                    converged: outcome.converged,
                 }))
             }
             Err(e) => {
@@ -528,15 +550,17 @@ impl GraphService for GraphServiceImpl {
         let guard = self.graph_store.read().await;
         let pool = guard.pool();
 
-        match compute_betweenness_centrality(
+        match compute_betweenness_report(
             pool,
             &req.tenant_id,
             edge_refs.as_deref(),
             max_samples,
+            BETWEENNESS_TIME_BUDGET,
         )
         .await
         {
-            Ok(mut entries) => {
+            Ok(report) => {
+                let mut entries = report.entries;
                 let total = entries.len() as u32;
 
                 if let Some(k) = req.top_k {
@@ -562,6 +586,9 @@ impl GraphService for GraphServiceImpl {
                     entries: proto_entries,
                     total,
                     query_time_ms,
+                    partial: report.budget_hit,
+                    sources_processed: report.sources_processed as u32,
+                    sources_total: report.sources_total as u32,
                 }))
             }
             Err(e) => {

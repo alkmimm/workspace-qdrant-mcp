@@ -47,6 +47,16 @@ pub async fn communities(
         return Ok(());
     }
 
+    // Same caveat the MCP tool leads with: an interrupted labelling is a
+    // load-dependent snapshot, not a converged clustering.
+    if resp.partial {
+        output::warning(format!(
+            "PARTIAL: the time budget stopped label propagation after {} iteration(s) \
+             without converging; an identical run may return different communities.",
+            resp.iterations
+        ));
+    }
+
     for c in &resp.communities {
         println!(
             "\nCommunity {} ({} members):",

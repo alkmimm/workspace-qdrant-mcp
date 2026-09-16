@@ -55,7 +55,14 @@ pub async fn compute_pagerank(
         return Ok(Vec::new());
     }
 
-    let node_ids: Vec<&String> = graph.nodes.keys().collect();
+    // Sorted: the iteration below sums the dangling mass and inserts scores in
+    // this order, and floating-point addition is not associative — with the
+    // HashMap's per-instance order the same graph produced scores that differed
+    // in the last bits on every call (measured live: two identical `hotspots`
+    // calls, same top-30 order, every score different at the 15th digit). A
+    // near-tie at the top_k boundary is then decided by luck.
+    let mut node_ids: Vec<&String> = graph.nodes.keys().collect();
+    node_ids.sort_unstable();
     let scores = run_pagerank_iterations(&graph, &node_ids, config, tenant_id);
     let results = build_pagerank_results(scores, &graph, tenant_id);
     Ok(results)
@@ -160,10 +167,15 @@ fn build_pagerank_results(
         })
         .collect();
 
+    // Exact ties are common (every leaf of one hub scores the same), and the
+    // input is a HashMap's order, so a score-only sort would still hand a
+    // different tied node to the top_k boundary per call. Node id is a content
+    // hash — the tiebreaker that ties the cut to the graph, not the process.
     results.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.node_id.cmp(&b.node_id))
     });
     info!(
         tenant_id,

@@ -678,3 +678,199 @@ async fn test_load_adjacency_drops_use_ubiquitous_node() {
     assert!(usage_only.nodes.contains_key("norm"));
     assert_eq!(usage_only.suppressed_ubiquitous, 1);
 }
+
+// ─── Result determinism (the graph-wide actions) ─────────────────────
+//
+// `usages`/`impact` got their determinism gate in #367/#371. These cover the
+// graph-WIDE actions the same defect class reached through a different door:
+// every one of them iterated a `HashMap` somewhere on the path that decides
+// WHICH entries sit at the top_k boundary — sampled sources (bridges), the
+// floating-point summation order (hotspots), equal-size community order
+// (modules). `RandomState` reseeds per map instance, so a handful of repeats in
+// one process is enough to expose the reordering.
+
+/// Hub + leaves + a tail: the leaves all score exactly 0.0 (a tie the sort must
+/// settle by node id), and `max_samples: 3` makes the SOURCE SET the thing
+/// under test — with `HashMap` order it was a different three sources on every
+/// call, and the scores moved with it.
+async fn build_hub_with_tail(pool: &SqlitePool) {
+    insert_node(pool, "t1", "hub", "hub", "function").await;
+    for leaf in ["l1", "l2", "l3", "l4", "l5", "l6"] {
+        insert_node(pool, "t1", leaf, leaf, "function").await;
+        insert_edge(pool, "t1", leaf, "hub", "CALLS").await;
+    }
+    insert_node(pool, "t1", "t1a", "t1a", "function").await;
+    insert_node(pool, "t1", "t1b", "t1b", "function").await;
+    insert_edge(pool, "t1", "hub", "t1a", "CALLS").await;
+    insert_edge(pool, "t1", "t1a", "t1b", "CALLS").await;
+}
+
+fn betweenness_signature(entries: &[BetweennessEntry]) -> Vec<(String, u64)> {
+    entries
+        .iter()
+        .map(|e| (e.node_id.clone(), e.score.to_bits()))
+        .collect()
+}
+
+#[tokio::test]
+async fn betweenness_sampled_sources_are_sorted_and_repeats_are_bit_identical() {
+    let pool = setup_graph_pool().await;
+    build_hub_with_tail(&pool).await;
+
+    let mut seen: Vec<Vec<(String, u64)>> = Vec::new();
+    for _ in 0..8 {
+        let report = compute_betweenness_report(
+            &pool,
+            "t1",
+            None,
+            Some(3),
+            std::time::Duration::from_secs(20),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.sources_total, 3);
+        assert_eq!(report.sources_processed, 3);
+        assert!(!report.budget_hit);
+        seen.push(betweenness_signature(&report.entries));
+    }
+    assert!(
+        seen.windows(2).all(|w| w[0] == w[1]),
+        "identical betweenness calls disagreed: {seen:?}"
+    );
+
+    // Tied scores (every leaf is 0.0) come back in node-id order — the cut at
+    // any top_k is then a property of the graph, not of the process.
+    let entries = &seen[0];
+    let zeros: Vec<&str> = entries
+        .iter()
+        .filter(|(_, bits)| *bits == 0.0f64.to_bits())
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let mut sorted = zeros.clone();
+    sorted.sort_unstable();
+    assert_eq!(zeros, sorted, "tied entries must be node-id ordered");
+}
+
+#[tokio::test]
+async fn betweenness_zero_budget_reports_budget_hit_with_finite_scores() {
+    let pool = setup_graph_pool().await;
+    build_hub_with_tail(&pool).await;
+
+    let report = compute_betweenness_report(&pool, "t1", None, None, std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(report.budget_hit, "a zero budget must be reported as hit");
+    assert_eq!(report.sources_processed, 0);
+    assert_eq!(report.sources_total, 9);
+    assert_eq!(report.entries.len(), 9, "every node is still listed");
+    assert!(
+        report.entries.iter().all(|e| e.score == 0.0),
+        "no source walked ⇒ every score is exactly 0.0, never NaN/inf: {:?}",
+        report.entries.iter().map(|e| e.score).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn pagerank_repeats_are_bit_identical_and_ties_are_node_id_ordered() {
+    let pool = setup_graph_pool().await;
+    build_hub_with_tail(&pool).await;
+    let config = PageRankConfig::default();
+
+    let mut seen: Vec<Vec<(String, u64)>> = Vec::new();
+    for _ in 0..8 {
+        let results = compute_pagerank(&pool, "t1", &config, None).await.unwrap();
+        seen.push(
+            results
+                .iter()
+                .map(|e| (e.node_id.clone(), e.score.to_bits()))
+                .collect(),
+        );
+    }
+    assert!(
+        seen.windows(2).all(|w| w[0] == w[1]),
+        "identical PageRank calls disagreed (summation order leaked): {seen:?}"
+    );
+
+    // The six leaves have no in-edges and identical names-per-count, so their
+    // scores tie exactly; the tie must resolve to node-id order.
+    let leaves: Vec<&str> = seen[0]
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .filter(|id| id.starts_with('l'))
+        .collect();
+    assert_eq!(leaves, vec!["l1", "l2", "l3", "l4", "l5", "l6"]);
+}
+
+#[tokio::test]
+async fn communities_equal_size_order_is_by_smallest_node_id_and_repeatable() {
+    let pool = setup_graph_pool().await;
+    // Two disjoint triangles of equal size: a size-only sort left their order
+    // to the HashMap that grouped them.
+    for id in ["p", "q", "r", "a", "b", "c"] {
+        insert_node(&pool, "t1", id, id, "function").await;
+    }
+    for (s, t) in [
+        ("p", "q"),
+        ("q", "r"),
+        ("r", "p"),
+        ("a", "b"),
+        ("b", "c"),
+        ("c", "a"),
+    ] {
+        insert_edge(&pool, "t1", s, t, "CALLS").await;
+    }
+    let config = CommunityConfig {
+        max_iterations: 50,
+        min_community_size: 2,
+    };
+
+    let mut seen: Vec<Vec<Vec<String>>> = Vec::new();
+    for _ in 0..8 {
+        let report = detect_communities_report(
+            &pool,
+            "t1",
+            &config,
+            None,
+            std::time::Duration::from_secs(20),
+        )
+        .await
+        .unwrap();
+        assert!(report.outcome.converged && !report.outcome.budget_hit);
+        seen.push(
+            report
+                .communities
+                .iter()
+                .map(|c| c.members.iter().map(|m| m.node_id.clone()).collect())
+                .collect(),
+        );
+    }
+    assert!(
+        seen.windows(2).all(|w| w[0] == w[1]),
+        "identical community calls disagreed on order: {seen:?}"
+    );
+    assert_eq!(seen[0].len(), 2);
+    assert_eq!(
+        seen[0][0],
+        vec!["a", "b", "c"],
+        "the community holding the smallest node id is community 0"
+    );
+    assert_eq!(seen[0][1], vec!["p", "q", "r"]);
+}
+
+#[tokio::test]
+async fn communities_zero_budget_reports_budget_hit() {
+    let pool = setup_graph_pool().await;
+    build_two_clusters(&pool).await;
+    let config = CommunityConfig::default();
+
+    let report = detect_communities_report(&pool, "t1", &config, None, std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(report.outcome.budget_hit);
+    assert!(!report.outcome.converged);
+    assert_eq!(report.outcome.iterations, 0);
+    assert!(
+        report.communities.is_empty(),
+        "nothing merged before the budget fired, so no community reaches min size 2"
+    );
+}

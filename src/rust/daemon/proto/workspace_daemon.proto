@@ -846,6 +846,13 @@ message CommunityResponse {
     repeated CommunityProto communities = 1;
     uint32 total_communities = 2;
     int64 query_time_ms = 3;
+    // Label propagation stopped on its wall-clock budget BEFORE converging: the
+    // clusters are a snapshot of an unfinished pass whose depth depends on
+    // machine load, so two identical calls need not agree. A caller comparing
+    // results across calls must treat a partial answer as unreliable.
+    bool partial = 4;
+    uint32 iterations = 5;                        // Label-propagation iterations completed
+    bool converged = 6;                           // True when a fixpoint was reached
 }
 
 // A detected community
@@ -876,6 +883,14 @@ message BetweennessResponse {
     repeated BetweennessNodeProto entries = 1;
     uint32 total = 2;
     int64 query_time_ms = 3;
+    // The Brandes loop stopped on its wall-clock budget: scores are an
+    // approximation over sources_processed of sources_total (sorted) sources,
+    // and the cut point depends on machine load — so two identical calls need
+    // not agree. Bound the work with max_samples <= sources_processed to make
+    // every run walk the same source set.
+    bool partial = 4;
+    uint32 sources_processed = 5;
+    uint32 sources_total = 6;
 }
 
 // A betweenness centrality score for a node
