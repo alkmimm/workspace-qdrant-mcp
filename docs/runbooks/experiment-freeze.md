@@ -192,8 +192,12 @@ on `memexd` in `docker-compose.yml`); these are:
   (never the others) when the VM footprint passes `VM_GUARD_STOP_GB` (70) or
   host free memory drops below `HOST_GUARD_MIN_FREE_GB` (16). Log:
   `.wqm-fork/logs/memory-guard.log`. `make stack-guard-stop` ends it.
-- Do not `redeploy` while other workloads share the VM; `stack-up` reuses the
-  built images and migrated databases without the copies.
+- `redeploy` no longer streams the databases through the cache unless it
+  must: the snapshot copy drops its pages as it goes (#393) and the migration
+  rehearsal first probes the new binary's schema targets on an empty
+  directory (~4 s) and skips the ~10 GiB copy when every live store is
+  already at target (`SKIP: memexd 49/49, search 10/10, graph 6/6`). What
+  remains is the image build; prefer `stack-up` when nothing changed.
 - Trim `COMPOSE_PROFILES`: `embeddings-cpu` (warm standby, 8 GiB cap) is
   unnecessary once the experiment pins one embedding backend.
 - The durable fix is `~/.wslconfig`: lower `memory=` (64 GB on a 127 GB host)

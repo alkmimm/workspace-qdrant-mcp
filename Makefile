@@ -232,17 +232,32 @@ backup-db: check-env
 	  --keep "$(DB_BACKUP_KEEP)" --rotate-dir /backup \
 	&& echo "backup: state/backups/pre-deploy-$$ts"
 
+# Copy-free first: the NEW binary is run `--migrate-only` on an EMPTY dir (~4 s,
+# a few hundred KiB) so it logs the schema versions it targets; those are
+# compared with the versions the LIVE databases record. Only when at least one
+# store would actually migrate — or the comparison is impossible — do we pay
+# for the ~10 GiB copy and rehearse on it. Most redeploys ship no schema
+# change, and on 2026-09-16 that unconditional copy was one of the two that
+# filled the WSL2 page cache to its ceiling and took the Windows host down.
 rehearse-migrations: check-env
 	@docker run --rm \
 	  -v "$(MEMEXD_DB_VOLUME)":/live:ro \
 	  -v "$(REPO)/scripts/migration-rehearsal-copy.py":/copy.py:ro \
+	  -v "$(REPO)/scripts/migration-rehearsal-needed.py":/needed.py:ro \
 	  --entrypoint sh "$(MEMEXD_IMAGE)" -c \
-	  'set -e; out=$$(python3 /copy.py /live /tmp/rehearsal); echo "$$out"; \
+	  'set -e; \
+	   if [ ! -f /live/memexd.db ]; then echo "SKIP: no memexd.db in source (fresh install — nothing to rehearse)"; exit 0; fi; \
+	   mkdir -p /tmp/probe; \
+	   WQM_DATABASE_PATH=/tmp/probe/memexd.db /usr/local/bin/memexd \
+	     --foreground --migrate-only > /tmp/probe.log 2>&1 || true; \
+	   need=$$(python3 /needed.py /live /tmp/probe.log); echo "$$need"; \
+	   if echo "$$need" | grep -q "^SKIP:"; then exit 0; fi; \
+	   out=$$(python3 /copy.py /live /tmp/rehearsal); echo "$$out"; \
 	   if echo "$$out" | grep -q "^SKIP:"; then exit 0; fi; \
 	   WQM_DATABASE_PATH=/tmp/rehearsal/memexd.db /usr/local/bin/memexd \
 	     --foreground --migrate-only 2>&1 | tee /tmp/rehearsal.out || true; \
 	   grep -q MIGRATIONS_OK /tmp/rehearsal.out'
-	@echo "rehearse-migrations: OK (new binary migrated a copy of the live DBs)"
+	@echo "rehearse-migrations: OK (schema already at target, or the new binary migrated a copy of the live DBs)"
 
 stack-up: check-env preflight
 	@cd "$(REPO)" && $(COMPOSE) up -d
