@@ -173,6 +173,33 @@ cost of each condition separately: the advertised catalog
 (`tools/list`, ~53 KB for the full 12 tools), the instructions, and any
 `rules list` the prompt asks for.
 
+## 7b. Host memory (WSL2) — the stack must never take the host down
+
+On 2026-09-16 the WSL2 VM sat at its `memory=96GB` ceiling for hours with
+50–61 GiB of **page cache** (processes never exceeded 17 GiB); the Windows
+host ran out, failed to page its own files (`InPageError`), froze the VM and
+rebooted — every other workload in the VM went down with this one. The cache
+came from `make redeploy` (two ~10 GiB database copies), container builds
+and the daemon's indexing I/O, and `autoMemoryReclaim=gradual` did not hand
+it back. Per-container `mem_limit` is deliberately not the tool (see the note
+on `memexd` in `docker-compose.yml`); these are:
+
+- `make preflight` — refuses to start when the Windows host has < 24 GB free,
+  the VM footprint (MemTotal−MemFree) is > 60 GB, the VM page cache is > 40 GB
+  or swap in use is > 8 GB (all `*_GB` env-tunable; `PREFLIGHT_SOFT=1` warns
+  instead). `stack-up` and `redeploy` run it first.
+- `make stack-guard` — background watchdog; stops **this** compose project
+  (never the others) when the VM footprint passes `VM_GUARD_STOP_GB` (70) or
+  host free memory drops below `HOST_GUARD_MIN_FREE_GB` (16). Log:
+  `.wqm-fork/logs/memory-guard.log`. `make stack-guard-stop` ends it.
+- Do not `redeploy` while other workloads share the VM; `stack-up` reuses the
+  built images and migrated databases without the copies.
+- Trim `COMPOSE_PROFILES`: `embeddings-cpu` (warm standby, 8 GiB cap) is
+  unnecessary once the experiment pins one embedding backend.
+- The durable fix is `~/.wslconfig`: lower `memory=` (64 GB on a 127 GB host)
+  and `autoMemoryReclaim=dropcache`; it needs `wsl --shutdown`, so schedule it
+  when nothing else runs in the VM.
+
 ## 8. Checklist
 
 - [ ] `make verify-deploy` green, commit recorded for mcp + memexd images
