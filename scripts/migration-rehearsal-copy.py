@@ -115,6 +115,41 @@ def preflight(src_dir: str, dest_parent: str, keep: int) -> int:
     return 0
 
 
+def drop_page_cache(path: str, flush: bool) -> None:
+    """Tell the kernel this file's pages can go (POSIX_FADV_DONTNEED).
+
+    Why this exists (2026-09-16 host incident): every `make redeploy` streams
+    the three databases through the page cache twice — once for the snapshot,
+    once for the migration rehearsal — ~10 GiB each way, and the cache keeps
+    them. Inside a WSL2 VM that cache is not free: the VM's footprint as the
+    Windows host sees it is Total−Free, so 50–60 GiB of cached copies held
+    the VM at its 96 GB ceiling for hours (`autoMemoryReclaim=gradual` did not
+    return it) and left the host too little for itself. The host started
+    failing to page in its own files (InPageError), froze the VM and finally
+    rebooted. Processes inside the VM never exceeded 17 GiB.
+
+    Dirty pages cannot be dropped, so the destination is fsync'ed first. On
+    the read-only source (a live database) this is advisory only. A missing
+    file or an OS without fadvise is not an error: this is hygiene, never a
+    reason to fail a backup.
+    """
+    fadvise = getattr(os, "posix_fadvise", None)
+    if fadvise is None or not os.path.exists(path):
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        if flush:
+            os.fsync(fd)
+        fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def copy_databases(src_dir: str, dest_dir: str) -> None:
     """SQLite-backup every present database into `dest_dir`."""
     os.makedirs(dest_dir, exist_ok=True)
@@ -123,14 +158,21 @@ def copy_databases(src_dir: str, dest_dir: str) -> None:
         if not os.path.exists(src_path):
             print(f"note: {name} absent in source; skipped")
             continue
+        dest_path = os.path.join(dest_dir, name)
         src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
-        dst = sqlite3.connect(os.path.join(dest_dir, name))
+        dst = sqlite3.connect(dest_path)
         try:
             src.backup(dst)
         finally:
             dst.close()
             src.close()
-        size = os.path.getsize(os.path.join(dest_dir, name))
+        # Release what the copy pulled into the page cache: the destination
+        # (flushed first) and the source pages the backup API read, WAL
+        # included — see drop_page_cache for why this is not optional.
+        drop_page_cache(dest_path, flush=True)
+        drop_page_cache(src_path, flush=False)
+        drop_page_cache(src_path + "-wal", flush=False)
+        size = os.path.getsize(dest_path)
         print(f"copied {name} -> {dest_dir} ({size} bytes)")
 
 
