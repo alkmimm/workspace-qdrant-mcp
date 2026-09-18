@@ -89,6 +89,15 @@ case "$fail" in
   0) echo "preflight: safe to start." ;;
   2) if [[ "$PREFLIGHT_SOFT" == "1" ]]; then echo "preflight: host unmeasurable, continuing (PREFLIGHT_SOFT=1)."; fail=0
      else echo "preflight: could not measure the host — refusing (set PREFLIGHT_SOFT=1 to override)."; fi ;;
-  *) echo "preflight: UNSAFE — not starting. Free host memory first (close what you can, or lower memory= in ~/.wslconfig and wsl --shutdown when the other workloads allow it)." ;;
+  *) if [[ "$PREFLIGHT_SOFT" == "1" ]]; then
+       # Downgrade EVERY threshold breach, not just the unmeasurable host: the
+       # VM-side numbers can be build residue (a `make validate` leaves ~50 GB
+       # of reclaimable cargo cache in the guest) while the host is fine, and
+       # the operator is the one who can tell. The watchdog stays the backstop.
+       echo "preflight: thresholds exceeded, continuing anyway (PREFLIGHT_SOFT=1) — the stack-guard watchdog is the remaining protection; run 'make stack-guard' if it is not up."
+       fail=0
+     else
+       echo "preflight: UNSAFE — not starting. Free host memory first (close what you can, or lower memory= in ~/.wslconfig and wsl --shutdown when the other workloads allow it). PREFLIGHT_SOFT=1 overrides."
+     fi ;;
 esac
 exit "$fail"
