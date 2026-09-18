@@ -631,3 +631,78 @@ async fn other_generation_exists_only_when_another_row_tracks_the_path() {
         "no generation left — cleanups may run"
     );
 }
+
+/// `content_hash_reusing_mtime` must answer from the index — no read, no hash —
+/// when a row for the path carries the file's current mtime, and must fall
+/// back to hashing the bytes when no row does. The recorded hash is a value
+/// SHA-256 could never produce, so returning it proves the file was not read.
+#[tokio::test]
+async fn test_content_hash_reusing_mtime_skips_read_when_mtime_matches() {
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let abs = tmp.path().join("lib.rs");
+    std::fs::write(&abs, "pub fn indexed_before() {}").unwrap();
+    let mtime_now = get_file_mtime(&abs).unwrap();
+    let real_hash = compute_file_hash(&abs).unwrap();
+
+    // No row yet → the bytes are hashed.
+    let (h, reused) = content_hash_reusing_mtime(&pool, "w1", "lib.rs", &abs)
+        .await
+        .unwrap();
+    assert_eq!(h, real_hash);
+    assert!(!reused, "nothing tracked → must hash");
+
+    // A row at this exact mtime (any branch) → its hash is reused verbatim.
+    insert_tracked_file(
+        &pool,
+        "w1",
+        "lib.rs",
+        Some("some-other-branch"),
+        Some("code"),
+        Some("rust"),
+        &mtime_now,
+        "recorded-not-a-sha",
+        1,
+        Some("tree_sitter"),
+        ProcessingStatus::Done,
+        ProcessingStatus::Done,
+        None,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let (h, reused) = content_hash_reusing_mtime(&pool, "w1", "lib.rs", &abs)
+        .await
+        .unwrap();
+    assert_eq!(
+        h, "recorded-not-a-sha",
+        "same mtime → recorded hash, file not read"
+    );
+    assert!(reused);
+
+    // Touch the file forward: the recorded mtime no longer matches → hash again.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&abs)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    let (h, reused) = content_hash_reusing_mtime(&pool, "w1", "lib.rs", &abs)
+        .await
+        .unwrap();
+    assert_eq!(h, real_hash, "changed mtime → the bytes decide");
+    assert!(!reused);
+
+    // A different path with the same mtime never matches (keyed by path).
+    let (h, reused) = content_hash_reusing_mtime(&pool, "w1", "other.rs", &abs)
+        .await
+        .unwrap();
+    assert_eq!(h, real_hash);
+    assert!(!reused);
+}

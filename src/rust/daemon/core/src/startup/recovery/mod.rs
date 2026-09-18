@@ -178,8 +178,9 @@ fn log_folder_recovery(
                 || s.files_to_update > 0
             {
                 info!(
-                    "Recovery for {} ({}): {} progressive scan(s), ~{} modified, -{} delete, x{} excluded, !{} errors",
+                    "Recovery for {} ({}): {} progressive scan(s), ~{} modified, ={} unchanged ({} by mtime, no read), -{} delete, x{} excluded, !{} errors",
                     watch_id, path, s.progressive_scans_enqueued, s.files_to_update,
+                    s.files_unchanged, s.files_unchanged_by_mtime,
                     s.files_to_delete, s.files_newly_excluded, s.errors
                 );
             } else {
@@ -270,7 +271,7 @@ async fn detect_deleted_files(
         std::time::Duration::from_millis(startup_config.startup_enqueue_batch_delay_ms);
     let mut enqueued_in_batch: usize = 0;
 
-    for (file_path, stored_hash) in &tracked {
+    for (file_path, stored_hash, stored_mtime) in &tracked {
         let abs_path = root.join(file_path);
         enqueued_in_batch += process_tracked_file(
             queue_manager,
@@ -280,6 +281,7 @@ async fn detect_deleted_files(
             &abs_path,
             file_path,
             stored_hash,
+            stored_mtime,
             reconcile_modified,
             stats,
         )
@@ -310,6 +312,7 @@ async fn process_tracked_file(
     abs_path: &Path,
     file_path: &str,
     stored_hash: &str,
+    stored_mtime: &str,
     reconcile_modified: bool,
     stats: &mut RecoveryStats,
 ) -> usize {
@@ -374,10 +377,26 @@ async fn process_tracked_file(
             }
         }
     } else if reconcile_modified {
-        // File still on disk and not excluded: re-hash and re-index when the
-        // content changed while the daemon was down (or in an inactive project,
-        // which live watch events skip). enqueue_file_op is idempotent, so this
-        // is a no-op when the watcher already queued the same edit.
+        // File still on disk and not excluded: re-index when the content changed
+        // while the daemon was down (or in an inactive project, which live watch
+        // events skip). enqueue_file_op is idempotent, so this is a no-op when
+        // the watcher already queued the same edit.
+        //
+        // mtime first, hash second. An mtime equal to the one recorded at
+        // ingest proves the content unchanged (same millisecond formatter as
+        // store_track; see content_hash_reusing_mtime) — a `stat`, not a read.
+        // Hashing every tracked file here was a full read of the corpus on
+        // every daemon start, and that churn is what grew the WSL2 VM past
+        // what the host could give it.
+        if !stored_mtime.is_empty()
+            && tracked_files_schema::get_file_mtime(abs_path)
+                .map(|now| now == stored_mtime)
+                .unwrap_or(false)
+        {
+            stats.files_unchanged += 1;
+            stats.files_unchanged_by_mtime += 1;
+            return 0;
+        }
         match wqm_common::hashing::compute_file_hash(abs_path) {
             Ok(on_disk_hash) if on_disk_hash != stored_hash => {
                 match enqueue_file_op(

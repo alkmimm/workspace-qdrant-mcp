@@ -248,8 +248,9 @@ async fn test_process_tracked_file_modified_enqueues_update() {
         tmp.path(),
         &abs,
         "src/main.rs",
-        "stale_old_hash", // differs from the on-disk content hash
-        true,             // reconcile_modified
+        "stale_old_hash",           // differs from the on-disk content hash
+        "1970-01-01T00:00:00.000Z", // stored mtime differs too → the hash path runs
+        true,                       // reconcile_modified
         &mut stats,
     )
     .await;
@@ -291,6 +292,7 @@ async fn test_process_tracked_file_unchanged_enqueues_nothing() {
         &abs,
         "src/main.rs",
         &on_disk,
+        "1970-01-01T00:00:00.000Z", // stale mtime → proven unchanged by HASH, not mtime
         true,
         &mut stats,
     )
@@ -298,6 +300,7 @@ async fn test_process_tracked_file_unchanged_enqueues_nothing() {
 
     assert_eq!(queued, 0);
     assert_eq!(stats.files_unchanged, 1);
+    assert_eq!(stats.files_unchanged_by_mtime, 0);
     assert_eq!(stats.files_to_update, 0);
 
     let count: i64 =
@@ -330,6 +333,7 @@ async fn test_process_tracked_file_modified_skipped_when_reconcile_off() {
         &abs,
         "src/main.rs",
         "stale_old_hash",
+        "1970-01-01T00:00:00.000Z",
         false, // reconcile_modified OFF
         &mut stats,
     )
@@ -338,4 +342,79 @@ async fn test_process_tracked_file_modified_skipped_when_reconcile_off() {
     assert_eq!(queued, 0);
     assert_eq!(stats.files_to_update, 0);
     assert_eq!(stats.files_unchanged, 0);
+}
+
+/// The mtime fast path: a tracked file whose recorded mtime equals the on-disk
+/// mtime is proven unchanged WITHOUT being read. The stored hash here is
+/// deliberately wrong — if the recovery had hashed the file it would have
+/// found a mismatch and enqueued an Update; counting it unchanged is only
+/// possible if the mtime alone settled it.
+#[tokio::test]
+async fn test_process_tracked_file_same_mtime_is_unchanged_without_hashing() {
+    let pool = create_test_pool().await;
+    setup_reconcile_tables(&pool).await;
+    let queue_manager = QueueManager::new(pool.clone());
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    let abs = tmp.path().join("src/main.rs");
+    std::fs::write(
+        &abs,
+        "fn main() { println!(\"content the index never saw\"); }",
+    )
+    .unwrap();
+    let mtime_now = crate::tracked_files_schema::get_file_mtime(&abs).unwrap();
+
+    let mut stats = RecoveryStats::default();
+    let queued = super::process_tracked_file(
+        &queue_manager,
+        "tenant-rc",
+        "projects",
+        tmp.path(),
+        &abs,
+        "src/main.rs",
+        "hash_that_does_not_match_the_bytes",
+        &mtime_now,
+        true,
+        &mut stats,
+    )
+    .await;
+
+    assert_eq!(queued, 0, "same mtime must not enqueue anything");
+    assert_eq!(stats.files_unchanged, 1);
+    assert_eq!(
+        stats.files_unchanged_by_mtime, 1,
+        "settled by mtime, not by a read"
+    );
+    assert_eq!(stats.files_to_update, 0);
+
+    // And an mtime that moved forward is NOT trusted: the hash runs, sees the
+    // mismatch, and the file is queued for update.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&abs)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    let mut stats = RecoveryStats::default();
+    let queued = super::process_tracked_file(
+        &queue_manager,
+        "tenant-rc",
+        "projects",
+        tmp.path(),
+        &abs,
+        "src/main.rs",
+        "hash_that_does_not_match_the_bytes",
+        &mtime_now,
+        true,
+        &mut stats,
+    )
+    .await;
+    assert_eq!(
+        queued, 1,
+        "a changed mtime falls through to the hash, which disagrees"
+    );
+    assert_eq!(stats.files_to_update, 1);
+    assert_eq!(stats.files_unchanged_by_mtime, 0);
 }

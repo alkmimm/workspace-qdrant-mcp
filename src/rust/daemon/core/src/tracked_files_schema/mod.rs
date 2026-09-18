@@ -30,12 +30,12 @@ pub use schema::{
 
 // Re-export pool-based operations
 pub use operations::{
-    compute_content_hash, compute_file_hash, compute_relative_path, delete_qdrant_chunks,
-    delete_tracked_file, get_chunk_point_ids, get_file_mtime, get_tracked_file_paths,
-    get_tracked_files_by_prefix, get_tracked_files_with_hashes, insert_qdrant_chunks,
-    insert_tracked_file, is_incremental, lookup_tracked_file, lookup_tracked_files_holding_branch,
-    lookup_watch_folder, other_generation_exists, remove_branch_from_tracked_file, set_incremental,
-    update_tracked_file,
+    compute_content_hash, compute_file_hash, compute_relative_path, content_hash_reusing_mtime,
+    delete_qdrant_chunks, delete_tracked_file, get_chunk_point_ids, get_file_mtime,
+    get_tracked_file_paths, get_tracked_files_by_prefix, get_tracked_files_with_hashes,
+    insert_qdrant_chunks, insert_tracked_file, is_incremental, lookup_tracked_file,
+    lookup_tracked_files_holding_branch, lookup_watch_folder, other_generation_exists,
+    remove_branch_from_tracked_file, set_incremental, update_tracked_file,
 };
 
 // Re-export transaction-aware operations

@@ -630,9 +630,18 @@ async fn prepare_update(
     // per-new-file round trip and a cross-branch over-delete on shared paths.
     defensive_delete_untracked: bool,
 ) -> UnifiedProcessorResult<UpdateAction> {
-    let new_hash = tracked_files_schema::compute_file_hash(file_path).map_err(|e| {
-        UnifiedProcessorError::ProcessingFailed(format!("Failed to hash file: {}", e))
-    })?;
+    // A `stat` + one SELECT when the index already holds this path at this
+    // exact mtime; a full read + SHA-256 only when it does not. Every
+    // re-walk, restart and worktree-membership pass funnels through here, and
+    // for those the answer is almost always "unchanged".
+    let (new_hash, _reused) = tracked_files_schema::content_hash_reusing_mtime(
+        pool,
+        watch_folder_id,
+        relative_path,
+        file_path,
+    )
+    .await
+    .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("Failed to hash file: {}", e)))?;
 
     if let Ok(Some(existing)) = tracked_files_schema::lookup_tracked_file(
         pool,
