@@ -109,6 +109,67 @@ pub fn get_file_mtime(path: &Path) -> std::io::Result<String> {
     Ok(timestamps::format_utc(&datetime))
 }
 
+/// The content hash of `abs_path`, WITHOUT reading the file whenever the
+/// index already proves it unchanged.
+///
+/// `tracked_files` records `file_mtime` (millisecond ISO-8601, written by
+/// `store_track` with the same formatter as [`get_file_mtime`]) next to the
+/// content hash. When a row for this `(watch_folder, relative_path)` — any
+/// branch, any content generation — carries exactly the mtime the file has NOW,
+/// its `file_hash` IS the file's hash: content cannot change without the
+/// mtime changing (the 10 s watcher debounce also rules out two writes inside
+/// one millisecond reaching the index as one). That turns the check into a
+/// `stat` plus one indexed SELECT.
+///
+/// Why this matters (2026-09-18): every daemon start re-hashed the whole
+/// corpus — the startup recovery walks every tracked file, the progressive
+/// scan re-enqueues every file as `add`, and worktree branch-membership
+/// reconciles enqueue every file of every linked worktree (33 worktrees ×
+/// ~4 650 files on one repo = ~150 000 items) — each one a full read of a
+/// file that turned out identical. Inside a WSL2 VM that churn is what the
+/// Windows host pays for (a 60 GB `vmmemWSL` for a stack whose processes
+/// held 17 GB), and on 2026-09-16 it took the host down.
+///
+/// Returns `(hash, reused)`; `reused` is true when no byte was read. Any
+/// lookup error falls back to hashing — the fast path is an optimisation,
+/// never a reason to fail an ingest.
+pub async fn content_hash_reusing_mtime(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    relative_path: &str,
+    abs_path: &Path,
+) -> std::io::Result<(String, bool)> {
+    if let Ok(mtime_now) = get_file_mtime(abs_path) {
+        let hit: Result<Option<String>, sqlx::Error> = sqlx::query_scalar(
+            "SELECT file_hash FROM tracked_files
+             WHERE watch_folder_id = ?1 AND relative_path = ?2 AND file_mtime = ?3
+             LIMIT 1",
+        )
+        .bind(watch_folder_id)
+        .bind(relative_path)
+        .bind(&mtime_now)
+        .fetch_optional(pool)
+        .await;
+        match hit {
+            Ok(Some(hash)) => {
+                tracing::debug!(
+                    "mtime fast path: {} unchanged since {} — reusing recorded hash",
+                    relative_path,
+                    mtime_now
+                );
+                return Ok((hash, true));
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!(
+                "mtime fast path lookup failed for {} ({}); hashing instead",
+                relative_path,
+                e
+            ),
+        }
+    }
+    compute_file_hash(abs_path).map(|h| (h, false))
+}
+
 /// Look up a watch_folder by tenant_id and collection, return (watch_id, path)
 pub async fn lookup_watch_folder(
     pool: &SqlitePool,
@@ -617,9 +678,12 @@ pub async fn get_tracked_file_paths(
 pub async fn get_tracked_files_with_hashes(
     pool: &SqlitePool,
     watch_folder_id: &str,
-) -> Result<Vec<(String, String)>, sqlx::Error> {
+) -> Result<Vec<(String, String, String)>, sqlx::Error> {
+    // `file_mtime` rides along so the startup recovery can prove a file
+    // unchanged with a `stat` instead of re-hashing it (see
+    // `content_hash_reusing_mtime` for why that read is the expensive part).
     let rows = sqlx::query(
-        "SELECT relative_path, file_hash FROM tracked_files WHERE watch_folder_id = ?1",
+        "SELECT relative_path, file_hash, file_mtime FROM tracked_files WHERE watch_folder_id = ?1",
     )
     .bind(watch_folder_id)
     .fetch_all(pool)
@@ -627,7 +691,13 @@ pub async fn get_tracked_files_with_hashes(
 
     Ok(rows
         .iter()
-        .map(|r| (r.get("relative_path"), r.get("file_hash")))
+        .map(|r| {
+            (
+                r.get("relative_path"),
+                r.get("file_hash"),
+                r.get::<Option<String>, _>("file_mtime").unwrap_or_default(),
+            )
+        })
         .collect())
 }
 

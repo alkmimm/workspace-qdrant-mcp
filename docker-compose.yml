@@ -906,6 +906,16 @@ services:
     environment:
       # Local stack — no anonymized telemetry.
       DO_NOT_TRACK: "1"
+      # Keep the CUDA caching allocator from growing to the card's edge. Under
+      # the daemon's ingest (12 concurrent requests x 32 chunks) Infinity's
+      # dynamic batches drove PyTorch's reserved VRAM to 15.6 of 16.3 GB, and a
+      # full card on WSL2 is not an OOM: the Windows driver's sysmem fallback
+      # backs the overflow with HOST RAM, invisible to the VM and charged to
+      # vmmemWSL (measured 2026-09-18: host free 27 GB while the VM reported
+      # 48 GB). expandable_segments stops fragmentation from pinning reserved
+      # memory; the GC threshold releases cached blocks once 60% of the
+      # device is reserved, so the allocator settles well below the edge.
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True,garbage_collection_threshold:0.6"
     healthcheck:
       test:
         [

@@ -11,6 +11,10 @@ pub struct RecoveryStats {
     pub files_to_update: u64,
     /// Number of files skipped (unchanged)
     pub files_unchanged: u64,
+    /// Of `files_unchanged`, how many were proven so by `file_mtime` alone —
+    /// a `stat`, no read, no hash. The number to watch when a restart is slow
+    /// or the VM's memory grows: it should be almost all of them.
+    pub files_unchanged_by_mtime: u64,
     /// Number of files routed to libraries collection (from project folders)
     pub files_routed_to_library: u64,
     /// Number of files now excluded (queued for deletion)

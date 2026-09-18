@@ -58,8 +58,18 @@ pub(super) async fn try_branch_dedup(
         return Ok(None);
     }
 
-    let file_hash = tracked_files_schema::compute_file_hash(file_path)
-        .map_err(|e| UnifiedProcessorError::ProcessingFailed(e.to_string()))?;
+    // Same mtime fast path as prepare_update (which already ran for this item
+    // and made the row hot): a worktree baseline pass reads the MAIN tree's
+    // copy of a file the index already tracks at this exact mtime, so this is
+    // the second full read the old code spent on a hash it already had.
+    let (file_hash, _reused) = tracked_files_schema::content_hash_reusing_mtime(
+        &ctx.pool,
+        watch_folder_id,
+        relative_path,
+        file_path,
+    )
+    .await
+    .map_err(|e| UnifiedProcessorError::ProcessingFailed(e.to_string()))?;
 
     // ── 1. Is this content already indexed (any branch)? ──
     // Layer 2 stage 2: one content-row per (watch, relative_path, file_hash). If

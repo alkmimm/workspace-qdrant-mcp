@@ -20,6 +20,7 @@ dev-debug.log
 *.db
 .wqm-fork/indexed-projects.json
 .wqm-fork/logs/
+.wqm-fork/memory-guard.pid
 .wqm-fork/observability/
 .wqm-fork/reports/
 .wqm-fork/metrics/
