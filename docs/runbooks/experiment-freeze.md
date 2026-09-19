@@ -185,24 +185,44 @@ it back. Per-container `mem_limit` is deliberately not the tool (see the note
 on `memexd` in `docker-compose.yml`); these are:
 
 - `make preflight` — refuses to start when the Windows host has < 24 GB free,
-  the VM footprint (MemTotal−MemFree) is > 60 GB, the VM page cache is > 40 GB
-  or swap in use is > 8 GB (all `*_GB` env-tunable; `PREFLIGHT_SOFT=1` warns
-  instead). `stack-up` and `redeploy` run it first.
+  the host is charged > 60 GB for the VM (the `vmmemWSL` working set — guest
+  page cache included until the guest idles long enough for
+  `autoMemoryReclaim` to return it; measured ≈ guest `MemTotal−MemFree` + 3–7
+  GB), or the guest's PSI `full avg60` is > 10 %. Without a host view it falls
+  back to the guest footprint (> 60 GB) and page cache (> 40 GB). Swap in use
+  is printed but never fails the check: `autoMemoryReclaim` swaps idle pages
+  out on purpose (8.8 GB after an idle night at PSI 0.06 %). All thresholds
+  are env-tunable; `PREFLIGHT_SOFT=1` turns every refusal into a warning (a
+  `make validate` leaves ~50 GB of reclaimable cargo cache that only the
+  operator can recognise as residue). `stack-up` and `redeploy` run it first.
 - `make stack-guard` — background watchdog; stops **this** compose project
-  (never the others) when the VM footprint passes `VM_GUARD_STOP_GB` (70) or
-  host free memory drops below `HOST_GUARD_MIN_FREE_GB` (16). Log:
-  `.wqm-fork/logs/memory-guard.log`. `make stack-guard-stop` ends it.
+  (never the others) when the host charge for the VM passes
+  `VM_GUARD_STOP_GB` (70; guest footprint when the host cannot be asked) or
+  host free memory drops below `HOST_GUARD_MIN_FREE_GB` (16), for 2 polls in
+  a row. Log: `.wqm-fork/logs/memory-guard.log`. `make stack-guard-stop` ends
+  it. Restart it after editing the scripts — it keeps the old code in memory.
 - `redeploy` no longer streams the databases through the cache unless it
   must: the snapshot copy drops its pages as it goes (#393) and the migration
   rehearsal first probes the new binary's schema targets on an empty
   directory (~4 s) and skips the ~10 GiB copy when every live store is
   already at target (`SKIP: memexd 49/49, search 10/10, graph 6/6`). What
   remains is the image build; prefer `stack-up` when nothing changed.
+- The daemon itself is the largest cache churner and is where the durable
+  fixes go: a restart no longer re-reads every tracked file (mtime fast path,
+  #397 — recovery, progressive-scan re-add and branch dedup all prove a file
+  unchanged by mtime before hashing it), and the GPU embedder's allocator is
+  capped so a full VRAM never spills into host memory
+  (`PYTORCH_CUDA_ALLOC_CONF`). Watch the recovery log line
+  `unchanged (N by mtime, no read)` after a restart.
 - Trim `COMPOSE_PROFILES`: `embeddings-cpu` (warm standby, 8 GiB cap) is
   unnecessary once the experiment pins one embedding backend.
-- The durable fix is `~/.wslconfig`: lower `memory=` (64 GB on a 127 GB host)
-  and `autoMemoryReclaim=dropcache`; it needs `wsl --shutdown`, so schedule it
-  when nothing else runs in the VM.
+- `~/.wslconfig` stays at `memory=96GB`: the other workloads in this VM need
+  it, so lowering the cap is not the fix. `autoMemoryReclaim=dropcache`
+  (returns cache as soon as the guest idles instead of gradually) is the one
+  optional host-side tweak; it needs `wsl --shutdown`, so schedule it when
+  nothing else runs in the VM. Neither mode reclaims while the guest CPU is
+  busy — a long indexing drain or build pins the cache until it ends, which
+  is why the guard exists.
 
 ## 8. Checklist
 
