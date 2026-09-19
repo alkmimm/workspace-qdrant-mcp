@@ -896,6 +896,20 @@ services:
       - "7997"
       - --url-prefix
       - /v1
+      # Largest batch per GPU forward (both models). Infinity's default of 32
+      # sequences × up to 8 192 tokens took the caching allocator to 15.2 of
+      # 16.3 GB, and on WSL2 a full card is not an OOM: the NVIDIA driver's
+      # sysmem fallback backs the overflow with HOST RAM charged to vmmemWSL
+      # (measured 2026-09-19 03:15Z: vmmemWSL 90.8 GB, host 15.8 GB free,
+      # guard breach). Stopping the ingest and restarting this container took
+      # VRAM 15.2 → 3.6 GB and host free 17 → 76 GB. The GPU is not the
+      # bottleneck (0–5 % utilisation under the full drain), so a small batch
+      # costs nothing: measured 3.0–3.4 GB VRAM at ~2 000 items/min with the
+      # daemon still at WQM_RESOURCE_MAX_CONCURRENT_EMBEDDINGS=8 (12 active).
+      # VRAM is bounded per forward, so the batch is the lever, not the
+      # daemon's request concurrency.
+      - --batch-size
+      - ${WQM_EMBEDDING_GPU_BATCH:-8}
       # fp16 keeps the fused nested-tensor CUDA kernels in play — the auto
       # dtype picks bf16 on this card, which those kernels do not support and
       # PyTorch silently falls back to a slower generic kernel ("nested_from_
