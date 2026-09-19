@@ -34,7 +34,7 @@ use crate::unified_queue_processor::UnifiedProcessorError;
 use crate::unified_queue_schema::{
     DestinationStatus, FilePayload, QueueOperation, UnifiedQueueItem,
 };
-use wqm_common::hashing::{compute_base_point, compute_content_hash, normalize_line_endings};
+use wqm_common::hashing::{compute_base_point, compute_content_hash};
 
 /// Outcome of [`try_branch_dedup`] — `Some` means the dedup fast-path completed
 /// and the caller must return early; `None` means the file is novel (or the
@@ -210,11 +210,11 @@ pub(super) async fn try_branch_dedup(
 
     // ── 4. Enqueue FTS5 work (batch writer owns search.db writes) ──
     if let Some(sender) = crate::search_db::batch_writer::global_sender() {
-        match tokio::fs::read_to_string(file_path).await {
-            Ok(raw_content) => {
-                // Normalize EOL so this branch-dedup FTS5 enqueue matches the
-                // base_point identity and never re-stores a stale '\r'.
-                let new_content = normalize_line_endings(&raw_content).into_owned();
+        // The shared reader (normalised, so this enqueue matches the
+        // base_point identity and never re-stores a stale '\r'; redacted, so
+        // the clone's FTS5 lines match what its source generation holds).
+        match crate::document_processor::redaction::read_for_index(file_path).await {
+            Ok((new_content, _redacted_lines)) => {
                 let new_hash = compute_content_hash(&new_content);
                 let change = FileChange {
                     file_id,

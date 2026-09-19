@@ -145,6 +145,112 @@ const PROJECT_EXTENSION_LIST: &[&str] = &[
     ".sbt",
     ".gradle",
     ".pom",
+    // ── Registry parity (2026-09-19) ─────────────────────────────────────
+    // Every extension of a language in language_registry.yaml belongs here:
+    // the daemon shipped grammars for 24 languages whose files this gate
+    // rejected (C++ .cc/.cxx/.hh, Kotlin .kts, Julia .jl, Ada, Lisp, Fortran,
+    // Pascal, Scheme, …) — an agent found them with native grep and the index
+    // had never seen them. `registry_extensions_are_all_allowlisted` keeps
+    // the two lists in step; `.fasl` (compiled Lisp image, a binary) is the
+    // one registry entry left out on purpose.
+    ".adb",
+    ".ads", // Ada
+    ".cljc",
+    ".edn", // Clojure
+    ".c++",
+    ".cc",
+    ".cxx",
+    ".h++",
+    ".hh",
+    ".hxx",
+    ".ipp",
+    ".tpp", // C++
+    ".f",
+    ".f03",
+    ".f08",
+    ".for",
+    ".fpp", // Fortran
+    ".lhs", // Haskell (literate)
+    ".htm",
+    ".xhtml", // HTML
+    ".jsonc", // JSON with comments
+    ".jl",    // Julia
+    ".kts",   // Kotlin script / Gradle Kotlin DSL
+    ".cls",
+    ".sty", // LaTeX
+    ".cl",
+    ".lisp",
+    ".lsp", // Lisp
+    ".markdown",
+    ".mdx", // Markdown
+    ".mll",
+    ".mly", // OCaml lexers / parsers
+    ".dpk",
+    ".dpr",
+    ".lfm",
+    ".pp", // Pascal
+    ".pod",
+    ".psgi",
+    ".t", // Perl
+    ".php3",
+    ".php4",
+    ".php5",
+    ".php7",
+    ".phps",
+    ".phtml", // PHP
+    ".psd1",
+    ".psm1", // PowerShell
+    ".pyi",
+    ".pyw", // Python
+    ".rmd",
+    ".rnw", // R
+    ".gemspec",
+    ".rake",
+    ".rbw", // Ruby
+    ".sc",  // Scala
+    ".rkt",
+    ".scm",
+    ".ss", // Scheme
+    ".vala",
+    ".vapi", // Vala
+    ".xsd",
+    ".xsl",
+    ".xslt", // XML
+    // ── Source-like formats the coverage audit found unindexed ───────────
+    // (`make coverage-audit`, 2026-09-19: 500 git-tracked files across nine
+    // repos were promised by default_configuration.yaml and rejected here.)
+    ".tf",
+    ".tfvars",
+    ".hcl", // Terraform / HCL
+    ".jinja",
+    ".jinja2",
+    ".j2",
+    ".hbs", // templates
+    ".plist",
+    ".xcconfig",
+    ".pbxproj",
+    ".storyboard",
+    ".xib",
+    ".entitlements", // Xcode
+    ".service",
+    ".timer", // systemd units
+    ".patch",
+    ".diff", // diffs
+    // ── Configuration formats, admitted with credential redaction ────────
+    // 16 of 130 .conf and 17 of 55 .properties in the audited repos carry
+    // password= / secret= / token= lines (Spring application.properties,
+    // keycloak.conf). They are indexed because document_processor::redaction
+    // masks the VALUE of every credential-named key before chunking, so the
+    // vectors, the payload and the FTS5 lines hold `password=<redacted>` and
+    // a reader still learns the setting exists. `.env*` stays out: a file that
+    // is nothing but secrets is not worth a regex's residual risk (the
+    // `.env.example` / `.sample` / `.template` / `.dist` names, which hold
+    // placeholders by convention, are admitted by exact name below).
+    ".properties",
+    ".conf",
+    ".cfg",
+    ".ini",
+    ".cnf",
 ];
 
 /// Document/reference formats added only to the library allowlist.
@@ -177,6 +283,7 @@ const PROJECT_FILENAME_LIST: &[&str] = &[
     "Makefile",
     "GNUmakefile",
     "BSDmakefile",
+    "justfile",
     "Kbuild",
     "SConstruct",
     "SConscript",
@@ -212,6 +319,13 @@ const PROJECT_FILENAME_LIST: &[&str] = &[
     // Go / Rust manifests whose extension is not a language of its own
     "go.mod",
     "go.sum",
+    // Environment TEMPLATES only — placeholders by convention, and redaction
+    // masks anything real that slips in. `.env`, `.env.local`,
+    // `.env.production` and friends are never listed: see the note above.
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+    ".env.dist",
     // Git / tooling ignore + config files (safe to index, no secrets)
     ".gitignore",
     ".gitattributes",
