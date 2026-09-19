@@ -159,12 +159,11 @@ pub(super) async fn try_branch_dedup(
     }
 
     // ── 3. tracked_files row + qdrant_chunks mirror for this branch ──
-    let file_mtime = std::fs::metadata(file_path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_default();
+    // Same formatter as store_track: the mtime fast path compares this stamp
+    // with the file's current one, and until 2026-09-19 this path wrote epoch
+    // seconds while every other writer wrote millisecond ISO-8601 — so no
+    // dedup-shared row ever matched and every restart re-read them all.
+    let file_mtime = tracked_files_schema::get_file_mtime(file_path).unwrap_or_default();
     let extension = file_path
         .extension()
         .and_then(|e| e.to_str())

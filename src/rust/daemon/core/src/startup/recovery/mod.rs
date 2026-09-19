@@ -178,9 +178,9 @@ fn log_folder_recovery(
                 || s.files_to_update > 0
             {
                 info!(
-                    "Recovery for {} ({}): {} progressive scan(s), ~{} modified, ={} unchanged ({} by mtime, no read), -{} delete, x{} excluded, !{} errors",
+                    "Recovery for {} ({}): {} progressive scan(s), ~{} modified, ={} unchanged ({} by mtime, no read; {} re-stamped), -{} delete, x{} excluded, !{} errors",
                     watch_id, path, s.progressive_scans_enqueued, s.files_to_update,
-                    s.files_unchanged, s.files_unchanged_by_mtime,
+                    s.files_unchanged, s.files_unchanged_by_mtime, s.files_mtime_refreshed,
                     s.files_to_delete, s.files_newly_excluded, s.errors
                 );
             } else {
@@ -270,6 +270,7 @@ async fn detect_deleted_files(
     let batch_delay =
         std::time::Duration::from_millis(startup_config.startup_enqueue_batch_delay_ms);
     let mut enqueued_in_batch: usize = 0;
+    let mut refresh: Vec<tracked_files_schema::MtimeRefresh> = Vec::new();
 
     for (file_path, stored_hash, stored_mtime) in &tracked {
         let abs_path = root.join(file_path);
@@ -284,6 +285,7 @@ async fn detect_deleted_files(
             stored_mtime,
             reconcile_modified,
             stats,
+            &mut refresh,
         )
         .await;
 
@@ -298,6 +300,19 @@ async fn detect_deleted_files(
             }
             enqueued_in_batch = 0;
         }
+    }
+
+    // Files the hash proved unchanged while their stored stamp was stale: give
+    // them the current mtime so the NEXT start settles them with a stat. One
+    // transaction per folder; a failure here only costs one more read later.
+    match tracked_files_schema::refresh_mtime_for_unchanged(pool, watch_folder_id, &refresh).await {
+        Ok(n) => stats.files_mtime_refreshed += n,
+        Err(e) => warn!(
+            "Could not refresh file_mtime for {} unchanged file(s) in {}: {}",
+            refresh.len(),
+            watch_folder_id,
+            e
+        ),
     }
 }
 
@@ -315,6 +330,7 @@ async fn process_tracked_file(
     stored_mtime: &str,
     reconcile_modified: bool,
     stats: &mut RecoveryStats,
+    refresh: &mut Vec<tracked_files_schema::MtimeRefresh>,
 ) -> usize {
     let relative = match wqm_common::paths::RelativePath::from_user_input(file_path) {
         Ok(r) => r,
@@ -383,16 +399,13 @@ async fn process_tracked_file(
         // the watcher already queued the same edit.
         //
         // mtime first, hash second. An mtime equal to the one recorded at
-        // ingest proves the content unchanged (same millisecond formatter as
-        // store_track; see content_hash_reusing_mtime) — a `stat`, not a read.
+        // ingest proves the content unchanged (either spelling of the stamp;
+        // see tracked_files_schema::MtimeStamps) — a `stat`, not a read.
         // Hashing every tracked file here was a full read of the corpus on
         // every daemon start, and that churn is what grew the WSL2 VM past
         // what the host could give it.
-        if !stored_mtime.is_empty()
-            && tracked_files_schema::get_file_mtime(abs_path)
-                .map(|now| now == stored_mtime)
-                .unwrap_or(false)
-        {
+        let now = tracked_files_schema::MtimeStamps::of(abs_path).ok();
+        if now.as_ref().is_some_and(|now| now.matches(stored_mtime)) {
             stats.files_unchanged += 1;
             stats.files_unchanged_by_mtime += 1;
             return 0;
@@ -423,7 +436,18 @@ async fn process_tracked_file(
                     }
                 }
             }
-            Ok(_) => stats.files_unchanged += 1,
+            Ok(_) => {
+                // Same bytes under a new mtime (checkout, copy, touch): re-stamp
+                // the row, or this file is read again on every start forever.
+                stats.files_unchanged += 1;
+                if let Some(now) = now {
+                    refresh.push((
+                        file_path.to_string(),
+                        stored_hash.to_string(),
+                        now.iso_millis,
+                    ));
+                }
+            }
             Err(e) => debug!("Reconcile hash failed for {}: {}", file_path, e),
         }
     }

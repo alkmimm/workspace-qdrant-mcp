@@ -252,6 +252,7 @@ async fn test_process_tracked_file_modified_enqueues_update() {
         "1970-01-01T00:00:00.000Z", // stored mtime differs too → the hash path runs
         true,                       // reconcile_modified
         &mut stats,
+        &mut Vec::new(),
     )
     .await;
 
@@ -295,6 +296,7 @@ async fn test_process_tracked_file_unchanged_enqueues_nothing() {
         "1970-01-01T00:00:00.000Z", // stale mtime → proven unchanged by HASH, not mtime
         true,
         &mut stats,
+        &mut Vec::new(),
     )
     .await;
 
@@ -336,6 +338,7 @@ async fn test_process_tracked_file_modified_skipped_when_reconcile_off() {
         "1970-01-01T00:00:00.000Z",
         false, // reconcile_modified OFF
         &mut stats,
+        &mut Vec::new(),
     )
     .await;
 
@@ -377,6 +380,7 @@ async fn test_process_tracked_file_same_mtime_is_unchanged_without_hashing() {
         &mtime_now,
         true,
         &mut stats,
+        &mut Vec::new(),
     )
     .await;
 
@@ -409,6 +413,7 @@ async fn test_process_tracked_file_same_mtime_is_unchanged_without_hashing() {
         &mtime_now,
         true,
         &mut stats,
+        &mut Vec::new(),
     )
     .await;
     assert_eq!(
@@ -417,4 +422,160 @@ async fn test_process_tracked_file_same_mtime_is_unchanged_without_hashing() {
     );
     assert_eq!(stats.files_to_update, 1);
     assert_eq!(stats.files_unchanged_by_mtime, 0);
+}
+
+/// Rows written by the branch-dedup path before 2026-09-19 carry the mtime as
+/// epoch SECONDS ("1784474124"), not millisecond ISO-8601. They must still
+/// settle by mtime: on a worktree-heavy repo those were 99 % of the rows, and
+/// re-reading them on every start was the churn the fast path exists to stop.
+/// The stored hash is wrong on purpose — hashing would have queued an Update.
+#[tokio::test]
+async fn test_process_tracked_file_legacy_epoch_seconds_mtime_is_unchanged_without_hashing() {
+    let pool = create_test_pool().await;
+    setup_reconcile_tables(&pool).await;
+    let queue_manager = QueueManager::new(pool.clone());
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    let abs = tmp.path().join("src/main.rs");
+    std::fs::write(&abs, "fn main() { println!(\"dedup-shared\"); }").unwrap();
+    let legacy_stamp = tfs::MtimeStamps::of(&abs).unwrap().epoch_secs;
+    assert!(
+        legacy_stamp.chars().all(|c| c.is_ascii_digit()),
+        "fixture must be the epoch-seconds spelling, got {legacy_stamp}"
+    );
+
+    let mut stats = RecoveryStats::default();
+    let mut refresh = Vec::new();
+    let queued = super::process_tracked_file(
+        &queue_manager,
+        "tenant-rc",
+        "projects",
+        tmp.path(),
+        &abs,
+        "src/main.rs",
+        "hash_that_does_not_match_the_bytes",
+        &legacy_stamp,
+        true,
+        &mut stats,
+        &mut refresh,
+    )
+    .await;
+
+    assert_eq!(queued, 0);
+    assert_eq!(
+        stats.files_unchanged_by_mtime, 1,
+        "epoch-seconds stamp settles it"
+    );
+    assert_eq!(stats.files_to_update, 0);
+    assert!(refresh.is_empty(), "settled by mtime → nothing to re-stamp");
+}
+
+/// Same bytes under a new mtime (a checkout, a copy, a `touch`): the hash
+/// proves the file unchanged, and the row must be re-stamped with the current
+/// mtime — otherwise that file is read again on EVERY start, forever. After
+/// the refresh, the next pass settles it by mtime alone.
+#[tokio::test]
+async fn test_recovery_restamps_rows_the_hash_proved_unchanged() {
+    let pool = create_test_pool().await;
+    setup_reconcile_tables(&pool).await;
+    let queue_manager = QueueManager::new(pool.clone());
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base_path = tmp.path().to_string_lossy().to_string();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    let abs = tmp.path().join("src/main.rs");
+    std::fs::write(&abs, "fn main() { println!(\"checked out again\"); }").unwrap();
+    let real_hash = wqm_common::hashing::compute_file_hash(&abs).unwrap();
+
+    sqlx::query(
+        "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled, is_archived, created_at, updated_at)
+         VALUES ('wf-rc', ?1, 'projects', 'tenant-rc', 1, 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+    )
+    .bind(&base_path)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Two generations of the path: the live one (real hash, stale stamp) and a
+    // debris row with another hash. Only the row the hash proves may move.
+    for (hash, stamp) in [
+        (real_hash.as_str(), "1970-01-01T00:00:00.000Z"),
+        ("some-other-generation", "1970-01-01T00:00:00.000Z"),
+    ] {
+        sqlx::query(
+            "INSERT INTO tracked_files (watch_folder_id, relative_path, file_mtime, file_hash, chunk_count, collection, created_at, updated_at)
+             VALUES ('wf-rc', 'src/main.rs', ?1, ?2, 1, 'projects', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .bind(stamp)
+        .bind(hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let mut stats = RecoveryStats::default();
+    let mut refresh = Vec::new();
+    let queued = super::process_tracked_file(
+        &queue_manager,
+        "tenant-rc",
+        "projects",
+        tmp.path(),
+        &abs,
+        "src/main.rs",
+        &real_hash,
+        "1970-01-01T00:00:00.000Z",
+        true,
+        &mut stats,
+        &mut refresh,
+    )
+    .await;
+    assert_eq!(queued, 0, "same bytes → nothing to enqueue");
+    assert_eq!(stats.files_unchanged, 1);
+    assert_eq!(
+        stats.files_unchanged_by_mtime, 0,
+        "the stale stamp forced a read"
+    );
+    assert_eq!(refresh.len(), 1, "the read must schedule a re-stamp");
+
+    let now = tfs::MtimeStamps::of(&abs).unwrap();
+    let restamped = tfs::refresh_mtime_for_unchanged(&pool, "wf-rc", &refresh)
+        .await
+        .unwrap();
+    assert_eq!(restamped, 1, "exactly the row holding the proven hash");
+    let stamps: Vec<(String, String)> = sqlx::query_as(
+        "SELECT file_hash, file_mtime FROM tracked_files WHERE watch_folder_id = 'wf-rc' ORDER BY file_hash",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for (hash, stamp) in &stamps {
+        if hash == &real_hash {
+            assert_eq!(
+                stamp, &now.iso_millis,
+                "proven row carries the current mtime"
+            );
+        } else {
+            assert_eq!(stamp, "1970-01-01T00:00:00.000Z", "debris row untouched");
+        }
+    }
+
+    // Second start: settled by mtime, no read, nothing more to re-stamp.
+    let mut stats = RecoveryStats::default();
+    let mut refresh = Vec::new();
+    super::process_tracked_file(
+        &queue_manager,
+        "tenant-rc",
+        "projects",
+        tmp.path(),
+        &abs,
+        "src/main.rs",
+        &real_hash,
+        &now.iso_millis,
+        true,
+        &mut stats,
+        &mut refresh,
+    )
+    .await;
+    assert_eq!(stats.files_unchanged_by_mtime, 1);
+    assert!(refresh.is_empty());
 }
