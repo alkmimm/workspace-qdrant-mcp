@@ -204,6 +204,7 @@ fn is_not_a_secret(value: &str) -> bool {
               | [+-]?\d+(?:\.\d+)?
               | \$\{.*\}                        # ${VAR}, ${VAR:default}, ${{ secrets.X }}
               | \$[A-Za-z_][A-Za-z0-9_]*       # $VAR
+              | \$\(.*\)                       # $(openssl rand -hex 32) — generated, not stored
               | %[A-Za-z_][A-Za-z0-9_]*%       # %VAR%
               | \{\{.*\}\}                     # {{ templated }}
               | <[^<>]+>                       # <placeholder>, <redacted>
@@ -475,6 +476,7 @@ mod tests {
                     use_token: true\n\
                     bypass: enabled-for-tests\n\
                     compass_mode=north-up\n\
+                    MCP_TEST_TOKEN=$(openssl rand -hex 32)\n\
                     db_password = var.db_password\n\
                     api_key = env(\"API_KEY\")\n\
                     password=changeme\n\
