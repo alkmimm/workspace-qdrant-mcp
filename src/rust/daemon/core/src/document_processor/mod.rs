@@ -498,19 +498,19 @@ fn process_file_sync_inner(
     // Credentials are masked HERE, on the one text every store derives from
     // (vectors, Qdrant payload, FTS5 lines), so no store ever holds the value.
     // Configuration-shaped files also get the key/value layer; see redaction.rs.
-    let raw_text = match redaction::redact_secrets(&raw_text, redaction::is_config_like(file_path))
-    {
-        Some(r) => {
-            info!(
-                file = %file_path.display(),
-                redacted_lines = r.lines,
-                "credential values masked before chunking"
-            );
-            metadata.insert("redacted_lines".to_string(), r.lines.to_string());
-            r.text
-        }
-        None => raw_text,
-    };
+    let raw_text =
+        match redaction::redact_secrets(&raw_text, redaction::key_value_mode_for(file_path)) {
+            Some(r) => {
+                info!(
+                    file = %file_path.display(),
+                    redacted_lines = r.lines,
+                    "credential values masked before chunking"
+                );
+                metadata.insert("redacted_lines".to_string(), r.lines.to_string());
+                r.text
+            }
+            None => raw_text,
+        };
 
     // Add collection to metadata
     metadata.insert("collection".to_string(), collection.to_string());

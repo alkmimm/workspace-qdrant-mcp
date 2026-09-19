@@ -59,6 +59,40 @@ pub struct Redaction {
     pub lines: usize,
 }
 
+/// Translation catalogues look exactly like configuration (`"password":
+/// "Senha"`) but their values are labels, not credentials. A scan of the
+/// live index (2026-09-19) found 25 of the 48 "credential" hits in i18n JSON
+/// under `translations/`, `lang/`, `locales/`. Matched on path components.
+pub fn is_i18n_path(path: &Path) -> bool {
+    const DIRS: &[&str] = &[
+        "i18n",
+        "l10n",
+        "locale",
+        "locales",
+        "lang",
+        "langs",
+        "translation",
+        "translations",
+        "messages",
+    ];
+    path.parent()
+        .map(|p| {
+            p.components().any(|c| {
+                c.as_os_str()
+                    .to_str()
+                    .map(|s| DIRS.contains(&s.to_ascii_lowercase().as_str()))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Whether the key/value layer applies: configuration-shaped, and not a
+/// translation catalogue.
+pub fn key_value_mode_for(path: &Path) -> bool {
+    is_config_like(path) && !is_i18n_path(path)
+}
+
 /// Configuration-shaped files, where a `key = value` line is a setting and a
 /// credential-named key means the value IS the credential. Matched on the
 /// lowercased extension or on the whole name for extensionless dotfiles.
@@ -161,7 +195,7 @@ fn is_not_a_secret(value: &str) -> bool {
             r#"(?ix)^(?:
                 true|false|null|nil|none|yes|no|on|off
               | [+-]?\d+(?:\.\d+)?
-              | \$\{[^}]*\}                    # ${VAR}, ${VAR:default}
+              | \$\{.*\}                        # ${VAR}, ${VAR:default}, ${{ secrets.X }}
               | \$[A-Za-z_][A-Za-z0-9_]*       # $VAR
               | %[A-Za-z_][A-Za-z0-9_]*%       # %VAR%
               | \{\{.*\}\}                     # {{ templated }}
@@ -179,7 +213,17 @@ fn is_not_a_secret(value: &str) -> bool {
     if v.chars().count() < 4 {
         return true;
     }
-    PLACEHOLDER.is_match(v)
+    if PLACEHOLDER.is_match(v) {
+        return true;
+    }
+    // Prose — "Password is required", "Senha ou e-mail inválidos": two or more
+    // words of letters and punctuation only. A credential with spaces exists,
+    // but a UI message under a credential-named key is far more common.
+    static PROSE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\p{L}[\p{L}\p{M}'’.,;:!?()\-]*(?:\s+\p{L}[\p{L}\p{M}'’.,;:!?()\-]*)+$")
+            .expect("PROSE regex")
+    });
+    PROSE.is_match(v)
 }
 
 /// Split a raw value into (opening quote, inner, closing quote, trailing
@@ -394,11 +438,30 @@ mod tests {
                     db_password = var.db_password\n\
                     api_key = env(\"API_KEY\")\n\
                     password=changeme\n\
-                    secret = ********\n";
+                    secret = ********\n\
+                    token: ${{ secrets.GITHUB_TOKEN }}\n\
+                    \"password\": \"Password is required\",\n\
+                    \"token\": \"Sessão expirada, entre novamente.\",\n";
         assert!(
             redact_secrets(text, true).is_none(),
             "no line here holds a value worth masking"
         );
+    }
+
+    #[test]
+    fn translation_catalogues_keep_their_labels() {
+        // `"password": "Senha"` is a UI label; the path says so.
+        for p in [
+            "services/lang/translation/pt.json",
+            "packages/translations/assets/translations/pt-BR.json",
+            "src/i18n/en.json",
+            "app/locales/es/messages.json",
+        ] {
+            assert!(is_config_like(Path::new(p)), "{p} is JSON");
+            assert!(!key_value_mode_for(Path::new(p)), "{p} is a catalogue");
+        }
+        assert!(key_value_mode_for(Path::new("services/config/app.json")));
+        assert!(key_value_mode_for(Path::new(".github/workflows/ci.yml")));
     }
 
     #[test]
