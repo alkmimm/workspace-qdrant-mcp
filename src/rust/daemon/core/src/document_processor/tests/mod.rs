@@ -454,5 +454,5 @@ async fn application_properties_secret_never_reaches_raw_text_or_chunks() {
     assert!(content
         .raw_text
         .contains("password = request.form[\"password\"]"));
-    assert!(content.metadata.get("redacted_lines").is_none());
+    assert!(!content.metadata.contains_key("redacted_lines"));
 }
