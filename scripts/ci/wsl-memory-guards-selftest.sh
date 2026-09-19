@@ -77,15 +77,19 @@ expect_preflight host-ok-no-vmmem-guest-big 1 FAKE_HOST_FREE_KB=$(gb 100) FAKE_C
 
 # ── guard ────────────────────────────────────────────────────────────────────
 # run_guard <name> <expected-exit> <expect-stop:yes|no> [VAR=value ...]
+# The cache drop is a no-op here unless a case sets GUARD_DROP_CMD itself;
+# the default cache reading (5 GB) is under GUARD_DROP_MIN_CACHE_GB anyway.
+# A case may pass a 4th token as LOG=<needle>: the guard log must contain it.
 run_guard() {
   local name="$1" want="$2" stop="$3"; shift 3
+  local needle=""; [[ "${1:-}" == LOG=* ]] && { needle="${1#LOG=}"; shift; }
   local marker="$TMP/stopped.$RANDOM" log="$TMP/guard.$RANDOM.log" got
-  env "$@" FAKE_COUNTER="$TMP/g.$RANDOM" GUARD_LOG="$log" GUARD_STOP_CMD="touch '$marker'" INTERVAL_SECS=0 \
+  env GUARD_DROP_CMD=true GUARD_DROP_SETTLE_SECS=0 "$@" FAKE_COUNTER="$TMP/g.$RANDOM" GUARD_LOG="$log" GUARD_STOP_CMD="touch '$marker'" INTERVAL_SECS=0 \
     timeout 2 bash "$GUARD" >/dev/null 2>&1; got=$?
   ran=$(( ran + 1 ))
   local stopped=no; [[ -e "$marker" ]] && stopped=yes
-  if [[ "$got" != "$want" || "$stopped" != "$stop" ]]; then
-    echo "FAIL: guard/$name: exit $got (wanted $want), stopped=$stopped (wanted $stop)"; sed 's/^/    /' "$log"; fails=$(( fails + 1 ))
+  if [[ "$got" != "$want" || "$stopped" != "$stop" ]] || { [[ -n "$needle" ]] && ! grep -q -- "$needle" "$log"; }; then
+    echo "FAIL: guard/$name: exit $got (wanted $want), stopped=$stopped (wanted $stop)${needle:+, log must contain '$needle'}"; sed 's/^/    /' "$log"; fails=$(( fails + 1 ))
   else
     echo "ok: guard/$name (exit $got, stopped=$stopped)"
   fi
@@ -98,7 +102,20 @@ run_guard healthy-never-trips        124 no  FAKE_HOST_FREE_KB=$(gb 100) FAKE_CH
 # No host view: the guest footprint stands in for the charge.
 run_guard no-host-guest-footprint    3   yes FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 75)
 run_guard no-host-guest-fine         124 no  FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 20)
+# Page cache is the charge (the 2026-09-19 redeploy): the drop runs, the
+# re-measure (second value in the sequence) is back under the line, and the
+# breach is averted — no stop, ever. The 3rd reading onward stays at 20.
+run_guard cache-drop-averts-breach   124 no  LOG=averted FAKE_HOST_FREE_KB=$(gb 100) FAKE_CACHED_KB=$(gb 50) \
+  GUARD_DROP_CMD="touch '$TMP/dropped'" FAKE_CHARGE_SEQ="$(gb 80) $(gb 40) $(gb 20)"
+[[ -e "$TMP/dropped" ]] || { echo "FAIL: guard/cache-drop-averts-breach: the drop command never ran"; fails=$(( fails + 1 )); }
+# Real pressure under a big cache: the drop runs, the re-measure is still
+# over the line, the breach counts, and two of them trip as before.
+run_guard cache-drop-not-enough-trips 3  yes LOG="did not clear" FAKE_HOST_FREE_KB=$(gb 100) FAKE_CACHED_KB=$(gb 50) \
+  GUARD_DROP_CMD=true FAKE_CHARGE_SEQ="$(gb 80) $(gb 78) $(gb 80) $(gb 78)"
+# No way to drop (sudo and docker both refused): the breach counts as is.
+run_guard cache-drop-unavailable-trips 3 yes LOG="drop unavailable" FAKE_HOST_FREE_KB=$(gb 100) FAKE_CACHED_KB=$(gb 50) \
+  GUARD_DROP_CMD=false FAKE_CHARGE_SEQ="$(gb 80) $(gb 80)"
 
 echo "wsl-memory-guards selftest: $ran cases, $fails failed"
-(( ran == 20 )) || { echo "GATE: expected exactly 20 cases to run (got $ran) — a deleted case is a silently un-gated behaviour; adjust the count when you add one."; exit 1; }
+(( ran == 23 )) || { echo "GATE: expected exactly 23 cases to run (got $ran) — a deleted case is a silently un-gated behaviour; adjust the count when you add one."; exit 1; }
 exit $(( fails > 0 ))
