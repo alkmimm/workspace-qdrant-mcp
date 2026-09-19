@@ -95,7 +95,7 @@ Ingestion filtering operates at three levels:
 The system uses a multi-layered approach with the **file type allowlist** as the primary gate.
 
 See [File Type Allowlist](#file-type-allowlist) and [Per-Project Ignore Files](#per-project-ignore-files) below for the complete specification including:
-- Ingestion gate layering (ignore files → allowlist → exclusions → size limits)
+- Ingestion gate layering (ignore files → allowlist → exclusions → size limits). A file name the allowlist admits exactly (`.gitignore`, `.editorconfig`, `.env.example`, …) beats the exclusion engine's hidden-path rule — the three enqueue paths (folder scan, file watcher, startup reconciler) must agree, and until 2026-09-19 only the reconciler admitted those dotfiles (`patterns/exclusion/engine.rs::check_hidden_components`)
 - Allowed extensions by category (400+ extensions across 21 categories)
 - Allowed extension-less filenames (30+ exact names)
 - Per-extension ingestion size limits (configurable via `ingestion_limits.extension_size_limits_kb`)

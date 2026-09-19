@@ -11,5 +11,5 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use extensions::AllowedExtensions;
+pub use extensions::{is_allowlisted_filename, AllowedExtensions};
 pub use types::FileRoute;

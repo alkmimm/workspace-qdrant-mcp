@@ -305,15 +305,23 @@ impl ExclusionEngine {
             || file_path == ".github"
     }
 
-    /// Check for hidden files/directories at any depth in the path
+    /// Check for hidden files/directories at any depth in the path.
+    ///
+    /// Two exceptions: the `.github/` directory, and a FINAL component that
+    /// is a file name the ingestion allowlist admits by exact name
+    /// (`.gitignore`, `.editorconfig`, `.env.example`, …). The allowlist is
+    /// curated — `.env`, `.netrc`, `id_rsa` are deliberately not on it — so
+    /// an explicit admission beats the blanket hidden-file rule. Hidden
+    /// DIRECTORIES stay excluded: `.vscode/`, `.cache/`, `.claude/`.
     fn check_hidden_components(&self, file_path: &str) -> Option<ExclusionResult> {
-        for component in file_path.split('/') {
-            if component.is_empty() {
-                continue;
-            }
-
+        let components: Vec<&str> = file_path.split('/').filter(|c| !c.is_empty()).collect();
+        let last = components.len().saturating_sub(1);
+        for (i, component) in components.into_iter().enumerate() {
             if component.starts_with('.') {
                 if component == ".github" {
+                    continue;
+                }
+                if i == last && crate::allowed_extensions::is_allowlisted_filename(component) {
                     continue;
                 }
 

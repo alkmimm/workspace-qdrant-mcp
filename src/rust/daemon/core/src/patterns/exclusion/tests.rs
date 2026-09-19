@@ -12,9 +12,11 @@ fn test_engine_initialization() {
 fn test_basic_exclusion() {
     let engine = ExclusionEngine::new().unwrap();
 
-    // Version control
+    // Version control: the .git/ directory is excluded; .gitignore is NOT —
+    // it is on the ingestion allowlist by exact name (see
+    // allowlisted_dotfile_names_beat_the_hidden_rule).
     assert!(engine.should_exclude(".git/config").excluded);
-    assert!(engine.should_exclude(".gitignore").excluded);
+    assert!(!engine.should_exclude(".gitignore").excluded);
 
     // Node modules
     assert!(
@@ -154,6 +156,45 @@ fn test_filename_vs_path_exclusion() {
             .excluded
     );
     assert!(engine.should_exclude("node_modules/package.json").excluded);
+}
+
+/// A hidden FILE whose name the ingestion allowlist admits exactly is not
+/// excluded by the hidden-path rule, at any depth; hidden directories and
+/// hidden files the allowlist does not name still are. Until 2026-09-19 the
+/// folder scan and the file watcher (both go through this engine) dropped
+/// `.gitignore` / `.editorconfig` / `.env.example`, while the startup
+/// reconciler (which does not) indexed them — so they were refreshed only
+/// at a daemon restart and a forced re-embed never revisited them.
+#[test]
+fn allowlisted_dotfile_names_beat_the_hidden_rule() {
+    let engine = ExclusionEngine::new().unwrap();
+    for p in [
+        ".gitignore",
+        "src/.gitignore",
+        "deep/path/.editorconfig",
+        ".env.example",
+        "infra/local-demo/.env.example",
+        ".env.sample",
+        ".dockerignore",
+        ".github/workflows/ci.yml",
+    ] {
+        assert!(
+            !engine.should_exclude(p).excluded,
+            "{p} is allowlisted by name"
+        );
+    }
+    for p in [
+        ".env",
+        "app/.env",
+        ".env.local",
+        ".env.production",
+        "src/.hidden_file",
+        ".vscode/settings.json",
+        ".claude/worktrees/x/.gitignore",
+        "sub/.cache/.gitignore",
+    ] {
+        assert!(engine.should_exclude(p).excluded, "{p} must stay excluded");
+    }
 }
 
 #[test]

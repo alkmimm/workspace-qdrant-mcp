@@ -572,6 +572,27 @@ exits 0 when a positional filter matches nothing, so a rename would silently un-
 check that keeps the registry, the compiled allowlist and the documented YAML in step. If \
 you ADDED a test here, bump this count."; exit 1; }
 
+# The exclusion engine — the gate every folder scan and watcher event passes
+# through — must honour the ingestion allowlist's exact file names. Until
+# 2026-09-19 it excluded every hidden path component, so `.gitignore`,
+# `.editorconfig` and `.env.example` reached the index only through the
+# startup reconciler (which does not consult it): refreshed at restarts only,
+# never revisited by a re-embed. These 16 tests pin the engine, including
+# `allowlisted_dotfile_names_beat_the_hidden_rule` (hidden directories and
+# un-admitted dotfiles stay out). NAMES via module path, exact count asserted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        patterns::exclusion::tests \
+        --test-threads=4 2>&1 | tee /tmp/exclusion.log; \
+    grep -q "^test result: ok\. 16 passed" /tmp/exclusion.log \
+    || { echo "GATE: expected exactly 16 exclusion-engine tests to run and pass — libtest \
+exits 0 when a positional filter matches nothing, so a module rename would silently un-gate \
+the rule that keeps allowlisted dotfiles reachable by the scan and the watcher. If you ADDED \
+a test here, bump this count."; exit 1; }
+
 # The watcher throttle DEFERS, it does not drop. Until 2026-09-19 an event
 # arriving while the queue held > 1 000 pending items had a 1-in-2 chance of
 # being discarded (3-in-4 above 5 000) and the F-045 "reconcile later" flag
