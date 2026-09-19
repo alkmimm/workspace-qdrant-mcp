@@ -572,6 +572,27 @@ exits 0 when a positional filter matches nothing, so a rename would silently un-
 check that keeps the registry, the compiled allowlist and the documented YAML in step. If \
 you ADDED a test here, bump this count."; exit 1; }
 
+# The watcher throttle DEFERS, it does not drop. Until 2026-09-19 an event
+# arriving while the queue held > 1 000 pending items had a 1-in-2 chance of
+# being discarded (3-in-4 above 5 000) and the F-045 "reconcile later" flag
+# had no consumer — every daemon restart and every tenant re-embed opened a
+# window in which live edits in ANY project silently never reached the
+# index. These 12 tests pin the buffer: last event per path wins, the
+# release budget follows the load, and only an overflow of the 250k-path cap
+# raises the flag. NAMES via module path, exact count asserted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        watching_queue::throttle::tests \
+        --test-threads=4 2>&1 | tee /tmp/throttle.log; \
+    grep -q "^test result: ok\. 12 passed" /tmp/throttle.log \
+    || { echo "GATE: expected exactly 12 watcher-throttle tests to run and pass — libtest \
+exits 0 when a positional filter matches nothing, so a module rename would silently un-gate \
+the buffer that keeps throttled file events from being lost. If you ADDED a test here, bump \
+this count."; exit 1; }
+
 # Credential redaction runs here: .conf/.properties/.cfg/.ini are on the
 # allowlist ONLY because document_processor::redaction masks the value of
 # every credential-named key (and known token shapes, URL passwords, PEM
