@@ -61,6 +61,7 @@ while :; do
   if [[ -n "$reason" ]]; then
     breaches=$(( breaches + 1 ))
     log "breach ${breaches}/${CONSECUTIVE_BREACHES}: $reason"
+    top=$(wsl_host_top_processes); [[ -n "$top" ]] && log "  host top working sets (GB): $top"
     if (( breaches >= CONSECUTIVE_BREACHES )); then
       log "TRIP: $reason — stopping the workspace-qdrant stack (other compose projects untouched)"
       stop_stack >>"$LOG" 2>&1
