@@ -115,7 +115,21 @@ Diff the two lists (`list format=flat` pages through the indexed paths).
 Watch for `exclude_directories` matching a **path component** anywhere:
 `bin`, `build`, `dist`, `out`, `coverage`, `vendor`, `deps`, `tmp` — a Rust
 `src/bin/`, a Go `vendor/`, a package literally named `coverage` are silently
-absent, and native grep (condition A) sees them.
+absent, and native grep (condition A) sees them. It happened (2026-09-19): the
+global `out/` rule hid every hexagonal `adapters/out` / `ports/out` package of
+a Java monorepo — 415 git-tracked sources, plus 16 Angular `state/` folders —
+until an agent noticed `LorawanSender.java` in native grep but not in the
+index. `global.wqmignore` now re-includes those names below any `src/`
+directory (`!**/src/**/out/` and siblings); after editing the file, a memexd
+restart runs `[ignore_sync]` and enqueues the newly eligible files as
+`missing` (817 that day, drained in 10 minutes — recovery is a `stat` per
+file since #399). Measure it the same way before a run:
+
+```bash
+# git-tracked files hidden by a plain 'name/' rule of global.wqmignore
+git -C <repo> ls-files | awk -v r="$(grep -E '^[A-Za-z_.-]+/$' state/memexd/global.wqmignore | tr -d / | paste -sd'|')" \
+  'BEGIN{n=split(r,R,"|")} {for(i=1;i<=n;i++) if (index("/"$0"/","/"R[i]"/")) {c[R[i]]++; break}} END{for(k in c) print k, c[k]}'
+```
 
 ## 5. Freshness, tenant, branch
 
