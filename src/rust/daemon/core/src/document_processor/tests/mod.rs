@@ -394,3 +394,65 @@ fn test_extract_rtf_with_formatting() {
     assert!(text.contains("Bold text"));
     assert!(text.contains("normal text"));
 }
+
+/// The value of a credential-named key in a configuration file must reach
+/// neither the raw text nor any chunk — every store (vectors, payload, FTS5
+/// lines) derives from these two — while the key itself survives so a reader
+/// still learns that the setting exists. The count travels in the metadata.
+#[tokio::test]
+async fn application_properties_secret_never_reaches_raw_text_or_chunks() {
+    let processor = DocumentProcessor::new();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("application.properties");
+    std::fs::write(
+        &path,
+        "spring.datasource.url=jdbc:postgresql://db:5432/app\n\
+         spring.datasource.username=app\n\
+         spring.datasource.password=Hunter2-Pr0d-2026\n\
+         server.port=8080\n",
+    )
+    .unwrap();
+
+    let content = processor
+        .process_file_content(&path, "projects")
+        .await
+        .expect("properties files process");
+    assert!(
+        !content.raw_text.contains("Hunter2"),
+        "raw_text still holds the password: {}",
+        content.raw_text
+    );
+    assert!(content
+        .raw_text
+        .contains("spring.datasource.password=<redacted>"));
+    assert!(content.raw_text.contains("spring.datasource.username=app"));
+    for chunk in &content.chunks {
+        assert!(
+            !chunk.content.contains("Hunter2"),
+            "a chunk still holds the password: {}",
+            chunk.content
+        );
+    }
+    assert_eq!(
+        content.metadata.get("redacted_lines").map(String::as_str),
+        Some("1"),
+        "the redaction count rides in the metadata"
+    );
+
+    // A source file with the same words is code, not configuration: untouched,
+    // and no redaction metadata is stamped.
+    let code = dir.path().join("login.py");
+    std::fs::write(
+        &code,
+        "def login(request):\n    password = request.form[\"password\"]\n    return check(password)\n",
+    )
+    .unwrap();
+    let content = processor
+        .process_file_content(&code, "projects")
+        .await
+        .expect("python files process");
+    assert!(content
+        .raw_text
+        .contains("password = request.form[\"password\"]"));
+    assert!(!content.metadata.contains_key("redacted_lines"));
+}

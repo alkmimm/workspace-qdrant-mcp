@@ -9,13 +9,14 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 use tracing::{debug, warn};
 
+use crate::document_processor::redaction;
 use crate::fts_batch_processor::{
     enforce_fts5_hard_cap_skip, hard_cap_line_threshold, line_count_estimate, BatchStats,
     FileChange, FtsBatchConfig, FtsBatchProcessor,
 };
 use crate::indexed_content_schema;
 use crate::search_db::{Fts5WorkItem, SearchDbError, SearchDbManager};
-use wqm_common::hashing::{compute_content_hash, normalize_line_endings};
+use wqm_common::hashing::compute_content_hash;
 
 /// Outcome of `update_fts5_for_file_or_enqueue` — tells the caller how to
 /// handle `search_status` for the queue item.
@@ -79,13 +80,15 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
     // Batched path: do disk + hash + cache-lookup here so workers stay
     // parallel for that work, then `send` and return — the actor owns
     // every write after this point.
-    let new_content = match tokio::fs::read_to_string(read_path).await {
-        // Normalize EOL up front so the content hash below — and the skip
-        // decision it drives — is line-ending agnostic. Otherwise an existing
-        // CRLF file's raw hash matches the cache and the code_lines rewrite
-        // that strips the trailing '\r' is skipped entirely. Matches the
-        // base_point identity (compute_file_hash).
-        Ok(c) => normalize_line_endings(&c).into_owned(),
+    // One reader for every code_lines writer (redaction::read_for_index):
+    // EOL-normalised up front so the content hash below — and the skip
+    // decision it drives — is line-ending agnostic (otherwise an existing
+    // CRLF file's raw hash matches the cache and the rewrite that strips the
+    // trailing '\r' is skipped; matches the base_point identity), AND
+    // credential-redacted, the same text the chunker embedded. A bare read
+    // here would put the value the vectors masked straight into `grep`.
+    let new_content = match redaction::read_for_index(read_path).await {
+        Ok((c, _redacted_lines)) => c,
         Err(e) => {
             debug!(
                 "FTS5: cannot read file for indexing (may be binary): {}: {}",
@@ -186,11 +189,9 @@ pub(super) async fn update_fts5_for_file(
 ) -> Result<bool, String> {
     let fts_start = std::time::Instant::now();
 
-    // Read file content from disk
-    let new_content = match tokio::fs::read_to_string(read_path).await {
-        // See update_fts5_for_file_or_enqueue: normalize EOL before hashing so
-        // the raw-content skip can't strand an existing CRLF file's stale '\r'.
-        Ok(content) => normalize_line_endings(&content).into_owned(),
+    // Same reader as update_fts5_for_file_or_enqueue: normalised + redacted.
+    let new_content = match redaction::read_for_index(read_path).await {
+        Ok((content, _redacted_lines)) => content,
         Err(e) => {
             debug!(
                 "FTS5: cannot read file for indexing (may be binary): {}: {}",
