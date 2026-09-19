@@ -144,6 +144,7 @@ impl FileWatcherQueue {
                 events_processed,
                 queue_errors,
                 events_throttled,
+                false,
             )
             .await;
         }
@@ -267,8 +268,41 @@ impl FileWatcherQueue {
                 events_processed,
                 queue_errors,
                 events_throttled,
+                false,
             )
             .await;
+        }
+
+        // Release what earlier ticks held back, at the rate the load allows
+        // (everything once it is Normal). Released events were already
+        // filtered when first seen and bypass the throttle, or they would
+        // bounce straight back into the buffer.
+        let released = throttle_state
+            .drain_deferred(throttle_state.release_budget().await)
+            .await;
+        if !released.is_empty() {
+            let left = throttle_state.deferred_len().await;
+            if left == 0 {
+                info!(
+                    "throttle: released the last {} deferred event(s); buffer empty",
+                    released.len()
+                );
+            }
+            for event in released {
+                Self::enqueue_file_operation(
+                    event,
+                    config,
+                    queue_manager,
+                    allowed_extensions,
+                    error_tracker,
+                    throttle_state,
+                    events_processed,
+                    queue_errors,
+                    events_throttled,
+                    true,
+                )
+                .await;
+            }
         }
     }
 
@@ -289,7 +323,9 @@ impl FileWatcherQueue {
     }
 
     /// Enqueue file operation with retry logic, multi-tenant routing, error tracking,
-    /// and queue depth throttling
+    /// and queue depth throttling. `deferred_release` marks an event coming back
+    /// out of the throttle's buffer: it was throttled once already and must not
+    /// be again, or it would never leave.
     #[allow(clippy::too_many_arguments)]
     async fn enqueue_file_operation(
         event: FileEvent,
@@ -301,6 +337,7 @@ impl FileWatcherQueue {
         events_processed: &Arc<Mutex<u64>>,
         queue_errors: &Arc<Mutex<u64>>,
         events_throttled: &Arc<Mutex<u64>>,
+        deferred_release: bool,
     ) {
         if !event.path.is_file() && !matches!(event.event_kind, EventKind::Remove(_)) {
             return;
@@ -344,9 +381,13 @@ impl FileWatcherQueue {
             return;
         }
 
-        if Self::should_throttle_event(throttle_state, queue_manager, events_throttled, &event)
-            .await
+        // Held back, not dropped: the event waits in the throttle's buffer and
+        // process_debounced_events releases it on a later tick.
+        if !deferred_release
+            && Self::should_throttle_event(throttle_state, queue_manager, events_throttled, &event)
+                .await
         {
+            throttle_state.defer(event).await;
             return;
         }
 
@@ -414,7 +455,7 @@ impl FileWatcherQueue {
         if throttle_state.should_throttle().await {
             let load_level = throttle_state.get_load_level().await;
             debug!(
-                "Throttling event due to {} queue load (depth: {}): {}",
+                "Deferring event under {} queue load (depth: {}): {}",
                 load_level.as_str(),
                 throttle_state.get_depth().await,
                 event.path.display()

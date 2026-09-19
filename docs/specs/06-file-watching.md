@@ -33,6 +33,7 @@ The system uses a two-layer watching approach based on whether the project is gi
 - For git-tracked projects: handles real-time dirty-state changes between git operations (modified files that haven't been committed)
 - Exclusion patterns apply: `.git/`, `target/`, `node_modules/`, etc. (`.git/` directory is excluded from Layer 1)
 - See [Folder Move Detection Strategy](#folder-move-detection-strategy) for rename handling
+- **Queue-depth throttle defers, never drops** (`watching_queue/throttle.rs`): above 1 000 pending items every other event is held back, above 5 000 three in four; held events wait in a per-path buffer (last event for a path wins) and the 500 ms watcher tick releases them — all of them once the load is Normal again, a bounded trickle (25 / 5 per tick) while it is High / Critical. Only an overflow of the 250 000-path cap loses an event, and that raises the F-045 flag and a warning. Before 2026-09-19 the held events were discarded and the flag had no consumer: every restart (the worktree re-enqueue) and every tenant re-embed silently lost half to three quarters of the live edits made in any project until the next startup reconciliation
 
 #### Layer 2: Git Watcher (git-tracked projects only)
 

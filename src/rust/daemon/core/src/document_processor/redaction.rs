@@ -140,11 +140,14 @@ pub fn is_config_like(path: &Path) -> bool {
 }
 
 /// `key = value` / `key: value` / `"key": "value",` where the key ENDS in a
-/// credential word. `pre` keeps everything up to and including the separator
+/// credential word. `pass` counts only behind a separator (`_pass`, `-pass`,
+/// `.pass`, or the whole key) — `RABBITMQ_PASS:` was the first real miss
+/// found in the index (2026-09-19), while `bypass`/`compass` must not match.
+/// `pre` keeps everything up to and including the separator
 /// and its trailing whitespace; `val` is the rest of the line.
 static KEY_VALUE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?i)^(?P<pre>\s*(?:export\s+)?(?:-\s+)?["']?[\w.\-\[\]]*?(?:password|passwd|pwd|passphrase|secret|api[_\-]?key|apikey|access[_\-]?key|private[_\-]?key|token|credentials?)["']?\s*[:=]\s*)(?P<val>.*)$"#,
+        r#"(?i)^(?P<pre>\s*(?:export\s+)?(?:-\s+)?["']?[\w.\-\[\]]*?(?:password|passwd|pwd|passphrase|(?:^|[\s_\-.])pass|secret|api[_\-]?key|apikey|access[_\-]?key|private[_\-]?key|token|credentials?)["']?\s*[:=]\s*)(?P<val>.*)$"#,
     )
     .expect("KEY_VALUE regex")
 });
@@ -470,6 +473,8 @@ mod tests {
                     password_min_length=8\n\
                     tokenizer: bert-base\n\
                     use_token: true\n\
+                    bypass: enabled-for-tests\n\
+                    compass_mode=north-up\n\
                     db_password = var.db_password\n\
                     api_key = env(\"API_KEY\")\n\
                     password=changeme\n\
@@ -559,6 +564,14 @@ mod tests {
         assert_eq!(
             redact(list, true),
             "- name: x\n  access_token: <redacted>\n"
+        );
+        // `_PASS` / `-pass` / `.pass` / bare `pass` count; the compose file
+        // that leaked `RABBITMQ_PASS: guest123` while masking
+        // `RABBITMQ_PASSWORD` next to it is the reason.
+        let compose = "  RABBITMQ_USER: integrator\n  RABBITMQ_PASS: guest123\n  db-pass: s3cr3t!\n  pass: nested-value\n";
+        assert_eq!(
+            redact(compose, true),
+            "  RABBITMQ_USER: integrator\n  RABBITMQ_PASS: <redacted>\n  db-pass: <redacted>\n  pass: <redacted>\n"
         );
         // A `#` inside the quotes is part of the password, not a comment.
         let hash = "password: \"ab#cd!efg\" # prod\n";
