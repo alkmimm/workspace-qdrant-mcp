@@ -80,5 +80,8 @@ fi
 # but nothing recorded WHAT took the memory, and by the time anyone looked
 # it was gone. Empty when the host cannot be asked.
 wsl_host_top_processes() {
-  wsl_ps 'Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 6 | ForEach-Object { "{0}={1:N1}" -f $_.ProcessName, ($_.WorkingSet64/1GB) }' 2>/dev/null | tr -d '\r' | paste -sd' ' -
+  # Not through wsl_ps: that helper strips ALL whitespace (fine for one number,
+  # it would glue six entries into one token here).
+  [[ -x "$WSL_PS" ]] || return 0
+  "$WSL_PS" -NoProfile -NonInteractive -Command 'Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 6 | ForEach-Object { "{0}={1:N1}" -f $_.ProcessName, ($_.WorkingSet64/1GB) }' 2>/dev/null | tr -d '\r' | paste -sd' ' -
 }
