@@ -434,4 +434,105 @@ mod tests {
             }
         );
     }
+
+    /// Every extension the bundled language registry knows must pass the
+    /// project allowlist. Until 2026-09-19 the daemon shipped grammars for 24
+    /// languages whose files this gate rejected (C++ .cc/.cxx/.hh, Kotlin
+    /// .kts, Julia .jl, Ada, Lisp, Fortran, Pascal, Scheme, …): the registry
+    /// said "supported", the walk never queued them, and native grep found
+    /// what the index could not. `.fasl` (a compiled Lisp image, binary) is
+    /// the one registry entry excluded on purpose.
+    #[tokio::test]
+    async fn registry_extensions_are_all_allowlisted() {
+        use crate::language_registry::providers::registry::RegistryProvider;
+        use crate::language_registry::LanguageRegistry;
+
+        let mut registry = LanguageRegistry::new();
+        registry.register_provider(Box::new(RegistryProvider::new().unwrap()));
+        registry.load().await.unwrap();
+        let languages = registry.all().await;
+        assert!(
+            languages.len() >= 40,
+            "bundled registry loaded {}",
+            languages.len()
+        );
+
+        const BINARY_BY_DESIGN: &[&str] = &[".fasl"];
+        let ae = AllowedExtensions::default();
+        let mut rejected = Vec::new();
+        let mut checked = 0usize;
+        for (id, lang) in &languages {
+            for ext in &lang.extensions {
+                let dotted = if ext.starts_with('.') {
+                    ext.to_lowercase()
+                } else {
+                    format!(".{}", ext.to_lowercase())
+                };
+                if BINARY_BY_DESIGN.contains(&dotted.as_str()) {
+                    continue;
+                }
+                checked += 1;
+                if !ae.is_allowed(&format!("/repo/src/probe{dotted}"), "projects") {
+                    rejected.push(format!("{id}: {dotted}"));
+                }
+            }
+        }
+        assert!(checked > 100, "registry exposed only {checked} extensions");
+        assert!(
+            rejected.is_empty(),
+            "language_registry.yaml extensions the project allowlist rejects — add them to \
+             PROJECT_EXTENSION_LIST in allowed_extensions/extensions.rs:\n  {}",
+            rejected.join("\n  ")
+        );
+    }
+
+    /// assets/default_configuration.yaml documents `watching.allowed_extensions`
+    /// as THE ingestion gate, but the daemon never reads that list: every
+    /// ingest path uses `AllowedExtensions::default()`. The YAML is therefore a
+    /// generated mirror (scripts/gen-allowlist-yaml.py) and this test is what
+    /// keeps it honest — on 2026-09-19 it promised 355 extensions against 91
+    /// compiled (.conf, .properties, .cc, .kts, man-page `.1`/`.5`, …), 500
+    /// git-tracked files across the watched repos that `make coverage-audit`
+    /// reported as "promised but never indexed".
+    #[test]
+    fn default_configuration_yaml_mirrors_the_compiled_allowlist() {
+        let yaml: serde_yaml_ng::Value = serde_yaml_ng::from_str(include_str!(
+            "../../../../../../assets/default_configuration.yaml"
+        ))
+        .expect("default_configuration.yaml parses");
+        let list = |key: &str| -> std::collections::HashSet<String> {
+            yaml["watching"][key]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("watching.{key} is a list"))
+                .iter()
+                .map(|v| v.as_str().expect("string entry").to_lowercase())
+                .collect()
+        };
+        let ae = AllowedExtensions::default();
+
+        let yaml_exts = list("allowed_extensions");
+        let compiled_exts: std::collections::HashSet<String> = ae
+            .project_extensions
+            .iter()
+            .map(|e| e.to_lowercase())
+            .collect();
+        let only_yaml: Vec<_> = yaml_exts.difference(&compiled_exts).collect();
+        let only_rust: Vec<_> = compiled_exts.difference(&yaml_exts).collect();
+        assert!(
+            only_yaml.is_empty() && only_rust.is_empty(),
+            "watching.allowed_extensions drifted from PROJECT_EXTENSION_LIST — run \
+             scripts/gen-allowlist-yaml.py. only in yaml: {only_yaml:?}; only in rust: {only_rust:?}"
+        );
+
+        let yaml_names = list("allowed_filenames");
+        let compiled_names: std::collections::HashSet<String> =
+            ae.filenames.iter().map(|n| n.to_lowercase()).collect();
+        let only_yaml: Vec<_> = yaml_names.difference(&compiled_names).collect();
+        let only_rust: Vec<_> = compiled_names.difference(&yaml_names).collect();
+        assert!(
+            only_yaml.is_empty() && only_rust.is_empty(),
+            "watching.allowed_filenames drifted from PROJECT_FILENAME_LIST — run \
+             scripts/gen-allowlist-yaml.py. only in yaml: {only_yaml:?}; only in rust: {only_rust:?}"
+        );
+    }
 }

@@ -109,9 +109,10 @@ The allowlist is the **primary ingestion gate** — files not on the allowlist a
 - **Two-tier allowlist**: Project extensions (source code, configs, text) and library extensions (superset: project + reference formats)
 - **Library allowlist** = project_extensions UNION library_only_extensions (`.pdf`, `.epub`, `.djvu`, `.docx`, `.mobi`, `.odt`, `.rtf`, `.doc`, `.ppt`, `.pptx`, `.xls`, `.xlsx`, `.csv`, `.tsv`, `.parquet`)
 - **Format-based routing**: Files with library-only extensions found in project folders are routed to the `libraries` collection with `source_project_id` metadata (see [Project vs. Library Boundary](14-future-development.md#project-vs-library-boundary))
-- Defined in YAML config under `watching.allowed_extensions` and `watching.allowed_filenames`
-- Compile-time embedded defaults in all three components (daemon, CLI, MCP server)
-- User config can override (extend or restrict) the defaults
+- **Source of truth is the compiled list** in `src/rust/daemon/core/src/allowed_extensions/extensions.rs` (`PROJECT_EXTENSION_LIST`, `PROJECT_FILENAME_LIST`, `PROJECT_FILENAME_GLOB_LIST`); every ingest path uses `AllowedExtensions::default()`
+- `watching.allowed_extensions` / `watching.allowed_filenames` in `assets/default_configuration.yaml` are a **generated mirror** (`scripts/gen-allowlist-yaml.py`), not an input: the daemon does not read them. Two validate-stage tests keep the three lists in step — `registry_extensions_are_all_allowlisted` (every `language_registry.yaml` extension passes the gate; on 2026-09-19 24 bundled languages did not) and `default_configuration_yaml_mirrors_the_compiled_allowlist` (the YAML had drifted to 355 promised vs 91 compiled)
+- Deliberately absent from the project list: `.conf`, `.properties`, `.cfg`, `.ini`, `.env*` — measured across nine repos, roughly one in six carries credentials; redaction before chunking is the way to admit them
+- `make coverage-audit` (`scripts/index-coverage-audit.py`) reports, per project, every git-tracked file the index lacks and the gate that dropped it
 
 #### Ingestion Gate Layering
 

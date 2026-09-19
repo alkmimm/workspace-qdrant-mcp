@@ -548,6 +548,30 @@ exits 0 when a positional filter matches nothing, so a rename would silently un-
 check that keeps a daemon restart from re-reading every tracked file. If you ADDED a test \
 here, bump this count."; exit 1; }
 
+# Allowlist parity runs here: the compiled PROJECT_EXTENSION_LIST is the only
+# ingestion gate the daemon reads, so (1) every extension of a language in
+# language_registry.yaml must pass it — 24 bundled languages were silently
+# unindexable on 2026-09-19 (C++ .cc, Kotlin .kts, Julia .jl, Ada, Lisp, …) —
+# and (2) assets/default_configuration.yaml `watching.allowed_extensions` /
+# `allowed_filenames` must be an exact mirror of it (scripts/gen-allowlist-
+# yaml.py), because that YAML is what people and `make coverage-audit` read
+# as the promise; it had drifted to 355 promised vs 91 compiled. Hermetic:
+# the bundled registry and the YAML are include_str!'d. NAMES only, exact
+# count asserted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        registry_extensions_are_all_allowlisted \
+        default_configuration_yaml_mirrors_the_compiled_allowlist \
+        --test-threads=4 2>&1 | tee /tmp/allowlist-parity.log; \
+    grep -q "^test result: ok\. 2 passed" /tmp/allowlist-parity.log \
+    || { echo "GATE: expected exactly 2 allowlist-parity tests to run and pass — libtest \
+exits 0 when a positional filter matches nothing, so a rename would silently un-gate the \
+check that keeps the registry, the compiled allowlist and the documented YAML in step. If \
+you ADDED a test here, bump this count."; exit 1; }
+
 # Dependency-cycle precision runs here: hermetic (in-memory SQLite, no
 # embeddings, no network) and it guards a defect that produced confident,
 # well-formed, entirely fictional output. A method call on a receiver typed by

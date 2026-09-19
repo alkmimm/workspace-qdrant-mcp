@@ -145,6 +145,103 @@ const PROJECT_EXTENSION_LIST: &[&str] = &[
     ".sbt",
     ".gradle",
     ".pom",
+    // ── Registry parity (2026-09-19) ─────────────────────────────────────
+    // Every extension of a language in language_registry.yaml belongs here:
+    // the daemon shipped grammars for 24 languages whose files this gate
+    // rejected (C++ .cc/.cxx/.hh, Kotlin .kts, Julia .jl, Ada, Lisp, Fortran,
+    // Pascal, Scheme, …) — an agent found them with native grep and the index
+    // had never seen them. `registry_extensions_are_all_allowlisted` keeps
+    // the two lists in step; `.fasl` (compiled Lisp image, a binary) is the
+    // one registry entry left out on purpose.
+    ".adb",
+    ".ads", // Ada
+    ".cljc",
+    ".edn", // Clojure
+    ".c++",
+    ".cc",
+    ".cxx",
+    ".h++",
+    ".hh",
+    ".hxx",
+    ".ipp",
+    ".tpp", // C++
+    ".f",
+    ".f03",
+    ".f08",
+    ".for",
+    ".fpp", // Fortran
+    ".lhs", // Haskell (literate)
+    ".htm",
+    ".xhtml", // HTML
+    ".jsonc", // JSON with comments
+    ".jl",    // Julia
+    ".kts",   // Kotlin script / Gradle Kotlin DSL
+    ".cls",
+    ".sty", // LaTeX
+    ".cl",
+    ".lisp",
+    ".lsp", // Lisp
+    ".markdown",
+    ".mdx", // Markdown
+    ".mll",
+    ".mly", // OCaml lexers / parsers
+    ".dpk",
+    ".dpr",
+    ".lfm",
+    ".pp", // Pascal
+    ".pod",
+    ".psgi",
+    ".t", // Perl
+    ".php3",
+    ".php4",
+    ".php5",
+    ".php7",
+    ".phps",
+    ".phtml", // PHP
+    ".psd1",
+    ".psm1", // PowerShell
+    ".pyi",
+    ".pyw", // Python
+    ".rmd",
+    ".rnw", // R
+    ".gemspec",
+    ".rake",
+    ".rbw", // Ruby
+    ".sc",  // Scala
+    ".rkt",
+    ".scm",
+    ".ss", // Scheme
+    ".vala",
+    ".vapi", // Vala
+    ".xsd",
+    ".xsl",
+    ".xslt", // XML
+    // ── Source-like formats the coverage audit found unindexed ───────────
+    // (`make coverage-audit`, 2026-09-19: 500 git-tracked files across nine
+    // repos were promised by default_configuration.yaml and rejected here.)
+    ".tf",
+    ".tfvars",
+    ".hcl", // Terraform / HCL
+    ".jinja",
+    ".jinja2",
+    ".j2",
+    ".hbs", // templates
+    ".plist",
+    ".xcconfig",
+    ".pbxproj",
+    ".storyboard",
+    ".xib",
+    ".entitlements", // Xcode
+    ".service",
+    ".timer", // systemd units
+    ".patch",
+    ".diff", // diffs
+             // NOT here, on purpose: .conf .properties .cfg .ini and every .env* —
+             // the same audit found 16 of 130 .conf and 17 of 55 .properties carrying
+             // password= / secret= / token= lines (Spring application.properties,
+             // keycloak.conf). Indexing them copies credentials into the vector
+             // store; see the filename list's note. Redacting such lines before
+             // chunking is the way to admit them, and is tracked as an issue.
 ];
 
 /// Document/reference formats added only to the library allowlist.
@@ -177,6 +274,7 @@ const PROJECT_FILENAME_LIST: &[&str] = &[
     "Makefile",
     "GNUmakefile",
     "BSDmakefile",
+    "justfile",
     "Kbuild",
     "SConstruct",
     "SConscript",
