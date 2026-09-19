@@ -152,6 +152,19 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       WQM_LOG_LEVEL: ${WQM_LOG_LEVEL:-INFO}
       WQM_EMBEDDING_PROVIDER: ${WQM_EMBEDDING_PROVIDER:-fastembed}
+      # Longest string handed to the remote embedder (characters). The shipped
+      # default (120 000, embedding.max_input_chars) only guards the endpoint's
+      # 422; the model's tokenizer then keeps up to 8 192 tokens, and NomicBERT's
+      # attention materialises batch × heads × tokens² — one batch of 8 chunks
+      # at 8 192 tokens is ~13 GB of fp16 scores. That is what filled the card
+      # (15.2 of 16.3 GB, twice on 2026-09-19, with --batch-size 8 already in
+      # place) and spilled into host RAM through the WSL2 driver's sysmem
+      # fallback. 8 000 chars ≈ 2 500–3 000 code tokens: ~1.7 GB of attention
+      # per batch, and a chunk that long is already past what the retrieval
+      # unit should be (tree-sitter chunks are function/class-sized; the tail
+      # of a 10 KB minified catalog.html adds nothing). Truncations are counted
+      # in the daemon's WARN "truncated N input(s)" line.
+      WQM_EMBEDDING_MAX_INPUT_CHARS: ${WQM_EMBEDDING_MAX_INPUT_CHARS:-8000}
       # Remote cross-encoder reranker for 2nd-stage search (EmbeddingService.
       # Rerank). When the base URL is set, the daemon POSTs to {base}/v1/rerank
       # — the Infinity GPU sidecar serves BAAI/bge-reranker-v2-m3 alongside e5.
