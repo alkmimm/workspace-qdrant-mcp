@@ -236,13 +236,13 @@ const PROJECT_EXTENSION_LIST: &[&str] = &[
     ".timer", // systemd units
     ".patch",
     ".diff", // diffs
-             // NOT here, on purpose: .conf .properties .cfg .ini and every .env* —
-             // the same audit found 16 of 130 .conf and 17 of 55 .properties carrying
-             // password= / secret= / token= lines (Spring application.properties,
-             // keycloak.conf). Indexing them copies credentials into the vector
-             // store; see the filename list's note. Redacting such lines before
-             // chunking is the way to admit them, and is tracked as an issue.
 ];
+// NOT in PROJECT_EXTENSION_LIST, on purpose: .conf .properties .cfg .ini and
+// every .env* — the same audit found 16 of 130 .conf and 17 of 55 .properties
+// carrying password= / secret= / token= lines (Spring application.properties,
+// keycloak.conf). Indexing them copies credentials into the vector store; see
+// the filename list's note. Redacting such lines before chunking is the way
+// to admit them, and is tracked as an issue.
 
 /// Document/reference formats added only to the library allowlist.
 /// library_extensions = project_extensions ∪ LIBRARY_ONLY_EXTENSION_LIST
