@@ -15,6 +15,10 @@ pub struct RecoveryStats {
     /// a `stat`, no read, no hash. The number to watch when a restart is slow
     /// or the VM's memory grows: it should be almost all of them.
     pub files_unchanged_by_mtime: u64,
+    /// Rows re-stamped with the file's current mtime because the hash proved
+    /// the bytes unchanged under a stale stamp (checkout, copy, touch) — each
+    /// one is a file the NEXT start settles by mtime instead of reading.
+    pub files_mtime_refreshed: u64,
     /// Number of files routed to libraries collection (from project folders)
     pub files_routed_to_library: u64,
     /// Number of files now excluded (queued for deletion)

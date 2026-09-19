@@ -523,20 +523,27 @@ ADDED a test here, bump this count."; exit 1; }
 # Without it every daemon start, progressive scan and worktree-membership pass
 # re-read the whole corpus to conclude "unchanged" (~150 000 reads on one repo
 # with 33 worktrees), and inside a WSL2 VM that churn is charged to the Windows
-# host — the 2026-09-16 host reboot. Both tests hand the code a recorded hash
-# SHA-256 could never produce and assert it comes back verbatim (no read), then
-# move the mtime and assert the bytes decide again. Hermetic: in-memory SQLite
-# and a tempdir. NAMES only, exact count asserted.
+# host — the 2026-09-16 host reboot. The match tests hand the code a recorded
+# hash SHA-256 could never produce and assert it comes back verbatim (no read),
+# then move the mtime and assert the bytes decide again. The legacy tests do the
+# same with the epoch-SECONDS stamp branch dedup wrote until 2026-09-19 (99 % of
+# the rows on a worktree-heavy repo — none of them ever matched). The restamp
+# test asserts a row the hash proved unchanged under a stale stamp gets the
+# current mtime, so it is not re-read on every start forever. Hermetic:
+# in-memory SQLite and a tempdir. NAMES only, exact count asserted.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         test_content_hash_reusing_mtime_skips_read_when_mtime_matches \
+        test_content_hash_reusing_mtime_accepts_legacy_epoch_seconds_stamp \
         test_process_tracked_file_same_mtime_is_unchanged_without_hashing \
+        test_process_tracked_file_legacy_epoch_seconds_mtime_is_unchanged_without_hashing \
+        test_recovery_restamps_rows_the_hash_proved_unchanged \
         --test-threads=4 2>&1 | tee /tmp/mtime-fast-path.log; \
-    grep -q "^test result: ok\. 2 passed" /tmp/mtime-fast-path.log \
-    || { echo "GATE: expected exactly 2 mtime fast-path tests to run and pass — libtest \
+    grep -q "^test result: ok\. 5 passed" /tmp/mtime-fast-path.log \
+    || { echo "GATE: expected exactly 5 mtime fast-path tests to run and pass — libtest \
 exits 0 when a positional filter matches nothing, so a rename would silently un-gate the \
 check that keeps a daemon restart from re-reading every tracked file. If you ADDED a test \
 here, bump this count."; exit 1; }

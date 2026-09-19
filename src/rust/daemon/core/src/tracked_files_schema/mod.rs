@@ -9,6 +9,7 @@
 //! - `qdrant_chunks` is daemon-only (write and read)
 //! - `qdrant_chunks` is a child of `tracked_files` with CASCADE delete
 
+mod mtime;
 mod operations;
 mod reconcile;
 pub mod schema;
@@ -30,12 +31,17 @@ pub use schema::{
 
 // Re-export pool-based operations
 pub use operations::{
-    compute_content_hash, compute_file_hash, compute_relative_path, content_hash_reusing_mtime,
-    delete_qdrant_chunks, delete_tracked_file, get_chunk_point_ids, get_file_mtime,
-    get_tracked_file_paths, get_tracked_files_by_prefix, get_tracked_files_with_hashes,
-    insert_qdrant_chunks, insert_tracked_file, is_incremental, lookup_tracked_file,
-    lookup_tracked_files_holding_branch, lookup_watch_folder, other_generation_exists,
-    remove_branch_from_tracked_file, set_incremental, update_tracked_file,
+    compute_content_hash, compute_file_hash, compute_relative_path, delete_qdrant_chunks,
+    delete_tracked_file, get_chunk_point_ids, get_tracked_file_paths, get_tracked_files_by_prefix,
+    get_tracked_files_with_hashes, insert_qdrant_chunks, insert_tracked_file, is_incremental,
+    lookup_tracked_file, lookup_tracked_files_holding_branch, lookup_watch_folder,
+    other_generation_exists, remove_branch_from_tracked_file, set_incremental, update_tracked_file,
+};
+
+// Re-export the mtime fast path (stat-not-read proof that a file is unchanged)
+pub use mtime::{
+    content_hash_reusing_mtime, get_file_mtime, refresh_mtime_for_unchanged, MtimeRefresh,
+    MtimeStamps,
 };
 
 // Re-export transaction-aware operations

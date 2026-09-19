@@ -706,3 +706,57 @@ async fn test_content_hash_reusing_mtime_skips_read_when_mtime_matches() {
     assert_eq!(h, real_hash);
     assert!(!reused);
 }
+
+/// A row stamped in the epoch-seconds spelling (what branch dedup wrote before
+/// 2026-09-19, still in the table) must serve the fast path exactly like a
+/// millisecond ISO-8601 one — the reader accepts both spellings of one instant
+/// instead of a table rewrite. Same not-a-SHA trick: the file is not read.
+#[tokio::test]
+async fn test_content_hash_reusing_mtime_accepts_legacy_epoch_seconds_stamp() {
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let abs = tmp.path().join("dedup_shared.rs");
+    std::fs::write(&abs, "pub fn shared_across_branches() {}").unwrap();
+    let stamps = MtimeStamps::of(&abs).unwrap();
+    assert_ne!(stamps.iso_millis, stamps.epoch_secs);
+    assert!(stamps.matches(&stamps.iso_millis));
+    assert!(stamps.matches(&stamps.epoch_secs));
+    assert!(!stamps.matches(""), "a row without a stamp proves nothing");
+    assert_eq!(
+        get_file_mtime(&abs).unwrap(),
+        stamps.iso_millis,
+        "every writer's formatter is the ISO spelling"
+    );
+
+    insert_tracked_file(
+        &pool,
+        "w1",
+        "dedup_shared.rs",
+        Some("feature/x"),
+        Some("code"),
+        Some("rust"),
+        &stamps.epoch_secs,
+        "recorded-not-a-sha",
+        1,
+        Some("dedup_share"),
+        ProcessingStatus::Done,
+        ProcessingStatus::Done,
+        None,
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let (h, reused) = content_hash_reusing_mtime(&pool, "w1", "dedup_shared.rs", &abs)
+        .await
+        .unwrap();
+    assert_eq!(
+        h, "recorded-not-a-sha",
+        "epoch-seconds stamp → recorded hash"
+    );
+    assert!(reused, "no byte read");
+}
