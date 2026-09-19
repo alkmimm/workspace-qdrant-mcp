@@ -57,6 +57,21 @@ target/
 _build/
 coverage/
 **/coverage/
+
+# A build-artifact NAME is not an artifact under a source tree. The plain rules
+# above match the path segment anywhere, and hexagonal Java packages
+# (`adapters/out`, `ports/out`, `domain/target`), Angular `features/*/state/`
+# folders and a Dart `lib/src/coverage/` all carry those names: measured
+# 2026-09-19, 415 + 16 + 1 + 1 git-tracked sources across the watched repos had
+# never been indexed (LorawanSender.java was the one an agent noticed — native
+# grep found it, the index could not). Re-include the same names when they sit
+# below a `src/` directory; real build output never does.
+!**/src/**/out/
+!**/src/**/state/
+!**/src/**/target/
+!**/src/**/coverage/
+!**/src/**/build/
+!**/src/**/dist/
 *.class
 *.o
 *.a

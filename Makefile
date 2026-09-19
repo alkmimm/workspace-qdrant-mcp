@@ -87,7 +87,7 @@ DB_BACKUP_KEEP ?= 2
 	build-images mcp-rebuild memexd-recreate \
 	backup-db rehearse-migrations \
 	codex-register claude-register \
-	health-quick scan register-all watch reindex reindex-status hooks-install clean \
+	health-quick scan register-all watch reindex reindex-status coverage-audit hooks-install clean \
 	mem-watch-start mem-watch mem-watch-stop
 
 help:
@@ -133,6 +133,7 @@ help:
 	@echo "  watch            poll indexing progress until all projects drain (or timeout)"
 	@echo "  reindex          trigger a full reindex of the watched projects (admin API)"
 	@echo "  reindex-status   per-project indexing progress (one-shot)"
+	@echo "  coverage-audit   git ls-files vs the index per project; DEFECT buckets exit 1 (REPO_PATH=, SHOW=)"
 	@echo "  mem-watch-start  start the background memory-growth sampler (detached)"
 	@echo "  mem-watch        analyze memory samples: per-container trend + leak projection"
 	@echo "  mem-watch-stop   stop the background memory sampler"
@@ -404,6 +405,15 @@ reindex: check-env
 # Per-project indexing progress (pending / done / total / percent) from snapshot.
 reindex-status: check-env
 	@python3 "$(REPO)/scripts/wqm_admin.py" status "http://localhost:$(MCP_HTTP_PORT)"
+
+# What git tracks vs what the index holds, per project, with every missing file
+# sorted into the gate that dropped it (ignore rule, allowlist, size) — and the
+# two DEFECT buckets: ELIGIBLE (the walk should have taken it) and
+# allowlist-drift (default_configuration.yaml promises an extension the compiled
+# allowlist rejects). Read-only, sub-second. Exit 1 on a defect, so it can gate
+# an experiment run (runbook experiment-freeze.md §4). REPO_PATH=<abs> limits it.
+coverage-audit:
+	@python3 "$(REPO)/scripts/index-coverage-audit.py" $(if $(REPO_PATH),--repo "$(REPO_PATH)",) --show $(or $(SHOW),6)
 
 # ── Memory-growth watch (memexd soak signal) ─────────────────────────────────
 #
