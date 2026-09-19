@@ -833,6 +833,7 @@ RUN set -eux; \
     bash scripts/ci/hooks-claude-path-audit.sh /repo; \
     ONNX_VERSION="${ONNX_VERSION}" bash scripts/check-version-consistency.sh; \
     sh scripts/git-hooks/test-install.sh; \
+    bash scripts/ci/wsl-memory-guards-selftest.sh /repo; \
     touch /static-checks.ok
 
 # ─────────────────────────────────────────────

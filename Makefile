@@ -100,7 +100,7 @@ help:
 	@echo "  stack-up         start the docker stack (no rebuild; runs preflight first)"
 	@echo "  stack-down       stop the docker stack"
 	@echo "  preflight        refuse to start when the Windows host / WSL VM is short of memory"
-	@echo "  stack-guard      background watchdog: stops THIS stack if the VM footprint or host free memory trips"
+	@echo "  stack-guard      background watchdog: stops THIS stack if the host charge for the VM or host free memory trips"
 	@echo "  stack-guard-stop stop the watchdog"
 	@echo "  stack-restart    down + up"
 	@echo "  stack-status     compose ps + ping admin/qdrant/daemon"
@@ -156,8 +156,9 @@ check-env:
 # other workload in the VM down. Two guards: `preflight` refuses to START on a
 # short host (wired into stack-up / redeploy; PREFLIGHT_SOFT=1 downgrades to a
 # warning), `stack-guard` stops THIS compose project — never the others — if
-# the footprint grows past VM_GUARD_STOP_GB (70) or host free memory drops
-# below HOST_GUARD_MIN_FREE_GB (16) while it runs.
+# the host charge for the VM (vmmemWSL working set; guest footprint when the
+# host cannot be asked) grows past VM_GUARD_STOP_GB (70) or host free memory
+# drops below HOST_GUARD_MIN_FREE_GB (16) for 2 polls in a row while it runs.
 GUARD_PID := $(REPO)/.wqm-fork/memory-guard.pid
 
 preflight:

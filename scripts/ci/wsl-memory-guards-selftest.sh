@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Self-test for the WSL2 memory preflight + watchdog, hermetic (no Windows
+# host, no docker): every probe in scripts/wsl-memory-lib.sh is replaced
+# through its WSL_MEMORY_PROBES_OVERRIDE seam, and the guard's compose stop
+# through GUARD_STOP_CMD. Runs in the static-checks stage — the scripts gate
+# `make stack-up` / `make redeploy`, so a regression here silently removes the
+# protection that keeps this stack from taking the host down (2026-09-16).
+#
+# Usage: bash scripts/ci/wsl-memory-guards-selftest.sh [repo-root]
+set -uo pipefail
+REPO="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+PREFLIGHT="$REPO/scripts/host-memory-preflight.sh"
+GUARD="$REPO/scripts/wsl-memory-guard.sh"
+LIB="$REPO/scripts/wsl-memory-lib.sh"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+fails=0; ran=0
+
+for f in "$LIB" "$PREFLIGHT" "$GUARD"; do
+  bash -n "$f" || { echo "FAIL: syntax error in $f"; exit 1; }
+done
+
+# Probe stubs. Scalars come from FAKE_* env vars ("" = unmeasurable, exactly
+# what the real probes return when they cannot measure). The VM charge can be
+# a space-separated SEQUENCE consumed one value per call, so a guard run can
+# be fed "80 80" (trip) or "80 20 20" (recover) across its polls.
+cat > "$TMP/probes.sh" <<'STUB'
+wsl_host_free_kb()        { echo "${FAKE_HOST_FREE_KB-}"; }
+wsl_host_total_kb()       { echo "${FAKE_HOST_TOTAL_KB-133000000}"; }
+wsl_guest_footprint_kb()  { echo "${FAKE_GUEST_KB-20971520}"; }
+wsl_guest_cached_kb()     { echo "${FAKE_CACHED_KB-5242880}"; }
+wsl_guest_swap_used_kb()  { echo "${FAKE_SWAP_KB-0}"; }
+wsl_psi_full_avg60_pct()  { echo "${FAKE_PSI-0}"; }
+wsl_vm_charge_kb() {
+  local seq=( ${FAKE_CHARGE_SEQ-} ) n
+  [[ ${#seq[@]} -gt 0 ]] || { echo ""; return; }
+  n=$(cat "$FAKE_COUNTER" 2>/dev/null || echo 0); echo $(( n + 1 )) > "$FAKE_COUNTER"
+  (( n >= ${#seq[@]} )) && n=$(( ${#seq[@]} - 1 ))
+  echo "${seq[$n]}"
+}
+STUB
+export WSL_MEMORY_PROBES_OVERRIDE="$TMP/probes.sh"
+gb() { echo $(( $1 * 1048576 )); }
+
+# expect_preflight <name> <expected-exit> [VAR=value ...]
+expect_preflight() {
+  local name="$1" want="$2"; shift 2
+  local out got
+  out=$(env "$@" FAKE_COUNTER="$TMP/c.$RANDOM" bash "$PREFLIGHT" 2>&1); got=$?
+  ran=$(( ran + 1 ))
+  if [[ "$got" != "$want" ]]; then
+    echo "FAIL: preflight/$name: exit $got, wanted $want"; echo "$out" | sed 's/^/    /'; fails=$(( fails + 1 ))
+  else
+    echo "ok: preflight/$name (exit $got)"
+  fi
+}
+
+# ── preflight ────────────────────────────────────────────────────────────────
+expect_preflight healthy                    0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 20)
+expect_preflight host-short                 1 FAKE_HOST_FREE_KB=$(gb 10)  FAKE_CHARGE_SEQ=$(gb 20)
+expect_preflight charge-high                1 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 65)
+expect_preflight charge-high-soft           0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 65) PREFLIGHT_SOFT=1
+# Cache is only capped when the host cannot say what it is charged: 50 GB of
+# guest cache with a 30 GB host charge is a reclaimed cache, not a risk.
+expect_preflight big-cache-charge-fine      0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 30) FAKE_CACHED_KB=$(gb 50) FAKE_GUEST_KB=$(gb 66)
+# Swap in use is informational (autoMemoryReclaim swaps idle pages on purpose).
+expect_preflight swap-only-is-fine          0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 20) FAKE_SWAP_KB=$(gb 20)
+expect_preflight psi-pressure               1 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 20) FAKE_PSI=15
+expect_preflight psi-unmeasurable           0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 20) FAKE_PSI=
+# No host view: exit 2 (unmeasurable), and the guest-side caps take over.
+expect_preflight host-unmeasurable          2 FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ=
+expect_preflight host-unmeasurable-soft     0 FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= PREFLIGHT_SOFT=1
+expect_preflight no-host-guest-cache-high   1 FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_CACHED_KB=$(gb 50) FAKE_GUEST_KB=$(gb 55)
+expect_preflight no-host-guest-footprint    1 FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 66)
+# Host measurable but no vmmem process (older WSL naming): guest caps apply.
+expect_preflight host-ok-no-vmmem-guest-ok  0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=
+expect_preflight host-ok-no-vmmem-guest-big 1 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 66)
+
+# ── guard ────────────────────────────────────────────────────────────────────
+# run_guard <name> <expected-exit> <expect-stop:yes|no> [VAR=value ...]
+run_guard() {
+  local name="$1" want="$2" stop="$3"; shift 3
+  local marker="$TMP/stopped.$RANDOM" log="$TMP/guard.$RANDOM.log" got
+  env "$@" FAKE_COUNTER="$TMP/g.$RANDOM" GUARD_LOG="$log" GUARD_STOP_CMD="touch '$marker'" INTERVAL_SECS=0 \
+    timeout 2 bash "$GUARD" >/dev/null 2>&1; got=$?
+  ran=$(( ran + 1 ))
+  local stopped=no; [[ -e "$marker" ]] && stopped=yes
+  if [[ "$got" != "$want" || "$stopped" != "$stop" ]]; then
+    echo "FAIL: guard/$name: exit $got (wanted $want), stopped=$stopped (wanted $stop)"; sed 's/^/    /' "$log"; fails=$(( fails + 1 ))
+  else
+    echo "ok: guard/$name (exit $got, stopped=$stopped)"
+  fi
+}
+# exit 3 = tripped and stopped; exit 124 = timeout ran out with no trip.
+run_guard trips-after-two-breaches   3   yes FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ="$(gb 80) $(gb 80)"
+run_guard one-breach-then-recovery   124 no  FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ="$(gb 80) $(gb 20)"
+run_guard host-short-trips           3   yes FAKE_HOST_FREE_KB=$(gb 5)   FAKE_CHARGE_SEQ=$(gb 20)
+run_guard healthy-never-trips        124 no  FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 20)
+# No host view: the guest footprint stands in for the charge.
+run_guard no-host-guest-footprint    3   yes FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 75)
+run_guard no-host-guest-fine         124 no  FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 20)
+
+echo "wsl-memory-guards selftest: $ran cases, $fails failed"
+(( ran == 20 )) || { echo "GATE: expected exactly 20 cases to run (got $ran) — a deleted case is a silently un-gated behaviour; adjust the count when you add one."; exit 1; }
+exit $(( fails > 0 ))
