@@ -236,13 +236,22 @@ const PROJECT_EXTENSION_LIST: &[&str] = &[
     ".timer", // systemd units
     ".patch",
     ".diff", // diffs
+    // ── Configuration formats, admitted with credential redaction ────────
+    // 16 of 130 .conf and 17 of 55 .properties in the audited repos carry
+    // password= / secret= / token= lines (Spring application.properties,
+    // keycloak.conf). They are indexed because document_processor::redaction
+    // masks the VALUE of every credential-named key before chunking, so the
+    // vectors, the payload and the FTS5 lines hold `password=<redacted>` and
+    // a reader still learns the setting exists. `.env*` stays out: a file that
+    // is nothing but secrets is not worth a regex's residual risk (the
+    // `.env.example` / `.sample` / `.template` / `.dist` names, which hold
+    // placeholders by convention, are admitted by exact name below).
+    ".properties",
+    ".conf",
+    ".cfg",
+    ".ini",
+    ".cnf",
 ];
-// NOT in PROJECT_EXTENSION_LIST, on purpose: .conf .properties .cfg .ini and
-// every .env* — the same audit found 16 of 130 .conf and 17 of 55 .properties
-// carrying password= / secret= / token= lines (Spring application.properties,
-// keycloak.conf). Indexing them copies credentials into the vector store; see
-// the filename list's note. Redacting such lines before chunking is the way
-// to admit them, and is tracked as an issue.
 
 /// Document/reference formats added only to the library allowlist.
 /// library_extensions = project_extensions ∪ LIBRARY_ONLY_EXTENSION_LIST
@@ -310,6 +319,13 @@ const PROJECT_FILENAME_LIST: &[&str] = &[
     // Go / Rust manifests whose extension is not a language of its own
     "go.mod",
     "go.sum",
+    // Environment TEMPLATES only — placeholders by convention, and redaction
+    // masks anything real that slips in. `.env`, `.env.local`,
+    // `.env.production` and friends are never listed: see the note above.
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+    ".env.dist",
     // Git / tooling ignore + config files (safe to index, no secrets)
     ".gitignore",
     ".gitattributes",

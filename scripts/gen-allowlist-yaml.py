@@ -35,9 +35,11 @@ HEADER_EXT = """  # allowed_extensions: File extensions eligible for ingestion i
   # by scripts/gen-allowlist-yaml.py, and the validate-stage test
   # `default_configuration_yaml_mirrors_the_compiled_allowlist` fails the
   # build when the two differ. Library-only document formats (.pdf, .epub,
-  # .docx, …) are a separate list in the same Rust file. Deliberately absent:
-  # .conf .properties .cfg .ini and .env* — measured 2026-09-19, roughly one
-  # in six of those files carries credentials (see the Rust file's note).
+  # .docx, …) are a separate list in the same Rust file. Configuration formats
+  # (.conf .properties .cfg .ini .cnf) are indexed with credential values
+  # masked before chunking (document_processor/redaction.rs); .env* files stay
+  # out — only the .env.example / .sample / .template / .dist names are listed
+  # under allowed_filenames.
   # Format: Array of extension strings (with leading dot), sorted
 """
 

@@ -435,6 +435,37 @@ mod tests {
         );
     }
 
+    /// Configuration formats are admitted because document_processor::redaction
+    /// masks credential values before chunking; environment files are not —
+    /// `.env`-style files are nothing but secrets, and a regex is not a
+    /// guarantee. Only the template names (placeholders by convention) pass.
+    #[test]
+    fn config_formats_admitted_env_files_still_rejected() {
+        let ae = AllowedExtensions::default();
+        for p in [
+            "/svc/src/main/resources/application.properties",
+            "/svc/keycloak.conf",
+            "/svc/php.ini",
+            "/svc/setup.cfg",
+            "/svc/my.cnf",
+            "/svc/.env.example",
+            "/svc/.env.sample",
+            "/svc/.env.template",
+            "/svc/.env.dist",
+        ] {
+            assert!(ae.is_allowed(p, "projects"), "{p} must be indexable");
+        }
+        for p in [
+            "/svc/.env",
+            "/svc/.env.local",
+            "/svc/.env.production",
+            "/svc/prod.env",
+            "/home/user/.netrc",
+        ] {
+            assert!(!ae.is_allowed(p, "projects"), "{p} must stay out");
+        }
+    }
+
     /// Every extension the bundled language registry knows must pass the
     /// project allowlist. Until 2026-09-19 the daemon shipped grammars for 24
     /// languages whose files this gate rejected (C++ .cc/.cxx/.hh, Kotlin

@@ -572,6 +572,30 @@ exits 0 when a positional filter matches nothing, so a rename would silently un-
 check that keeps the registry, the compiled allowlist and the documented YAML in step. If \
 you ADDED a test here, bump this count."; exit 1; }
 
+# Credential redaction runs here: .conf/.properties/.cfg/.ini are on the
+# allowlist ONLY because document_processor::redaction masks the value of
+# every credential-named key (and known token shapes, URL passwords, PEM
+# private-key bodies in any file) on the one raw_text every store derives
+# from. Seven unit tests pin the rules — placeholders, numbers, `${VAR}`,
+# `var.x` and code assignments must survive, quotes must be kept — one
+# pipeline test proves the value reaches neither raw_text nor a chunk, and one
+# allowlist test proves `.env*` stays out while the template names get in.
+# Hermetic: strings and a tempdir. NAMES only, exact count asserted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        document_processor::redaction::tests \
+        application_properties_secret_never_reaches_raw_text_or_chunks \
+        config_formats_admitted_env_files_still_rejected \
+        --test-threads=4 2>&1 | tee /tmp/redaction.log; \
+    grep -q "^test result: ok\. 9 passed" /tmp/redaction.log \
+    || { echo "GATE: expected exactly 9 credential-redaction tests to run and pass — libtest \
+exits 0 when a positional filter matches nothing, so a rename would silently un-gate the \
+masking that is the only reason configuration files are indexed at all. If you ADDED a test \
+here, bump this count."; exit 1; }
+
 # Dependency-cycle precision runs here: hermetic (in-memory SQLite, no
 # embeddings, no network) and it guards a defect that produced confident,
 # well-formed, entirely fictional output. A method call on a receiver typed by

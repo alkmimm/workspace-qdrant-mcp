@@ -15,6 +15,7 @@ pub mod chunking;
 pub mod extraction;
 #[cfg(feature = "ocr")]
 pub mod ocr;
+pub mod redaction;
 pub mod types;
 
 pub use self::types::{detect_document_type, DocumentProcessorError, DocumentProcessorResult};
@@ -493,6 +494,23 @@ fn process_file_sync_inner(
     // Run OCR on embedded images for supported document types
     #[cfg(feature = "ocr")]
     let raw_text = ocr::enrich_text_with_ocr(file_path, raw_text, &mut metadata, ocr_engine);
+
+    // Credentials are masked HERE, on the one text every store derives from
+    // (vectors, Qdrant payload, FTS5 lines), so no store ever holds the value.
+    // Configuration-shaped files also get the key/value layer; see redaction.rs.
+    let raw_text = match redaction::redact_secrets(&raw_text, redaction::is_config_like(file_path))
+    {
+        Some(r) => {
+            info!(
+                file = %file_path.display(),
+                redacted_lines = r.lines,
+                "credential values masked before chunking"
+            );
+            metadata.insert("redacted_lines".to_string(), r.lines.to_string());
+            r.text
+        }
+        None => raw_text,
+    };
 
     // Add collection to metadata
     metadata.insert("collection".to_string(), collection.to_string());
