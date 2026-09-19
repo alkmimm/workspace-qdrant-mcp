@@ -912,19 +912,52 @@ services:
       # full card on WSL2 is not an OOM: the Windows driver's sysmem fallback
       # backs the overflow with HOST RAM, invisible to the VM and charged to
       # vmmemWSL (measured 2026-09-18: host free 27 GB while the VM reported
-      # 48 GB). expandable_segments stops fragmentation from pinning reserved
-      # memory; the GC threshold releases cached blocks once 60% of the
-      # device is reserved, so the allocator settles well below the edge.
-      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True,garbage_collection_threshold:0.6"
+      # 48 GB). The GC threshold releases cached blocks once 60% of the device
+      # is reserved, so the allocator settles well below the edge.
+      #
+      # NOT expandable_segments: it maps memory through the CUDA virtual-memory
+      # API (cuMemCreate/cuMemMap), which the WSL2 GPU-PV driver path does not
+      # carry reliably — with it on, the engine died 6 minutes into the ingest
+      # (2026-09-19 02:09Z, "RuntimeError: CUDA driver error: unknown error" in
+      # batch_handler) and never served another request.
+      PYTORCH_CUDA_ALLOC_CONF: "garbage_collection_threshold:0.6"
+      # The model the health probe embeds with (must be one of the served ids).
+      WQM_HEALTH_MODEL: ${WQM_EMBEDDING_SIDECAR_MODEL:-intfloat/multilingual-e5-large}
     healthcheck:
+      # A real inference, not /health: a dead engine keeps /health at 200 and
+      # hangs every /v1/embeddings call (2026-09-19: "healthy" for 35 minutes
+      # after the CUDA error above while the daemon timed out on every item and
+      # the queue crawled at 31 items/min). A live engine answers a one-token
+      # embedding in milliseconds. Three consecutive hangs after start-up
+      # SIGTERM PID 1 so `restart: always` brings a fresh engine — Docker never
+      # restarts a container for being unhealthy on its own.
       test:
-        [
-          "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:7997/health', timeout=5)\"",
-        ]
-      interval: 15s
-      timeout: 10s
-      retries: 20
+        - CMD-SHELL
+        - |
+          python - <<'PY'
+          import json, os, sys, urllib.request
+          C = "/tmp/wqm-embed-fails"
+          req = urllib.request.Request(
+              "http://127.0.0.1:7997/v1/embeddings",
+              data=json.dumps({"model": os.environ["WQM_HEALTH_MODEL"], "input": ["ping"]}).encode(),
+              headers={"Content-Type": "application/json"})
+          try:
+              urllib.request.urlopen(req, timeout=20).read()
+              open(C, "w").write("0")
+              sys.exit(0)
+          except Exception as e:
+              n = (int(open(C).read() or 0) + 1) if os.path.exists(C) else 1
+              open(C, "w").write(str(n))
+              up = float(open("/proc/uptime").read().split()[0])
+              started = int(open("/proc/1/stat").read().rsplit(")", 1)[1].split()[19]) / os.sysconf("SC_CLK_TCK")
+              if n >= 3 and up - started > 300:
+                  print(f"embedding engine dead ({e}); restarting the container", file=sys.stderr)
+                  os.kill(1, 15)
+              sys.exit(1)
+          PY
+      interval: 30s
+      timeout: 25s
+      retries: 3
       start_period: 180s
     volumes:
       - infinity_data:/app/.cache
