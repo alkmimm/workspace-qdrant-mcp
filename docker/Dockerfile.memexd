@@ -576,9 +576,10 @@ you ADDED a test here, bump this count."; exit 1; }
 # allowlist ONLY because document_processor::redaction masks the value of
 # every credential-named key (and known token shapes, URL passwords, PEM
 # private-key bodies in any file) on the one raw_text every store derives
-# from. Eight unit tests pin the rules — placeholders, numbers, `${VAR}`,
+# from. Nine unit tests pin the rules — placeholders, numbers, `${VAR}`,
 # `${{ }}`, `var.x`, prose labels, translation catalogues and code
-# assignments must survive, quotes must be kept — one
+# assignments must survive, quotes must be kept, and the FTS5 reader
+# (`read_for_index`) returns byte-for-byte the chunker's view — one
 # pipeline test proves the value reaches neither raw_text nor a chunk, and one
 # allowlist test proves `.env*` stays out while the template names get in.
 # Hermetic: strings and a tempdir. NAMES only, exact count asserted.
@@ -591,8 +592,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         application_properties_secret_never_reaches_raw_text_or_chunks \
         config_formats_admitted_env_files_still_rejected \
         --test-threads=4 2>&1 | tee /tmp/redaction.log; \
-    grep -q "^test result: ok\. 10 passed" /tmp/redaction.log \
-    || { echo "GATE: expected exactly 10 credential-redaction tests to run and pass — libtest \
+    grep -q "^test result: ok\. 11 passed" /tmp/redaction.log \
+    || { echo "GATE: expected exactly 11 credential-redaction tests to run and pass — libtest \
 exits 0 when a positional filter matches nothing, so a rename would silently un-gate the \
 masking that is the only reason configuration files are indexed at all. If you ADDED a test \
 here, bump this count."; exit 1; }
@@ -887,6 +888,7 @@ RUN set -eux; \
     bash scripts/ci/path-discipline.sh /repo; \
     bash scripts/ci/forbid_canonicalize.sh /repo; \
     bash scripts/ci/hooks-claude-path-audit.sh /repo; \
+    bash scripts/ci/forbid_bare_index_reads.sh /repo; \
     ONNX_VERSION="${ONNX_VERSION}" bash scripts/check-version-consistency.sh; \
     sh scripts/git-hooks/test-install.sh; \
     bash scripts/ci/wsl-memory-guards-selftest.sh /repo; \

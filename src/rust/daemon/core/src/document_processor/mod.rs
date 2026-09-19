@@ -495,22 +495,19 @@ fn process_file_sync_inner(
     #[cfg(feature = "ocr")]
     let raw_text = ocr::enrich_text_with_ocr(file_path, raw_text, &mut metadata, ocr_engine);
 
-    // Credentials are masked HERE, on the one text every store derives from
-    // (vectors, Qdrant payload, FTS5 lines), so no store ever holds the value.
-    // Configuration-shaped files also get the key/value layer; see redaction.rs.
-    let raw_text =
-        match redaction::redact_secrets(&raw_text, redaction::key_value_mode_for(file_path)) {
-            Some(r) => {
-                info!(
-                    file = %file_path.display(),
-                    redacted_lines = r.lines,
-                    "credential values masked before chunking"
-                );
-                metadata.insert("redacted_lines".to_string(), r.lines.to_string());
-                r.text
-            }
-            None => raw_text,
-        };
+    // Credentials are masked HERE for the vectors and the Qdrant payload; the
+    // FTS5 line index reads the disk on its own and applies the SAME policy
+    // through redaction::read_for_index. Configuration-shaped files also get
+    // the key/value layer; see redaction.rs.
+    let (raw_text, redacted_lines) = redaction::redact_for_path(file_path, raw_text);
+    if redacted_lines > 0 {
+        info!(
+            file = %file_path.display(),
+            redacted_lines,
+            "credential values masked before chunking"
+        );
+        metadata.insert("redacted_lines".to_string(), redacted_lines.to_string());
+    }
 
     // Add collection to metadata
     metadata.insert("collection".to_string(), collection.to_string());

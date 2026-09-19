@@ -1,9 +1,13 @@
 //! Credential redaction before chunking.
 //!
-//! Every byte the daemon indexes passes through `process_file_sync_inner` as
-//! one `raw_text`, and from there into the dense vectors, the Qdrant payload
-//! and the FTS5 line index. This module rewrites that text ONCE, so all three
-//! stores see the same redacted content and no store ever holds the value.
+//! Text leaves the disk at TWO places, and both apply the one policy in
+//! [`redact_for_path`]: the chunker in `process_file_sync_inner` (its
+//! `raw_text` feeds the dense vectors and the Qdrant payload) and the FTS5
+//! line index, whose writers in `strategies/processing/file/` read the file
+//! themselves and must do so through [`read_for_index`]. The first deploy
+//! (2026-09-19) hooked the chunker alone: `grep` served a 64-hex token for a
+//! file whose Qdrant payload showed `<redacted>`. `scripts/ci/
+//! forbid_bare_index_reads.sh` now fails the build on a bare read there.
 //!
 //! Why it exists: `.conf`, `.properties`, `.cfg`, `.ini` were kept off the
 //! ingestion allowlist because `make coverage-audit` (2026-09-19) found 16 of
@@ -375,6 +379,37 @@ pub fn redact_secrets(text: &str, key_value_mode: bool) -> Option<Redaction> {
     changed.then_some(Redaction { text: out, lines })
 }
 
+/// The policy in one call: redact `text` as the file at `path` should be
+/// redacted (configuration layer for config-shaped, non-i18n paths; known
+/// token shapes for everything). Returns the text to index and how many
+/// lines were masked (0 = untouched, `text` handed back without a copy).
+///
+/// Every store must derive from THIS text — the chunker in
+/// `process_file_sync_inner` and the FTS5 line index alike — or one of them
+/// keeps the value the other masked. The 2026-09-19 deploy shipped the
+/// chunker hook alone and `grep` (FTS5, which reads the disk on its own in
+/// `strategies/processing/file/`) served a 64-hex token that the Qdrant
+/// payload for the same file showed as `<redacted>`. `read_for_index` is the
+/// reader every `code_lines` writer goes through; `scripts/ci/
+/// forbid_bare_index_reads.sh` fails the build on a bare `read_to_string`
+/// in that directory.
+pub fn redact_for_path(path: &Path, text: String) -> (String, usize) {
+    match redact_secrets(&text, key_value_mode_for(path)) {
+        Some(r) => (r.text, r.lines),
+        None => (text, 0),
+    }
+}
+
+/// Read a file the way the text index must see it: EOL-normalised (the
+/// `base_point` identity is CRLF-agnostic) and credential-redacted. The one
+/// disk reader for `code_lines`; see [`redact_for_path`].
+pub async fn read_for_index(read_path: impl AsRef<Path>) -> std::io::Result<(String, usize)> {
+    let read_path = read_path.as_ref();
+    let raw = tokio::fs::read_to_string(read_path).await?;
+    let normalised = wqm_common::hashing::normalize_line_endings(&raw).into_owned();
+    Ok(redact_for_path(read_path, normalised))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +497,45 @@ mod tests {
         }
         assert!(key_value_mode_for(Path::new("services/config/app.json")));
         assert!(key_value_mode_for(Path::new(".github/workflows/ci.yml")));
+    }
+
+    /// The FTS5 reader must hand back the SAME text the chunker embeds: EOL
+    /// normalised and the credential masked. This is the read that fed a
+    /// 64-hex token into `grep` while the vectors for the same file showed
+    /// `<redacted>` (2026-09-19) — a bare `read_to_string` in any
+    /// `code_lines` writer reopens that hole; the static check
+    /// `scripts/ci/forbid_bare_index_reads.sh` guards the call sites.
+    #[tokio::test]
+    async fn read_for_index_returns_the_chunkers_view_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("application.properties");
+        std::fs::write(
+            &path,
+            "spring.datasource.url=jdbc:postgresql://db:5432/app\r\n\
+             spring.authorization.token = 9f8e7d6c5b4a39281706f5e4d3c2b1a0-live\r\n\
+             server.port=8080\r\n",
+        )
+        .unwrap();
+        let (text, lines) = read_for_index(&path).await.unwrap();
+        assert_eq!(lines, 1);
+        assert_eq!(
+            text,
+            "spring.datasource.url=jdbc:postgresql://db:5432/app\n\
+             spring.authorization.token = <redacted>\n\
+             server.port=8080\n",
+            "EOL normalised AND the token masked"
+        );
+        // And it is byte-for-byte what the chunker's hook produces.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let normalised = wqm_common::hashing::normalize_line_endings(&raw).into_owned();
+        assert_eq!(redact_for_path(&path, normalised), (text, 1));
+        // A clean file comes back untouched, count 0.
+        let clean = dir.path().join("main.rs");
+        std::fs::write(&clean, "fn main() {}\n").unwrap();
+        assert_eq!(
+            read_for_index(&clean).await.unwrap(),
+            ("fn main() {}\n".to_string(), 0)
+        );
     }
 
     #[test]
