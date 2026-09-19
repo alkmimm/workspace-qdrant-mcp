@@ -123,7 +123,15 @@ index. `global.wqmignore` now re-includes those names below any `src/`
 directory (`!**/src/**/out/` and siblings); after editing the file, a memexd
 restart runs `[ignore_sync]` and enqueues the newly eligible files as
 `missing` (817 that day, drained in 10 minutes — recovery is a `stat` per
-file since #399). Measure it the same way before a run:
+file since #399). Measure it before a run — `make coverage-audit` (`scripts/index-coverage-audit.py`)
+compares `git ls-files` with `tracked_files` per project and sorts every
+missing file into the gate that dropped it (`global`, `wqmignore`,
+`gitignore`, `allowlist`, `size`); two buckets are defects and exit 1:
+`ELIGIBLE` (the walk should have taken it) and `allowlist-drift`
+(`default_configuration.yaml` promises an extension the compiled allowlist in
+`allowed_extensions/extensions.rs` rejects — the daemon never reads the YAML
+list; 500 files across the watched repos on 2026-09-19). The one-liner
+version for a single rule:
 
 ```bash
 # git-tracked files hidden by a plain 'name/' rule of global.wqmignore
