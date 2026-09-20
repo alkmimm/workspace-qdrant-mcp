@@ -456,7 +456,7 @@ fn parse_restamp_enabled(raw: Option<&str>) -> bool {
 /// folder root, and replays ancestor directory rules — the queued path is
 /// reached directly, not via a pruning walk. Building the gate costs a few
 /// file reads; the embedding work it can save costs seconds to minutes.
-fn is_ignored_at_dequeue(base_path: &str, file_path: &Path) -> bool {
+pub(super) fn is_ignored_at_dequeue(base_path: &str, file_path: &Path) -> bool {
     let root = Path::new(base_path);
     let gate = IgnoreGate::for_dir(
         file_path.parent().unwrap_or(root),

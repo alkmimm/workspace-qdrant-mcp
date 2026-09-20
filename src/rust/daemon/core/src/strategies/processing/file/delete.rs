@@ -380,11 +380,23 @@ pub(super) async fn delete_tracked_file(
     // (measured 2026-07-15: 1,034 preserves per boot). Without the flag the
     // original protection stands unchanged.
     let covered = is_covered_by_live_generation(item);
-    if r_new_empty
-        && delete_target_still_exists(Path::new(abs_file_path))
-        && is_branch_prune_delete(item)
-        && !(covered && covered_delete_policy() == CoveredDeletePolicy::On)
-    {
+    // The preserve promises "reconciliation re-tags it on a later pass" — which
+    // is false when the on-disk file is IGNORED under the current rules: every
+    // enqueue path skips it, so the stale generation would sit in the index
+    // forever with whatever it held on the dead branch. Observed 2026-09-20:
+    // DOC-V2's git-ignored `scripts/ext-stack/credentials.json`, indexed once
+    // on `codex/mobile-contextual-filters` before the ignore rule existed,
+    // survived every prune with a 32-char password in FTS5. Same gate as the
+    // dequeue check for Adds, so the two paths cannot disagree.
+    let ignored_now = ignored_under_current_rules(abs_file_path, relative_path);
+    if preserve_pruned_entry(
+        r_new_empty,
+        delete_target_still_exists(Path::new(abs_file_path)),
+        is_branch_prune_delete(item),
+        ignored_now,
+        covered,
+        covered_delete_policy(),
+    ) {
         if covered && covered_delete_policy() == CoveredDeletePolicy::Dry {
             debug!(
                 "[stage3-dry] WOULD delete stale generation of '{}' (file_id={}, pruned \
@@ -401,6 +413,14 @@ pub(super) async fn delete_tracked_file(
             );
         }
         return Ok(());
+    }
+    if r_new_empty && ignored_now && is_branch_prune_delete(item) {
+        info!(
+            "Deleting stale generation of '{}': pruned branch '{}' was its only tag and the \
+             on-disk file is ignored under the current rules — no reconciliation would ever \
+             re-tag it",
+            relative_path, item.branch
+        );
     }
 
     let (other_refs_bp, other_holds_x) = match bp {
@@ -686,6 +706,43 @@ fn delete_target_still_exists(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// The branch-prune preserve decision, as a pure function of its inputs (see
+/// the comment at the call site in [`delete_tracked_file`]). Keep the index
+/// entry only when removing the pruned branch would empty its tag set, the
+/// file is still on disk, this is a prune delete, the current ignore rules do
+/// NOT exclude the file (otherwise no reconciliation will ever re-tag it), and
+/// it is not stage-3 debris under `policy=on`.
+fn preserve_pruned_entry(
+    r_new_empty: bool,
+    on_disk: bool,
+    prune_delete: bool,
+    ignored_now: bool,
+    covered: bool,
+    policy: CoveredDeletePolicy,
+) -> bool {
+    r_new_empty
+        && on_disk
+        && prune_delete
+        && !ignored_now
+        && !(covered && policy == CoveredDeletePolicy::On)
+}
+
+/// Whether the file is ignored under the rules in force NOW — the same gate
+/// the dequeue path applies to an Add/Update, evaluated against the watch
+/// root derived from the main-anchored pair (absolute == root + relative, the
+/// invariant every consumer of this module assumes). A pair that does not
+/// compose is treated as not ignored, which keeps the preserve conservative.
+fn ignored_under_current_rules(abs_file_path: &str, relative_path: &str) -> bool {
+    let Some(root) = abs_file_path
+        .strip_suffix(relative_path)
+        .map(|r| r.trim_end_matches(['/', '\\']))
+        .filter(|r| !r.is_empty())
+    else {
+        return false;
+    };
+    super::is_ignored_at_dequeue(root, Path::new(abs_file_path))
+}
+
 /// True when dropping `branch` would empty this file's branch set — i.e. it is
 /// the file's last remaining tag, so removing it deletes the whole index entry
 /// (Qdrant point + tracked row), not just one branch label. A multi-branch file
@@ -877,12 +934,65 @@ pub(super) async fn handle_qdrant_failure(
 #[cfg(test)]
 mod tests {
     use super::{
-        bypasses_on_disk_skip, delete_target_still_exists, is_branch_prune_delete,
-        is_covered_by_live_generation, is_ignore_excluded_delete, parse_covered_delete_policy,
-        parse_shadowed_strip_policy, would_remove_last_tag, CoveredDeletePolicy,
-        ShadowedStripPolicy,
+        bypasses_on_disk_skip, delete_target_still_exists, ignored_under_current_rules,
+        is_branch_prune_delete, is_covered_by_live_generation, is_ignore_excluded_delete,
+        parse_covered_delete_policy, parse_shadowed_strip_policy, preserve_pruned_entry,
+        would_remove_last_tag, CoveredDeletePolicy, ShadowedStripPolicy,
     };
     use crate::unified_queue_schema::{ItemType, QueueOperation, QueueStatus, UnifiedQueueItem};
+
+    /// The preserve is for a present-but-mislabeled file that reconciliation
+    /// WILL re-tag. A file the current rules ignore is never re-tagged, so the
+    /// stale generation must go — that is the git-ignored credentials.json
+    /// that survived every prune on a dead branch (2026-09-20).
+    #[test]
+    fn preserve_is_refused_when_the_on_disk_file_is_ignored_now() {
+        use CoveredDeletePolicy::{Dry, On};
+        // The classic preserve: sole tag, on disk, prune delete, not ignored.
+        assert!(preserve_pruned_entry(true, true, true, false, false, Dry));
+        // Same file, but the rules in force now ignore it → delete it.
+        assert!(!preserve_pruned_entry(true, true, true, true, false, Dry));
+        assert!(!preserve_pruned_entry(true, true, true, true, true, Dry));
+        // The pre-existing exits are untouched: gone from disk, not a prune
+        // delete, other tags remain, or stage-3 debris under policy=on.
+        assert!(!preserve_pruned_entry(true, false, true, false, false, Dry));
+        assert!(!preserve_pruned_entry(true, true, false, false, false, Dry));
+        assert!(!preserve_pruned_entry(false, true, true, false, false, Dry));
+        assert!(!preserve_pruned_entry(true, true, true, false, true, On));
+        // Covered debris under `dry` is still preserved (observed, not acted on).
+        assert!(preserve_pruned_entry(true, true, true, false, true, Dry));
+    }
+
+    /// The gate is the dequeue one, evaluated from the main-anchored pair: a
+    /// `.gitignore` in the watch root decides, and a pair that does not compose
+    /// is treated as not ignored (conservative).
+    #[test]
+    fn ignored_under_current_rules_follows_the_watch_roots_gitignore() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("scripts/ext-stack")).unwrap();
+        std::fs::write(
+            root.join(".gitignore"),
+            "scripts/ext-stack/*credentials*.json\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("scripts/ext-stack/credentials.json"), "{}").unwrap();
+        std::fs::write(root.join("scripts/ext-stack/config.json"), "{}").unwrap();
+        let abs = |rel: &str| root.join(rel).to_string_lossy().into_owned();
+        assert!(ignored_under_current_rules(
+            &abs("scripts/ext-stack/credentials.json"),
+            "scripts/ext-stack/credentials.json"
+        ));
+        assert!(!ignored_under_current_rules(
+            &abs("scripts/ext-stack/config.json"),
+            "scripts/ext-stack/config.json"
+        ));
+        // Pair that does not compose (relative is not a suffix of absolute).
+        assert!(!ignored_under_current_rules(
+            &abs("scripts/ext-stack/credentials.json"),
+            "elsewhere/credentials.json"
+        ));
+    }
 
     #[test]
     fn would_remove_last_tag_only_when_branch_is_sole_tag() {

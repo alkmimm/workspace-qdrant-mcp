@@ -572,6 +572,27 @@ exits 0 when a positional filter matches nothing, so a rename would silently un-
 check that keeps the registry, the compiled allowlist and the documented YAML in step. If \
 you ADDED a test here, bump this count."; exit 1; }
 
+# The branch-prune delete's preserve guard ("the file is still on disk, so
+# reconciliation will re-tag it") must yield to the ignore rules in force:
+# a git-ignored file on a dead branch is never re-tagged, and until
+# 2026-09-20 its stale generation — DOC-V2's credentials.json with a 32-char
+# password — survived every prune. These 9 tests pin the delete module's pure
+# decisions (last-tag arithmetic, prune/ignore markers, covered policy, and
+# the preserve truth table + the dequeue ignore gate). NAMES via module path,
+# exact count asserted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        strategies::processing::file::delete::tests \
+        --test-threads=4 2>&1 | tee /tmp/prune-delete.log; \
+    grep -q "^test result: ok\. 9 passed" /tmp/prune-delete.log \
+    || { echo "GATE: expected exactly 9 file-delete decision tests to run and pass — libtest \
+exits 0 when a positional filter matches nothing, so a module rename would silently un-gate \
+the preserve guard that decides whether a pruned branch's last generation leaves the index. \
+If you ADDED a test here, bump this count."; exit 1; }
+
 # The exclusion engine — the gate every folder scan and watcher event passes
 # through — must honour the ingestion allowlist's exact file names. Until
 # 2026-09-19 it excluded every hidden path component, so `.gitignore`,
