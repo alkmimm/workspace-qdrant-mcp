@@ -343,6 +343,10 @@ const PROJECT_FILENAME_LIST: &[&str] = &[
     ".prettierrc",
     ".stylelintrc",
     ".browserslistrc",
+    // Project-level MCP client configuration (which servers a repo wires up).
+    // Its `env` blocks can hold credentials; the key/value redaction layer
+    // masks them, so the file is admitted like any other JSON.
+    ".mcp.json",
     ".bashrc",
     ".bash_profile",
     ".bash_logout",
