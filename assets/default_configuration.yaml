@@ -1539,6 +1539,7 @@ watching:
     - ".gitmodules"
     - ".inputrc"
     - ".mailmap"
+    - ".mcp.json"
     - ".npmignore"
     - ".nvmrc"
     - ".prettierignore"

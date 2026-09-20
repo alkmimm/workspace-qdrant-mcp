@@ -343,6 +343,10 @@ const PROJECT_FILENAME_LIST: &[&str] = &[
     ".prettierrc",
     ".stylelintrc",
     ".browserslistrc",
+    // Project-level MCP client configuration (which servers a repo wires up).
+    // Its `env` blocks can hold credentials; the key/value redaction layer
+    // masks them, so the file is admitted like any other JSON.
+    ".mcp.json",
     ".bashrc",
     ".bash_profile",
     ".bash_logout",
@@ -452,6 +456,26 @@ impl Default for AllowedExtensions {
             filename_globs,
         }
     }
+}
+
+/// Whether `name` is one of the well-known file names the allowlist admits by
+/// exact (case-insensitive) name — `.gitignore`, `Dockerfile`, `.env.example`.
+///
+/// The exclusion engine consults this so a name the project deliberately
+/// admits is never lost to a generic rule. Until 2026-09-19 every hidden path
+/// component was excluded there, so the folder scan and the file watcher
+/// dropped `.gitignore` / `.editorconfig` / `.env.example` while the startup
+/// reconciler (which does not consult that engine) indexed them: such files
+/// were refreshed only at a daemon restart, and a forced re-embed never
+/// revisited them.
+pub fn is_allowlisted_filename(name: &str) -> bool {
+    static NAMES: std::sync::LazyLock<HashSet<String>> = std::sync::LazyLock::new(|| {
+        PROJECT_FILENAME_LIST
+            .iter()
+            .map(|s| s.to_ascii_lowercase())
+            .collect()
+    });
+    NAMES.contains(&name.to_ascii_lowercase())
 }
 
 impl AllowedExtensions {
