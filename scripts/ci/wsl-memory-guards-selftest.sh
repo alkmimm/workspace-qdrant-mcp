@@ -84,7 +84,11 @@ run_guard() {
   local name="$1" want="$2" stop="$3"; shift 3
   local needle=""; [[ "${1:-}" == LOG=* ]] && { needle="${1#LOG=}"; shift; }
   local marker="$TMP/stopped.$RANDOM" log="$TMP/guard.$RANDOM.log" got
-  env GUARD_DROP_CMD=true GUARD_DROP_SETTLE_SECS=0 "$@" FAKE_COUNTER="$TMP/g.$RANDOM" GUARD_LOG="$log" GUARD_STOP_CMD="touch '$marker'" INTERVAL_SECS=0 \
+  # GUARD_LOCK= disables the single-instance lock: these cases run guards in
+  # parallel against the real repo path on purpose, and the live guard on a
+  # developer's machine already holds that lock. Cases that TEST the lock pass
+  # their own GUARD_LOCK after "$@", which wins.
+  env GUARD_DROP_CMD=true GUARD_DROP_SETTLE_SECS=0 GUARD_LOCK= "$@" FAKE_COUNTER="$TMP/g.$RANDOM" GUARD_LOG="$log" GUARD_STOP_CMD="touch '$marker'" INTERVAL_SECS=0 \
     timeout 2 bash "$GUARD" >/dev/null 2>&1; got=$?
   ran=$(( ran + 1 ))
   local stopped=no; [[ -e "$marker" ]] && stopped=yes
@@ -115,7 +119,18 @@ run_guard cache-drop-not-enough-trips 3  yes LOG="did not clear" FAKE_HOST_FREE_
 # No way to drop (sudo and docker both refused): the breach counts as is.
 run_guard cache-drop-unavailable-trips 3 yes LOG="drop unavailable" FAKE_HOST_FREE_KB=$(gb 100) FAKE_CACHED_KB=$(gb 50) \
   GUARD_DROP_CMD=false FAKE_CHARGE_SEQ="$(gb 80) $(gb 80)"
+# Single-instance lock: the boot unit and `make stack-guard` both start the
+# script, and two guards would each answer the same breach with its own
+# `compose stop`. With a free lock the guard runs normally; with the lock held
+# by another process it exits 0 (NOT a failure — systemd's Restart=on-failure
+# must not respawn it into a contention loop) and stops nothing, even while a
+# breach is on the table.
+run_guard lock-free-guard-runs          124 no  GUARD_LOCK="$TMP/free.lock" FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 20)
+exec 8>"$TMP/held.lock"; flock -n 8 || { echo "FAIL: harness could not take the test lock"; fails=$(( fails + 1 )); }
+run_guard lock-held-second-exits-zero     0 no  LOG="another guard already holds" GUARD_LOCK="$TMP/held.lock" \
+  FAKE_HOST_FREE_KB=$(gb 5) FAKE_CHARGE_SEQ="$(gb 80) $(gb 80)"
+exec 8>&-
 
 echo "wsl-memory-guards selftest: $ran cases, $fails failed"
-(( ran == 23 )) || { echo "GATE: expected exactly 23 cases to run (got $ran) — a deleted case is a silently un-gated behaviour; adjust the count when you add one."; exit 1; }
+(( ran == 25 )) || { echo "GATE: expected exactly 25 cases to run (got $ran) — a deleted case is a silently un-gated behaviour; adjust the count when you add one."; exit 1; }
 exit $(( fails > 0 ))

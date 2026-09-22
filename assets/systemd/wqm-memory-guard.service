@@ -1,0 +1,56 @@
+# Memory watchdog for the workspace-qdrant stack, as a boot service.
+#
+# Why this exists: the guard is what keeps an indexing run from taking the
+# Windows host down (2026-09-16: the VM reached its 96 GB cap with 61 GiB of
+# page cache and the host rebooted). It was started by hand with
+# `make stack-guard`, so it died with every `wsl --shutdown` and stayed dead
+# until someone remembered — on 2026-09-22 the stack ran ~1 h unguarded after
+# a reboot, because Docker's `restart: always` brings the containers back
+# with no user session while nothing brings the guard back.
+#
+# A SYSTEM unit (not a user unit) is deliberate: at VM boot there is no login
+# session, so `systemctl --user` services do not run, while docker.service and
+# its restart-always containers do.
+#
+# Install (one privileged step, from the repo root):
+#   sudo install -m 0644 assets/systemd/wqm-memory-guard.service \
+#        /etc/systemd/system/wqm-memory-guard.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wqm-memory-guard
+# Check:  systemctl status wqm-memory-guard   |  make stack-guard-status
+# Logs:   .wqm-fork/logs/memory-guard.log     (also journalctl -u wqm-memory-guard)
+#
+# The unit and `make stack-guard` are safe to mix: the script takes an
+# exclusive lock and a second instance exits 0 without touching the stack.
+
+[Unit]
+Description=workspace-qdrant WSL memory guard (stops the stack before the host is starved)
+Documentation=file:///home/alkmimm/respositorios/workspace-qdrant-mcp/scripts/wsl-memory-guard.sh
+# The guard stops containers through `docker compose`, so it needs the daemon.
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=alkmimm
+Group=alkmimm
+WorkingDirectory=/home/alkmimm/respositorios/workspace-qdrant-mcp
+ExecStart=/bin/bash /home/alkmimm/respositorios/workspace-qdrant-mcp/scripts/wsl-memory-guard.sh
+
+# Exit 3 = tripped (it stopped the stack): come back and keep watching, since
+# the trip does not restart the stack. A clean exit 0 means another instance
+# already holds the lock — do NOT respawn into a lock-contention loop.
+Restart=on-failure
+RestartSec=30s
+
+# The host-side probes call powershell.exe through WSL interop, which works
+# from a system service (verified 2026-09-22 with a cleared environment);
+# without it the guard degrades to the guest-side footprint check and says so
+# in its log. No hardening sandbox here: the guard must read /proc, reach the
+# docker socket and exec /mnt/c binaries.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wqm-memory-guard
+
+[Install]
+WantedBy=multi-user.target
