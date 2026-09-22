@@ -14,6 +14,7 @@ use ignore::WalkBuilder;
 use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
 
+use crate::allowed_extensions::{AllowedExtensions, FileRoute};
 use crate::patterns::ignore_gate::IgnoreGate;
 use crate::queue_operations::QueueManager;
 use crate::watching_queue::WatchManager;
@@ -60,7 +61,18 @@ pub async fn reconcile_ignore_rules(
     // collections have no branch; `None` keeps their per-path semantics.)
     let branch = resolve_branch(project_root, collection);
 
-    let eligible_files = walk_eligible_files(project_root, global_ignore_path)?;
+    let mut eligible_files = walk_eligible_files(project_root, global_ignore_path)?;
+    // "On disk and not ignored" is not the same as "indexable". Until
+    // 2026-09-22 this pass stopped at the ignore cascade, so every file the
+    // ingestion allowlist refuses — `.env`, `Runner.xcscheme`,
+    // `contents.xcworkspacedata`, `terraform.tfvars.example`, extensionless
+    // hook scripts — counted as MISSING at every single start: the reconciler
+    // enqueued an add, the dequeue guard dropped it, nothing changed, and the
+    // next start enqueued the same set again. Measured across six boots
+    // (2026-09-19 → 22): "21 stale deleted, 183 missing added", byte for byte
+    // identical every time, which is issue #402 and which also made the
+    // `missing=` number useless as a drift signal.
+    retain_indexable(&mut eligible_files, project_root, collection, tenant_id);
     let indexed_files = get_indexed_file_paths(pool, watch_id).await?;
 
     // Empty-walk safety net. A walk that yields ZERO eligible files while the
@@ -286,6 +298,41 @@ pub(crate) fn walk_eligible_files(
     Ok(files)
 }
 
+/// Drop from `eligible` every path the ingestion gate would refuse, so the
+/// reconciler's "missing" means "indexable and absent" rather than merely
+/// "on disk and not ignored".
+///
+/// The predicate is `route_file(..) != Excluded`, NOT
+/// [`AllowedExtensions::is_allowed`]: a library-routed document inside a
+/// project folder (`.pdf`, `.docx`, `.odt` — see `LIBRARY_ROUTED_EXTENSIONS`)
+/// is legitimately indexed under `libraries` while `is_allowed(path,
+/// "projects")` returns false for it. Measured before shipping: exactly 9
+/// such files are indexed today, and `is_allowed` would have flipped every
+/// one of them from fine to STALE — this pass deletes what it considers
+/// stale, so the wrong predicate here is a data-loss bug, not a cosmetic one.
+/// `route_file` is also what the file watcher filters on
+/// (`should_filter_debounced_event`), so the three enqueue paths now agree.
+///
+/// Shrinking the eligible set is otherwise safe in the stale direction: a
+/// path that is indexed AND refused by the gate is debris the ingest can
+/// never refresh, and the delete this pass enqueues for it is the cleanup.
+fn retain_indexable(
+    eligible: &mut HashSet<String>,
+    project_root: &Path,
+    collection: &str,
+    tenant_id: &str,
+) {
+    static ALLOWED: std::sync::LazyLock<AllowedExtensions> =
+        std::sync::LazyLock::new(AllowedExtensions::default);
+    eligible.retain(|rel| {
+        let abs = project_root.join(rel);
+        !matches!(
+            ALLOWED.route_file(&abs.to_string_lossy(), collection, tenant_id),
+            FileRoute::Excluded
+        )
+    });
+}
+
 /// Normalize a relative path to the storage format used by
 /// `tracked_files.relative_path` — forward-slash separators, lossy UTF-8.
 fn normalize_relative(rel: &Path) -> String {
@@ -347,6 +394,92 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    fn set(paths: &[&str]) -> HashSet<String> {
+        paths.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// The eligible set is what the ingest can actually take. Paths the
+    /// allowlist refuses must be dropped, or they are reported "missing"
+    /// forever: the reconciler enqueues an add, the dequeue guard drops it,
+    /// and the next start repeats it (issue #402 — the same "183 missing
+    /// added" at six consecutive boots, 2026-09-19 → 22).
+    #[test]
+    fn retain_indexable_drops_what_the_ingest_would_refuse() {
+        let root = Path::new("/repo");
+        let mut files = set(&[
+            // indexable
+            "src/main.rs",
+            "README.md",
+            "Dockerfile",
+            ".gitignore",
+            "src/main/resources/application.properties",
+            ".env.example",
+            // refused by the allowlist — every one of these was in the live
+            // 183 that the reconciler re-enqueued at each boot
+            "doc-frontend/packages/app/.env",
+            "doc-frontend/packages/app/.env.local",
+            "ios/Runner.xcodeproj/xcshareddata/xcschemes/Runner.xcscheme",
+            "macos/Runner.xcworkspace/contents.xcworkspacedata",
+            "infra/terraform/bootstrap-github/terraform.tfvars.example",
+            "scripts/git-hooks/pre-push",
+            "windows/runner/runner.exe.manifest",
+        ]);
+        retain_indexable(&mut files, root, "projects", "tenant123");
+        assert_eq!(
+            files,
+            set(&[
+                "src/main.rs",
+                "README.md",
+                "Dockerfile",
+                ".gitignore",
+                "src/main/resources/application.properties",
+                ".env.example",
+            ])
+        );
+    }
+
+    /// A library-routed document inside a PROJECT folder (`.pdf`, `.docx`,
+    /// `.odt`) is indexed under `libraries`, so it must stay eligible. This is
+    /// why the predicate is `route_file` and not `is_allowed`: the latter
+    /// returns false for these, which would have flipped the 9 such files
+    /// measured in the live index from fine to STALE — and this pass deletes
+    /// what it calls stale.
+    #[test]
+    fn retain_indexable_keeps_library_routed_documents_in_a_project_folder() {
+        let root = Path::new("/repo");
+        let mut files = set(&[
+            "docs/workspace-qdrant-tagging.pdf",
+            "integrator-api/Guia_Integracao.docx",
+            "integrator-api/Guia_Integracao.odt",
+            "e2e/fixtures/sample.pdf",
+            "src/lib.rs",
+            "app/.env",
+        ]);
+        retain_indexable(&mut files, root, "projects", "tenant123");
+        assert!(!files.contains("app/.env"), "still refused");
+        assert_eq!(files.len(), 5, "the four documents and the source survive");
+        for kept in [
+            "docs/workspace-qdrant-tagging.pdf",
+            "integrator-api/Guia_Integracao.docx",
+            "integrator-api/Guia_Integracao.odt",
+            "e2e/fixtures/sample.pdf",
+        ] {
+            assert!(files.contains(kept), "{kept} routes to libraries, not out");
+        }
+    }
+
+    /// A libraries watch folder keeps its own formats and still refuses what
+    /// the library allowlist does not name.
+    #[test]
+    fn retain_indexable_honours_the_library_collection() {
+        let root = Path::new("/lib");
+        let mut files = set(&["manual.pdf", "notes.md", "cover.png", "secrets/.env"]);
+        retain_indexable(&mut files, root, "libraries", "mylib");
+        assert!(files.contains("manual.pdf") && files.contains("notes.md"));
+        assert!(!files.contains("secrets/.env"));
+        assert!(!files.contains("cover.png"), "images are not text");
+    }
 
     /// Unit test the diff logic without DB (just the set operations)
     #[test]

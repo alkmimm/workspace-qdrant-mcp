@@ -572,6 +572,30 @@ exits 0 when a positional filter matches nothing, so a rename would silently un-
 check that keeps the registry, the compiled allowlist and the documented YAML in step. If \
 you ADDED a test here, bump this count."; exit 1; }
 
+# The ignore reconciler's "eligible" set must be what the ingest can take,
+# not merely what the ignore rules allow. Until 2026-09-22 it stopped at the
+# ignore cascade, so every allowlist-refused file (.env, .xcscheme,
+# .xcworkspacedata, extensionless hooks) was reported missing at EVERY start,
+# re-enqueued, dropped by the dequeue guard, and reported again — six boots in
+# a row logged an identical "21 stale deleted, 183 missing added" (#402), and
+# the `missing=` number was useless as a drift signal. The predicate is
+# `route_file != Excluded`, never `is_allowed`: a .pdf/.docx in a project
+# folder routes to `libraries`, and calling it ineligible would mark it STALE
+# — a delete. These 18 tests pin both halves. NAMES via module path, exact
+# count asserted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        startup::reconciliation::ignore_sync::tests \
+        --test-threads=4 2>&1 | tee /tmp/ignore-sync.log; \
+    grep -q "^test result: ok\. 18 passed" /tmp/ignore-sync.log \
+    || { echo "GATE: expected exactly 18 ignore_sync tests to run and pass — libtest exits 0 \
+when a positional filter matches nothing, so a module rename would silently un-gate the \
+eligibility rule that keeps the reconciler from re-enqueueing un-indexable files forever (and \
+from deleting library-routed documents). If you ADDED a test here, bump this count."; exit 1; }
+
 # The branch-prune delete's preserve guard ("the file is still on disk, so
 # reconciliation will re-tag it") must yield to the ignore rules in force:
 # a git-ignored file on a dead branch is never re-tagged, and until
