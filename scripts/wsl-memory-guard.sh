@@ -57,6 +57,21 @@ drop_caches() {
 mkdir -p "$(dirname "$LOG")"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
 
+# One guard per repo. The boot service (assets/systemd/wqm-memory-guard.service)
+# and `make stack-guard` both start this script, and two guards would each see
+# the same breach and each run `compose stop`. The loser exits 0 — never a
+# failure, so systemd's Restart=on-failure does not respawn it into a
+# lock-contention loop. GUARD_LOCK= disables locking for the self-test, which
+# runs several guards in parallel on purpose.
+LOCK="${GUARD_LOCK-$REPO/.wqm-fork/memory-guard.lock}"
+if [[ -n "$LOCK" ]]; then
+  exec 9>"$LOCK" || { log "cannot open lock $LOCK — continuing unlocked"; }
+  if ! flock -n 9; then
+    log "another guard already holds $LOCK — exiting (this is not an error)"
+    exit 0
+  fi
+fi
+
 log "guard start: stop if host charge for the VM > ${VM_GUARD_STOP_GB} GB or host free < ${HOST_GUARD_MIN_FREE_GB} GB for ${CONSECUTIVE_BREACHES} consecutive polls (every ${INTERVAL_SECS}s); page cache ≥ ${GUARD_DROP_MIN_CACHE_GB} GB is dropped and re-measured before a breach counts"
 breaches=0
 host_unknown_logged=0

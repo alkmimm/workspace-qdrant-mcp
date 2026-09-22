@@ -83,7 +83,7 @@ DB_BACKUP_KEEP ?= 2
 
 .PHONY: help check-env first-time redeploy \
 	stack-up stack-down stack-restart stack-status stack-logs verify-deploy \
-	preflight stack-guard stack-guard-stop \
+	preflight stack-guard stack-guard-stop stack-guard-install stack-guard-status \
 	build-images mcp-rebuild memexd-recreate \
 	backup-db rehearse-migrations \
 	codex-register claude-register \
@@ -102,6 +102,8 @@ help:
 	@echo "  preflight        refuse to start when the Windows host / WSL VM is short of memory"
 	@echo "  stack-guard      background watchdog: stops THIS stack if the host charge for the VM or host free memory trips"
 	@echo "  stack-guard-stop stop the watchdog"
+	@echo "  stack-guard-install  make the watchdog a boot service (survives wsl --shutdown; needs sudo once)"
+	@echo "  stack-guard-status   whether the watchdog is running, and how"
 	@echo "  stack-restart    down + up"
 	@echo "  stack-status     compose ps + ping admin/qdrant/daemon"
 	@echo "  stack-logs       tail mcp + memexd logs (LOG_TAIL=$(LOG_TAIL))"
@@ -161,21 +163,49 @@ check-env:
 # host cannot be asked) grows past VM_GUARD_STOP_GB (70) or host free memory
 # drops below HOST_GUARD_MIN_FREE_GB (16) for 2 polls in a row while it runs.
 GUARD_PID := $(REPO)/.wqm-fork/memory-guard.pid
+GUARD_UNIT := wqm-memory-guard
 
 preflight:
 	@bash "$(REPO)/scripts/host-memory-preflight.sh"
 
 stack-guard: check-env
 	@mkdir -p "$(REPO)/.wqm-fork/logs"
-	@if [[ -f "$(GUARD_PID)" ]] && kill -0 "$$(cat "$(GUARD_PID)")" 2>/dev/null; then \
+	@if systemctl is-active --quiet $(GUARD_UNIT) 2>/dev/null; then \
+		echo "stack-guard: already running as the $(GUARD_UNIT) service (survives wsl --shutdown)"; \
+	elif [[ -f "$(GUARD_PID)" ]] && kill -0 "$$(cat "$(GUARD_PID)")" 2>/dev/null; then \
 		echo "stack-guard already running (pid $$(cat "$(GUARD_PID)"))"; \
 	else \
 		nohup bash "$(REPO)/scripts/wsl-memory-guard.sh" >/dev/null 2>&1 & echo $$! > "$(GUARD_PID)"; \
 		echo "stack-guard started (pid $$(cat "$(GUARD_PID)")); log: .wqm-fork/logs/memory-guard.log"; \
+		echo "  NOTE: a hand-started guard dies with 'wsl --shutdown'. 'make stack-guard-install' makes it a boot service."; \
 	fi
 
 stack-guard-stop:
+	@if systemctl is-active --quiet $(GUARD_UNIT) 2>/dev/null; then \
+		echo "stack-guard runs as a service: sudo systemctl stop $(GUARD_UNIT)"; \
+	fi
 	@if [[ -f "$(GUARD_PID)" ]]; then kill "$$(cat "$(GUARD_PID)")" 2>/dev/null && echo "stack-guard stopped" || echo "stack-guard was not running"; rm -f "$(GUARD_PID)"; else echo "stack-guard not running"; fi
+
+# Install the guard as a boot service. The hand-started guard dies with every
+# `wsl --shutdown` while Docker's `restart: always` brings the stack back
+# without it — on 2026-09-22 the stack ran ~1 h unguarded after a reboot.
+# Needs root once; everything else in this Makefile does not.
+stack-guard-install: check-env
+	@echo "Installing $(GUARD_UNIT) (sudo will prompt once)…"
+	@sudo install -m 0644 "$(REPO)/assets/systemd/$(GUARD_UNIT).service" "/etc/systemd/system/$(GUARD_UNIT).service"
+	@sudo systemctl daemon-reload
+	@sudo systemctl enable --now $(GUARD_UNIT)
+	@$(MAKE) --no-print-directory stack-guard-status
+
+stack-guard-status:
+	@if systemctl is-active --quiet $(GUARD_UNIT) 2>/dev/null; then \
+		echo "guard: ACTIVE as $(GUARD_UNIT) (enabled: $$(systemctl is-enabled $(GUARD_UNIT) 2>/dev/null))"; \
+	elif [[ -f "$(GUARD_PID)" ]] && kill -0 "$$(cat "$(GUARD_PID)")" 2>/dev/null; then \
+		echo "guard: running by hand (pid $$(cat "$(GUARD_PID)")) — dies with 'wsl --shutdown'; see 'make stack-guard-install'"; \
+	else \
+		echo "guard: NOT RUNNING — the stack is unprotected ('make stack-guard' now, 'make stack-guard-install' for good)"; \
+	fi
+	@tail -n 2 "$(REPO)/.wqm-fork/logs/memory-guard.log" 2>/dev/null | sed 's/^/  /' || true
 
 # ── Stack lifecycle ──────────────────────────────────────────────────────────
 
@@ -263,7 +293,8 @@ rehearse-migrations: check-env
 
 stack-up: check-env preflight
 	@cd "$(REPO)" && $(COMPOSE) up -d
-	@echo "Stack started. Run 'make stack-status' to verify, 'make stack-guard' to watch host memory."
+	@$(MAKE) --no-print-directory stack-guard
+	@echo "Stack started. Run 'make stack-status' to verify."
 
 stack-down: check-env
 	@cd "$(REPO)" && $(COMPOSE) down
