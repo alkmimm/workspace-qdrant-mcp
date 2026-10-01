@@ -1,4 +1,26 @@
 //! Branch lifecycle management for monitoring branch changes in repositories.
+//!
+//! ## Why there is no default-branch tracking here
+//!
+//! This module used to report the repository's "default branch" and emit a
+//! `DefaultChanged` event. It was removed (2026-10-01) because it was wrong and
+//! unused at the same time:
+//!
+//! * the detector read `.git/HEAD`, which names the CHECKED-OUT branch, so every
+//!   `git checkout` of a feature branch was reported as a default-branch change;
+//! * nothing consumed the answer — the `watch_folders.default_branch` column it
+//!   was meant to feed was declared as a migration string that never executed
+//!   (no deployed database had the column), and no `BranchEventHandler`
+//!   implementation existed anywhere;
+//! * the tests could not tell the difference, because their fixtures renamed the
+//!   current branch, where "current" and "default" coincide.
+//!
+//! The trunk that actually matters — the one read surfaces widen to for files a
+//! feature branch does not carry — is resolved where it is consumed: the MCP
+//! server's `getBaseBranch` (`tracked-files-queries/tracked-files.ts`), which
+//! takes git's default (`origin/HEAD`, then a local `main`/`master`) only
+//! when the index holds files under that name. Do not reintroduce a second
+//! resolver here without a consumer; two answers to one question drift apart.
 
 mod detector;
 #[cfg(test)]
@@ -12,8 +34,7 @@ use super::types::GitResult;
 
 /// Branch lifecycle event types
 ///
-/// These events are emitted when branches are created, deleted, renamed,
-/// or when the default branch changes.
+/// These events are emitted when branches are created, deleted, or renamed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BranchEvent {
     /// A new branch was created
@@ -35,13 +56,6 @@ pub enum BranchEvent {
         /// New branch name
         new_name: String,
     },
-    /// The default branch changed
-    DefaultChanged {
-        /// Previous default branch
-        old_default: String,
-        /// New default branch
-        new_default: String,
-    },
     /// Branch was switched to (HEAD changed)
     Switched {
         /// Previous branch
@@ -58,7 +72,6 @@ impl BranchEvent {
             BranchEvent::Created { branch, .. } => branch,
             BranchEvent::Deleted { branch } => branch,
             BranchEvent::Renamed { new_name, .. } => new_name,
-            BranchEvent::DefaultChanged { new_default, .. } => new_default,
             BranchEvent::Switched { to_branch, .. } => to_branch,
         }
     }
@@ -69,10 +82,6 @@ impl BranchEvent {
             BranchEvent::Created { branch: b, .. } => b == branch,
             BranchEvent::Deleted { branch: b } => b == branch,
             BranchEvent::Renamed { old_name, new_name } => old_name == branch || new_name == branch,
-            BranchEvent::DefaultChanged {
-                old_default,
-                new_default,
-            } => old_default == branch || new_default == branch,
             BranchEvent::Switched {
                 from_branch,
                 to_branch,
@@ -112,8 +121,6 @@ pub struct BranchLifecycleStats {
     pub tracked_branches: usize,
     /// Number of pending delete events (waiting for rename correlation)
     pub pending_deletes: usize,
-    /// Current default branch
-    pub default_branch: Option<String>,
 }
 
 /// Handler for branch lifecycle events that integrates with Qdrant
@@ -137,20 +144,4 @@ pub trait BranchEventHandler: Send + Sync {
         old_branch: &str,
         new_branch: &str,
     ) -> GitResult<()>;
-
-    /// Handle a default branch change event
-    async fn handle_default_changed(
-        &self,
-        project_id: &str,
-        old_default: &str,
-        new_default: &str,
-    ) -> GitResult<()>;
-}
-
-/// SQL schemas for branch lifecycle tracking
-pub mod branch_schema {
-    /// Add default_branch column to watch_folders
-    pub const ALTER_ADD_DEFAULT_BRANCH: &str = r#"
-        ALTER TABLE watch_folders ADD COLUMN default_branch TEXT
-    "#;
 }

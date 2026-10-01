@@ -154,6 +154,7 @@ Retrieve documents by point ID, exact-search file locator, or metadata filter. U
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `documentId` | string | No | — | Document ID to retrieve |
+| `id` | string | No | — | Alias for `documentId` — the name a `search`, `list` or `scratchpad` result uses, so a result id can be pasted straight back. (`grep` matches carry no point id; use `filePath` + `lineNumber`.) `documentId` wins if both are given. |
 | `filePath` | string | No | — | Exact-search file locator |
 | `lineNumber` | number | No | — | 1-based line number for an exact-search hit |
 | `collection` | string | No | `projects` | Collection to retrieve from: `projects`, `libraries`, `rules`, `scratchpad` |
@@ -166,7 +167,8 @@ Retrieve documents by point ID, exact-search file locator, or metadata filter. U
 At least one of `documentId`, `filePath`, or `filter` should be provided.
 
 If you are retrieving something returned by `search` or `list`, pass the
-result `id` field to `documentId`. If the hit came from exact search, pass
+result `id` field to `documentId` — or just pass it as `id`, which is accepted
+as an alias for exactly this round-trip. If the hit came from exact search, pass
 `filePath` + `lineNumber` from the result metadata instead. The metadata field
 `document_id` is not a Qdrant point id; use `filter: { "document_id": "..." }`
 for that case. The tool will also try that metadata filter automatically if the

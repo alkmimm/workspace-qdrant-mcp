@@ -567,3 +567,57 @@ describe('listTrackedFiles', () => {
     });
   });
 });
+
+describe('content generations collapse to one entry per file', () => {
+  // `tracked_files` holds one row per content GENERATION of a path. Under the
+  // default concrete-branch filter that is already one row per file (measured on
+  // the live index: 1975 rows / 1975 distinct paths), but a `branch:"*"` sweep
+  // saw the same file once per branch — 2230 rows for 1976 files — which both
+  // duplicated entries and shortened every page by the repeats it spent.
+  let db: DatabaseType;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.exec(TRACKED_FILES_SCHEMA);
+    seedProject(db);
+    seedFile(db, 'src/a.rs', { branch: 'main' });
+    seedFile(db, 'src/a.rs', { branch: 'feature/x' });
+    seedFile(db, 'src/a.rs', { branch: 'feature/y' });
+    seedFile(db, 'src/b.rs', { branch: 'main' });
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('lists a multi-generation file once on a cross-branch read', () => {
+    const result = listTrackedFiles(db, { watchFolderId: WATCH_ID });
+    expect(result.data.map((f) => f.relativePath)).toEqual(['src/a.rs', 'src/b.rs']);
+  });
+
+  it('counts it once too, so the total matches what paging can return', () => {
+    const list = listTrackedFiles(db, { watchFolderId: WATCH_ID });
+    expect(countTrackedFiles(db, { watchFolderId: WATCH_ID })).toBe(list.data.length);
+    expect(countTrackedFiles(db, { watchFolderId: WATCH_ID })).toBe(2);
+  });
+
+  it('still lists one entry per file under a concrete branch filter', () => {
+    const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, branch: 'main' });
+    expect(result.data.map((f) => f.relativePath)).toEqual(['src/a.rs', 'src/b.rs']);
+    expect(countTrackedFiles(db, { watchFolderId: WATCH_ID, branch: 'main' })).toBe(2);
+  });
+
+  it('fills a page with distinct files rather than spending it on repeats', () => {
+    const result = listTrackedFiles(db, { watchFolderId: WATCH_ID, limit: 2 });
+    expect(result.data.map((f) => f.relativePath)).toEqual(['src/a.rs', 'src/b.rs']);
+  });
+
+  it('marks the file as a test when any generation says so', () => {
+    seedFile(db, 'src/c.rs', { branch: 'main', isTest: false });
+    seedFile(db, 'src/c.rs', { branch: 'feature/z', isTest: true });
+    const entry = listTrackedFiles(db, { watchFolderId: WATCH_ID }).data.find(
+      (f) => f.relativePath === 'src/c.rs'
+    );
+    expect(entry?.isTest).toBe(true);
+  });
+});

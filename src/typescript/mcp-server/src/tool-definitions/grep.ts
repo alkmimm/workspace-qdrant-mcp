@@ -49,7 +49,7 @@ export const grepToolDefinition = {
       maxResults: {
         type: 'number',
         description:
-          'Maximum matches per page (default: 100). When the cap is hit the response sets truncated:true, reports total_matches, and sets next_offset — page with offset, narrow with pathGlob, or raise this cap.',
+          'Maximum matches per page (default: 100). When the cap is hit the response sets truncated:true and next_offset — page with offset, narrow with pathGlob, or raise this cap. Note what total_matches means in each case: with truncated:false it is the EXACT total; with truncated:true it is a floor (at least this many), never an overstatement, so use countOnly when you need the precise size.',
       },
       countOnly: {
         type: 'boolean',

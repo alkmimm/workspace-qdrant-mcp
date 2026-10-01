@@ -660,6 +660,11 @@ message TextSearchRequest {
     optional string path_prefix = 7;             // [non-path] File path prefix filter (e.g., "src/")
     int32 context_lines = 8;                      // Lines of context before/after (0 = none)
     int32 max_results = 9;                        // Max results (0 = unlimited, default: 1000)
+    // Drop files whose path matches this glob, BEFORE max_results is applied.
+    // Same semantics as the MCP `pathExclude` (shared parity table:
+    // assets/path_exclude_parity.json). Filtering only after the cap let excluded
+    // paths consume the page and returned empty pages with an inflated total.
+    optional string path_exclude = 10;            // [non-path] File path glob to exclude (e.g., "old_project/**")
 }
 
 // TextSearch Response

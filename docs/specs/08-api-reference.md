@@ -142,6 +142,7 @@ Direct document access for chunk-by-chunk retrieval.
 ```typescript
 retrieve({
     documentId?: string,               // Qdrant point id (from search/list result `id`)
+    id?: string,                       // alias for documentId — the producer's own field name
     filePath?: string,                 // Exact-search file locator
     lineNumber?: number,               // 1-based line number for exact-search hits
     collection?: "projects" | "libraries" | "rules" | "scratchpad", // default: "projects"

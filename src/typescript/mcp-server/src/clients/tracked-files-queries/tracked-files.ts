@@ -11,6 +11,7 @@ import type { DegradedQueryResult } from '../sqlite-state-manager.js';
 import { handleTableNotFound } from './helpers.js';
 import { getSearchDatabasePath } from '../../utils/paths.js';
 import { expandBraces } from '../../utils/path-glob.js';
+import { getDefaultBranch } from '../../utils/git-utils.js';
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -393,10 +394,24 @@ export function listTrackedFiles(
     const limit = options.limit ?? 500;
     params.push(limit);
 
+    // GROUP BY path: `tracked_files` holds one row per content GENERATION, so a
+    // path tracked on several branches is several rows. Under the default
+    // concrete-branch filter that is exactly one row per path (measured: 1975
+    // rows / 1975 distinct paths), but a `branch:"*"` sweep returned the same
+    // file once per branch — 2230 rows for 1976 files on this repo — which both
+    // duplicated entries and shortened every page by the repeats it spent. One
+    // entry per file is what a caller means by "list the files".
+    // MAX() keeps the pick deterministic; for `is_test` it also means "a test if
+    // any generation says so", the same rule getIsTestByFilePaths applies.
     const sql = `
-      SELECT relative_path, file_type, language, extension, is_test
+      SELECT relative_path,
+             MAX(file_type) AS file_type,
+             MAX(language) AS language,
+             MAX(extension) AS extension,
+             MAX(is_test) AS is_test
       FROM tracked_files
       WHERE ${conditions.join(' AND ')}
+      GROUP BY relative_path
       ORDER BY relative_path ASC
       LIMIT ?
     `;
@@ -429,8 +444,10 @@ export function countTrackedFiles(
 
   try {
     const { conditions, params } = buildFilterClause(options);
+    // DISTINCT for the same reason the listing groups by path: one entry per
+    // file, so the total describes what paging can actually return.
     const sql = `
-      SELECT COUNT(*) as cnt
+      SELECT COUNT(DISTINCT relative_path) as cnt
       FROM tracked_files
       WHERE ${conditions.join(' AND ')}
     `;
@@ -464,6 +481,44 @@ export function getIsTestByFilePaths(
   filePaths: readonly string[]
 ): Map<string, boolean> {
   const out = new Map<string, boolean>();
+  for (const [abs, annotation] of getFileAnnotationsByFilePaths(db, watchFolderId, filePaths)) {
+    if (annotation.isTest !== undefined) out.set(abs, annotation.isTest);
+  }
+  return out;
+}
+
+/** What `tracked_files` can say about a file the FTS surfaces found on disk. */
+export interface TrackedFileAnnotation {
+  /** Repo-relative path — always present (derived from the watch-folder root). */
+  relativePath: string;
+  /** Daemon `is_test` verdict; `undefined` when no row covers the path. */
+  isTest: boolean | undefined;
+  /** Detected language; `null` when unknown or no row covers the path. */
+  language: string | null;
+}
+
+/**
+ * Absolute path → what the daemon knows about that file: its repo-relative path,
+ * `is_test`, and `language`.
+ *
+ * One query for all three because the FTS read surfaces need all three and
+ * already paid for this lookup to get `is_test` alone. A keyword/exact hit used
+ * to carry only `file_path` while a semantic hit carried `relative_path`,
+ * `language` and `branch` — so an agent reading `relative_path` silently got
+ * nothing the moment it set `exact: true`. The fields now match across modes.
+ *
+ * `relativePath` is computed from the watch-folder root rather than read from the
+ * row, so it is available even for a file the index has not tracked yet; the row
+ * supplies only what the daemon alone can know. `MAX(is_test)` collapses the
+ * multiple generations a path can have. Chunked to stay under SQLite's
+ * bound-parameter limit. Best-effort throughout: any failure yields an empty map.
+ */
+export function getFileAnnotationsByFilePaths(
+  db: DatabaseType | null,
+  watchFolderId: string,
+  filePaths: readonly string[]
+): Map<string, TrackedFileAnnotation> {
+  const out = new Map<string, TrackedFileAnnotation>();
   if (!db || filePaths.length === 0) return out;
   try {
     const wf = db
@@ -480,6 +535,11 @@ export function getIsTestByFilePaths(
       if (list) list.push(abs);
       else absByRel.set(rel, [abs]);
     }
+    for (const [rel, absList] of absByRel) {
+      for (const abs of absList) {
+        out.set(abs, { relativePath: rel, isTest: undefined, language: null });
+      }
+    }
     const relPaths = [...absByRel.keys()];
     const CHUNK = 400; // SQLite's default max bound parameters is 999
     for (let i = 0; i < relPaths.length; i += CHUNK) {
@@ -487,17 +547,23 @@ export function getIsTestByFilePaths(
       const placeholders = chunk.map(() => '?').join(',');
       const rows = db
         .prepare(
-          `SELECT relative_path, MAX(is_test) AS is_test FROM tracked_files
+          `SELECT relative_path, MAX(is_test) AS is_test, MAX(language) AS language
+             FROM tracked_files
            WHERE watch_folder_id = ? AND relative_path IN (${placeholders})
            GROUP BY relative_path`
         )
         .all(watchFolderId, ...chunk) as Array<{
         relative_path: string;
         is_test: number | null;
+        language: string | null;
       }>;
       for (const row of rows) {
         for (const abs of absByRel.get(row.relative_path) ?? []) {
-          out.set(abs, row.is_test === 1);
+          out.set(abs, {
+            relativePath: row.relative_path,
+            isTest: row.is_test === 1,
+            language: row.language,
+          });
         }
       }
     }
@@ -508,34 +574,107 @@ export function getIsTestByFilePaths(
 }
 
 /**
- * Resolve the de-facto base branch for a project: the branch under which the
- * most files are tracked, excluding `excludeBranch`. This matches whatever
- * branch the daemon tagged the bulk of (unchanged) files under — the daemon
- * defaults unchanged files to the project's base branch regardless of the
- * repo's local git naming (e.g. files end up under "main" even when the git
- * default is "master") — so it is the correct fallback target for a
- * feature-branch view. Returns `null` when no other branch has tracked files.
+ * Resolve the branch a read on `effectiveBranch` should widen to for files that
+ * branch does not carry — or `null` when it should not widen at all.
+ *
+ * The daemon tags only CHANGED files under a feature branch, so a file
+ * unchanged on that branch stays indexed under the trunk and is invisible to a
+ * strict branch filter. Widening to the trunk repairs that. Widening on the
+ * TRUNK itself repairs nothing and actively harms: there is no "unchanged
+ * elsewhere" set to recover, so every extra branch admitted can only contribute
+ * a stale content generation of a path the trunk already has.
+ *
+ * That is exactly what used to happen. This function took an `excludeBranch`
+ * argument — always the caller's own branch — and returned "the branch with the
+ * most tracked files that isn't you". On the trunk it could therefore never
+ * return the trunk, which made the identical guard in `resolveFallbackBranch`
+ * ("the effective branch already IS the base branch") unreachable. Measured on
+ * this repo: a read on `main` widened into an abandoned `fix/...` branch holding
+ * 1952 files, which re-served pre-edit generations of files changed on `main`
+ * and inflated `grep`'s `total_matches` from 2033 to 4033 by counting the
+ * overlapping set twice. Every read surface — grep, search (both lanes), list,
+ * retrieve — calls this one function, so all of them were affected.
+ *
+ * The trunk is now resolved from GIT (see {@link getDefaultBranch}), which is
+ * the authority for it; the index is only consulted when git cannot answer.
+ * Returns `null` when the caller is already on the trunk, or when neither
+ * source can name one.
  */
 export function getBaseBranch(
   db: DatabaseType | null,
   watchFolderId: string,
-  excludeBranch: string
+  effectiveBranch: string
 ): string | null {
   if (!db) return null;
   try {
-    const row = db
-      .prepare(
-        `SELECT je.value AS branch FROM tracked_files tf, json_each(tf.branches) je
-         WHERE tf.watch_folder_id = ? AND je.value IS NOT NULL AND je.value != ?
-         GROUP BY je.value
-         ORDER BY COUNT(*) DESC
-         LIMIT 1`
-      )
-      .get(watchFolderId, excludeBranch) as { branch: string } | undefined;
-    return row?.branch ?? null;
+    const trunk = resolveTrunkBranch(db, watchFolderId, effectiveBranch);
+    return trunk && trunk !== effectiveBranch ? trunk : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The project's trunk, resolved from git and the index TOGETHER — neither is
+ * sufficient alone.
+ *
+ * Git names the trunk correctly but can name one the index has never heard of:
+ * the write path defaults a branch tag to `main`, so a repo whose git default is
+ * `master` can hold its files under `main` (both names appear in this
+ * deployment's data, in the same project). Trusting git blindly there would
+ * point the fallback at an empty branch and, worse, report "already on the
+ * trunk" for a caller on `master` whose files are all tagged `main`.
+ *
+ * The index names a branch that exists but cannot tell a trunk from a long-lived
+ * feature branch: measured here, one project's most-tracked branch was
+ * `fix/schedule-export-sheet-titles` (98.7%) against `main` (97.3%).
+ *
+ * So: take git's answer when the index actually has files under it, else the
+ * most-tracked branch. The index fallback does NOT exclude `effectiveBranch` —
+ * the dominant branch must be allowed to resolve to itself, which is precisely
+ * the signal "already on the trunk, do not widen". `effectiveBranch` only breaks
+ * an exact tie, where preferring the caller's own branch is the conservative
+ * outcome (no widening).
+ */
+function resolveTrunkBranch(
+  db: DatabaseType,
+  watchFolderId: string,
+  effectiveBranch: string
+): string | null {
+  const folder = db
+    .prepare('SELECT path FROM watch_folders WHERE watch_id = ?')
+    .get(watchFolderId) as { path: string } | undefined;
+  if (folder?.path) {
+    const fromGit = getDefaultBranch(folder.path);
+    if (fromGit && branchHasTrackedFiles(db, watchFolderId, fromGit)) return fromGit;
+  }
+  const dominant = db
+    .prepare(
+      `SELECT je.value AS branch FROM tracked_files tf, json_each(tf.branches) je
+         WHERE tf.watch_folder_id = ? AND je.value IS NOT NULL
+         GROUP BY je.value
+         ORDER BY COUNT(*) DESC, (je.value = ?) DESC, je.value ASC
+         LIMIT 1`
+    )
+    .get(watchFolderId, effectiveBranch) as { branch: string } | undefined;
+  return dominant?.branch ?? null;
+}
+
+/** Whether the index holds any file tagged under `branch` for this watch folder. */
+function branchHasTrackedFiles(
+  db: DatabaseType,
+  watchFolderId: string,
+  branch: string
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 AS present FROM tracked_files tf
+         WHERE tf.watch_folder_id = ?
+           AND EXISTS (SELECT 1 FROM json_each(tf.branches) WHERE value = ?)
+         LIMIT 1`
+    )
+    .get(watchFolderId, branch) as { present: number } | undefined;
+  return row !== undefined;
 }
 
 function mergeTrackedRowsWithSearchMetadata(
@@ -598,7 +737,7 @@ function listSearchMetadataFallbackRows(
       FROM searchdb.file_metadata fm
       JOIN watch_folders wf ON wf.tenant_id = fm.tenant_id AND wf.watch_id = ?
     )
-    SELECT m.relative_path
+    SELECT DISTINCT m.relative_path
     FROM metadata m
     WHERE ${conditions.join(' AND ')}
     ORDER BY m.relative_path ASC
@@ -645,7 +784,11 @@ function countSearchMetadataFallbackRows(
       FROM searchdb.file_metadata fm
       JOIN watch_folders wf ON wf.tenant_id = fm.tenant_id AND wf.watch_id = ?
     )
-    SELECT COUNT(*) AS cnt
+    -- DISTINCT because \`file_metadata\` holds one row per content GENERATION of a
+    -- path, while the listing collapses to one entry per path. COUNT(*) made the
+    -- total exceed what any amount of paging could return — the same
+    -- "count rows, serve hits" mismatch that inflated grep's \`total_matches\`.
+    SELECT COUNT(DISTINCT m.relative_path) AS cnt
     FROM metadata m
     WHERE ${conditions.join(' AND ')}
   `;

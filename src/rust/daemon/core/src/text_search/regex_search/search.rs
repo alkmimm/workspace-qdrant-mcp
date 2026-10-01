@@ -6,8 +6,10 @@ use tracing::debug;
 
 use super::query::{build_regex_search_query, fts5_exceeds_threshold};
 use crate::search_db::{SearchDbError, SearchDbManager};
+use crate::text_search::dedup::MatchDeduper;
 use crate::text_search::escaping::{compile_glob_matcher, resolve_path_filter};
 use crate::text_search::exact_search::attach_context_lines;
+use crate::text_search::path_exclude::{compile_path_exclude, is_excluded, PathExclude};
 use crate::text_search::regex_parser::{build_fts5_query, extract_literals_from_regex};
 use crate::text_search::types::{SearchMatch, SearchOptions, SearchResults};
 
@@ -51,6 +53,7 @@ pub async fn search_regex(
         .case_insensitive(options.case_insensitive)
         .build()
         .map_err(|e| SearchDbError::InvalidPattern(format!("{}", e)))?;
+    let exclude = compile_path_exclude(options.path_exclude.as_deref())?;
 
     debug!(
         "Regex search: pattern={:?}, literals={:?}, fts5_query={:?}, tenant={:?}, path_glob={:?}",
@@ -78,6 +81,7 @@ pub async fn search_regex(
         &effective_options,
         &re,
         glob_matcher.as_ref(),
+        exclude.as_ref(),
         options.max_results,
     )
     .await?;
@@ -116,6 +120,7 @@ pub(super) async fn collect_regex_matches(
     options: &SearchOptions,
     re: &regex::Regex,
     glob_matcher: Option<&impl Fn(&str) -> bool>,
+    exclude: Option<&PathExclude>,
     max_results_hint: usize,
 ) -> Result<(Vec<SearchMatch>, bool, usize), SearchDbError> {
     let (sql, use_fts) = build_regex_search_query(fts5_query, options);
@@ -143,6 +148,10 @@ pub(super) async fn collect_regex_matches(
     let mut matches = Vec::new();
     let mut truncated = false;
     let mut candidates_scanned: usize = 0;
+    // Same identity rule as the exact engine — one hit per
+    // (file_path, line_number, content), collapsed before the cap so
+    // `total_matches` counts hits (see `text_search::dedup`).
+    let mut deduper = MatchDeduper::new();
 
     while let Some(row) = stream.try_next().await? {
         candidates_scanned += 1;
@@ -153,13 +162,22 @@ pub(super) async fn collect_regex_matches(
                 continue;
             }
         }
+        // Before the cap, like the include glob: an excluded row must not spend
+        // the result budget (see `text_search::path_exclude`).
+        if is_excluded(exclude, &file_path) {
+            continue;
+        }
 
         let content: String = row.get("content");
         if re.is_match(&content) {
+            let line_number: i64 = row.get("line_number");
+            if !deduper.accept(&file_path, line_number, &content) {
+                continue;
+            }
             matches.push(SearchMatch {
                 line_id: row.get("line_id"),
                 file_id: row.get("file_id"),
-                line_number: row.get("line_number"),
+                line_number,
                 content,
                 file_path,
                 tenant_id: row.get("tenant_id"),

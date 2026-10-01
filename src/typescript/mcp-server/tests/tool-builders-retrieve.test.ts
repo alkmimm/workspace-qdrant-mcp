@@ -47,3 +47,26 @@ describe('buildRetrieveOptions — existing fields still map', () => {
     expect(opts.unknownArgs).toEqual(['query']);
   });
 });
+
+describe('buildRetrieveOptions — `id` alias', () => {
+  // Every read surface hands back the point id as `id`; feeding that straight
+  // back to retrieve was rejected for naming the field exactly as the producer
+  // named it. Round-tripping a tool's own output must not require renaming it.
+  it('accepts `id` as the point id', () => {
+    expect(buildRetrieveOptions({ id: 'point-1' }).documentId).toBe('point-1');
+  });
+
+  it('does not flag `id` as an unknown arg', () => {
+    expect(buildRetrieveOptions({ id: 'point-1' }).unknownArgs).toBeUndefined();
+  });
+
+  it('prefers an explicit documentId when both are given', () => {
+    expect(buildRetrieveOptions({ id: 'alias', documentId: 'canonical' }).documentId).toBe(
+      'canonical'
+    );
+  });
+
+  it('still flags unknown args alongside the alias', () => {
+    expect(buildRetrieveOptions({ id: 'point-1', query: 'nope' }).unknownArgs).toEqual(['query']);
+  });
+});

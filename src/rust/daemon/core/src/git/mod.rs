@@ -16,7 +16,7 @@ pub use branch_detector::GitBranchDetector;
 
 // Re-export from branch_lifecycle
 pub use branch_lifecycle::{
-    branch_schema, BranchEvent, BranchEventHandler, BranchLifecycleConfig, BranchLifecycleDetector,
+    BranchEvent, BranchEventHandler, BranchLifecycleConfig, BranchLifecycleDetector,
     BranchLifecycleStats,
 };
 

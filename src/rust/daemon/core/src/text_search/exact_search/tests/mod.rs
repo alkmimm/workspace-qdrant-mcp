@@ -1,6 +1,7 @@
 //! Tests for exact substring search.
 
 mod context_tests;
+mod exclude_tests;
 mod glob_tests;
 mod search_tests;
 

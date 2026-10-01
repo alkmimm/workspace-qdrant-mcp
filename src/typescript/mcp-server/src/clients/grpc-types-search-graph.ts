@@ -12,6 +12,8 @@ export interface TextSearchRequest {
   path_prefix?: string;
   context_lines: number;
   max_results: number;
+  /** Exclude glob, applied by the daemon before `max_results` (MCP `pathExclude`). */
+  path_exclude?: string;
 }
 
 export interface TextSearchResponse {

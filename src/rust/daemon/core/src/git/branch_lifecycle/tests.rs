@@ -72,9 +72,6 @@ async fn test_branch_lifecycle_detector_initialize() {
 
     let branches = detector.get_tracked_branches().await;
     assert!(!branches.is_empty());
-
-    let default = detector.get_default_branch().await;
-    assert!(default.is_some());
 }
 
 #[tokio::test]
@@ -171,11 +168,35 @@ async fn test_branch_lifecycle_stats() {
     let stats = detector.stats().await;
     assert!(stats.tracked_branches >= 3);
     assert_eq!(stats.pending_deletes, 0);
-    assert!(stats.default_branch.is_some());
 }
 
-#[test]
-fn test_branch_schema_sql() {
-    assert!(branch_schema::ALTER_ADD_DEFAULT_BRANCH.contains("ALTER TABLE"));
-    assert!(branch_schema::ALTER_ADD_DEFAULT_BRANCH.contains("watch_folders"));
+/// Checking out another existing branch creates, deletes and renames nothing,
+/// so a scan must report nothing.
+///
+/// It used to report a default-branch change: the detector read `.git/HEAD` —
+/// the CHECKED-OUT branch — and called it the default, so every `git checkout`
+/// of a feature branch surfaced as `DefaultChanged { main -> feature }`. The
+/// older tests could not see this because they renamed the current branch,
+/// where "current" and "default" happen to be the same name.
+#[tokio::test]
+async fn test_switching_head_is_not_a_lifecycle_event() {
+    let temp_dir = tempdir().unwrap();
+    let repo_path = temp_dir.path();
+
+    let repo = create_test_repo(repo_path).unwrap();
+    let head = repo.head().unwrap();
+    let commit = head.peel_to_commit().unwrap();
+    repo.branch("feature-a", &commit, false).unwrap();
+
+    let detector = BranchLifecycleDetector::with_defaults(repo_path.to_path_buf());
+    detector.initialize().await.unwrap();
+
+    repo.set_head("refs/heads/feature-a").unwrap();
+
+    let events = detector.scan_for_changes().await.unwrap();
+    assert!(
+        events.is_empty(),
+        "a checkout is not a branch lifecycle event, got {:?}",
+        events
+    );
 }

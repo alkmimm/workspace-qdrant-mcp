@@ -3,7 +3,6 @@
 //! Comprehensive integration tests for Git-related features:
 //! - Branch lifecycle detection (create, delete, rename)
 //! - Project ID disambiguation for multi-clone scenarios
-//! - Default branch detection and tracking
 //! - Alias management for project ID transitions
 
 use git2::{Repository, Signature};
@@ -87,9 +86,6 @@ async fn test_branch_lifecycle_full_workflow() {
     // Verify initial state
     let branches = detector.get_tracked_branches().await;
     assert!(!branches.is_empty(), "Should have at least one branch");
-
-    let default_branch = detector.get_default_branch().await;
-    assert!(default_branch.is_some(), "Should have a default branch");
 
     // Create a new branch
     let head = repo.head().unwrap();
@@ -193,7 +189,6 @@ async fn test_branch_lifecycle_stats() {
         stats.tracked_branches
     );
     assert_eq!(stats.pending_deletes, 0);
-    assert!(stats.default_branch.is_some());
 }
 
 // ============================================================================
@@ -373,15 +368,17 @@ async fn test_branch_detector_with_disambiguation() {
         branch
     );
 
-    // Now initialize lifecycle detector
+    // Now initialize lifecycle detector. It must track the branch the branch
+    // detector reports as current. (This used to assert the lifecycle
+    // detector's "default branch" equalled the CURRENT branch — the conflation
+    // that made every checkout look like a default-branch change.)
     let lifecycle_detector = BranchLifecycleDetector::with_defaults(repo_path.to_path_buf());
     lifecycle_detector.initialize().await.unwrap();
 
-    let default_branch = lifecycle_detector.get_default_branch().await;
-    assert_eq!(
-        default_branch.as_deref(),
-        Some(branch.as_str()),
-        "Lifecycle detector should agree on default branch"
+    let tracked = lifecycle_detector.get_tracked_branches().await;
+    assert!(
+        tracked.contains(&branch),
+        "Lifecycle detector should track the current branch {branch:?}, got {tracked:?}"
     );
 }
 

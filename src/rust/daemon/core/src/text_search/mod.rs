@@ -24,13 +24,16 @@
 //! Patterns shorter than 3 characters cannot use the trigram index and fall back
 //! to a full table scan with LIKE only.
 
+mod dedup;
 mod escaping;
 mod exact_search;
+mod path_exclude;
 mod regex_parser;
 mod regex_search;
 mod types;
 
 // Public API
+pub use dedup::{retain_first_by_path, MatchDeduper};
 pub use escaping::{escape_fts5_pattern, escape_like_pattern};
 pub use exact_search::context::attach_context_lines;
 pub use exact_search::search_exact;
@@ -40,4 +43,5 @@ pub use types::{RegexLiterals, SearchMatch, SearchOptions, SearchResults};
 
 // Crate-internal API (used by grep_search)
 pub(crate) use escaping::{compile_glob_matcher, resolve_path_filter};
+pub(crate) use path_exclude::{compile_path_exclude, is_excluded};
 pub(crate) use types::display_branch;

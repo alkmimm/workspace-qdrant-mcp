@@ -34,8 +34,6 @@ pub struct BranchLifecycleDetector {
     config: BranchLifecycleConfig,
     /// Currently tracked branches (name -> TrackedBranch)
     tracked_branches: Arc<RwLock<HashMap<String, TrackedBranch>>>,
-    /// Current default branch
-    current_default: Arc<RwLock<Option<String>>>,
     /// Pending deletes for rename correlation
     pending_deletes: Arc<RwLock<Vec<PendingDelete>>>,
     /// Event sender channel
@@ -49,7 +47,6 @@ impl BranchLifecycleDetector {
             repo_path,
             config,
             tracked_branches: Arc::new(RwLock::new(HashMap::new())),
-            current_default: Arc::new(RwLock::new(None)),
             pending_deletes: Arc::new(RwLock::new(Vec::new())),
             event_sender: None,
         }
@@ -75,10 +72,6 @@ impl BranchLifecycleDetector {
         for (name, commit_hash, _modified) in branches {
             tracked.insert(name.clone(), TrackedBranch { commit_hash });
         }
-
-        let default = self.detect_default_branch()?;
-        let mut current_default = self.current_default.write().await;
-        *current_default = Some(default);
 
         info!(
             "BranchLifecycleDetector initialized for {} with {} branches",
@@ -137,58 +130,6 @@ impl BranchLifecycleDetector {
         Ok(branches)
     }
 
-    /// Detect the default branch of the repository
-    pub fn detect_default_branch(&self) -> GitResult<String> {
-        let head_path = self.repo_path.join(".git/HEAD");
-
-        let head_content =
-            std::fs::read_to_string(&head_path).map_err(|e| GitError::RepositoryError {
-                message: format!("Failed to read .git/HEAD: {}", e),
-                source: git2::Error::from_str(&e.to_string()),
-            })?;
-
-        if let Some(stripped) = head_content.strip_prefix("ref: refs/heads/") {
-            Ok(stripped.trim().to_string())
-        } else {
-            self.get_remote_default_branch()
-                .or_else(|_| Ok("main".to_string()))
-        }
-    }
-
-    /// Get the default branch from remote
-    fn get_remote_default_branch(&self) -> GitResult<String> {
-        let repo = Repository::open(&self.repo_path).map_err(|e| GitError::RepositoryError {
-            message: "Failed to open repository".to_string(),
-            source: e,
-        })?;
-
-        let config = repo.config().map_err(|e| GitError::RepositoryError {
-            message: "Failed to read git config".to_string(),
-            source: e,
-        })?;
-
-        if let Ok(default_branch) = config.get_string("init.defaultBranch") {
-            return Ok(default_branch);
-        }
-
-        if let Ok(default_branch) = config.get_string("remote.origin.defaultBranch") {
-            return Ok(default_branch);
-        }
-
-        if repo.find_branch("main", git2::BranchType::Local).is_ok() {
-            return Ok("main".to_string());
-        }
-
-        if repo.find_branch("master", git2::BranchType::Local).is_ok() {
-            return Ok("master".to_string());
-        }
-
-        Err(GitError::RepositoryError {
-            message: "Could not determine default branch".to_string(),
-            source: git2::Error::from_str("No default branch found"),
-        })
-    }
-
     /// Scan for branch changes
     pub async fn scan_for_changes(&self) -> GitResult<Vec<BranchEvent>> {
         let current_branches = self.list_all_branches()?;
@@ -215,11 +156,6 @@ impl BranchLifecycleDetector {
             &mut events,
         );
         self.emit_expired_deletes(&mut pending, rename_timeout, &mut events);
-
-        let current_default = self.detect_default_branch()?;
-        let mut stored_default = self.current_default.write().await;
-        emit_default_branch_change(stored_default.as_deref(), &current_default, &mut events);
-        *stored_default = Some(current_default);
 
         if let Some(ref sender) = self.event_sender {
             for event in &events {
@@ -319,11 +255,6 @@ impl BranchLifecycleDetector {
         self.tracked_branches.read().await.keys().cloned().collect()
     }
 
-    /// Get the current default branch
-    pub async fn get_default_branch(&self) -> Option<String> {
-        self.current_default.read().await.clone()
-    }
-
     /// Get commit hash for a specific branch
     pub async fn get_branch_commit(&self, branch: &str) -> Option<String> {
         self.tracked_branches
@@ -337,32 +268,10 @@ impl BranchLifecycleDetector {
     pub async fn stats(&self) -> BranchLifecycleStats {
         let tracked = self.tracked_branches.read().await;
         let pending = self.pending_deletes.read().await;
-        let default = self.current_default.read().await;
 
         BranchLifecycleStats {
             tracked_branches: tracked.len(),
             pending_deletes: pending.len(),
-            default_branch: default.clone(),
-        }
-    }
-}
-
-/// Emit a `DefaultChanged` event if the default branch has changed.
-fn emit_default_branch_change(
-    old_default: Option<&str>,
-    current_default: &str,
-    events: &mut Vec<BranchEvent>,
-) {
-    if let Some(old) = old_default {
-        if old != current_default {
-            info!(
-                "Detected default branch change: {} -> {}",
-                old, current_default
-            );
-            events.push(BranchEvent::DefaultChanged {
-                old_default: old.to_string(),
-                new_default: current_default.to_string(),
-            });
         }
     }
 }

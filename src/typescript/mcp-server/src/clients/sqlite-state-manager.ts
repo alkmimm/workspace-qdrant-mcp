@@ -378,12 +378,23 @@ export class SqliteStateManager {
     return trackedFilesQueries.countTrackedFiles(this.db, options);
   }
 
-  /** De-facto base branch for a project (majority-tracked branch != excludeBranch). */
-  getBaseBranch(watchFolderId: string, excludeBranch: string): string | null {
-    return trackedFilesQueries.getBaseBranch(this.db, watchFolderId, excludeBranch);
+  /**
+   * Branch a read on `effectiveBranch` should widen to, or `null` when it is
+   * already the project's trunk and must not widen (see the query's docs).
+   */
+  getBaseBranch(watchFolderId: string, effectiveBranch: string): string | null {
+    return trackedFilesQueries.getBaseBranch(this.db, watchFolderId, effectiveBranch);
   }
 
   /** Absolute path → daemon is_test verdict (best-effort; see the query docs). */
+  /** Absolute path → relative_path + is_test + language (best-effort; see docs). */
+  getFileAnnotationsByFilePaths(
+    watchFolderId: string,
+    filePaths: readonly string[]
+  ): Map<string, trackedFilesQueries.TrackedFileAnnotation> {
+    return trackedFilesQueries.getFileAnnotationsByFilePaths(this.db, watchFolderId, filePaths);
+  }
+
   getIsTestByFilePaths(watchFolderId: string, filePaths: readonly string[]): Map<string, boolean> {
     return trackedFilesQueries.getIsTestByFilePaths(this.db, watchFolderId, filePaths);
   }

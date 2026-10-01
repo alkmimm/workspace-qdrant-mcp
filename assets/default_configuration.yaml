@@ -1717,7 +1717,7 @@ watching:
 # Purpose: Configures Git-specific features including branch lifecycle management
 # and repository monitoring for tracked projects.
 #
-# Branch Lifecycle: Tracks branch creation, deletion, rename, and default changes
+# Branch Lifecycle: Tracks branch creation, deletion and rename
 # Document Management: Auto-manages Qdrant documents when branches change
 git:
   # track_branch_lifecycle: Enable branch lifecycle monitoring
@@ -1756,16 +1756,11 @@ git:
   # Default reasoning: 500ms handles most Git operations while staying responsive
   rename_correlation_timeout_ms: 500
 
-  # default_branch_detection: How to detect the default branch
-  # Purpose: Determines strategy for identifying repository default branch
-  # Options:
-  #   - "head": Read .git/HEAD file
-  #   - "remote": Query remote (origin/HEAD)
-  #   - "config": Read init.defaultBranch from git config
-  # Fallback: If detection fails, defaults to "main" then "master"
-  # Format: String enum
-  # Default reasoning: "head" is fastest and most reliable for local operations
-  default_branch_detection: "head"
+  # (No default_branch_detection key: the daemon does not track a default
+  # branch. It used to accept one here, defaulting to "head" — which read the
+  # CHECKED-OUT branch, not the default — and nothing ever read the setting.
+  # The trunk used by branch-scoped reads is resolved by the MCP server from
+  # git's origin/HEAD, cross-checked against the branches the index holds.)
 
 # =============================================================================
 # LSP (LANGUAGE SERVER PROTOCOL) INTEGRATION CONFIGURATION

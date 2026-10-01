@@ -26,6 +26,11 @@ export const retrieveToolDefinition = {
         description:
           'The point id to retrieve — the `id` field from a search or list result (a Qdrant point UUID). NOT the metadata `document_id` (a content hash); to match that, use `filter: {"document_id": "..."}` instead. The tool will also try that filter automatically when the point id lookup misses.',
       },
+      id: {
+        type: 'string',
+        description:
+          'Alias for `documentId`, accepted because `id` is what a search, list or scratchpad result calls this field — pasting a result id straight back in works. (grep matches carry no point id; for those pass `filePath` + `lineNumber`.) `documentId` wins if both are given.',
+      },
       filePath: {
         type: 'string',
         description:
@@ -69,7 +74,7 @@ export const retrieveToolDefinition = {
       branch: {
         type: 'string',
         description:
-          'Branch to scope projects-collection results to (default: your current Git branch, widened to the base branch for files unchanged on a feature branch). Pass "*" to retrieve across all branches — use this only when you deliberately want stale/other-branch versions. Ignored for scratchpad/libraries/rules: those collections are branch-agnostic.',
+          'Branch to scope projects-collection results to (default: your current Git branch; on a FEATURE branch this also fills in files unchanged there from the trunk, but never overrides a path your branch carries — on the trunk itself there is no widening at all). Pass "*" to retrieve across all branches — use this only when you deliberately want stale/other-branch versions. Ignored for scratchpad/libraries/rules: those collections are branch-agnostic.',
       },
     },
   },

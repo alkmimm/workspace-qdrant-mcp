@@ -17,7 +17,7 @@ import { getWorktreeContext } from '../utils/request-context.js';
 import { shapeGrepMatches, type GrepShapingOptions } from './grep-shaping.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
-import type { TextSearchMatch } from '../clients/grpc-types.js';
+import type { TextSearchMatch, TextSearchResponse } from '../clients/grpc-types.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
 import { finishToolEvent, logSearchEvent } from '../clients/search-event-queries.js';
@@ -27,6 +27,7 @@ import { SERVER_VERSION as MCP_SERVER_VERSION } from '../server-types.js';
 import {
   collapseBranchSet,
   concreteBranchFilter,
+  mergeFallbackByMissingPath,
   normalizeBranchList,
   resolveEffectiveBranch,
   resolveFallbackBranch,
@@ -223,6 +224,35 @@ export interface GrepResponse {
 }
 
 /** Build the text search request object for the daemon. */
+/** Deepest refetch when filling a window — the daemon's own result ceiling. */
+const GREP_REFILL_MAX_DEPTH = 10_000;
+/** Refetch rounds before settling for a short page (depth ×4 per round). */
+const GREP_REFILL_MAX_ROUNDS = 6;
+
+/** Everything a grep window fetch needs except the depth. */
+interface GrepWindowQuery {
+  pattern: string;
+  regex: boolean;
+  caseSensitive: boolean;
+  contextLines: number;
+  tenantId: string | undefined;
+  branch: string | undefined;
+  fallbackBranch: string | undefined;
+  pathGlob: string | undefined;
+  pathExclude: string | undefined;
+}
+
+/** The merged, filtered, deduped rows of one window fetch. */
+interface GrepWindow {
+  /** Responses actually used: scoped first, then the fallback when merged. */
+  responses: TextSearchResponse[];
+  /** The scoped response's distinct, post-exclude total for its branch scope. */
+  scopedTotal: number;
+  matches: GrepMatch[];
+  /** Rows the LOCAL filter removed — counted by `scopedTotal`, never served. */
+  droppedLocally: number;
+}
+
 function buildGrepRequest(
   pattern: string,
   regex: boolean,
@@ -231,7 +261,8 @@ function buildGrepRequest(
   maxResults: number,
   tenantId: string | undefined,
   branch: string | undefined,
-  pathGlob: string | undefined
+  pathGlob: string | undefined,
+  pathExclude?: string
 ): {
   pattern: string;
   regex: boolean;
@@ -241,6 +272,7 @@ function buildGrepRequest(
   tenant_id?: string;
   branch?: string;
   path_glob?: string;
+  path_exclude?: string;
 } {
   const request: {
     pattern: string;
@@ -251,6 +283,7 @@ function buildGrepRequest(
     tenant_id?: string;
     branch?: string;
     path_glob?: string;
+    path_exclude?: string;
   } = {
     pattern,
     regex,
@@ -266,6 +299,10 @@ function buildGrepRequest(
   const concreteBranch = concreteBranchFilter(branch);
   if (concreteBranch) request.branch = concreteBranch;
   if (pathGlob) request.path_glob = pathGlob;
+  // Applied by the daemon BEFORE its result cap — filtering only after the cap
+  // let excluded paths fill the page (measured: an empty page, truncated:true,
+  // no continuation, total 2021 for 13 real hits).
+  if (pathExclude) request.path_exclude = pathExclude;
   return request;
 }
 
@@ -305,8 +342,11 @@ export function dedupGrepMatches(matches: GrepMatch[]): GrepMatch[] {
 
 /**
  * Drop grep matches whose file path matches the `pathExclude` glob — the hard
- * per-call exclude, applied in TS on the mapped matches (the daemon FTS query
- * itself only knows the `pathGlob` include). Floats like the include filter, so
+ * per-call exclude. The daemon now applies the same exclude BEFORE its result
+ * cap (`TextSearchRequest.path_exclude`, same semantics, pinned by the shared
+ * table `assets/path_exclude_parity.json`), so for pathExclude this pass is a
+ * belt-and-braces no-op; what it still decides on its own is the caller-aware
+ * foreign-worktree drop below. Floats like the include filter, so
  * `old_project/**` silences that tree at the repo root and any nested depth.
  *
  * Also drops, for a main-tenant caller, any match under another worktree's
@@ -625,46 +665,33 @@ export class GrepTool {
       // Paging is a client-side slice over the daemon's deterministic order
       // (file, then line — the FTS request has no offset field), so fetch
       // deep enough to cover the requested window.
-      const fetchDepth = maxResults + offset;
-      const request = buildGrepRequest(
-        pattern,
-        regex,
-        caseSensitive,
-        contextLines,
-        fetchDepth,
-        tenantId,
-        branch,
-        pathGlob
+      const grepWindow = await this.fetchGrepWindow(
+        {
+          pattern,
+          regex,
+          caseSensitive,
+          contextLines,
+          tenantId,
+          branch,
+          fallbackBranch,
+          pathGlob,
+          pathExclude,
+        },
+        offset + maxResults
       );
-      const responses = [await this.daemonClient.textSearch(request)];
-      if (fallbackBranch) {
-        responses.push(
-          await this.daemonClient.textSearch(
-            buildGrepRequest(
-              pattern,
-              regex,
-              caseSensitive,
-              contextLines,
-              fetchDepth,
-              tenantId,
-              fallbackBranch,
-              pathGlob
-            )
-          )
-        );
-      }
-      const rawMatches = filterGrepMatchesByExclude(
-        responses.flatMap((response) => mapGrepMatches(response.matches)),
-        pathExclude,
-        pathGlob
-      );
-      const dedupedMatches = dedupGrepMatches(rawMatches);
+      const { responses } = grepWindow;
+      const dedupedMatches = grepWindow.matches;
       let matches = dedupedMatches.slice(offset, offset + maxResults);
-      let duplicatesDropped = rawMatches.length - dedupedMatches.length;
       let truncated =
         responses.some((response) => response.truncated) ||
         dedupedMatches.length > offset + matches.length;
-      let totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
+      // The scoped response's own total is the EXACT distinct count for its
+      // branch scope — post-dedup and post-exclude, both now applied by the
+      // daemon — so it is a trustworthy floor for a capped page, UNLESS this side
+      // dropped rows the daemon counted (foreign-worktree paths, which only the
+      // caller-aware filter here can judge). Then only what we kept is provable. Summing the responses — the original behaviour —
+      // counted the overlapping set twice (4033 reported for 2033).
+      let scopedTotal = grepWindow.droppedLocally > 0 ? 0 : grepWindow.scopedTotal;
       let message: string | undefined;
       let widenedFired = false;
       // Auto-widen on empty: a branch-scoped grep that finds nothing may simply
@@ -694,9 +721,8 @@ export class GrepTool {
         if (widened) {
           widenedFired = true;
           matches = widened.matches;
-          duplicatesDropped = widened.duplicatesDropped;
           truncated = widened.truncated;
-          totalMatches = widened.totalMatches;
+          scopedTotal = widened.totalMatches;
           message = widened.message;
         }
       }
@@ -831,8 +857,14 @@ export class GrepTool {
       // Worktree callers get MAIN-anchored paths; tell them how to Read their own
       // copy once (only worth saying when there are paths to translate).
       const wtNote = shaped.matches.length > 0 ? worktreeReadNote() : undefined;
+      // Untruncated: the deduped set IS the full surface, so the count is exact.
+      // Truncated: report the best FLOOR we can prove — the scoped response's
+      // exact total, the page we are returning, and whatever we deduped — and
+      // let `truncated: true` carry "there is more". Reporting a sum over
+      // overlapping branch scopes made this number overstate by up to 2x, which
+      // is the dangerous direction: it sizes work that does not exist.
       const totalMatchesOut = truncated
-        ? Math.max(offset + matches.length, totalMatches - duplicatesDropped)
+        ? Math.max(offset + matches.length, dedupedMatches.length, scopedTotal)
         : widenedFired
           ? matches.length
           : dedupedMatches.length;
@@ -855,11 +887,8 @@ export class GrepTool {
         ...echo,
         matches: shaped.matches,
         ...(wtNote ? { worktree: wtNote } : {}),
-        // Report the deduped count. When the daemon truncated, its
-        // total_matches is an upper bound over the (duplicated) full set —
-        // discount the duplicates seen on this page as a best effort. An
-        // untruncated paged read knows the exact full count (the deduped set);
-        // a widened result only knows its own page.
+        // Exact when `truncated` is false; a floor (never an overstatement) when
+        // it is true. See where totalMatchesOut is computed.
         total_matches: totalMatchesOut,
         truncated,
         latency_ms: latencyMs,
@@ -887,6 +916,80 @@ export class GrepTool {
   }
 
   /**
+   * Fetch enough rows to fill `[0, windowEnd)` of the merged, locally filtered,
+   * deduped match list — or everything the daemon has, whichever is smaller.
+   *
+   * A page may only come back SHORT when the daemon has nothing more. Anything
+   * that removes rows between the daemon and the page — the caller-aware
+   * foreign-worktree drop, or fallback rows for paths the scope already covers —
+   * would otherwise leave a short or empty page with `truncated: true`; and since
+   * `offset` indexes the FILTERED list, the caller could not page past it
+   * either. So the window is refetched deeper until it fills. The daemon caches
+   * a query's full result set (its cache key ignores `max_results`), which makes
+   * each deeper round a re-slice rather than a re-scan.
+   */
+  private async fetchGrepWindow(query: GrepWindowQuery, windowEnd: number): Promise<GrepWindow> {
+    let depth = windowEnd;
+    let best = await this.fetchGrepWindowOnce(query, depth);
+    for (let round = 2; round <= GREP_REFILL_MAX_ROUNDS; round += 1) {
+      const short = best.matches.length < windowEnd;
+      const moreUpstream = best.responses.some((response) => response.truncated);
+      if (!short || !moreUpstream || depth >= GREP_REFILL_MAX_DEPTH) break;
+      depth = Math.min(GREP_REFILL_MAX_DEPTH, depth * 4);
+      const deeper = await this.fetchGrepWindowOnce(query, depth);
+      // A deeper fetch of the same query is a superset — unless the index moved
+      // between calls (it is live, and the daemon's cache lasts seconds). Never
+      // trade a window for a worse one; stop refilling instead.
+      if (deeper.matches.length < best.matches.length) break;
+      best = deeper;
+    }
+    return best;
+  }
+
+  /** One fetch at a fixed depth: scoped query, then (when sound) the fallback. */
+  private async fetchGrepWindowOnce(query: GrepWindowQuery, depth: number): Promise<GrepWindow> {
+    const request = (branch: string | undefined) =>
+      buildGrepRequest(
+        query.pattern,
+        query.regex,
+        query.caseSensitive,
+        query.contextLines,
+        depth,
+        query.tenantId,
+        branch,
+        query.pathGlob,
+        query.pathExclude
+      );
+    const scoped = await this.daemonClient.textSearch(request(query.branch));
+    const responses = [scoped];
+    // Fallback rows sort after every scoped row, so while the scoped response is
+    // truncated they cannot reach this window — and the set of paths the scope
+    // covers is only completely known once it is NOT truncated. Merging earlier
+    // let a stale base-branch generation in for a path the scope carries beyond
+    // the fetched rows. Skipping it also saves a daemon round trip.
+    let fallbackRows: GrepMatch[] = [];
+    if (query.fallbackBranch && !scoped.truncated) {
+      const fallback = await this.daemonClient.textSearch(request(query.fallbackBranch));
+      responses.push(fallback);
+      fallbackRows = mapGrepMatches(fallback.matches);
+    }
+    // The fallback may only FILL IN paths the scope lacks — never add an older
+    // generation of a path the scope carries. Same rule `list` applies in SQL.
+    const merged = mergeFallbackByMissingPath(
+      mapGrepMatches(scoped.matches),
+      fallbackRows,
+      (m) => m.file
+    );
+    const filtered = filterGrepMatchesByExclude(merged, query.pathExclude, query.pathGlob);
+    return {
+      responses,
+      scopedTotal: scoped.total_matches,
+      matches: dedupGrepMatches(filtered),
+      droppedLocally: merged.length - filtered.length,
+    };
+  }
+
+  /**
    * On an empty branch-scoped result, re-run the grep across ALL branches and
    * return the widened matches (+ a message noting the widening).
    *
@@ -909,7 +1012,6 @@ export class GrepTool {
         matches: GrepMatch[];
         truncated: boolean;
         totalMatches: number;
-        duplicatesDropped: number;
         message: string;
       }
     | undefined
@@ -917,31 +1019,30 @@ export class GrepTool {
     const concreteBranch = concreteBranchFilter(branch);
     if (!tenantId || !concreteBranch) return undefined;
     try {
-      const resp = await this.daemonClient.textSearch(
-        buildGrepRequest(
+      // Same window rules as the scoped read — exclude applied by the daemon,
+      // short pages refetched, a floor only when nothing was dropped here.
+      const widened = await this.fetchGrepWindow(
+        {
           pattern,
           regex,
           caseSensitive,
           contextLines,
-          maxResults,
           tenantId,
-          '*',
-          pathGlob
-        )
+          branch: '*',
+          fallbackBranch: undefined,
+          pathGlob,
+          pathExclude,
+        },
+        maxResults
       );
-      const rawMatches = filterGrepMatchesByExclude(
-        mapGrepMatches(resp.matches),
-        pathExclude,
-        pathGlob
-      );
-      const dedupedMatches = dedupGrepMatches(rawMatches);
-      const matches = dedupedMatches.slice(0, maxResults);
+      const matches = widened.matches.slice(0, maxResults);
       if (matches.length === 0) return undefined;
       return {
         matches,
-        duplicatesDropped: rawMatches.length - dedupedMatches.length,
-        truncated: resp.truncated || dedupedMatches.length > matches.length,
-        totalMatches: resp.total_matches,
+        truncated:
+          widened.responses.some((response) => response.truncated) ||
+          widened.matches.length > matches.length,
+        totalMatches: widened.droppedLocally > 0 ? 0 : widened.scopedTotal,
         message: branchWideningMessage(concreteBranch),
       };
     } catch {
@@ -1007,7 +1108,8 @@ export class GrepTool {
                   EMPTY_DIAGNOSIS_PROBE_LIMIT,
                   tenantId,
                   '*', // any branch — case-sensitive was already 0 everywhere
-                  pathGlob
+                  pathGlob,
+                  pathExclude
                 )
               );
               const matches = dedupGrepMatches(

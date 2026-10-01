@@ -141,4 +141,54 @@ mod tests {
         assert_eq!(matches[0].context_before, vec!["line1", "line2"]);
         assert_eq!(matches[0].context_after, vec!["line4", "line5"]);
     }
+
+    /// The list this engine scans on disk: one entry per path, never an excluded
+    /// one. Several content generations of a path are several `file_metadata`
+    /// rows, and without the collapse the scanner opened the same file once per
+    /// generation, reporting each of its matches that many times. An excluded
+    /// path must not be scanned at all, or its matches spend the result budget.
+    #[tokio::test]
+    async fn path_exclude_and_generation_collapse_shape_the_scan_list() {
+        use crate::code_lines_schema::UPSERT_FILE_METADATA_SQL;
+        use crate::search_db::SearchDbManager;
+        use crate::text_search::SearchOptions;
+
+        let tmp = TempDir::new().unwrap();
+        let db = SearchDbManager::new(&tmp.path().join("scan_list.db"))
+            .await
+            .unwrap();
+        let rows: [(i64, &str); 4] = [
+            (1, "/repo/src/a.rs"),
+            (2, "/repo/src/a.rs"), // second generation of the same path
+            (3, "/repo/old_project/b.rs"),
+            (4, "/repo/src/c.rs"),
+        ];
+        for (file_id, path) in rows {
+            sqlx::query(UPSERT_FILE_METADATA_SQL)
+                .bind(file_id)
+                .bind("proj1")
+                .bind(Some("main"))
+                .bind(path)
+                .bind(None::<&str>)
+                .bind(None::<&str>)
+                .bind(None::<&str>)
+                .bind(None::<i64>)
+                .bind(0_i64)
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+
+        let options = SearchOptions {
+            tenant_id: Some("proj1".to_string()),
+            path_exclude: Some("old_project/**".to_string()),
+            ..Default::default()
+        };
+        let files = super::super::query::query_file_paths(&db, &options, None)
+            .await
+            .unwrap();
+
+        let paths: Vec<&str> = files.iter().map(|f| f.file_path.as_str()).collect();
+        assert_eq!(paths, vec!["/repo/src/a.rs", "/repo/src/c.rs"]);
+    }
 }

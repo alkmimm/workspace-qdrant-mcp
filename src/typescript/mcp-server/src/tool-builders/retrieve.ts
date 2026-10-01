@@ -21,7 +21,14 @@ const KNOWN_ARG_KEYS: ReadonlySet<string> = new Set(RETRIEVE_ARG_KEYS);
 export function buildRetrieveOptions(args: Record<string, unknown> | undefined): RetrieveOptions {
   const options: RetrieveOptions = {};
 
-  const documentId = args?.['documentId'] as string | undefined;
+  // `id` is accepted as an alias for `documentId` because that is the field name
+  // the point-returning surfaces HAND BACK: a `search`, `list` or `scratchpad`
+  // result carries `id` (grep matches carry none — they use filePath+line), and
+  // the obvious next call — feeding it straight to `retrieve` — was rejected for
+  // naming the field exactly as the producer named it. Round-tripping a tool's
+  // own output must not require renaming it (`documentId` stays the documented
+  // name; an explicit `documentId` wins if both are given).
+  const documentId = (args?.['documentId'] ?? args?.['id']) as string | undefined;
   if (documentId) options.documentId = documentId;
 
   const filePath = args?.['filePath'] as string | undefined;

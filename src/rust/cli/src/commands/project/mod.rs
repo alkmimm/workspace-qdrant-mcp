@@ -125,6 +125,7 @@ enum ProjectCommand {
             wqm project search 'TODO'                   Search for text\n  \
             wqm project search 'fn\\s+main' --regex     Regex search\n  \
             wqm project search 'error' --path-glob '**/*.rs'  Filter by file type\n  \
+            wqm project search 'TODO' --path-exclude 'old_project/**'  Skip a tree\n  \
             wqm project search 'fixme' -C 3             Show 3 lines of context\n  \
             wqm project search 'Bug' --case-sensitive   Case-sensitive search"
     )]
@@ -143,6 +144,11 @@ enum ProjectCommand {
         /// Filter by file path glob (e.g., "**/*.rs")
         #[arg(long)]
         path_glob: Option<String>,
+
+        /// Exclude files whose path matches this glob (e.g., "old_project/**").
+        /// Same rule as the MCP `pathExclude`; applied before --limit.
+        #[arg(long)]
+        path_exclude: Option<String>,
 
         /// Maximum results
         #[arg(short = 'n', long, default_value = "20")]
@@ -183,6 +189,7 @@ pub async fn execute(args: ProjectArgs) -> Result<()> {
             regex,
             case_sensitive,
             path_glob,
+            path_exclude,
             limit,
             context_lines,
         } => {
@@ -191,6 +198,7 @@ pub async fn execute(args: ProjectArgs) -> Result<()> {
                 regex,
                 case_sensitive,
                 path_glob,
+                path_exclude,
                 limit,
                 context_lines,
             )

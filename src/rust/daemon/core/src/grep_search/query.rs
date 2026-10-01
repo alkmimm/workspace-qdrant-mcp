@@ -48,6 +48,9 @@ pub(super) async fn query_file_paths(
     }
 
     let rows = query.fetch_all(pool).await?;
+    // Same exclude rule as the FTS engines: an excluded file is never scanned,
+    // so none of its matches can spend the result budget.
+    let exclude = crate::text_search::compile_path_exclude(options.path_exclude.as_deref())?;
 
     let mut files = Vec::with_capacity(rows.len());
     for row in rows {
@@ -58,12 +61,22 @@ pub(super) async fn query_file_paths(
                 continue;
             }
         }
+        if crate::text_search::is_excluded(exclude.as_ref(), &file_path) {
+            continue;
+        }
         files.push(FileInfo {
             file_path,
             tenant_id: row.get("tenant_id"),
             branch: crate::text_search::display_branch(row.get("branch")),
         });
     }
+
+    // One row per content GENERATION of a path: without this, the scanner opens
+    // the same file once per generation and reports every match in it that many
+    // times. Dedupe on the path — the generations differ only in what `search.db`
+    // remembers, while the scan reads the single file on disk. Same identity rule
+    // the FTS engines apply to their rows (`text_search::dedup`).
+    crate::text_search::retain_first_by_path(&mut files, |f| f.file_path.as_str());
 
     Ok(files)
 }

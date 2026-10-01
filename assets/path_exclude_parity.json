@@ -1,0 +1,191 @@
+{
+  "_comment": "Shared pathExclude parity table. GENERATED from the TypeScript matchesPathExclude (src/typescript/mcp-server/src/utils/path-glob.ts), which is the reference. The daemon applies the same exclude before its result cap, so the two implementations must agree on every row: if the daemon excluded MORE, matches the MCP server would keep become unreachable; if it excluded LESS, the server would drop them after the cap and report an overstated total. Read by text_search::path_exclude tests (Rust) and tests/utils/path-exclude-parity.test.ts (TS).",
+  "cases": [
+    {
+      "path": "/repo/src/rust/a.rs",
+      "exclude": "src/rust/**",
+      "excluded": true,
+      "why": "subtree glob, absolute indexed path"
+    },
+    {
+      "path": "/repo/old_project/x.ts",
+      "exclude": "old_project/**",
+      "excluded": true,
+      "why": "root-level subtree"
+    },
+    {
+      "path": "/repo/pkg/old_project/x.ts",
+      "exclude": "old_project/**",
+      "excluded": true,
+      "why": "floats to any depth"
+    },
+    {
+      "path": "/repo/src/a.rs",
+      "exclude": "old_project/**",
+      "excluded": false,
+      "why": "unrelated path stays"
+    },
+    {
+      "path": "/repo/src/x.rs",
+      "exclude": "src/*.rs",
+      "excluded": true,
+      "why": "single star, one level"
+    },
+    {
+      "path": "/repo/src/deep/x.rs",
+      "exclude": "src/*.rs",
+      "excluded": false,
+      "why": "single star must NOT cross a slash (the daemon include matcher does)"
+    },
+    {
+      "path": "/repo/tests/a.test.ts",
+      "exclude": "**/*.test.ts",
+      "excluded": true,
+      "why": "leading ** suffix glob"
+    },
+    {
+      "path": "/repo/src/a.ts",
+      "exclude": "**/*.test.ts",
+      "excluded": false,
+      "why": "suffix glob miss"
+    },
+    {
+      "path": "/repo/docs/archive/a.md",
+      "exclude": "docs/archive",
+      "excluded": true,
+      "why": "wildcard-free literal scopes to its subtree"
+    },
+    {
+      "path": "/repo/docs/archive",
+      "exclude": "docs/archive",
+      "excluded": true,
+      "why": "wildcard-free literal matches the exact path"
+    },
+    {
+      "path": "/repo/docs/archive.md",
+      "exclude": "docs/archive",
+      "excluded": false,
+      "why": "literal is not a prefix match"
+    },
+    {
+      "path": "/repo/docs/archive/a.md",
+      "exclude": "docs/archive/",
+      "excluded": true,
+      "why": "trailing slash = directory"
+    },
+    {
+      "path": "/repo/docs/archive",
+      "exclude": "docs/archive/",
+      "excluded": false,
+      "why": "trailing slash does not match the bare name"
+    },
+    {
+      "path": "/repo/src/a.rs",
+      "exclude": "{old_project,src}/**",
+      "excluded": true,
+      "why": "brace alternation"
+    },
+    {
+      "path": "/repo/lib/a.rs",
+      "exclude": "{old_project,src}/**",
+      "excluded": false,
+      "why": "brace alternation miss"
+    },
+    {
+      "path": "/repo/src/a.rs",
+      "exclude": "{old_project, src}/**",
+      "excluded": true,
+      "why": "brace alternatives are trimmed"
+    },
+    {
+      "path": "/repo/web/a.min.js",
+      "exclude": "*.min.js",
+      "excluded": true,
+      "why": "bare suffix floats"
+    },
+    {
+      "path": "/repo/web/a.js",
+      "exclude": "*.min.js",
+      "excluded": false,
+      "why": "bare suffix miss"
+    },
+    {
+      "path": "/repo/src/[x].rs",
+      "exclude": "src/[x].rs",
+      "excluded": true,
+      "why": "brackets are LITERAL, not a character class"
+    },
+    {
+      "path": "/repo/src/x.rs",
+      "exclude": "src/[x].rs",
+      "excluded": false,
+      "why": "brackets never act as a class (the daemon include matcher treats them as one)"
+    },
+    {
+      "path": "C:\\repo\\old_project\\a.ts",
+      "exclude": "old_project/**",
+      "excluded": true,
+      "why": "backslash paths are normalised"
+    },
+    {
+      "path": "/repo/.claude/worktrees/wt/src/a.rs",
+      "exclude": ".claude/worktrees/**",
+      "excluded": true,
+      "why": "dotted directory"
+    },
+    {
+      "path": "/repo/src/a.rs",
+      "exclude": "src/a.rs",
+      "excluded": true,
+      "why": "exact file literal"
+    },
+    {
+      "path": "/repo/src/a.rsx",
+      "exclude": "src/a.rs",
+      "excluded": false,
+      "why": "exact file literal is not a prefix"
+    },
+    {
+      "path": "/repo/src/ab.rs",
+      "exclude": "src/a?.rs",
+      "excluded": true,
+      "why": "question mark matches one character"
+    },
+    {
+      "path": "/repo/src/a/b.rs",
+      "exclude": "src/a?b.rs",
+      "excluded": false,
+      "why": "question mark never matches a slash"
+    },
+    {
+      "path": "/repo/src/{a.rs",
+      "exclude": "src/{a.rs",
+      "excluded": true,
+      "why": "unbalanced brace is literal"
+    },
+    {
+      "path": "/repo/x.rs",
+      "exclude": "**",
+      "excluded": true,
+      "why": "double star alone matches everything"
+    },
+    {
+      "path": "/repo/a/b/c/d.rs",
+      "exclude": "a/**/d.rs",
+      "excluded": true,
+      "why": "inner ** spans directories"
+    },
+    {
+      "path": "/repo/a/d.rs",
+      "exclude": "a/**/d.rs",
+      "excluded": true,
+      "why": "inner ** may span zero directories"
+    },
+    {
+      "path": "/repo/A/x.rs",
+      "exclude": "a/**",
+      "excluded": false,
+      "why": "case-sensitive"
+    }
+  ]
+}
