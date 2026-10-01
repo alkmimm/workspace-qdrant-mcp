@@ -169,8 +169,6 @@ async fn task4_branch_rename_emits_renamed_event_within_timeout() {
         .unwrap();
 
     // Post-#69: an atomic rename must produce a single Renamed event.
-    // A DefaultChanged event is still expected because .git/HEAD now
-    // points to the new branch name.
     let events = detector.scan_for_changes().await.unwrap();
     let renamed = events.iter().find_map(|e| match e {
         BranchEvent::Renamed { old_name, new_name } => Some((old_name.clone(), new_name.clone())),
@@ -180,18 +178,6 @@ async fn task4_branch_rename_emits_renamed_event_within_timeout() {
         renamed,
         Some(("main".to_string(), "trunk".to_string())),
         "expected a single Renamed main->trunk, got {:?}",
-        events
-    );
-    let default_changed = events.iter().any(|e| {
-        matches!(
-            e,
-            BranchEvent::DefaultChanged { old_default, new_default }
-                if old_default == "main" && new_default == "trunk"
-        )
-    });
-    assert!(
-        default_changed,
-        "expected DefaultChanged main->trunk, got {:?}",
         events
     );
     // Must NOT emit a bare Created for the new name.
@@ -260,34 +246,17 @@ async fn task5_branch_deletion_emits_deleted_after_rename_timeout() {
     );
 }
 
-// ─── Task 6: default branch change ─────────────────────────────────────────
-
-#[tokio::test]
-async fn task6_default_branch_change_via_head_rename_is_detected() {
-    let fx = GitFixtures::plain_clone().unwrap();
-
-    let detector =
-        BranchLifecycleDetector::new(fx.repo_path.clone(), BranchLifecycleConfig::default());
-    detector.initialize().await.unwrap();
-    assert_eq!(detector.get_default_branch().await.as_deref(), Some("main"));
-
-    // Rename the current branch (detector reads .git/HEAD for the default).
-    run_git(&fx.repo_path, &["branch", "-m", "main", "trunk"]);
-
-    let events = detector.scan_for_changes().await.unwrap();
-    let default_changed = events
-        .iter()
-        .find(|e| matches!(e, BranchEvent::DefaultChanged { .. }))
-        .expect("DefaultChanged event must fire when HEAD points to a new branch name");
-    if let BranchEvent::DefaultChanged {
-        old_default,
-        new_default,
-    } = default_changed
-    {
-        assert_eq!(old_default, "main");
-        assert_eq!(new_default, "trunk");
-    }
-}
+// ─── Task 6: default branch change — REMOVED (2026-10-01) ──────────────────
+//
+// This task asserted that renaming the current branch emitted
+// `DefaultChanged { main -> trunk }`. It passed for the wrong reason: the
+// detector read `.git/HEAD` (the checked-out branch) as the default, and the
+// fixture renamed the checked-out branch, so "current" and "default" were the
+// same name and the test could not tell them apart. A plain `git checkout` of a
+// feature branch produced the same event. Default-branch tracking had no
+// consumer and was removed; see `docs/specs/19-branch-worktree-audit.md` §2.3
+// and `git::branch_lifecycle` module docs. The behaviour now pinned instead is
+// `git::branch_lifecycle::tests::test_switching_head_is_not_a_lifecycle_event`.
 
 // ─── Task 7: rapid branch switch (basic, single-file) ──────────────────────
 

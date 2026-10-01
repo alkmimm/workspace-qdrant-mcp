@@ -334,6 +334,38 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib text_search::escaping -- --test-threads=4
 
+# Branch lifecycle + the branch/worktree audit. Hermetic: on-disk git fixtures
+# in tempdirs, git identity passed inline, no daemon, no network.
+#
+# Before 2026-10-01 nothing RAN these — clippy only compiled them — which is how
+# a "default branch" read from `.git/HEAD` (the checked-out branch) sat in the
+# tree behind tests that passed for the wrong reason: their fixtures renamed the
+# current branch, where current and default coincide. The feature was removed
+# (no consumer; see the `git::branch_lifecycle` module docs and spec 19 §2.3);
+# `test_switching_head_is_not_a_lifecycle_event` pins that a checkout emits no
+# event. `branch_prune` depends on this detector's `list_all_branches()` to
+# decide what to DELETE, so the detector stays under a running gate.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib git::branch_lifecycle \
+        -- --test-threads=4 2>&1 | tee /tmp/branch-lifecycle.log; \
+    grep -q "^test result: ok\. 9 passed" /tmp/branch-lifecycle.log \
+    || { echo "GATE: expected exactly 9 git::branch_lifecycle tests to run and pass. If you \
+ADDED a test here, bump this count."; exit 1; }; \
+    cargo test -p workspace-qdrant-core --test branch_worktree_audit \
+        -- --test-threads=4 2>&1 | tee /tmp/branch-worktree-audit.log; \
+    grep -q "^test result: ok\. 15 passed" /tmp/branch-worktree-audit.log \
+    || { echo "GATE: expected exactly 15 branch_worktree_audit tests to run and pass (spec 19; \
+task6 was removed with default-branch tracking). If you ADDED a test here, bump this \
+count."; exit 1; }; \
+    cargo test -p workspace-qdrant-core --test git_integration_tests \
+        -- --test-threads=4 2>&1 | tee /tmp/git-integration.log; \
+    grep -q "^test result: ok\. 12 passed" /tmp/git-integration.log \
+    || { echo "GATE: expected exactly 12 git_integration_tests to run and pass. If you ADDED \
+a test here, bump this count."; exit 1; }
+
 # Qdrant payload-index manifests run here, same rationale: hermetic (pure const
 # assertions, no Qdrant and no DB) and they guard a SILENT performance cliff —
 # a field used in a production filter but missing from the manifest makes that

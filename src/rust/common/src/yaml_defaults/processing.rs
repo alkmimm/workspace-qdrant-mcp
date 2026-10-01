@@ -87,7 +87,6 @@ pub struct YamlGitConfig {
     pub auto_delete_branch_documents: bool,
     pub branch_scan_interval_seconds: u64,
     pub rename_correlation_timeout_ms: u64,
-    pub default_branch_detection: String,
 }
 
 impl Default for YamlGitConfig {
@@ -97,7 +96,6 @@ impl Default for YamlGitConfig {
             auto_delete_branch_documents: true,
             branch_scan_interval_seconds: 5,
             rename_correlation_timeout_ms: 500,
-            default_branch_detection: "head".to_string(),
         }
     }
 }

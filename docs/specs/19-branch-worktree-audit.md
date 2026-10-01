@@ -99,15 +99,32 @@ references + code paths), and, for bugs and gaps, a follow-up action.
 
 ### 2.3 Default branch change via HEAD
 
-- **Status**: ok
-- **Evidence**: `task6_default_branch_change_via_head_rename_is_detected`.
-  When the current branch is renamed, the detector reads `.git/HEAD`
-  (`git/branch_lifecycle/detector.rs:141`) and emits
-  `DefaultChanged { main → trunk }` on the next scan.
-- **Caveat**: `DefaultChanged` also fires as a side effect of a rename
-  (see §2.1). Once #69 is fixed the event should remain even after the
-  rename is re-classified, because the default tracking is independent of
-  the create/delete correlation path.
+- **Status**: **bug, mislabelled ok** — re-classified 2026-10-01; the feature
+  was **removed**.
+- **Original evidence**: `task6_default_branch_change_via_head_rename_is_detected`.
+  When the current branch was renamed, the detector read `.git/HEAD` and
+  emitted `DefaultChanged { main → trunk }` on the next scan.
+- **Why "ok" was wrong**: `.git/HEAD` names the CHECKED-OUT branch, not the
+  repository's default. The fixture renamed the checked-out branch, where the
+  two coincide, so the test passed without being able to tell them apart. A
+  plain `git checkout feature` produced the same `DefaultChanged
+  { main → feature }`. A second test encoded the same conflation outright —
+  `test_branch_detector_with_disambiguation` asserted the lifecycle
+  detector's "default" equalled `GitBranchDetector::get_current_branch`.
+- **Why removed rather than fixed**: nothing consumed it. The
+  `watch_folders.default_branch` column it was meant to feed existed only as a
+  migration string (`branch_schema::ALTER_ADD_DEFAULT_BRANCH`) whose sole
+  references were two assertions on its spelling — no deployed database had the
+  column. No `BranchEventHandler` implementation existed, so `DefaultChanged`
+  reached no handler, and the YAML knob `git.default_branch_detection` was
+  parsed and never read. The only production user of `BranchLifecycleDetector`
+  is `branch_prune`, which calls `list_all_branches()` and nothing else.
+  Meanwhile the trunk that read surfaces actually need is resolved where it is
+  used (§8.2) — fixing a second, unconsumed resolver would have created two
+  answers to one question.
+- **Now pinned instead**:
+  `git::branch_lifecycle::tests::test_switching_head_is_not_a_lifecycle_event`
+  — checking out another existing branch emits no event.
 
 ### 2.4 Rapid branch switches
 
@@ -235,14 +252,15 @@ up `main_worktree_watch_id.tenant_id` and forces the same value.
 | Category | ok | gap | bug |
 |----------|----|-----|-----|
 | 1. Worktree Detection | 5 | 1 | 0 |
-| 2. Branch Lifecycle | 3 | 1 | 1 |
+| 2. Branch Lifecycle | 2 | 1 | 2 |
 | 3. Multi-Clone Disambiguation | 3 | 1 | 0 |
 | 4. Cross-Cutting Cases | 3 | 2 | 0 |
-| **Total** | **14** | **5** | **1** |
+| **Total** | **13** | **5** | **2** |
 
 Bugs filed:
 
 - **#69** — BranchLifecycleDetector misclassifies atomic rename as Created+Deleted. **Fixed** in the same session by reordering `scan_for_changes` (delete → new → expire). The audit test now asserts a single `Renamed` event.
+- **§2.3** (re-classified from ok, 2026-10-01) — "default branch" was read from `.git/HEAD`, i.e. the checked-out branch, and had no consumer. **Removed** rather than fixed; see §2.3.
 
 Gaps captured as follow-up tasks (see §§1.6, 2.4, 3.4, 4.2, 4.3).
 
