@@ -7,7 +7,9 @@ use futures::TryStreamExt;
 use sqlx::Row;
 use tracing::debug;
 
+use super::super::dedup::MatchDeduper;
 use super::super::escaping::{compile_glob_matcher, escape_fts5_pattern, resolve_path_filter};
+use super::super::path_exclude::{compile_path_exclude, is_excluded, PathExclude};
 use super::super::types::{SearchMatch, SearchOptions, SearchResults};
 use super::context::attach_context_lines;
 use super::query_builder::build_search_query;
@@ -43,6 +45,7 @@ pub async fn search_exact(
         .as_deref()
         .map(compile_glob_matcher)
         .transpose()?;
+    let exclude = compile_path_exclude(options.path_exclude.as_deref())?;
 
     let fts5_pattern = escape_fts5_pattern(pattern);
     let (sql, use_fts) = build_search_query(&fts5_pattern, &effective_options);
@@ -67,6 +70,7 @@ pub async fn search_exact(
         use_fts,
         &sql,
         &glob_matcher,
+        exclude.as_ref(),
         options,
     )
     .await?;
@@ -104,6 +108,7 @@ async fn run_bound_query(
     use_fts: bool,
     sql: &str,
     glob_matcher: &Option<Box<dyn Fn(&str) -> bool + Send + Sync>>,
+    exclude: Option<&PathExclude>,
     options: &SearchOptions,
 ) -> Result<(Vec<SearchMatch>, bool), SearchDbError> {
     let instr_pattern = if options.case_insensitive {
@@ -130,14 +135,24 @@ async fn run_bound_query(
     if let Some(ref prefix_arg) = path_prefix_arg {
         query = query.bind(prefix_arg);
     }
-    collect_matches(search_db.pool(), query, glob_matcher, options.max_results).await
+    collect_matches(
+        search_db.pool(),
+        query,
+        glob_matcher,
+        exclude,
+        options.max_results,
+    )
+    .await
 }
 
-/// Stream SQL rows, apply the glob filter, and collect into `SearchMatch` values.
+/// Stream SQL rows, apply the include glob and the exclude, and collect into
+/// `SearchMatch` values. Both filters run before dedup and the cap, so a filtered
+/// row never spends any of the `max_results` budget.
 async fn collect_matches<'q>(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
     glob_matcher: &Option<Box<dyn Fn(&str) -> bool + Send + Sync>>,
+    exclude: Option<&PathExclude>,
     max_results: usize,
 ) -> Result<(Vec<SearchMatch>, bool), SearchDbError> {
     let max = if max_results > 0 {
@@ -148,6 +163,11 @@ async fn collect_matches<'q>(
     let mut stream = query.fetch(pool);
     let mut matches = Vec::new();
     let mut truncated = false;
+    // The JOIN streams one row per content GENERATION of a path, so the same
+    // served hit can arrive several times. Collapse before the cap so a page
+    // holds `max_results` real hits and the pre-cap count the gRPC layer reports
+    // as `total_matches` counts hits rather than rows (see `text_search::dedup`).
+    let mut deduper = MatchDeduper::new();
 
     while let Some(row) = stream.try_next().await? {
         let file_path: String = row.get("file_path");
@@ -156,11 +176,19 @@ async fn collect_matches<'q>(
                 continue;
             }
         }
+        if is_excluded(exclude, &file_path) {
+            continue;
+        }
+        let line_number: i64 = row.get("line_number");
+        let content: String = row.get("content");
+        if !deduper.accept(&file_path, line_number, &content) {
+            continue;
+        }
         matches.push(SearchMatch {
             line_id: row.get("line_id"),
             file_id: row.get("file_id"),
-            line_number: row.get("line_number"),
-            content: row.get("content"),
+            line_number,
+            content,
             file_path,
             tenant_id: row.get("tenant_id"),
             branch: crate::text_search::display_branch(row.get("branch")),

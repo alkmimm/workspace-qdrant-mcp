@@ -4,6 +4,7 @@
 
 import type { QdrantClient } from '@qdrant/js-client-rest';
 import type { DaemonClient } from '../clients/daemon-client.js';
+import type { TextSearchResponse } from '../clients/grpc-types.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import type { SearchDbReader } from '../clients/search-db-reader.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
@@ -23,6 +24,7 @@ import {
   applyEffectiveBranch,
   collapseResultBranchFields,
   concreteBranchFilter,
+  mergeFallbackByMissingPath,
   resolveEffectiveBranch,
   resolveFallbackBranch,
   resolveProjectIdentity,
@@ -33,7 +35,7 @@ import {
   indexLagCaveat,
 } from './empty-diagnosis.js';
 import { whitespaceSensitivityHint } from './exact-hints.js';
-import { lookupTestFlags } from './test-flag.js';
+import { lookupFileAnnotations } from './test-flag.js';
 
 /**
  * Resolution outcome for exact-search tenant scoping.
@@ -139,6 +141,7 @@ function buildExactSearchRequest(
   tenant_id?: string;
   branch?: string;
   path_glob?: string;
+  path_exclude?: string;
 } {
   const request: {
     pattern: string;
@@ -149,6 +152,7 @@ function buildExactSearchRequest(
     tenant_id?: string;
     branch?: string;
     path_glob?: string;
+    path_exclude?: string;
   } = {
     pattern: options.query,
     regex: false,
@@ -164,7 +168,149 @@ function buildExactSearchRequest(
   // entirely, matching the Qdrant path's behaviour.
   if (options.branch && options.branch !== '*') request.branch = options.branch;
   if (options.pathGlob) request.path_glob = options.pathGlob;
+  // The daemon applies the exclude BEFORE its result cap. Filtering only here,
+  // after the cap, let excluded paths fill the page: `limit:500` found 1 of 13
+  // real hits. The local `filterResultsByPathExclude` still runs (it also drops
+  // foreign-worktree paths, which only this side can judge).
+  if (options.pathExclude) request.path_exclude = options.pathExclude;
   return request;
+}
+
+/** Deepest refetch when filling a page — the daemon's own result ceiling. */
+const EXACT_REFILL_MAX_DEPTH = 10_000;
+/** Refetch rounds before settling for a short page (depth ×4 per round). */
+const EXACT_REFILL_MAX_ROUNDS = 6;
+
+/** The merged, deduped, filtered results of one exact-search window fetch. */
+interface ExactWindow {
+  /** Responses actually used: scoped first, then the fallback when merged. */
+  responses: TextSearchResponse[];
+  /** The scoped response's distinct, post-exclude total for its branch scope. */
+  scopedTotal: number;
+  results: SearchResult[];
+  /** Rows the LOCAL filter removed — counted by `scopedTotal`, never served. */
+  droppedLocally: number;
+}
+
+/**
+ * Fetch enough rows to fill `[0, windowEnd)` of the merged, deduped, filtered
+ * list — or everything the daemon has, whichever is smaller. Same contract as
+ * grep's `fetchGrepWindow`: a page may come back short only when the daemon has
+ * nothing more, so a window the local filter thinned is refetched deeper. The
+ * daemon caches a query's full result set (its cache key ignores `max_results`),
+ * so each deeper round is a re-slice, not a re-scan.
+ */
+async function fetchExactWindow(
+  daemonClient: DaemonClient,
+  options: SearchOptions,
+  tenantId: string | undefined,
+  fallbackBranch: string | undefined,
+  windowEnd: number
+): Promise<ExactWindow> {
+  let depth = windowEnd;
+  let best = await fetchExactWindowOnce(daemonClient, options, tenantId, fallbackBranch, depth);
+  for (let round = 2; round <= EXACT_REFILL_MAX_ROUNDS; round += 1) {
+    const short = best.results.length < windowEnd;
+    const moreUpstream = best.responses.some((response) => response.truncated);
+    if (!short || !moreUpstream || depth >= EXACT_REFILL_MAX_DEPTH) break;
+    depth = Math.min(EXACT_REFILL_MAX_DEPTH, depth * 4);
+    const deeper = await fetchExactWindowOnce(
+      daemonClient,
+      options,
+      tenantId,
+      fallbackBranch,
+      depth
+    );
+    // A deeper fetch of the same query is a superset — unless the index moved
+    // between calls (it is live, and the daemon's cache lasts seconds). Never
+    // trade a window for a worse one; stop refilling instead.
+    if (deeper.results.length < best.results.length) break;
+    best = deeper;
+  }
+  return best;
+}
+
+/** One fetch at a fixed depth: scoped query, then (when sound) the fallback. */
+async function fetchExactWindowOnce(
+  daemonClient: DaemonClient,
+  options: SearchOptions,
+  tenantId: string | undefined,
+  fallbackBranch: string | undefined,
+  depth: number
+): Promise<ExactWindow> {
+  const scoped = await daemonClient.textSearch(
+    buildExactSearchRequest({ ...options, limit: depth }, tenantId)
+  );
+  const responses = [scoped];
+  // Fallback rows sort after every scoped row, so while the scoped response is
+  // truncated they cannot reach this window — and the paths the scope covers are
+  // only completely known once it is NOT truncated. Merging earlier let a stale
+  // base-branch generation in for a path the scope carries beyond the fetch.
+  let fallbackResults: SearchResult[] = [];
+  if (fallbackBranch && !scoped.truncated) {
+    const fallback = await daemonClient.textSearch(
+      buildExactSearchRequest({ ...options, branch: fallbackBranch, limit: depth }, tenantId)
+    );
+    responses.push(fallback);
+    fallbackResults = mapExactResults(fallback.matches);
+  }
+  // The fallback may only FILL IN paths the scope lacks — never add the base
+  // branch's older generation of a path the scope carries. Same rule `list`
+  // applies in SQL and grep applies too.
+  const merged = dedupeExactResults(
+    mergeFallbackByMissingPath(
+      mapExactResults(scoped.matches),
+      fallbackResults,
+      (r) => r.metadata['file_path'] as string | undefined
+    )
+  );
+  // Hard per-call exclude (`pathExclude`) — already applied by the daemon before
+  // its cap, so here it is a belt-and-braces no-op — and the default
+  // foreign-worktree drop, which only this side can judge. UNCONDITIONAL: the
+  // worktree drop must run even with no pathExclude — guarding on pathExclude
+  // made the exact lane the one production path that still returned
+  // foreign-checkout paths (review finding, 2026-08-13).
+  const results = filterResultsByPathExclude(merged, options.pathExclude, options.pathGlob);
+  return {
+    responses,
+    scopedTotal: scoped.total_matches,
+    results,
+    droppedLocally: merged.length - results.length,
+  };
+}
+
+/**
+ * Whether the all-branches scope holds matches that `pathExclude` alone removed.
+ *
+ * The exclude now runs in the daemon, before its cap, so an excluded hit never
+ * comes back here to be counted — and that count is what let this surface say
+ * "matches exist on other branches but pathExclude removed them all" instead of
+ * the misleading "may be genuinely absent". One small probe without the exclude
+ * (keeping the include glob and the foreign-worktree drop) recovers the signal.
+ * It only runs on an empty, excluded, already-widened result.
+ */
+async function widenedScopeHasExcludedMatches(
+  daemonClient: DaemonClient,
+  options: SearchOptions,
+  tenantId: string | undefined
+): Promise<boolean> {
+  const probeOptions: SearchOptions = {
+    ...options,
+    branch: '*',
+    limit: EMPTY_DIAGNOSIS_PROBE_LIMIT,
+  };
+  delete probeOptions.pathExclude;
+  try {
+    const probe = await daemonClient.textSearch(buildExactSearchRequest(probeOptions, tenantId));
+    const kept = filterResultsByPathExclude(
+      dedupeExactResults(mapExactResults(probe.matches)),
+      undefined,
+      options.pathGlob
+    );
+    return kept.length > 0;
+  } catch {
+    return false; // a diagnosis courtesy — never fail the search over it
+  }
 }
 
 /** Build the response returned when project-scope exact search has no
@@ -388,42 +534,40 @@ async function executeAndLogSearch(
   searchDbReader?: SearchDbReader
 ): Promise<SearchResponse> {
   try {
-    const request = buildExactSearchRequest(options, tenantId);
     const requestedBranch = concreteBranchFilter(options.branch);
-    const primaryResponse = await daemonClient.textSearch(request);
-    const responses = [primaryResponse];
-    const resultGroups: SearchResult[][] = [mapExactResults(primaryResponse.matches)];
-    if (fallbackBranch) {
-      const fallbackResponse = await daemonClient.textSearch(
-        buildExactSearchRequest({ ...options, branch: fallbackBranch }, tenantId)
-      );
-      responses.push(fallbackResponse);
-      resultGroups.push(mapExactResults(fallbackResponse.matches));
-    }
-    const rawResults = resultGroups.flat();
-    let dedupedResults = dedupeExactResults(rawResults);
-    // Track the RAW set that produced `dedupedResults` — recomputed below if the
-    // auto-widen replaces it. (A stale value goes negative: rawResults is empty
-    // whenever dedupedResults is empty, so `0 - widened.length` would inflate
-    // `total` for a truncated widen.)
-    let duplicatesDropped = rawResults.length - dedupedResults.length;
+    const limit = options.limit ?? 100;
+    // Pagination parity with grep and the vector path (P1.5 C): `offset` slices
+    // the deduped list, so the fetch has to reach `offset + limit`. Requesting
+    // only `limit` rows made every page past the first EMPTY — measured: offset
+    // 5 and 10 returned 0 of 2042 matches — and next_offset never appeared.
+    const offset = Math.max(0, options.offset ?? 0);
+    const windowEnd = offset + limit;
+    let exactWindow = await fetchExactWindow(daemonClient, options, tenantId, fallbackBranch, windowEnd);
     // Auto-widen on empty (parity with grep): a branch-scoped exact search that
     // finds nothing may be missing content the daemon tagged under another branch
     // (a file unchanged on the current branch stays indexed under the branch it
     // was last modified on). Re-run across ALL branches. Fires ONLY when the
-    // scoped result is empty, so good branch-scoped results are never diluted.
+    // scoped result set is empty — the whole set, not this page, so paging past
+    // the end is never mistaken for a scoping miss.
     let branchWidened = false;
-    if (dedupedResults.length === 0 && requestedBranch) {
-      const widenedResponse = await daemonClient.textSearch(
-        buildExactSearchRequest({ ...options, branch: '*' }, tenantId)
+    let widenedAllExcluded = false;
+    if (exactWindow.results.length === 0 && requestedBranch) {
+      const widened = await fetchExactWindow(
+        daemonClient,
+        { ...options, branch: '*' },
+        tenantId,
+        undefined,
+        windowEnd
       );
-      const widenedRaw = mapExactResults(widenedResponse.matches);
-      const widened = dedupeExactResults(widenedRaw);
-      if (widened.length > 0) {
-        responses.push(widenedResponse);
-        dedupedResults = widened;
-        duplicatesDropped = widenedRaw.length - widened.length;
+      if (widened.results.length > 0) {
+        exactWindow = widened;
         branchWidened = true;
+      } else if (options.pathExclude) {
+        widenedAllExcluded = await widenedScopeHasExcludedMatches(
+          daemonClient,
+          options,
+          tenantId
+        );
       }
     }
     // NO automatic cross-project widen. A project-scoped exact search (tenantId
@@ -432,28 +576,24 @@ async function executeAndLogSearch(
     // in (a confidential repo indexed in the same instance would leak into an
     // unrelated project's session). On an empty project result we surface a hint
     // offering scope:"all" (below) instead of fetching cross-project data here.
-    //
-    // Hard per-call exclude (`pathExclude`), applied AFTER any branch-widen so it
-    // covers widened hits too and BEFORE the offset slice so pagination stays honest.
-    // UNCONDITIONAL: the default other-worktree drop lives inside the filter and
-    // must run even when no pathExclude was passed — guarding on pathExclude made
-    // the exact lane the one production path that still returned foreign-checkout
-    // paths (review finding, 2026-08-13).
-    dedupedResults = filterResultsByPathExclude(
-      dedupedResults,
-      options.pathExclude,
-      options.pathGlob
-    );
-    const limit = options.limit ?? 100;
-    // Pagination parity with the vector path (P1.5 C): honor `offset` by slicing
-    // the deduped result list; set next_offset below when more remain.
-    const offset = Math.max(0, options.offset ?? 0);
+    const { responses } = exactWindow;
+    const dedupedResults = exactWindow.results;
+    // The scoped response's own total is the EXACT distinct count for its scope
+    // — post-dedup and post-exclude, both applied by the daemon — so it is a
+    // trustworthy floor for a capped read, UNLESS this side dropped rows the
+    // daemon counted (foreign-worktree paths). Summing the responses, the
+    // original behaviour, counted the overlapping branch scopes twice.
+    const scopedTotal = exactWindow.droppedLocally > 0 ? 0 : exactWindow.scopedTotal;
     const results = dedupedResults.slice(offset, offset + limit);
     // is_test parity with the semantic path (which reads the Qdrant ingest
     // tags): FTS hits carry none, so read the daemon's verdict back from
     // tracked_files by absolute path. Best-effort, project scope only.
     if (tenantId) {
-      const testFlags = lookupTestFlags(
+      // One lookup, three fields: `is_test` (parity with the semantic path's
+      // ingest tags) plus `relative_path` and `language`, which a semantic hit
+      // has always carried and a keyword hit silently lacked — an agent that read
+      // `relative_path` got nothing the moment it passed `exact: true`.
+      const annotations = lookupFileAnnotations(
         stateManager,
         tenantId,
         results
@@ -462,12 +602,19 @@ async function executeAndLogSearch(
       );
       for (const r of results) {
         const fp = r.metadata['file_path'] as string | undefined;
-        if (fp && testFlags.get(fp) === true) r.is_test = true;
+        if (!fp) continue;
+        const annotation = annotations.get(fp);
+        if (!annotation) continue;
+        if (annotation.isTest === true) r.is_test = true;
+        r.metadata['relative_path'] = annotation.relativePath;
+        if (annotation.language) r.metadata['language'] = annotation.language;
       }
     }
-    const totalMatches = responses.reduce((sum, response) => sum + response.total_matches, 0);
-    const total = responses.some((response) => response.truncated)
-      ? Math.max(results.length, totalMatches - duplicatesDropped)
+    // Exact when nothing was truncated; otherwise the best provable FLOOR — never
+    // an overstatement, which is the direction that sizes work that does not exist.
+    const moreUpstream = responses.some((response) => response.truncated);
+    const total = moreUpstream
+      ? Math.max(offset + results.length, dedupedResults.length, scopedTotal)
       : dedupedResults.length;
 
     stateManager.updateSearchEvent(eventId, {
@@ -490,14 +637,18 @@ async function executeAndLogSearch(
       scope: effectiveScope,
       collections_searched: [PROJECTS_COLLECTION],
     };
-    if (dedupedResults.length > offset + limit)
+    // More remain when the fetched list already runs past this page OR the
+    // daemon itself holds more. The second clause was missing: the fetch stops
+    // at the page end, so "the list runs past the page" was never true and the
+    // caller was never told there was a next page.
+    if (results.length > 0 && (dedupedResults.length > offset + limit || moreUpstream))
       successResponse.next_offset = offset + results.length;
     // A specific diagnosis (path filter excluded everything / branch has no
     // indexed content) is more useful than the generic scope-opt-in hint — same
     // shared probes grep uses (CLAUDE.md shared-behavior rule). Only on a
     // project-scoped, still-empty result.
     const diagnosis =
-      dedupedResults.length === 0 && tenantId
+      dedupedResults.length === 0 && tenantId && !widenedAllExcluded
         ? await diagnoseEmptyResult({
             tenantId,
             // Exact search always matches a literal substring — a metacharacter
@@ -511,13 +662,16 @@ async function executeAndLogSearch(
             pathExclude: options.pathExclude,
             searchDbReader,
             countWithoutPathFilter: async () => {
-              // Drop the pathGlob (delete, not `= undefined`, for
-              // exactOptionalPropertyTypes) and cap the probe.
+              // Drop BOTH path filters (delete, not `= undefined`, for
+              // exactOptionalPropertyTypes) and cap the probe. The exclude now
+              // travels to the daemon, so leaving it here would filter the very
+              // scope this probe exists to measure unfiltered.
               const probeOptions: SearchOptions = {
                 ...options,
                 limit: EMPTY_DIAGNOSIS_PROBE_LIMIT,
               };
               delete probeOptions.pathGlob;
+              delete probeOptions.pathExclude;
               const probe = await daemonClient.textSearch(
                 buildExactSearchRequest(probeOptions, tenantId)
               );
@@ -566,12 +720,9 @@ async function executeAndLogSearch(
     // probes are scoped to the requested branch and would be inaccurate here
     // (the pattern WAS found cross-branch; it was just filtered out).
     if (branchWidened && requestedBranch) {
-      successResponse.hint =
-        dedupedResults.length > 0
-          ? `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`
-          : `Matches exist on other branches but were all removed by pathExclude${
-              options.pathExclude ? ` "${options.pathExclude}"` : ''
-            } — drop or adjust it to see them.`;
+      successResponse.hint = `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`;
+    } else if (widenedAllExcluded) {
+      successResponse.hint = `Matches exist on other branches but were all removed by pathExclude "${options.pathExclude}" — drop or adjust it to see them.`;
     } else if (diagnosis) {
       successResponse.hint = diagnosis;
     } else if (dedupedResults.length === 0 && tenantId) {

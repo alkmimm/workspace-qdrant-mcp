@@ -36,6 +36,7 @@ pub async fn search_project(
     regex: bool,
     case_sensitive: bool,
     path_glob: Option<String>,
+    path_exclude: Option<String>,
     limit: usize,
     context_lines: u32,
 ) -> Result<()> {
@@ -53,6 +54,7 @@ pub async fn search_project(
         path_prefix: None,
         context_lines: context_lines as i32,
         max_results: limit as i32,
+        path_exclude,
     };
 
     let response = client.text_search().search(request).await?.into_inner();

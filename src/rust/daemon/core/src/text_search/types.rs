@@ -57,6 +57,10 @@ pub struct SearchOptions {
     /// over `path_prefix`. A SQL prefix is extracted from the glob for
     /// pre-filtering, then `glob::Pattern` verifies in Rust.
     pub path_glob: Option<String>,
+    /// Drop files whose path matches this glob — the MCP `pathExclude`, with the
+    /// MCP server's exact semantics (see `text_search::path_exclude`). Applied
+    /// before `max_results`, so excluded paths never consume the result budget.
+    pub path_exclude: Option<String>,
     /// Case-insensitive search (default: false = case-sensitive).
     pub case_insensitive: bool,
     /// Maximum number of results to return (0 = unlimited).

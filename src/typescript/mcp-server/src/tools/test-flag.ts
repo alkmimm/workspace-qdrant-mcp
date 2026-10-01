@@ -14,11 +14,20 @@
  */
 
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
+import type { TrackedFileAnnotation } from '../clients/tracked-files-queries/index.js';
+
+export type { TrackedFileAnnotation };
 
 /** The two state-manager reads the lookup needs (narrow for easy test mocks). */
 export type TestFlagStateReader = Pick<
   SqliteStateManager,
   'getWatchFolderIdByTenantId' | 'getIsTestByFilePaths'
+>;
+
+/** Same shape for the richer lookup below. */
+export type FileAnnotationStateReader = Pick<
+  SqliteStateManager,
+  'getWatchFolderIdByTenantId' | 'getFileAnnotationsByFilePaths'
 >;
 
 /** Absolute path → is_test for the tenant's watch folder; empty map when the
@@ -33,6 +42,29 @@ export function lookupTestFlags(
     const watchFolderId = stateManager.getWatchFolderIdByTenantId(tenantId);
     if (!watchFolderId) return new Map();
     return stateManager.getIsTestByFilePaths(watchFolderId, [...new Set(filePaths)]);
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * Absolute path → `relative_path` + `is_test` + `language`, for the FTS surfaces
+ * that must present the same metadata fields as a semantic hit.
+ *
+ * Same contract as {@link lookupTestFlags} — project-scoped, best-effort, empty
+ * map on any failure — and the same single query underneath, so a keyword hit
+ * costs no extra round trip to gain the fields.
+ */
+export function lookupFileAnnotations(
+  stateManager: FileAnnotationStateReader | undefined,
+  tenantId: string | undefined,
+  filePaths: readonly string[]
+): Map<string, TrackedFileAnnotation> {
+  if (!stateManager || !tenantId || filePaths.length === 0) return new Map();
+  try {
+    const watchFolderId = stateManager.getWatchFolderIdByTenantId(tenantId);
+    if (!watchFolderId) return new Map();
+    return stateManager.getFileAnnotationsByFilePaths(watchFolderId, [...new Set(filePaths)]);
   } catch {
     return new Map();
   }

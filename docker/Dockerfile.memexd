@@ -334,6 +334,63 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib text_search::escaping -- --test-threads=4
 
+# Served-hit identity, and the honesty of the count built on it. Hermetic (pure
+# set/arithmetic assertions, no FTS5 DB).
+#
+# A path holds several content GENERATIONS in search.db, so the engines stream one
+# row per generation while a reader sees one hit per (file_path, line_number,
+# content). Counting rows where the reader counts hits is what made
+# `total_matches` overstate a real surface by up to 2x (measured: 4033 reported
+# for 2033 actual), and it is a SILENT error — every number looked plausible. The
+# three engines (exact, regex, grep-scan) must therefore collapse at the source,
+# and `truncated` must account for the engine's own ceiling as well as the
+# caller's cap, or a count that exactly fills the cap reports as complete.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib text_search::dedup \
+        -- --test-threads=4 2>&1 | tee /tmp/hit-dedup.log; \
+    grep -q "^test result: ok\. 9 passed" /tmp/hit-dedup.log \
+    || { echo "GATE: expected exactly 9 text_search::dedup tests to run and pass — this is \
+the single identity rule all three search engines share. If you ADDED a test here, bump \
+this count."; exit 1; }
+
+# pathExclude, applied by the engines BEFORE the result cap. Hermetic (tempdir
+# search.db, no network).
+#
+# It used to run only in the MCP server, on rows already capped: excluded paths
+# consumed the page, which came back EMPTY with `truncated: true`, no
+# continuation and a total of 2021 for 13 real hits. The daemon-side matcher must
+# agree with the server's on every case or the fix becomes a recall bug — the
+# parity table `assets/path_exclude_parity.json` is generated from the TypeScript
+# implementation and asserted here and in the vitest suite. Explicit filters,
+# not a bare `path_exclude`: that substring also matches unrelated
+# `fast_path_excludes_*` tests.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        text_search::path_exclude:: \
+        text_search::exact_search::tests::exclude_tests:: \
+        path_exclude_applies_before_the_cap_in_regex_search \
+        path_exclude_and_generation_collapse_shape_the_scan_list \
+        --test-threads=4 2>&1 | tee /tmp/path-exclude.log; \
+    grep -q "^test result: ok\. 11 passed" /tmp/path-exclude.log \
+    || { echo "GATE: expected exactly 11 pathExclude tests to run and pass (5 matcher + 4 \
+exact + 1 regex + 1 grep-scan). If you ADDED a test here, bump this count."; exit 1; }
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-grpc --lib text_search_service \
+        -- --test-threads=4 2>&1 | tee /tmp/text-search-service.log; \
+    grep -q "^test result: ok\. 13 passed" /tmp/text-search-service.log \
+    || { echo "GATE: expected exactly 13 text_search_service tests to run and pass — they \
+pin what total_matches and truncated promise the caller. If you ADDED a test here, bump \
+this count."; exit 1; }
+
 # Branch lifecycle + the branch/worktree audit. Hermetic: on-disk git fixtures
 # in tempdirs, git identity passed inline, no daemon, no network.
 #

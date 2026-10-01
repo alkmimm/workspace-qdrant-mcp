@@ -47,6 +47,10 @@ struct CacheKey {
     branch: Option<String>,
     path_prefix: Option<String>,
     path_glob: Option<String>,
+    /// Part of the key because the engines apply the exclude while building the
+    /// cached result set: two requests that differ only in `path_exclude` must
+    /// never be served from each other's entry.
+    path_exclude: Option<String>,
 }
 
 impl CacheKey {
@@ -59,6 +63,7 @@ impl CacheKey {
             branch: req.branch.clone(),
             path_prefix: req.path_prefix.clone(),
             path_glob: req.path_glob.clone(),
+            path_exclude: req.path_exclude.clone(),
         }
     }
 
@@ -90,6 +95,28 @@ impl TextSearchServiceImpl {
         }
     }
 
+    /// Whether this response hides matches from the caller.
+    ///
+    /// TWO things can hide them, and only one used to be reported: the caller's
+    /// own `max_results` cap, and the ENGINE's ceiling
+    /// ([`CACHE_MISS_MAX_RESULTS`]) which stops the scan regardless of what was
+    /// asked for. Reporting only the first made the ceiling a silent lie — a
+    /// caller asking for exactly 10_000 (what the MCP `countOnly` mode does) got
+    /// 10_000 matches with `truncated: false`, i.e. a confidently wrong total for
+    /// every surface at least that large, against a documented promise that
+    /// `countOnly` "still reports truncated:true" past the cap.
+    ///
+    /// `found` is the DISTINCT match count: the engines dedupe content
+    /// generations before this point (see `text_search::dedup`), so both this
+    /// flag and `total_matches` describe hits a reader would see, not index rows.
+    ///
+    /// `max_results == 0` is the "unlimited" sentinel the engines use, so it hides
+    /// nothing — comparing against it literally reported EVERY non-empty response
+    /// as truncated.
+    fn response_is_truncated(engine_truncated: bool, found: usize, max_results: usize) -> bool {
+        engine_truncated || (max_results > 0 && found > max_results)
+    }
+
     /// Convert a gRPC request into SearchOptions
     fn build_options(req: &TextSearchRequest) -> SearchOptions {
         SearchOptions {
@@ -97,6 +124,7 @@ impl TextSearchServiceImpl {
             branch: req.branch.clone(),
             path_prefix: req.path_prefix.clone(),
             path_glob: req.path_glob.clone(),
+            path_exclude: req.path_exclude.clone(),
             case_insensitive: !req.case_sensitive,
             max_results: if req.max_results > 0 {
                 req.max_results as usize
@@ -193,6 +221,7 @@ impl TextSearchServiceImpl {
             branch: req.branch.clone(),
             path_prefix: req.path_prefix.clone(),
             path_glob: req.path_glob.clone(),
+            path_exclude: req.path_exclude.clone(),
             case_insensitive: !req.case_sensitive,
             max_results: CACHE_MISS_MAX_RESULTS,
             context_lines: 0,
@@ -232,8 +261,14 @@ impl TextSearchService for TextSearchServiceImpl {
         let results = self.execute_or_cached(&req).await?;
         let options = Self::build_options(&req);
         // Capture pre-truncation count before apply_max_results_and_context caps the vec.
+        // Post-dedupe (see `text_search::dedup`), so this counts distinct hits —
+        // what a caller means by "how many matches are there" — not index rows.
         let total_matches = results.matches.len() as i32;
-        let truncated = results.matches.len() > options.max_results;
+        let truncated = Self::response_is_truncated(
+            results.truncated,
+            results.matches.len(),
+            options.max_results,
+        );
 
         let matches = self
             .apply_max_results_and_context(results, &req, &options)
@@ -303,6 +338,7 @@ mod tests {
             path_prefix: None,
             context_lines: 0,
             max_results: 0,
+            path_exclude: None,
         };
 
         let opts = TextSearchServiceImpl::build_options(&req);
@@ -324,6 +360,7 @@ mod tests {
             path_prefix: None,
             context_lines: 3,
             max_results: 50,
+            path_exclude: None,
         };
 
         let opts = TextSearchServiceImpl::build_options(&req);
@@ -347,6 +384,7 @@ mod tests {
             path_prefix: None,
             context_lines: -5,
             max_results: 100,
+            path_exclude: None,
         };
 
         let opts = TextSearchServiceImpl::build_options(&req);
@@ -365,6 +403,7 @@ mod tests {
             path_prefix: None,
             context_lines: 3,
             max_results: 100,
+            path_exclude: None,
         };
         // Same search params, different context_lines/max_results
         let req2 = TextSearchRequest {
@@ -377,6 +416,7 @@ mod tests {
             path_prefix: None,
             context_lines: 0,
             max_results: 50,
+            path_exclude: None,
         };
         let key1 = CacheKey::from_request(&req1);
         let key2 = CacheKey::from_request(&req2);
@@ -396,6 +436,7 @@ mod tests {
             path_prefix: None,
             context_lines: 0,
             max_results: 0,
+            path_exclude: None,
         };
         let req2 = TextSearchRequest {
             pattern: "bar".to_string(),
@@ -416,12 +457,56 @@ mod tests {
             path_prefix: None,
             context_lines: 0,
             max_results: 0,
+            path_exclude: None,
         };
         let req2 = TextSearchRequest {
             regex: true,
             ..req1.clone()
         };
         assert_ne!(CacheKey::from_request(&req1), CacheKey::from_request(&req2));
+    }
+
+    /// The engines apply `path_exclude` while building the CACHED result set, so
+    /// a request that differs only in its exclude must miss the other's entry —
+    /// otherwise an excluded tree would leak back in for up to the cache TTL.
+    #[test]
+    fn test_cache_key_path_exclude_matters() {
+        let req1 = TextSearchRequest {
+            pattern: "test".to_string(),
+            regex: false,
+            case_sensitive: true,
+            tenant_id: None,
+            branch: None,
+            path_glob: None,
+            path_prefix: None,
+            context_lines: 0,
+            max_results: 0,
+            path_exclude: None,
+        };
+        let req2 = TextSearchRequest {
+            path_exclude: Some("old_project/**".to_string()),
+            ..req1.clone()
+        };
+        assert_ne!(CacheKey::from_request(&req1), CacheKey::from_request(&req2));
+    }
+
+    /// The exclude reaches the engines through `build_options`.
+    #[test]
+    fn test_build_options_carries_path_exclude() {
+        let req = TextSearchRequest {
+            pattern: "test".to_string(),
+            regex: false,
+            case_sensitive: true,
+            tenant_id: None,
+            branch: None,
+            path_glob: None,
+            path_prefix: None,
+            context_lines: 0,
+            max_results: 10,
+            path_exclude: Some("old_project/**".to_string()),
+        };
+        let opts = TextSearchServiceImpl::build_options(&req);
+        assert_eq!(opts.path_exclude.as_deref(), Some("old_project/**"));
     }
 
     /// Verify the total_matches / truncated invariant:
@@ -448,6 +533,7 @@ mod tests {
             path_prefix: None,
             context_lines: 0,
             max_results: cap as i32,
+            path_exclude: None,
         };
         let options = TextSearchServiceImpl::build_options(&req);
         assert_eq!(options.max_results, cap);
@@ -490,6 +576,7 @@ mod tests {
             path_prefix: None,
             context_lines: 0,
             max_results: cap as i32,
+            path_exclude: None,
         };
         let options = TextSearchServiceImpl::build_options(&req);
 
@@ -501,5 +588,48 @@ mod tests {
         assert_eq!(total_matches, 42);
         assert_eq!(capped_count, 42);
         assert_eq!(total_matches, capped_count);
+    }
+
+    /// The engine's OWN ceiling must set `truncated`, not just the caller's cap.
+    ///
+    /// Asking for exactly the ceiling used to report `truncated: false` with a
+    /// total clamped to the ceiling — a confident wrong answer for any surface
+    /// that large, and precisely the case the MCP `countOnly` mode hits.
+    #[test]
+    fn test_engine_ceiling_marks_response_truncated() {
+        let ceiling = CACHE_MISS_MAX_RESULTS;
+
+        assert!(
+            TextSearchServiceImpl::response_is_truncated(true, ceiling, ceiling),
+            "the engine stopped at its ceiling: there may be more, so say so"
+        );
+        assert!(
+            !TextSearchServiceImpl::response_is_truncated(false, ceiling, ceiling),
+            "a set that exactly fills the cap WITHOUT the engine capping is complete"
+        );
+    }
+
+    /// The caller's cap alone still reports truncation, ceiling or not.
+    #[test]
+    fn test_caller_cap_marks_response_truncated() {
+        assert!(TextSearchServiceImpl::response_is_truncated(
+            false, 1000, 50
+        ));
+        assert!(!TextSearchServiceImpl::response_is_truncated(false, 42, 50));
+    }
+
+    /// `max_results == 0` is the engines' "unlimited" sentinel, so it hides
+    /// nothing. Comparing against it literally called every non-empty response
+    /// truncated.
+    #[test]
+    fn test_unlimited_cap_never_marks_truncated() {
+        assert!(!TextSearchServiceImpl::response_is_truncated(false, 0, 0));
+        assert!(!TextSearchServiceImpl::response_is_truncated(
+            false, 5_000, 0
+        ));
+        assert!(
+            TextSearchServiceImpl::response_is_truncated(true, 5_000, 0),
+            "the engine's own ceiling still counts under an unlimited caller cap"
+        );
     }
 }

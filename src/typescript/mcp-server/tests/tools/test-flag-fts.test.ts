@@ -10,7 +10,10 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { getIsTestByFilePaths } from '../../src/clients/tracked-files-queries/tracked-files.js';
+import {
+  getFileAnnotationsByFilePaths,
+  getIsTestByFilePaths,
+} from '../../src/clients/tracked-files-queries/tracked-files.js';
 import { lookupTestFlags, type TestFlagStateReader } from '../../src/tools/test-flag.js';
 import { GrepTool } from '../../src/tools/grep.js';
 import type { DaemonClient } from '../../src/clients/daemon-client.js';
@@ -35,6 +38,7 @@ function makeDb(): Database.Database {
      CREATE TABLE tracked_files (
        watch_folder_id TEXT NOT NULL,
        relative_path TEXT NOT NULL,
+       language TEXT,
        is_test INTEGER NOT NULL DEFAULT 0
      )`
   );
@@ -44,12 +48,12 @@ function makeDb(): Database.Database {
     '/other-proj'
   );
   const ins = db.prepare(
-    'INSERT INTO tracked_files (watch_folder_id, relative_path, is_test) VALUES (?, ?, ?)'
+    'INSERT INTO tracked_files (watch_folder_id, relative_path, language, is_test) VALUES (?, ?, ?, ?)'
   );
-  ins.run('w1', 'src/a.ts', 0);
-  ins.run('w1', 'tests/a.test.ts', 1);
-  ins.run('w1', 'tests/a.test.ts', 0); // older generation — MAX() must keep the verdict
-  ins.run('w-other', 'src/a.ts', 1); // other watch folder must not leak
+  ins.run('w1', 'src/a.ts', 'typescript', 0);
+  ins.run('w1', 'tests/a.test.ts', 'typescript', 1);
+  ins.run('w1', 'tests/a.test.ts', 'typescript', 0); // older generation — MAX() keeps the verdict
+  ins.run('w-other', 'src/a.ts', 'typescript', 1); // other watch folder must not leak
   return db;
 }
 
@@ -93,6 +97,51 @@ describe('getIsTestByFilePaths (SQL lookup)', () => {
     const db = makeDb();
     expect(getIsTestByFilePaths(db as never, 'w1', []).size).toBe(0);
     expect(getIsTestByFilePaths(db as never, 'w-unknown', ['/proj/src/a.ts']).size).toBe(0);
+    db.close();
+  });
+});
+
+describe('getFileAnnotationsByFilePaths — the one lookup behind all three fields', () => {
+  // `is_test` is read back from this same query. The FTS surfaces also need
+  // `relative_path` and `language` so a keyword hit presents the same field
+  // NAMES a semantic hit does; folding them in here keeps it one round trip.
+  it('returns relative_path, is_test and language together', () => {
+    const db = makeDb();
+    const annotations = getFileAnnotationsByFilePaths(db as never, 'w1', ['/proj/src/a.ts']);
+    expect(annotations.get('/proj/src/a.ts')).toEqual({
+      relativePath: 'src/a.ts',
+      isTest: false,
+      language: 'typescript',
+    });
+    db.close();
+  });
+
+  it('gives an in-root path its relative_path even with no tracked row', () => {
+    // The relative path is derived from the watch root, so it does not depend on
+    // the file having been indexed yet; only the daemon's own verdicts do.
+    const db = makeDb();
+    const annotations = getFileAnnotationsByFilePaths(db as never, 'w1', ['/proj/not-tracked.ts']);
+    expect(annotations.get('/proj/not-tracked.ts')).toEqual({
+      relativePath: 'not-tracked.ts',
+      isTest: undefined,
+      language: null,
+    });
+    db.close();
+  });
+
+  it('omits paths outside the watch root rather than guessing a relative path', () => {
+    const db = makeDb();
+    const annotations = getFileAnnotationsByFilePaths(db as never, 'w1', [
+      '/elsewhere/outside-root.ts',
+    ]);
+    expect(annotations.has('/elsewhere/outside-root.ts')).toBe(false);
+    db.close();
+  });
+
+  it('keeps the is_test verdict across generations of one path', () => {
+    const db = makeDb();
+    const annotations = getFileAnnotationsByFilePaths(db as never, 'w1', ['/proj/tests/a.test.ts']);
+    expect(annotations.get('/proj/tests/a.test.ts')?.isTest).toBe(true);
     db.close();
   });
 });

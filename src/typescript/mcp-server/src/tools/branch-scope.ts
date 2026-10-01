@@ -181,12 +181,18 @@ export function collapseResultBranchFields(
  * (unchanged files stay under the project's base branch), so a branch-scoped
  * read on a feature branch would otherwise miss most of the project.
  *
- * `baseBranch` must be resolved from the indexed DATA (the branch the daemon
- * actually tagged the bulk under — see `getBaseBranch`), NOT from git's local
- * default, because the daemon's base tag can differ from the repo's git default
- * (e.g. files tagged "main" while git's default is "master"). Returns undefined
- * when no fallback should apply: no concrete effective branch (e.g. "*" or
- * unset), no base branch, or the effective branch already IS the base branch.
+ * `baseBranch` must come from `getBaseBranch`, which reconciles git's default
+ * branch with the branches the index actually holds — git alone can name a
+ * branch the index never tagged (the write path defaults a tag to "main", so a
+ * repo whose git default is "master" can hold its files under "main"), and the
+ * index alone cannot tell a trunk from a long-lived feature branch. That
+ * function already returns `null` when the caller is on the trunk, so the guard
+ * below is a second line of defence rather than the only one: when it WAS the
+ * only one it never fired, because the resolver was asked for "the best branch
+ * that isn't you" and so could never answer "you".
+ *
+ * Returns undefined when no fallback should apply: no concrete effective branch
+ * (e.g. "*" or unset), no base branch, or the effective branch already IS it.
  */
 export function resolveFallbackBranch(params: {
   effectiveBranch: string | undefined;
@@ -195,4 +201,83 @@ export function resolveFallbackBranch(params: {
   const eff = concreteBranchFilter(params.effectiveBranch);
   if (!eff || !params.baseBranch) return undefined;
   return params.baseBranch !== eff ? params.baseBranch : undefined;
+}
+
+/**
+ * Drop base-branch entries for paths the caller's OWN branch already answered.
+ *
+ * The vector lane cannot express "fill only what's missing" in its Qdrant filter
+ * — {@link branchFilterClause} widens with a plain `should: [branch,
+ * fallbackBranch]`, so both generations of a file changed on the caller's branch
+ * come back. The per-file collapse downstream then keeps whichever RANKED
+ * higher, which can be the base branch's older content: the stale copy wins on
+ * score and the caller never learns there was a newer one. This restores the
+ * same precedence the FTS and `list` surfaces use — the scoped branch owns any
+ * path it carries, and the fallback only fills gaps.
+ *
+ * A no-op when there is no fallback in play. Entries whose path or branch cannot
+ * be read are kept: a metadata gap must not become silent data loss.
+ */
+export function dropFallbackDuplicatesByPath<T>(
+  entries: readonly T[],
+  effectiveBranch: string | undefined,
+  fallbackBranch: string | undefined,
+  pathOf: (entry: T) => string | undefined,
+  branchOf: (entry: T) => unknown
+): T[] {
+  const eff = concreteBranchFilter(effectiveBranch);
+  if (!eff || !fallbackBranch || fallbackBranch === eff) return [...entries];
+  const branchesOf = (entry: T): string[] => normalizeBranchList(branchOf(entry));
+  const answeredByScope = new Set<string>();
+  for (const entry of entries) {
+    const path = pathOf(entry);
+    if (path && branchesOf(entry).includes(eff)) answeredByScope.add(path);
+  }
+  if (answeredByScope.size === 0) return [...entries];
+  return entries.filter((entry) => {
+    const path = pathOf(entry);
+    if (!path || !answeredByScope.has(path)) return true;
+    const branches = branchesOf(entry);
+    // No readable branch → we cannot tell this is the fallback's copy, and
+    // guessing would delete a real hit. Keep it; only a hit we can positively
+    // identify as fallback-only is dropped.
+    if (branches.length === 0) return true;
+    return branches.includes(eff);
+  });
+}
+
+/**
+ * Merge a base-branch fallback result into the branch-scoped one, keeping only
+ * the fallback entries whose FILE PATH the scoped result does not already carry.
+ *
+ * This is the rule that makes a fallback safe, and it is the rule the `list`
+ * surface has always applied in SQL ("rows on `branch` PLUS rows on
+ * `fallbackBranch` whose `relative_path` is not already present"). The FTS and
+ * vector surfaces instead concatenated the two result sets, so a path changed on
+ * the caller's branch was returned TWICE — once current, once as the base
+ * branch's older content generation — and an agent could read the pre-edit
+ * version of a line it had just fixed. Collapsing by path keeps the fallback
+ * doing its only job: filling in files the scoped view is missing.
+ *
+ * Entries whose path cannot be read are kept: dropping a hit because its shape
+ * was unexpected would turn a metadata gap into silent data loss.
+ */
+export function mergeFallbackByMissingPath<T>(
+  scoped: readonly T[],
+  fallback: readonly T[],
+  pathOf: (entry: T) => string | undefined
+): T[] {
+  if (fallback.length === 0) return [...scoped];
+  const covered = new Set<string>();
+  for (const entry of scoped) {
+    const path = pathOf(entry);
+    if (path) covered.add(path);
+  }
+  const merged = [...scoped];
+  for (const entry of fallback) {
+    const path = pathOf(entry);
+    if (path && covered.has(path)) continue;
+    merged.push(entry);
+  }
+  return merged;
 }

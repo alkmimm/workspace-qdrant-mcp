@@ -405,10 +405,36 @@ was complete the whole time; the defects were in branch scoping, not retrieval.
 - **Live**: `list` default (on the feature branch) 56→2210 (2177 base + 33
   net-new feature files; the ~23 changed files appear in their feature version,
   base copies suppressed — no double count).
+- **Update 2026-10-01 — "no-op on the base branch" was false.** The
+  data-driven resolver was called with the caller's own branch as
+  `excludeBranch` ("the most-tracked branch that isn't you"), so it could never
+  answer "you are on the base", and the matching guard in
+  `resolveFallbackBranch` was unreachable. On the trunk every read widened into
+  the most-tracked OTHER branch — measured on this repo: an abandoned
+  `fix/global-ignore-src-tree-reinclusion` holding 1952 files — re-serving that
+  branch's pre-edit generations and inflating `grep`'s `total_matches` from 2033
+  to 4033. All five read surfaces call the resolver, so all five were affected.
+  The resolver now takes git's default (`origin/HEAD`, then a local
+  `main`/`master`) **only when the index holds files under that name**, else
+  the most-tracked branch WITHOUT excluding the caller. That keeps this
+  section's lesson — `master` with zero tagged rows still falls through to the
+  data — and adds what the data alone cannot do: tell the trunk from a
+  long-lived feature branch (one project's most-tracked branch was
+  `fix/schedule-export-sheet-titles` at 98.7% against `main` at 97.3%).
 
 ### 8.3 `search` / `grep` base-branch fallback
 
-- **Status**: **gap** — follow-up.
+- **Status**: **fixed** (2026-10-01 for the override half). `grep` and
+  `search exact:true` run the 2-call merge described below and the vector lane
+  uses the `should: [branch, fallback]` filter, but until 2026-10-01 none of the
+  three applied §8.2's override suppression — they concatenated, so a file
+  changed on the feature branch came back twice (current and base generation),
+  and the vector lane's per-file collapse kept whichever SCORED higher, which
+  could be the stale one. The `list` rule is now shared:
+  `mergeFallbackByMissingPath` (two-query lanes) and
+  `dropFallbackDuplicatesByPath` (single OR-filtered query), both in
+  `tools/branch-scope.ts`.
+- **Original status**: **gap** — follow-up.
 - The same sparse-per-branch effect as §8.2 applies to `search` and `grep`: on a
   feature branch they surface only the changed files. Unlike `list`, `branch:"*"`
   DOES work for them (their builders parse `branch`), so a workaround exists in
@@ -447,7 +473,11 @@ was complete the whole time; the defects were in branch scoping, not retrieval.
   base-branch tag (what it labelled the bulk of files) can differ from the repo's
   git default. `git symbolic-ref refs/remotes/origin/HEAD` returned `master` and
   merged zero rows; the majority-tracked branch (`getBaseBranch`) returned `main`
-  and worked.
+  and worked. *Refined 2026-10-01:* neither source is enough alone — git can name
+  a branch the index never tagged, and the data cannot tell the trunk from a
+  long-lived feature branch. Take git's answer when the index has files under
+  it, else the data's; and never exclude the caller's branch from the data
+  answer, or "already on the base" becomes unrepresentable (§8.2 update).
 - **"Flapping" / "stale branch resolution" were measurement artifacts.** The MCP
   reads the live `.git/HEAD` via the bind mount (verified byte-identical between
   host and container); transient `main` readings during probing were shell noise

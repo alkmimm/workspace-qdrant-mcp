@@ -7,12 +7,17 @@
  * All functions accept the db handle as first parameter for delegation.
  */
 
-export type { TrackedFileEntry, ListTrackedFilesOptions } from './tracked-files.js';
+export type {
+  TrackedFileEntry,
+  ListTrackedFilesOptions,
+  TrackedFileAnnotation,
+} from './tracked-files.js';
 export {
   listTrackedFiles,
   countTrackedFiles,
   getBaseBranch,
   getIsTestByFilePaths,
+  getFileAnnotationsByFilePaths,
 } from './tracked-files.js';
 
 export type { ChunkCandidateEntry, ListChunkCandidatesOptions } from './chunks.js';

@@ -62,8 +62,16 @@ export const GREP_OUTPUT_SCHEMA = {
   properties: {
     success: { type: 'boolean' },
     matches: { type: 'array', items: { type: 'object', additionalProperties: true } },
-    total_matches: { type: 'number' },
-    truncated: { type: 'boolean' },
+    total_matches: {
+      type: 'number',
+      description:
+        'Exact when truncated is false; a floor (at least this many) when truncated is true. Never an overstatement — size a sweep from countOnly, not from a truncated page.',
+    },
+    truncated: {
+      type: 'boolean',
+      description:
+        'More matches exist than this response shows — because the page cap was hit OR the engine stopped at its own 10000 ceiling.',
+    },
     latency_ms: { type: 'number' },
   },
 };

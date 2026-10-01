@@ -120,6 +120,116 @@ export function getHeadCommit(repoRoot: string): string | null {
 }
 
 /**
+ * How long a FAILED default-branch lookup is remembered. The lookup runs git
+ * synchronously on the request path, so not remembering a failure would stall
+ * every read while git is unhealthy — and remembering it forever (the first
+ * version did) turned one slow filesystem moment into a permanent downgrade to
+ * the index heuristic for that repo, until the server restarted.
+ */
+const DEFAULT_BRANCH_FAILURE_TTL_MS = 60_000;
+
+/** The refs that decide the trunk, in one `git for-each-ref` call. */
+const DEFAULT_BRANCH_REFS = ['refs/remotes/origin/HEAD', 'refs/heads/main', 'refs/heads/master'];
+
+interface CachedDefaultBranch {
+  value: string | null;
+  /** `Infinity` for a definitive answer; a short TTL for a failed lookup. */
+  expiresAt: number;
+}
+
+const defaultBranchCache = new Map<string, CachedDefaultBranch>();
+
+/** Drop the {@link getDefaultBranch} cache (tests, and after a remote re-point). */
+export function clearDefaultBranchCache(): void {
+  defaultBranchCache.clear();
+}
+
+/**
+ * Run `git for-each-ref` for {@link DEFAULT_BRANCH_REFS}. Returns its output, or
+ * `null` when git could not answer (not a repo, git missing, timeout) — which
+ * is different from git answering "none of those refs exist" (empty output).
+ */
+export type ForEachRefRunner = (repoRoot: string) => string | null;
+
+const runForEachRef: ForEachRefRunner = (repoRoot) => {
+  try {
+    return execFileSync(
+      'git',
+      ['-C', repoRoot, 'for-each-ref', '--format=%(refname)%09%(symref)', ...DEFAULT_BRANCH_REFS],
+      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000, windowsHide: true }
+    );
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * The repository's DEFAULT branch — the trunk, not the checked-out branch.
+ *
+ * This is the authority for "am I on the project's main line?", which decides
+ * whether a read should widen to a base branch at all. Deriving it from the
+ * INDEX instead (e.g. "the branch most files are tracked under, excluding mine")
+ * is what let a read on the trunk widen into an abandoned sibling branch and
+ * serve its stale content generations — the branch with the most tracked files
+ * is not reliably the trunk (measured: a feature branch held 98.7% of one
+ * project's files against the trunk's 97.3%).
+ *
+ * Precedence: `refs/remotes/origin/HEAD` (what the remote itself calls
+ * default), then a local `main`, then a local `master`. Deliberately NOT
+ * `init.defaultBranch`: that config names the branch git creates in NEW
+ * repositories — a user-wide preference, not this repository's trunk — and
+ * `remote.origin.defaultBranch` is not a git setting at all. One subprocess
+ * answers all three questions; the first version spawned up to five, each with
+ * a 2 s timeout, synchronously on the request path.
+ *
+ * Returns `null` when none resolve — callers then fall back to their own
+ * heuristic rather than guessing a name that does not exist in the repo.
+ */
+export function getDefaultBranch(repoRoot: string): string | null {
+  return getDefaultBranchWith(repoRoot, runForEachRef, Date.now);
+}
+
+/** {@link getDefaultBranch} with an injectable git runner and clock (tests). */
+export function getDefaultBranchWith(
+  repoRoot: string,
+  run: ForEachRefRunner,
+  now: () => number
+): string | null {
+  const cached = defaultBranchCache.get(repoRoot);
+  if (cached && cached.expiresAt > now()) return cached.value;
+  const output = run(repoRoot);
+  const value = output === null ? null : parseDefaultBranch(output);
+  defaultBranchCache.set(repoRoot, {
+    value,
+    expiresAt: output === null ? now() + DEFAULT_BRANCH_FAILURE_TTL_MS : Number.POSITIVE_INFINITY,
+  });
+  return value;
+}
+
+/**
+ * Pick the trunk out of `for-each-ref --format=%(refname)%09%(symref)` output.
+ * Ref names are compared exactly: `for-each-ref` treats a pattern as a prefix,
+ * so `refs/heads/main` also lists a branch called `main/experiment`.
+ */
+export function parseDefaultBranch(forEachRefOutput: string): string | null {
+  const symrefByRef = new Map<string, string>();
+  for (const line of forEachRefOutput.split('\n')) {
+    const [refname, symref = ''] = line.split('\t');
+    if (refname && refname.trim().length > 0) symrefByRef.set(refname.trim(), symref.trim());
+  }
+  const remotePrefix = 'refs/remotes/origin/';
+  const remoteHead = symrefByRef.get('refs/remotes/origin/HEAD');
+  // `refs/remotes/origin/release/2.0` → `release/2.0`: only the remote prefix
+  // is stripped, so a trunk whose own name contains a slash survives intact.
+  if (remoteHead?.startsWith(remotePrefix) && remoteHead.length > remotePrefix.length) {
+    return remoteHead.slice(remotePrefix.length);
+  }
+  if (symrefByRef.has('refs/heads/main')) return 'main';
+  if (symrefByRef.has('refs/heads/master')) return 'master';
+  return null;
+}
+
+/**
  * Aggregate git state for a repo root.
  *
  * Combines the primitives above into a single object suitable for passing

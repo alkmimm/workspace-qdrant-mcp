@@ -446,3 +446,48 @@ async fn test_context_lines_with_regex() {
     assert_eq!(m.context_before, vec!["use std::io;"]);
     assert_eq!(m.context_after, vec!["    let data = read();"]);
 }
+
+///  runs before the cap in the regex engine too: five excluded
+/// files first in index order must not consume a one-result page.
+#[tokio::test]
+async fn path_exclude_applies_before_the_cap_in_regex_search() {
+    let (_tmp, db) = setup_search_db().await;
+    for id in 1..=5 {
+        insert_file_content(
+            &db,
+            id,
+            &["fn excluded_one() {}"],
+            "proj1",
+            Some("main"),
+            &format!("/repo/src/rust/m{id}.rs"),
+        )
+        .await;
+    }
+    insert_file_content(
+        &db,
+        6,
+        &["fn kept_one() {}"],
+        "proj1",
+        Some("main"),
+        "/repo/docs/example.rs",
+    )
+    .await;
+
+    let results = search_regex(
+        &db,
+        "fn \\w+_one",
+        &SearchOptions {
+            path_exclude: Some("src/rust/**".to_string()),
+            // Two slots: filtering after the cap would fill both with excluded
+            // rows (one slot + one hit reads as "cap reached" by design).
+            max_results: 2,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(results.matches.len(), 1);
+    assert_eq!(results.matches[0].file_path, "/repo/docs/example.rs");
+    assert!(!results.truncated);
+}

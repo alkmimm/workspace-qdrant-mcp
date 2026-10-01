@@ -49,6 +49,7 @@ import { matchesPathInclude } from '../utils/path-glob.js';
 import {
   collapseResultBranchFields,
   concreteBranchFilter,
+  dropFallbackDuplicatesByPath,
   resolveEffectiveBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
@@ -1272,7 +1273,19 @@ export async function finalizeResults(
     params.options.pathExclude,
     params.options.pathGlob
   );
-  const fusedResults = applyRRFFusion(scopedResults, params.mode);
+  // The branch widening in `branchFilterClause` is a plain OR, so a file changed
+  // on the caller's branch comes back twice — current and base-branch generation.
+  // Drop the base-branch copy for any path the caller's branch already answered,
+  // BEFORE fusion, so the stale generation cannot win on score and cannot shape
+  // the ranking either. Same precedence `list` and the FTS lanes apply.
+  const branchScoped = dropFallbackDuplicatesByPath(
+    scopedResults,
+    params.options.branch,
+    params.options.fallbackBranch,
+    (r) => (r.metadata['relative_path'] ?? r.metadata['file_path']) as string | undefined,
+    (r) => r.metadata['branch']
+  );
+  const fusedResults = applyRRFFusion(branchScoped, params.mode);
   // Snapshot the pre-boost score per result (raw cosine for semantic, RRF for
   // hybrid) so it can be RESTORED for display after ranking. The path-relevance
   // boost and the cross-encoder rerank below are RANKING signals ONLY — they
