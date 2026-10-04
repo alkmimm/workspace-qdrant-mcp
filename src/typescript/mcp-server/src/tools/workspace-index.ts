@@ -19,6 +19,12 @@ import { getEffectiveCwd } from './../utils/request-context.js';
 import { startGitHookTimer } from './../telemetry/metrics.js';
 import { getGitState } from './../utils/git-utils.js';
 import {
+  coverageResponseFields,
+  withIndexCoverage,
+  type BranchCoverageProbe,
+  type BranchCoverageReport,
+} from './branch-coverage.js';
+import {
   defaultRegistryPath,
   runAbandonAgentBranch,
   runAgentBranchStatus,
@@ -370,7 +376,8 @@ async function handleIndexingStatus(
   daemonClient: DaemonClient,
   actionLabel: 'indexing_status' | 'project_status' = 'indexing_status',
   projectDetector?: ProjectDetector,
-  probeQdrantPointCount?: (tenantId: string) => Promise<number | null>
+  probeQdrantPointCount?: (tenantId: string) => Promise<number | null>,
+  branchCoverage?: BranchCoverageProbe
 ): Promise<unknown> {
   const resolved = await resolveProjectIdForStatus(args, daemonClient, projectDetector);
 
@@ -509,6 +516,20 @@ async function handleIndexingStatus(
       }
     }
 
+    // The queue can read "complete" while a branch's content is missing from
+    // the index (2026-10-03: a worktree branch at 102 of its 400 files).
+    // Advisory and best-effort, like the vector-lane probe above.
+    let coverage: BranchCoverageReport | null = null;
+    try {
+      coverage = branchCoverage ? await branchCoverage(projectId) : null;
+    } catch {
+      coverage = null;
+    }
+    const coverageNote =
+      coverage && coverage.warnings.length > 0
+        ? ` · ${coverage.warnings.length} checked-out branch(es) only partially indexed (see coverage_warnings)`
+        : '';
+
     return {
       success: true,
       action: actionLabel,
@@ -526,8 +547,9 @@ async function handleIndexingStatus(
       indexing,
       summary: degradedReason
         ? `DEGRADED: ${done} files indexed in SQLite but 0 vector points in Qdrant — semantic search is broken for this project (issue #299).`
-        : summary,
+        : summary + coverageNote,
       ...(qdrantPoints !== undefined ? { qdrant_points: qdrantPoints } : {}),
+      ...coverageResponseFields(coverage),
       ...(degradedReason !== undefined ? { degraded: true, degraded_reason: degradedReason } : {}),
       ...(statusReason !== undefined ? { status_reason: statusReason } : {}),
       ...(failedItems.length > 0 ? { failed_items: failedItems } : {}),
@@ -638,7 +660,8 @@ function dispatchTsAction(
   repoDir: string,
   daemonClient: DaemonClient | undefined,
   projectDetector: ProjectDetector | undefined,
-  probeQdrantPointCount?: (tenantId: string) => Promise<number | null>
+  probeQdrantPointCount?: (tenantId: string) => Promise<number | null>,
+  branchCoverage?: BranchCoverageProbe
 ): unknown | Promise<unknown> {
   const registryPath = stringArg(args, 'registryPath') ?? defaultRegistryPath(repoDir);
   const base: BaseArgs = { registryPath };
@@ -653,7 +676,14 @@ function dispatchTsAction(
       // indexes but that aren't in indexed-projects.json (eval item #5).
       return runListProjects(base, daemonClient);
     case 'list_branches':
-      return runListBranches(projectArgs, daemonClient);
+      // The registry lists the branches someone REGISTERED; the index's own
+      // per-branch counts (and their coverage) ride along so a branch the
+      // daemon indexed through a worktree is visible here too.
+      return withIndexCoverage(
+        runListBranches(projectArgs, daemonClient),
+        branchCoverage,
+        stringArg(args, 'projectId')
+      );
     case 'agent_branch_status': {
       const branchName = stringArg(args, 'branchName', ['branch']);
       if (!branchName) throw new Error('branchName is required');
@@ -696,7 +726,8 @@ function dispatchTsAction(
             daemonClient,
             'project_status',
             projectDetector,
-            probeQdrantPointCount
+            probeQdrantPointCount,
+            branchCoverage
           )
         : runProjectStatus(projectArgs, daemonClient);
     case 'status_all':
@@ -718,7 +749,8 @@ export async function handleWorkspaceIndex(
   rawArgs: Record<string, unknown> | undefined,
   daemonClient?: DaemonClient,
   projectDetector?: ProjectDetector,
-  probeQdrantPointCount?: (tenantId: string) => Promise<number | null>
+  probeQdrantPointCount?: (tenantId: string) => Promise<number | null>,
+  branchCoverage?: BranchCoverageProbe
 ): Promise<unknown> {
   const args = rawArgs ?? {};
 
@@ -742,7 +774,8 @@ export async function handleWorkspaceIndex(
       daemonClient,
       'indexing_status',
       projectDetector,
-      probeQdrantPointCount
+      probeQdrantPointCount,
+      branchCoverage
     );
   }
 
@@ -760,7 +793,8 @@ export async function handleWorkspaceIndex(
       repoDir,
       daemonClient,
       projectDetector,
-      probeQdrantPointCount
+      probeQdrantPointCount,
+      branchCoverage
     );
   }
 

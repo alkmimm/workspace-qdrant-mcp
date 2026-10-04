@@ -39,6 +39,12 @@ export interface ListTrackedFilesOptions {
    * surfacing the stale default-branch copy of a file changed on `branch`.
    */
   fallbackBranch?: string;
+  /**
+   * Paths `fallbackBranch` must never fill: those git reports as changed
+   * between the two tips (deleted or modified on the branch — the trunk's copy
+   * is not the branch's). See `tools/fallback-guard.ts`.
+   */
+  fallbackRefusedPaths?: readonly string[];
   limit?: number;
   /** Glob pattern (e.g. "*.rs") — translated to SQLite GLOB */
   glob?: string;
@@ -337,12 +343,21 @@ function buildFilterClause(options: Omit<ListTrackedFilesOptions, 'limit'>): Fil
   }
   if (branch && fallbackBranch) {
     // Feature-branch view: rows on `branch`, plus rows on the default branch
-    // whose path is NOT overridden by a same-path entry on `branch`.
+    // whose path is NOT overridden by a same-path entry on `branch` and that
+    // git does not report as changed between the tips (a file the branch
+    // deleted must not reappear from the trunk).
     conditions.push(
       '(EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?) OR (EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?) AND relative_path NOT IN ' +
-        '(SELECT relative_path FROM tracked_files WHERE watch_folder_id = ? AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?))))'
+        '(SELECT relative_path FROM tracked_files WHERE watch_folder_id = ? AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?))' +
+        ' AND relative_path NOT IN (SELECT value FROM json_each(?))))'
     );
-    params.push(branch, fallbackBranch, options.watchFolderId, branch);
+    params.push(
+      branch,
+      fallbackBranch,
+      options.watchFolderId,
+      branch,
+      JSON.stringify(options.fallbackRefusedPaths ?? [])
+    );
   } else if (branch) {
     conditions.push('EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?)');
     params.push(branch);
@@ -843,9 +858,10 @@ function buildSearchMetadataFilterClause(
   }
   if (options.branch && fallbackBranch) {
     conditions.push(
-      '(EXISTS (SELECT 1 FROM json_each(m.branches) WHERE value = ?) OR EXISTS (SELECT 1 FROM json_each(m.branches) WHERE value = ?))'
+      '(EXISTS (SELECT 1 FROM json_each(m.branches) WHERE value = ?) OR (EXISTS (SELECT 1 FROM json_each(m.branches) WHERE value = ?)' +
+        ' AND m.relative_path NOT IN (SELECT value FROM json_each(?))))'
     );
-    params.push(options.branch, fallbackBranch);
+    params.push(options.branch, fallbackBranch, JSON.stringify(options.fallbackRefusedPaths ?? []));
   } else if (options.branch) {
     conditions.push('EXISTS (SELECT 1 FROM json_each(m.branches) WHERE value = ?)');
     params.push(options.branch);

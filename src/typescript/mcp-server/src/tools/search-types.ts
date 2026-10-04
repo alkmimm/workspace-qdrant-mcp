@@ -10,6 +10,7 @@ import {
 } from '../common/native-bridge.js';
 import type { WorktreeReadNote } from './worktree-note.js';
 import type { ProjectSource } from './project-echo.js';
+import type { FallbackGuard } from './fallback-guard.js';
 export const PROJECTS_COLLECTION = COLLECTION_PROJECTS;
 export const LIBRARIES_COLLECTION = COLLECTION_LIBRARIES;
 export const SCRATCHPAD_COLLECTION = COLLECTION_SCRATCHPAD;
@@ -104,6 +105,8 @@ export interface SearchOptions {
   component?: string;
   /** Internal: base branch to include for files unchanged on a feature branch. */
   fallbackBranch?: string;
+  /** Internal: which `fallbackBranch` entries may fill in (see `fallback-guard`). */
+  fallbackGuard?: FallbackGuard | undefined;
   /** When true, use FTS5 exact/substring search instead of semantic search */
   exact?: boolean;
   /** Lines of context before/after matches (only for exact mode, default: 0) */

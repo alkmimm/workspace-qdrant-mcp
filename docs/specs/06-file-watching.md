@@ -92,6 +92,8 @@ Ingestion filtering operates at three levels:
 
 > Re-inclusion (`!pattern`) gotcha: to re-include files under an otherwise-excluded directory, negate the **directory itself** (`!path/cfg/`) in addition to its contents (`!path/cfg/**`). A directory-pruning walk drops a still-ignored directory before descending into it, so a contents-only negation never fires. See `patterns/global_ignore.rs` tests.
 
+> A directory `global.wqmignore` re-includes also overrides the compiled exclusion engine (gate 2). The engine's build-output tokens (`out`, `build`, `dist`, `target`, …) match whole path segments; a segment whose directory the global file re-includes — e.g. `!**/src/**/out/` for a hexagonal `ports/out` package — does not count (`ExclusionEngine::should_exclude_with`, fed by `global_ignore::is_globally_whitelisted`). The re-inclusion is judged on the directory's path RELATIVE to the project root (`should_exclude_file_in` / `is_reincluded_dir`, shared by the scan, the library walk and the watcher): the global matcher is anchored at `/`, so on an absolute path a `src` segment above the project (clones under `~/src/`) would re-include real build output. Only that directory-segment rule yields: hidden components and exact / prefix / suffix file-name rules never do. Until 2026-10-04 the engine ignored the negation, so ~440 bws-engineer `ports/out` / `adapters/out` sources were indexed by the reconciler but skipped by the scan and the watcher (edits never reached the index), and startup recovery flagged them "excluded" on every restart.
+
 The system uses a multi-layered approach with the **file type allowlist** as the primary gate.
 
 See [File Type Allowlist](#file-type-allowlist) and [Per-Project Ignore Files](#per-project-ignore-files) below for the complete specification including:
@@ -204,6 +206,35 @@ filter-delete (and the Update path's defensive sweep, #281) require that NO
 generation still holds the path before deleting by bare `(file_path,
 tenant_id)` — see `docs/specs/21-cross-branch-dedup.md` for the Layer-2 model
 these protect.
+
+#### "Missing on disk" is judged in the branch's own checkout (2026-10-03)
+
+A linked worktree's content is stored MAIN-anchored (its rows live under the
+main watch folder, tagged with the worktree's branch — see
+`branch_switch/worktree_membership.rs`). So "is this file still on disk?" has
+no answer at the main root for a worktree branch: a worktree-only file is
+never there, and a file the worktree branch deleted may still be. Every
+on-disk staleness decision per `(path, branch)` resolves the branch's checkout
+through `git::BranchCheckouts` — the main folder for its HEAD, the leaf
+worktree for a worktree branch, nothing for a branch no checkout has (left to
+branch pruning):
+
+| Path | Decision |
+|---|---|
+| `idle/tasks/filesystem_reconcile.rs` | enqueue a Delete only for branches whose checkout lost the file |
+| `startup/reconciliation/missing_files.rs` (F-036 steps 4b/5) | same; a row is dropped only when every branch it carries lost the file |
+| `startup/recovery` (`detect_deleted_files`, flagged rows) | judge only rows tagged with the main folder's HEAD |
+| `file/delete_target.rs` (delete handler's stale check) | probe the item branch's checkout, not the main folder |
+| `queue_operations/delete_completion.rs` (F-036 post-completion) | probe the branch's checkout, and remove only rows whose set ⊆ {item branch} |
+
+Before this, all five joined the main root. Measured over 27 h of logs: 492 of
+the idle reconcile's 533 deletes were files that still existed in a worktree
+(emnify-sms-sender 421/421, bws-engineer 40/40, Finance 16/16, DOC-V2 15/20) —
+a worktree-only file was indexed at each tenant scan and gone ~8 minutes
+later. The post-completion cleanup then removed EVERY generation of the path,
+so the next delete for another branch found no row and fell through to the
+path-keyed Qdrant filter delete, leaving search.db rows orphaned (135 in one
+tenant). Gated in `make validate` (38 tests).
 
 #### Allowed Extensions by Category
 

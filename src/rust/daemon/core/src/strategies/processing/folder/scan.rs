@@ -10,7 +10,9 @@ use wqm_common::paths::{CanonicalPath, RelativePath};
 
 use crate::allowed_extensions::AllowedExtensions;
 use crate::file_classification::classify_file_type;
-use crate::patterns::exclusion::{should_exclude_directory, should_exclude_file};
+use crate::patterns::exclusion::{
+    is_reincluded_dir, should_exclude_directory, should_exclude_file_in,
+};
 use crate::patterns::global_ignore;
 use crate::patterns::ignore_gate::IgnoreGate;
 use crate::queue_operations::QueueManager;
@@ -156,8 +158,13 @@ async fn process_directory_entry(
     uplift: bool,
     errors: &mut u64,
 ) -> u64 {
-    // Check directory exclusion
-    if should_exclude_directory(dir_name) {
+    // Check directory exclusion. A directory `global.wqmignore` explicitly
+    // re-includes (e.g. `!**/src/**/out/` for a hexagonal `ports/out`) is
+    // walked even though its bare name is a build-output token — the same
+    // override `should_exclude_file_in` applies to the files inside it.
+    if should_exclude_directory(dir_name)
+        && !is_reincluded_dir(Path::new(watch_folder_root.as_str()), path)
+    {
         return 0;
     }
 
@@ -336,7 +343,7 @@ pub(crate) async fn process_file_entry(
 ) -> u64 {
     let abs_path = path.to_string_lossy();
 
-    if should_exclude_file(&abs_path) {
+    if should_exclude_file_in(Path::new(watch_folder_root.as_str()), &abs_path) {
         *files_excluded += 1;
         return 0;
     }

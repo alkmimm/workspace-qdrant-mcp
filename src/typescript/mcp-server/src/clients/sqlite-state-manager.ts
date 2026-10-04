@@ -386,7 +386,20 @@ export class SqliteStateManager {
     return trackedFilesQueries.getBaseBranch(this.db, watchFolderId, effectiveBranch);
   }
 
-  /** Absolute path → daemon is_test verdict (best-effort; see the query docs). */
+  /** Which of `relativePaths` the index holds under `branch` (any generation). */
+  getPathsTrackedOnBranch(
+    watchFolderId: string,
+    branch: string,
+    relativePaths: readonly string[]
+  ): Set<string> {
+    return trackedFilesQueries.getPathsTrackedOnBranch(this.db, watchFolderId, branch, relativePaths);
+  }
+
+  /** Distinct tracked paths per branch, largest first (best-effort). */
+  getTrackedFileCountsByBranch(watchFolderId: string): trackedFilesQueries.BranchFileCount[] {
+    return trackedFilesQueries.getTrackedFileCountsByBranch(this.db, watchFolderId);
+  }
+
   /** Absolute path → relative_path + is_test + language (best-effort; see docs). */
   getFileAnnotationsByFilePaths(
     watchFolderId: string,

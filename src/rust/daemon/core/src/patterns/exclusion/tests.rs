@@ -330,6 +330,156 @@ fn test_bare_pattern_no_substring_over_match() {
 }
 
 #[test]
+fn segment_match_is_whole_segment_or_suffix() {
+    use super::engine::segment_or_suffix_match;
+    let none: &dyn Fn(&str) -> bool = &|_| false;
+    assert!(segment_or_suffix_match(
+        "project/out/bundle.js",
+        "out",
+        none
+    ));
+    assert!(!segment_or_suffix_match(
+        "app/RouteDefinition.java",
+        "out",
+        none
+    ));
+    assert!(segment_or_suffix_match("a/notes.tmp", ".tmp", none));
+    assert!(segment_or_suffix_match("a\\out\\b.js", "out", none));
+}
+
+#[test]
+fn a_reincluded_directory_segment_does_not_count() {
+    use super::engine::segment_or_suffix_match;
+    let reincluded = |dir: &str| dir == "api/src/main/port/out";
+    assert!(!segment_or_suffix_match(
+        "api/src/main/port/out/Port.java",
+        "out",
+        &reincluded
+    ));
+    // Another `out` segment that was NOT re-included still counts.
+    assert!(segment_or_suffix_match(
+        "out/api/src/main/port/out/Port.java",
+        "out",
+        &reincluded
+    ));
+    // A FILE named like the token is not a directory match: never lifted.
+    let all = |_: &str| true;
+    assert!(segment_or_suffix_match("tools/out", "out", &all));
+}
+
+/// A re-included directory lifts only the directory-segment rule for that
+/// segment; another excluded segment and every file-level rule still apply.
+#[test]
+fn reinclusion_never_lifts_file_level_rules_or_other_segments() {
+    let engine = ExclusionEngine::new().unwrap();
+    let reincluded = |dir: &str| dir.ends_with("src/out");
+    assert!(
+        !engine
+            .should_exclude_with("app/src/out/Port.java", &reincluded)
+            .excluded
+    );
+    assert!(
+        engine
+            .should_exclude_with("app/src/out/build/x.js", &reincluded)
+            .excluded,
+        "the `build` segment was not re-included"
+    );
+    assert!(
+        engine
+            .should_exclude_with("app/src/out/notes.tmp", &reincluded)
+            .excluded,
+        "a suffix rule is file-level"
+    );
+    assert!(
+        engine
+            .should_exclude_with("app/.secret/src/out/Port.java", &reincluded)
+            .excluded,
+        "a hidden component above is file-level"
+    );
+}
+
+/// Regression (bws-engineer, 2026-10-04), end to end with the SHIPPED
+/// `global.wqmignore.example`: hexagonal `ports/out` / `adapters/out` sources
+/// under `src/` are eligible (the file's `!**/src/**/out/`), while a real
+/// build-output `out/` is still excluded. Before, the engine's `out` token
+/// excluded both, so the scan and the watcher never saw ~440 indexed sources
+/// and startup recovery flagged them "excluded" on every restart.
+#[test]
+fn shipped_global_ignore_reinclusion_reaches_should_exclude_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let global = dir.path().join("global.wqmignore");
+    std::fs::write(
+        &global,
+        include_str!("../../../../../../../assets/global.wqmignore.example"),
+    )
+    .unwrap();
+    let whitelisted = |rel: &std::path::Path| {
+        crate::patterns::global_ignore::is_whitelisted_by_file(&global, rel, true)
+    };
+    let root = std::path::Path::new("/home/u/repos/bws-engineer");
+    let reincluded = |d: &str| is_reincluded_dir_with(root, std::path::Path::new(d), &whitelisted);
+
+    for eligible in [
+        "api-service/src/main/java/com/x/events/application/port/out/ColdIndexPort.java",
+        "/home/u/repos/bws-engineer/worker-command/src/main/java/x/adapters/out/Sender.java",
+        "worker-command/src/test/java/x/adapters/out/SenderTest.java",
+    ] {
+        assert!(
+            !should_exclude_file_using(eligible, &reincluded),
+            "source under src/**/out must be eligible: {eligible}"
+        );
+    }
+    for excluded in [
+        "web/out/bundle.js",
+        "/home/u/repos/bws-engineer/out/index.html",
+    ] {
+        assert!(
+            should_exclude_file_using(excluded, &reincluded),
+            "build output must stay excluded: {excluded}"
+        );
+    }
+}
+
+/// The re-inclusion is judged RELATIVE to the project root. Anchored at `/`,
+/// the shipped `!**/src/**/target/` re-includes ANY directory with a `src`
+/// segment above it — so for a repository cloned under `~/src/` its real
+/// build output would be indexed. Relative to the root, it is not.
+#[test]
+fn reinclusion_never_reaches_above_the_project_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let global = dir.path().join("global.wqmignore");
+    std::fs::write(
+        &global,
+        include_str!("../../../../../../../assets/global.wqmignore.example"),
+    )
+    .unwrap();
+    let whitelisted = |rel: &std::path::Path| {
+        crate::patterns::global_ignore::is_whitelisted_by_file(&global, rel, true)
+    };
+    let root = std::path::Path::new("/home/u/src/app");
+
+    // The hazard: judged on the absolute path, the build dir reads as re-included.
+    assert!(whitelisted(std::path::Path::new("/home/u/src/app/target")));
+
+    let reincluded = |d: &str| is_reincluded_dir_with(root, std::path::Path::new(d), &whitelisted);
+    assert!(should_exclude_file_using(
+        "/home/u/src/app/target/debug/x.rs",
+        &reincluded
+    ));
+    assert!(!should_exclude_file_using(
+        "/home/u/src/app/api/src/main/x/port/out/A.java",
+        &reincluded
+    ));
+    // The root itself and directories outside it are never re-included.
+    assert!(!is_reincluded_dir_with(root, root, &|_| true));
+    assert!(!is_reincluded_dir_with(
+        root,
+        std::path::Path::new("/home/u/src"),
+        &|_| true
+    ));
+}
+
+#[test]
 fn test_should_exclude_directory() {
     // Well-known excluded directories
     assert!(should_exclude_directory("target"));

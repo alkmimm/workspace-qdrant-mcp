@@ -66,6 +66,12 @@ import {
   resolveFallbackBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
+import {
+  createFallbackGuard,
+  guardWidened,
+  withheldNote,
+  type FallbackGuard,
+} from './fallback-guard.js';
 import { worktreeReadNote } from './worktree-note.js';
 import { projectEcho, recordedIdentity } from './project-echo.js';
 
@@ -352,16 +358,24 @@ export class SearchTool {
     }
     const concreteEffective = concreteBranchFilter(effectiveBranch);
     let fallbackBranch: string | undefined;
+    let fallbackGuard: FallbackGuard | undefined;
     if (currentProjectId && concreteEffective) {
       const watchFolderId = this._stateManager.getWatchFolderIdByTenantId(currentProjectId);
       const baseBranch = watchFolderId
         ? this._stateManager.getBaseBranch(watchFolderId, concreteEffective)
         : null;
       fallbackBranch = resolveFallbackBranch({ effectiveBranch, baseBranch });
+      fallbackGuard = createFallbackGuard({
+        stateManager: this._stateManager,
+        watchFolderId,
+        projectRoot: this._stateManager.getProjectById(currentProjectId).data?.project_path,
+        branch: concreteEffective,
+        fallbackBranch,
+      });
     }
     const baseEffectiveOptions = applyEffectiveBranch(options, effectiveBranch);
     const effectiveOptions = fallbackBranch
-      ? { ...baseEffectiveOptions, fallbackBranch }
+      ? { ...baseEffectiveOptions, fallbackBranch, fallbackGuard }
       : baseEffectiveOptions;
     const embeddings = await this.prepareEmbeddings(
       effectiveOptions,
@@ -518,8 +532,27 @@ export class SearchTool {
       r.results.filter((x) => x.collection !== SCRATCHPAD_COLLECTION).length;
     if (codeHits(primary) === 0 && scope === 'project' && concreteEffective && currentProjectId) {
       const widened = await runFinalize(applyEffectiveBranch(options, '*'), undefined);
+      // Other branches' copies of files this branch deleted or changed are
+      // not this branch's content (see guardWidened); notes pass untouched.
+      const guarded = await guardWidened(
+        widened.results.filter((x) => x.collection !== SCRATCHPAD_COLLECTION),
+        fallbackGuard,
+        (r) => (r.metadata['relative_path'] ?? r.metadata['file_path']) as string | undefined
+      );
+      if (guarded.withheld > 0) {
+        const kept = new Set(guarded.kept);
+        widened.results = widened.results.filter(
+          (x) => x.collection === SCRATCHPAD_COLLECTION || kept.has(x)
+        );
+        if (codeHits(widened) === 0) {
+          const withheld = withheldNote(guarded.withheld, concreteEffective);
+          primary.hint = primary.hint ? `${primary.hint} ${withheld}` : withheld;
+          return primary;
+        }
+      }
       if (codeHits(widened) > 0) {
-        const note = `No semantic matches on branch "${concreteEffective}" — widened to all branches; results may be from another indexed branch.`;
+        let note = `No semantic matches on branch "${concreteEffective}" — widened to all branches; results may be from another indexed branch.`;
+        if (guarded.withheld > 0) note += ` ${withheldNote(guarded.withheld, concreteEffective)}`;
         widened.hint = widened.hint ? `${widened.hint} ${note}` : note;
         // The widen re-runs the ORIGINAL query only — runFinalize closes over
         // the original embeddings — so these results come from one leg even

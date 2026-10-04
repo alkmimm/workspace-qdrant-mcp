@@ -183,6 +183,40 @@ describe('RetrieveTool — branch scoping', () => {
     expect(result.documents).toHaveLength(1);
   });
 
+  it('keeps scrolling when the fill-in rules thin a page, so hasMore stays honest', async () => {
+    // Page 1: the trunk copy of a.ts is dropped (the branch carries a.ts), which
+    // left the over-fetched window one short — the page used to come back with
+    // hasMore:false although more admissible points existed.
+    const pt = (id: string, path: string, branch: string) => ({
+      id,
+      payload: { content: id, tenant_id: TENANT, document_id: 'doc-abc', relative_path: path, branch: [branch] },
+    });
+    const scrollFn = vi
+      .fn()
+      .mockResolvedValueOnce({
+        points: [pt('p1', 'a.ts', 'main'), pt('p2', 'a.ts', 'feature-x'), pt('p3', 'b.ts', 'main')],
+        next_page_offset: 'cursor-2',
+      })
+      .mockResolvedValueOnce({
+        points: [pt('p4', 'c.ts', 'feature-x'), pt('p5', 'd.ts', 'feature-x')],
+        next_page_offset: null,
+      });
+    const tool = await toolWithScroll(scrollFn, detector, createMockStateManager('main'));
+
+    const result = await tool.retrieve({
+      filter: { document_id: 'doc-abc' },
+      collection: 'projects',
+      projectId: TENANT,
+      branch: 'feature-x',
+      limit: 2,
+    });
+
+    expect(scrollFn).toHaveBeenCalledTimes(2);
+    expect((scrollFn.mock.calls[1][1] as Record<string, unknown>).offset).toBe('cursor-2');
+    expect(result.documents.map((d) => d.content)).toEqual(['p2', 'p3']);
+    expect(result.hasMore).toBe(true);
+  });
+
   it('does not branch-scope the libraries collection (branch-agnostic)', async () => {
     const scrollFn = vi.fn().mockResolvedValue({
       points: [

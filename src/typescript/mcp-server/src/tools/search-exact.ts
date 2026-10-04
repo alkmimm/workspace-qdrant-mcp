@@ -30,6 +30,12 @@ import {
   resolveProjectIdentity,
 } from './branch-scope.js';
 import {
+  createFallbackGuard,
+  guardWidened,
+  withheldNote,
+  type FallbackGuard,
+} from './fallback-guard.js';
+import {
   diagnoseEmptyResult,
   EMPTY_DIAGNOSIS_PROBE_LIMIT,
   indexLagCaveat,
@@ -205,10 +211,18 @@ async function fetchExactWindow(
   options: SearchOptions,
   tenantId: string | undefined,
   fallbackBranch: string | undefined,
-  windowEnd: number
+  windowEnd: number,
+  fallbackGuard?: FallbackGuard
 ): Promise<ExactWindow> {
   let depth = windowEnd;
-  let best = await fetchExactWindowOnce(daemonClient, options, tenantId, fallbackBranch, depth);
+  let best = await fetchExactWindowOnce(
+    daemonClient,
+    options,
+    tenantId,
+    fallbackBranch,
+    depth,
+    fallbackGuard
+  );
   for (let round = 2; round <= EXACT_REFILL_MAX_ROUNDS; round += 1) {
     const short = best.results.length < windowEnd;
     const moreUpstream = best.responses.some((response) => response.truncated);
@@ -219,7 +233,8 @@ async function fetchExactWindow(
       options,
       tenantId,
       fallbackBranch,
-      depth
+      depth,
+      fallbackGuard
     );
     // A deeper fetch of the same query is a superset — unless the index moved
     // between calls (it is live, and the daemon's cache lasts seconds). Never
@@ -236,7 +251,8 @@ async function fetchExactWindowOnce(
   options: SearchOptions,
   tenantId: string | undefined,
   fallbackBranch: string | undefined,
-  depth: number
+  depth: number,
+  fallbackGuard?: FallbackGuard
 ): Promise<ExactWindow> {
   const scoped = await daemonClient.textSearch(
     buildExactSearchRequest({ ...options, limit: depth }, tenantId)
@@ -253,6 +269,14 @@ async function fetchExactWindowOnce(
     );
     responses.push(fallback);
     fallbackResults = mapExactResults(fallback.matches);
+    // Only paths whose trunk copy IS the branch's copy may fill in: not
+    // changed between the tips, not held by the branch (see fallback-guard).
+    if (fallbackGuard) {
+      fallbackResults = await fallbackGuard.admit(
+        fallbackResults,
+        (r) => r.metadata['file_path'] as string | undefined
+      );
+    }
   }
   // The fallback may only FILL IN paths the scope lacks — never add the base
   // branch's older generation of a path the scope carries. Same rule `list`
@@ -505,11 +529,19 @@ export async function searchExact(
 
   const concreteEffective = concreteBranchFilter(effectiveBranch);
   let baseBranch: string | null = null;
+  let watchFolderId: string | null = null;
   if (tenantId && concreteEffective) {
-    const watchFolderId = stateManager.getWatchFolderIdByTenantId(tenantId);
+    watchFolderId = stateManager.getWatchFolderIdByTenantId(tenantId);
     if (watchFolderId) baseBranch = stateManager.getBaseBranch(watchFolderId, concreteEffective);
   }
   const fallbackBranch = resolveFallbackBranch({ effectiveBranch, baseBranch });
+  const fallbackGuard = createFallbackGuard({
+    stateManager,
+    watchFolderId,
+    projectRoot: resolution.kind === 'tenant' ? resolution.projectPath : undefined,
+    branch: concreteEffective,
+    fallbackBranch,
+  });
 
   return executeAndLogSearch(
     daemonClient,
@@ -519,7 +551,8 @@ export async function searchExact(
     eventId,
     startTime,
     fallbackBranch,
-    searchDbReader
+    searchDbReader,
+    fallbackGuard
   );
 }
 
@@ -531,7 +564,8 @@ async function executeAndLogSearch(
   eventId: string,
   startTime: number,
   fallbackBranch?: string,
-  searchDbReader?: SearchDbReader
+  searchDbReader?: SearchDbReader,
+  fallbackGuard?: FallbackGuard
 ): Promise<SearchResponse> {
   try {
     const requestedBranch = concreteBranchFilter(options.branch);
@@ -542,7 +576,14 @@ async function executeAndLogSearch(
     // 5 and 10 returned 0 of 2042 matches — and next_offset never appeared.
     const offset = Math.max(0, options.offset ?? 0);
     const windowEnd = offset + limit;
-    let exactWindow = await fetchExactWindow(daemonClient, options, tenantId, fallbackBranch, windowEnd);
+    let exactWindow = await fetchExactWindow(
+      daemonClient,
+      options,
+      tenantId,
+      fallbackBranch,
+      windowEnd,
+      fallbackGuard
+    );
     // Auto-widen on empty (parity with grep): a branch-scoped exact search that
     // finds nothing may be missing content the daemon tagged under another branch
     // (a file unchanged on the current branch stays indexed under the branch it
@@ -551,6 +592,7 @@ async function executeAndLogSearch(
     // the end is never mistaken for a scoping miss.
     let branchWidened = false;
     let widenedAllExcluded = false;
+    let widenedWithheld = 0;
     if (exactWindow.results.length === 0 && requestedBranch) {
       const widened = await fetchExactWindow(
         daemonClient,
@@ -559,8 +601,20 @@ async function executeAndLogSearch(
         undefined,
         windowEnd
       );
-      if (widened.results.length > 0) {
-        exactWindow = widened;
+      // Other branches' copies of files this branch deleted or changed are
+      // not this branch's content (see guardWidened).
+      const guarded = await guardWidened(
+        widened.results,
+        fallbackGuard,
+        (r) => r.metadata['file_path'] as string | undefined
+      );
+      widenedWithheld = guarded.withheld;
+      if (guarded.kept.length > 0) {
+        exactWindow = {
+          ...widened,
+          results: guarded.kept,
+          scopedTotal: Math.max(guarded.kept.length, widened.scopedTotal - guarded.withheld),
+        };
         branchWidened = true;
       } else if (options.pathExclude) {
         widenedAllExcluded = await widenedScopeHasExcludedMatches(
@@ -721,6 +775,11 @@ async function executeAndLogSearch(
     // (the pattern WAS found cross-branch; it was just filtered out).
     if (branchWidened && requestedBranch) {
       successResponse.hint = `No exact matches on branch "${requestedBranch}" — widened to all branches; results may be from another indexed branch.`;
+      if (widenedWithheld > 0) {
+        successResponse.hint += ` ${withheldNote(widenedWithheld, requestedBranch)}`;
+      }
+    } else if (widenedWithheld > 0 && requestedBranch) {
+      successResponse.hint = withheldNote(widenedWithheld, requestedBranch);
     } else if (widenedAllExcluded) {
       successResponse.hint = `Matches exist on other branches but were all removed by pathExclude "${options.pathExclude}" — drop or adjust it to see them.`;
     } else if (diagnosis) {

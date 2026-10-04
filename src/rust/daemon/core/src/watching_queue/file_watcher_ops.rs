@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use crate::allowed_extensions::{AllowedExtensions, FileRoute};
 use crate::file_classification::classify_file_type;
-use crate::patterns::exclusion::should_exclude_file;
+use crate::patterns::exclusion::should_exclude_file_in;
 use crate::patterns::global_ignore::is_globally_ignored;
 use crate::queue_operations::{QueueError, QueueManager};
 use crate::tracked_files_schema;
@@ -197,7 +197,8 @@ impl FileWatcherQueue {
 
         if !matches!(event.event_kind, EventKind::Remove(_)) {
             let file_path_str = event.path.to_string_lossy();
-            if should_exclude_file(&file_path_str) {
+            let root = config.read().await.path.clone();
+            if should_exclude_file_in(&root, &file_path_str) {
                 let mut count = events_filtered.lock().await;
                 *count += 1;
                 return true;
@@ -343,7 +344,8 @@ impl FileWatcherQueue {
             return;
         }
 
-        if should_exclude_file(&event.path.to_string_lossy()) {
+        let root = config.read().await.path.clone();
+        if should_exclude_file_in(&root, &event.path.to_string_lossy()) {
             debug!(
                 "File excluded by exclusion engine, skipping: {}",
                 event.path.display()

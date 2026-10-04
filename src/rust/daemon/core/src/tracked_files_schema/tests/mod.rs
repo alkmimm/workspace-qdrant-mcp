@@ -1,4 +1,5 @@
 mod batch_tests;
+mod branch_scope_tests;
 mod crud_tests;
 mod transaction_tests;
 mod unit_tests;

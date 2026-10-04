@@ -4,6 +4,7 @@
 //! with Python queue client operations.
 
 mod advanced;
+mod delete_completion;
 mod dequeue;
 mod destination;
 mod enqueue;

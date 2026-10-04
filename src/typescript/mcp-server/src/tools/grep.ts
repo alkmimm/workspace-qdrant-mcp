@@ -34,6 +34,12 @@ import {
   resolveProjectIdentity,
 } from './branch-scope.js';
 import {
+  createFallbackGuard,
+  guardWidened,
+  withheldNote,
+  type FallbackGuard,
+} from './fallback-guard.js';
+import {
   diagnoseEmptyResult,
   EMPTY_DIAGNOSIS_PROBE_LIMIT,
   indexLagCaveat,
@@ -238,6 +244,8 @@ interface GrepWindowQuery {
   tenantId: string | undefined;
   branch: string | undefined;
   fallbackBranch: string | undefined;
+  /** Which fallback rows may fill in (see `fallback-guard`); absent = none in play. */
+  fallbackGuard?: FallbackGuard | undefined;
   pathGlob: string | undefined;
   pathExclude: string | undefined;
 }
@@ -590,6 +598,13 @@ export class GrepTool {
         ? this.stateManager?.getBaseBranch(watchFolderId, concreteEffective)
         : null;
     const fallbackBranch = resolveFallbackBranch({ effectiveBranch, baseBranch });
+    const fallbackGuard = createFallbackGuard({
+      stateManager: this.stateManager,
+      watchFolderId,
+      projectRoot: projectPath,
+      branch: concreteEffective,
+      fallbackBranch,
+    });
 
     this.logGrepStart(eventId, pattern, maxResults, tenantId, effectiveBranch);
 
@@ -615,7 +630,8 @@ export class GrepTool {
       // failed to resolve there — the caller asked to span every project on
       // purpose, and labelling that a failure would be the same kind of
       // misleading signal this echo exists to prevent (#384).
-      scope === 'all' ? {} : projectEcho({ projectId: tenantId, projectPath }, projectId)
+      scope === 'all' ? {} : projectEcho({ projectId: tenantId, projectPath }, projectId),
+      fallbackGuard
     );
   }
 
@@ -659,7 +675,8 @@ export class GrepTool {
     eventId: string,
     shaping: GrepShapingOptions,
     fallbackBranch?: string,
-    echo: ProjectEcho = {}
+    echo: ProjectEcho = {},
+    fallbackGuard?: FallbackGuard
   ): Promise<GrepResponse> {
     try {
       // Paging is a client-side slice over the daemon's deterministic order
@@ -674,6 +691,7 @@ export class GrepTool {
           tenantId,
           branch,
           fallbackBranch,
+          fallbackGuard,
           pathGlob,
           pathExclude,
         },
@@ -718,12 +736,25 @@ export class GrepTool {
           pathGlob,
           pathExclude
         );
-        if (widened) {
+        // The widened set is other branches' copies; a file this branch
+        // deleted or changed must not come back as if it were this branch's
+        // (see guardWidened). Without a fallback in play there is no guard.
+        const guarded = widened
+          ? await guardWidened(widened.matches, fallbackGuard, (m) => m.file)
+          : undefined;
+        if (widened && guarded && guarded.kept.length > 0) {
           widenedFired = true;
-          matches = widened.matches;
+          matches = guarded.kept;
           truncated = widened.truncated;
-          scopedTotal = widened.totalMatches;
+          scopedTotal = widened.truncated
+            ? guarded.kept.length
+            : Math.max(guarded.kept.length, widened.totalMatches - guarded.withheld);
           message = widened.message;
+          if (guarded.withheld > 0) {
+            message = `${message} ${withheldNote(guarded.withheld, concreteBranchFilter(branch) ?? '')}`;
+          }
+        } else if (guarded && guarded.withheld > 0) {
+          message = withheldNote(guarded.withheld, concreteBranchFilter(branch) ?? '');
         }
       }
       // NO automatic cross-project widen. A project-scoped grep (tenantId set)
@@ -972,6 +1003,11 @@ export class GrepTool {
       const fallback = await this.daemonClient.textSearch(request(query.fallbackBranch));
       responses.push(fallback);
       fallbackRows = mapGrepMatches(fallback.matches);
+      // Only paths whose trunk copy IS the branch's copy may fill in: not
+      // changed between the tips, not held by the branch (see fallback-guard).
+      if (query.fallbackGuard) {
+        fallbackRows = await query.fallbackGuard.admit(fallbackRows, (m) => m.file);
+      }
     }
     // The fallback may only FILL IN paths the scope lacks — never add an older
     // generation of a path the scope carries. Same rule `list` applies in SQL.

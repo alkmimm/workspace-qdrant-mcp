@@ -708,6 +708,14 @@ on the host where the MCP is running.
 - `observe_project`, `observe_all`
 - `incremental_check`, `incremental_check_all`
 
+`project_status` / `indexing_status` report the QUEUE (work processed), which
+stays at 100% even if content later leaves the index. They — and
+`list_branches` — also return `index_coverage` (files the index holds per
+branch vs. files in the branch tip, for the trunk and every checked-out
+branch) and `coverage_warnings` for a checked-out branch far below the trunk's
+ratio. Treat a warned branch's empty results as "not indexed", not "absent".
+Shape: [`08-api-reference.md`](../specs/08-api-reference.md#workspace_index-indexing_status-action).
+
 **Mutating** (require both env + argument opt-in):
 
 - `init`, `add_project`

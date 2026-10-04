@@ -37,7 +37,9 @@ import {
   resolveFallbackBranch,
   concreteBranchFilter,
   collapseResultBranchFields,
+  dropFallbackDuplicatesByPath,
 } from './branch-scope.js';
+import { admitFallbackEntries, createFallbackGuard, type FallbackGuard } from './fallback-guard.js';
 import { projectEcho, recordedIdentity } from './project-echo.js';
 import { branchFilterClause } from './search-filters.js';
 // Shared with the help("exact") chapter — see retrieve-hints.ts.
@@ -54,6 +56,8 @@ import { helpRef } from './help-topics.js';
 interface BranchScope {
   branch?: string;
   fallbackBranch?: string;
+  /** Which `fallbackBranch` points may fill in (see `fallback-guard`). */
+  fallbackGuard?: FallbackGuard;
 }
 
 // Re-export all types so existing imports from './retrieve.js' continue to work
@@ -747,7 +751,7 @@ export class RetrieveTool {
       );
     }
 
-    const scroll = (useBranch: boolean) => {
+    const scroll = (useBranch: boolean, cursor?: string | number) => {
       const qdrantFilter = this.buildFilter(
         collection,
         filter,
@@ -761,13 +765,16 @@ export class RetrieveTool {
       // number was looked up as a point id, sorted before every UUID, and the
       // scroll restarted at page 1 — `offset` paging returned the same page
       // forever. Emulate the numeric skip client-side: over-fetch, then slice.
+      // `cursor` is only ever a `next_page_offset` Qdrant handed back.
       const scrollRequest: {
         limit: number;
         with_payload: boolean;
         with_vector: boolean;
         filter?: Record<string, unknown>;
+        offset?: string | number;
       } = { limit: offset + limit + 1, with_payload: true, with_vector: false };
       if (qdrantFilter) scrollRequest.filter = qdrantFilter;
+      if (cursor !== undefined) scrollRequest.offset = cursor;
       return this.qdrantClient.scroll(collectionName, scrollRequest);
     };
 
@@ -782,11 +789,49 @@ export class RetrieveTool {
       // empty. The tenant filter still applies, so this never crosses project
       // boundaries.
       const branchApplied = branchFilterClause(branch, fallbackBranch) !== null;
-      if (branchApplied && result.points.length === 0) {
+      let scopedPoints = result.points;
+      if (branchApplied && result.points.length > 0 && fallbackBranch) {
+        // The branch widening is a plain OR, so the fill-in obeys the same two
+        // rules as search/grep: the branch's own generation owns any path it
+        // carries (no mixing the trunk's older chunks into it), and a trunk
+        // point fills in only where its copy IS the branch's (fallback-guard).
+        type Point = (typeof result.points)[number];
+        const pointPath = (p: Point) =>
+          (p.payload?.['relative_path'] ?? p.payload?.['file_path']) as string | undefined;
+        const pointBranch = (p: Point) => p.payload?.['branch'];
+        const admit = (points: Point[]) =>
+          admitFallbackEntries(
+            dropFallbackDuplicatesByPath(points, branch, fallbackBranch, pointPath, pointBranch),
+            branchScope?.fallbackGuard,
+            pointPath,
+            pointBranch
+          );
+        // Filtering after the over-fetch would leave the window short (and
+        // `hasMore` false) whenever points were dropped; keep scrolling with
+        // Qdrant's cursor until the window holds offset+limit+1 admissible
+        // points, the collection is exhausted, or the filter window is spent.
+        // The rule is re-applied over EVERYTHING collected: a path's own-branch
+        // generation can arrive in a later page than its trunk copy.
+        const want = offset + limit + 1;
+        let collected: Point[] = result.points;
+        let cursor = result.next_page_offset;
+        scopedPoints = await admit(collected);
+        while (
+          scopedPoints.length < want &&
+          (typeof cursor === 'string' || typeof cursor === 'number') &&
+          collected.length < MAX_FILTER_WINDOW
+        ) {
+          const next = await scroll(true, cursor);
+          collected = collected.concat(next.points);
+          cursor = next.next_page_offset;
+          scopedPoints = await admit(collected);
+        }
+      } else if (branchApplied && result.points.length === 0) {
         result = await scroll(false);
+        scopedPoints = result.points;
       }
 
-      const pageWindow = offset > 0 ? result.points.slice(offset) : result.points;
+      const pageWindow = offset > 0 ? scopedPoints.slice(offset) : scopedPoints;
       const hasMore = pageWindow.length > limit;
       const points = hasMore ? pageWindow.slice(0, limit) : pageWindow;
 
@@ -900,6 +945,14 @@ export class RetrieveTool {
         : null;
       const fallbackBranch = resolveFallbackBranch({ effectiveBranch, baseBranch });
       if (fallbackBranch !== undefined) scope.fallbackBranch = fallbackBranch;
+      const fallbackGuard = createFallbackGuard({
+        stateManager: this.stateManager,
+        watchFolderId,
+        projectRoot: identity.projectPath,
+        branch: concreteEffective,
+        fallbackBranch,
+      });
+      if (fallbackGuard !== undefined) scope.fallbackGuard = fallbackGuard;
     }
     return scope;
   }
