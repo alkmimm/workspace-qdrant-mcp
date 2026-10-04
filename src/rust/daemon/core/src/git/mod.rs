@@ -46,4 +46,4 @@ pub use worktree::{find_main_worktree_path, list_linked_worktrees, LinkedWorktre
 
 // Re-export from checkouts
 pub(crate) use checkouts::{canonicalize_host_path, is_leaf_worktree_root};
-pub use checkouts::{BranchCheckouts, CheckoutPresence};
+pub use checkouts::{head_branch, BranchCheckouts, CheckoutPresence};

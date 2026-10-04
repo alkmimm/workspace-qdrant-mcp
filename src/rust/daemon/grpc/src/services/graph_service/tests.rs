@@ -65,6 +65,7 @@ mod path_validation {
             file_path: Some("/absolute/path.rs".to_string()),
             top_k: None,
             min_confidence: None,
+            branch: None,
         });
 
         let result = service.impact_analysis(request).await;
@@ -88,6 +89,7 @@ mod path_validation {
             file_path: Some("src/../secret.rs".to_string()),
             top_k: None,
             min_confidence: None,
+            branch: None,
         });
 
         let result = service.impact_analysis(request).await;
@@ -108,6 +110,7 @@ mod path_validation {
             file_path: Some(String::new()),
             top_k: None,
             min_confidence: None,
+            branch: None,
         });
 
         // Empty string is filtered to None by the handler.
@@ -125,6 +128,7 @@ mod path_validation {
             file_path: Some("src/lib.rs".to_string()),
             top_k: None,
             min_confidence: None,
+            branch: None,
         });
 
         // Valid relative path should pass validation (query may return empty).
@@ -225,6 +229,7 @@ mod min_confidence_filter {
             symbol_name: None,
             file_path: None,
             min_confidence,
+            branch: None,
         })
     }
 
@@ -238,6 +243,7 @@ mod min_confidence_filter {
             file_path: None,
             top_k,
             min_confidence,
+            branch: None,
         })
     }
 
@@ -389,5 +395,158 @@ mod min_confidence_filter {
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("min_confidence"));
+    }
+}
+
+// ── Branch scoping: an answer describes one branch's file versions ──
+
+mod branch_scoping {
+    use sqlx::sqlite::SqlitePoolOptions;
+    use tonic::Request;
+    use workspace_qdrant_core::graph::{
+        create_sqlite_graph_store, EdgeType, GraphEdge, GraphNode, NodeType,
+    };
+
+    use crate::proto::graph_service_server::GraphService;
+    use crate::proto::{GraphStatsRequest, ImpactAnalysisRequest};
+    use crate::services::GraphServiceImpl;
+
+    const TENANT: &str = "abcd12345678";
+
+    /// develop and fase-5 hold different versions of page.ts: develop's calls
+    /// legacy() (legacy.ts, develop only), fase-5's calls modern() (modern.ts,
+    /// fase-5 only). fase-5 also holds notes.md, never extracted.
+    async fn service() -> (GraphServiceImpl, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = create_sqlite_graph_store(tmp.path()).await.unwrap();
+        let render = GraphNode::new(TENANT, "page.ts", "render", NodeType::Function);
+        let legacy = GraphNode::new(TENANT, "legacy.ts", "legacy", NodeType::Function);
+        let modern = GraphNode::new(TENANT, "modern.ts", "modern", NodeType::Function);
+        let call = |to: &GraphNode| {
+            GraphEdge::new(
+                TENANT,
+                &render.node_id,
+                &to.node_id,
+                EdgeType::Calls,
+                "page.ts",
+            )
+        };
+        for (file, generation, nodes, edges) in [
+            (
+                "page.ts",
+                "page-dev",
+                vec![render.clone()],
+                vec![call(&legacy)],
+            ),
+            (
+                "page.ts",
+                "page-f5",
+                vec![render.clone()],
+                vec![call(&modern)],
+            ),
+            ("legacy.ts", "legacy-dev", vec![legacy.clone()], vec![]),
+            ("modern.ts", "modern-f5", vec![modern.clone()], vec![]),
+        ] {
+            store
+                .reingest_file(TENANT, file, generation, &nodes, &edges)
+                .await
+                .unwrap();
+        }
+
+        let state = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for ddl in [
+            "CREATE TABLE watch_folders (watch_id TEXT PRIMARY KEY, path TEXT NOT NULL, \
+             tenant_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, parent_watch_id TEXT)",
+            "CREATE TABLE tracked_files (watch_folder_id TEXT, relative_path TEXT, \
+             base_point TEXT, branches TEXT)",
+        ] {
+            sqlx::query(ddl).execute(&state).await.unwrap();
+        }
+        sqlx::query("INSERT INTO watch_folders VALUES ('w', '/nonexistent', ?1, 1, NULL)")
+            .bind(TENANT)
+            .execute(&state)
+            .await
+            .unwrap();
+        for (path, generation, branch) in [
+            ("page.ts", "page-dev", "develop"),
+            ("page.ts", "page-f5", "fase-5"),
+            ("legacy.ts", "legacy-dev", "develop"),
+            ("modern.ts", "modern-f5", "fase-5"),
+            ("notes.md", "notes-f5", "fase-5"),
+        ] {
+            sqlx::query("INSERT INTO tracked_files VALUES ('w', ?1, ?2, json_array(?3))")
+                .bind(path)
+                .bind(generation)
+                .bind(branch)
+                .execute(&state)
+                .await
+                .unwrap();
+        }
+        (
+            GraphServiceImpl::new(store).with_state_pool(Some(state)),
+            tmp,
+        )
+    }
+
+    fn impact(symbol: &str, branch: &str) -> Request<ImpactAnalysisRequest> {
+        Request::new(ImpactAnalysisRequest {
+            tenant_id: TENANT.into(),
+            symbol_name: symbol.into(),
+            file_path: None,
+            top_k: None,
+            min_confidence: None,
+            branch: Some(branch.into()),
+        })
+    }
+
+    #[tokio::test]
+    async fn impact_answers_for_the_asked_branch_only() {
+        let (svc, _tmp) = service().await;
+        let dev = svc
+            .impact_analysis(impact("legacy", "develop"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(dev.total_impacted, 1, "develop's page.ts calls legacy");
+
+        let f5 = svc
+            .impact_analysis(impact("legacy", "fase-5"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            f5.total_impacted, 0,
+            "fase-5 holds neither legacy.ts nor develop's page.ts"
+        );
+        let scope = f5
+            .scope
+            .expect("every answer says which branch it describes");
+        assert_eq!(scope.branch, "fase-5");
+        assert_eq!(scope.indexed_files, 3, "page-f5, modern-f5, notes-f5");
+        assert_eq!(scope.graphed_files, 2, "notes.md was never extracted");
+    }
+
+    #[tokio::test]
+    async fn stats_count_the_branch_and_star_counts_everything() {
+        let (svc, _tmp) = service().await;
+        let stats = |branch: &str| {
+            Request::new(GraphStatsRequest {
+                tenant_id: Some(TENANT.into()),
+                branch: Some(branch.into()),
+            })
+        };
+        let dev = svc
+            .get_graph_stats(stats("develop"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!((dev.total_nodes, dev.total_edges), (2, 1));
+        let all = svc.get_graph_stats(stats("*")).await.unwrap().into_inner();
+        assert_eq!((all.total_nodes, all.total_edges), (4, 2));
+        assert_eq!(all.scope.unwrap().branch, "*");
     }
 }

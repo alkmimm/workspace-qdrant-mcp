@@ -120,6 +120,7 @@ async fn setup_graph_pool() -> SqlitePool {
             signature TEXT,
             language TEXT,
             is_test_symbol INTEGER NOT NULL DEFAULT 0,
+            generation TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT ''
         )",
@@ -142,6 +143,7 @@ async fn setup_graph_pool() -> SqlitePool {
             edge_type TEXT NOT NULL,
             source_file TEXT NOT NULL,
             weight REAL DEFAULT 1.0,
+            generation TEXT NOT NULL DEFAULT '',
             metadata_json TEXT,
             created_at TEXT NOT NULL DEFAULT ''
         )",
@@ -254,7 +256,9 @@ async fn build_two_clusters(pool: &SqlitePool) {
 async fn test_pagerank_empty_graph() {
     let pool = setup_graph_pool().await;
     let config = PageRankConfig::default();
-    let results = compute_pagerank(&pool, "t1", &config, None).await.unwrap();
+    let results = compute_pagerank(&pool, "t1", &GraphScope::all(), &config, None)
+        .await
+        .unwrap();
     assert!(results.is_empty());
 }
 
@@ -264,7 +268,9 @@ async fn test_pagerank_single_node() {
     insert_node(&pool, "t1", "a", "alpha", "function").await;
 
     let config = PageRankConfig::default();
-    let results = compute_pagerank(&pool, "t1", &config, None).await.unwrap();
+    let results = compute_pagerank(&pool, "t1", &GraphScope::all(), &config, None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 1);
     // compute_pagerank applies the R3 IDF demotion (score *= ln(total/count)). A
     // lone unique symbol has total == count == 1 → ln(1) == 0, so its final score
@@ -279,7 +285,9 @@ async fn test_pagerank_diamond() {
     build_diamond(&pool).await;
 
     let config = PageRankConfig::default();
-    let results = compute_pagerank(&pool, "t1", &config, None).await.unwrap();
+    let results = compute_pagerank(&pool, "t1", &GraphScope::all(), &config, None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 4);
 
     // Node D should have highest PageRank (two incoming edges)
@@ -299,7 +307,9 @@ async fn test_pagerank_chain() {
     build_chain(&pool).await;
 
     let config = PageRankConfig::default();
-    let results = compute_pagerank(&pool, "t1", &config, None).await.unwrap();
+    let results = compute_pagerank(&pool, "t1", &GraphScope::all(), &config, None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 5);
 
     // Raw PageRank sums to ~1.0. compute_pagerank scales each score by the R3 IDF
@@ -324,7 +334,9 @@ async fn test_pagerank_convergence() {
         tolerance: 1e-10,
         ..Default::default()
     };
-    let results = compute_pagerank(&pool, "t1", &config, None).await.unwrap();
+    let results = compute_pagerank(&pool, "t1", &GraphScope::all(), &config, None)
+        .await
+        .unwrap();
 
     // Should converge to stable values. Divide out the uniform R3 IDF factor
     // (ln(total), all names distinct) to check the raw distribution sums to ~1.0.
@@ -344,7 +356,7 @@ async fn test_pagerank_edge_type_filter() {
     insert_edge(&pool, "t1", "a", "c", "IMPORTS").await;
 
     let config = PageRankConfig::default();
-    let results = compute_pagerank(&pool, "t1", &config, Some(&["CALLS"]))
+    let results = compute_pagerank(&pool, "t1", &GraphScope::all(), &config, Some(&["CALLS"]))
         .await
         .unwrap();
 
@@ -363,7 +375,7 @@ async fn test_pagerank_edge_type_filter() {
 async fn test_communities_empty() {
     let pool = setup_graph_pool().await;
     let config = CommunityConfig::default();
-    let communities = detect_communities(&pool, "t1", &config, None)
+    let communities = detect_communities(&pool, "t1", &GraphScope::all(), &config, None)
         .await
         .unwrap();
     assert!(communities.is_empty());
@@ -397,7 +409,7 @@ async fn test_communities_two_disconnected_clusters() {
         max_iterations: 100,
         min_community_size: 2,
     };
-    let communities = detect_communities(&pool, "t1", &config, None)
+    let communities = detect_communities(&pool, "t1", &GraphScope::all(), &config, None)
         .await
         .unwrap();
 
@@ -427,7 +439,7 @@ async fn test_communities_fully_connected() {
     insert_edge(&pool, "t1", "c", "a", "CALLS").await;
 
     let config = CommunityConfig::default();
-    let communities = detect_communities(&pool, "t1", &config, None)
+    let communities = detect_communities(&pool, "t1", &GraphScope::all(), &config, None)
         .await
         .unwrap();
 
@@ -449,7 +461,7 @@ async fn test_communities_min_size_filter() {
         min_community_size: 2,
         ..Default::default()
     };
-    let communities = detect_communities(&pool, "t1", &config, None)
+    let communities = detect_communities(&pool, "t1", &GraphScope::all(), &config, None)
         .await
         .unwrap();
 
@@ -469,7 +481,7 @@ async fn test_communities_sorted_by_size() {
     insert_edge(&pool, "t1", "g", "a", "CALLS").await;
 
     let config = CommunityConfig::default();
-    let communities = detect_communities(&pool, "t1", &config, None)
+    let communities = detect_communities(&pool, "t1", &GraphScope::all(), &config, None)
         .await
         .unwrap();
 
@@ -486,7 +498,7 @@ async fn test_communities_sorted_by_size() {
 #[tokio::test]
 async fn test_betweenness_empty() {
     let pool = setup_graph_pool().await;
-    let results = compute_betweenness_centrality(&pool, "t1", None, None)
+    let results = compute_betweenness_centrality(&pool, "t1", &GraphScope::all(), None, None)
         .await
         .unwrap();
     assert!(results.is_empty());
@@ -497,7 +509,7 @@ async fn test_betweenness_chain() {
     let pool = setup_graph_pool().await;
     build_chain(&pool).await;
 
-    let results = compute_betweenness_centrality(&pool, "t1", None, None)
+    let results = compute_betweenness_centrality(&pool, "t1", &GraphScope::all(), None, None)
         .await
         .unwrap();
     assert_eq!(results.len(), 5);
@@ -527,7 +539,7 @@ async fn test_betweenness_bridge_node() {
     let pool = setup_graph_pool().await;
     build_two_clusters(&pool).await;
 
-    let results = compute_betweenness_centrality(&pool, "t1", None, None)
+    let results = compute_betweenness_centrality(&pool, "t1", &GraphScope::all(), None, None)
         .await
         .unwrap();
 
@@ -555,7 +567,7 @@ async fn test_betweenness_small_graph() {
     insert_node(&pool, "t1", "b", "b", "function").await;
     insert_edge(&pool, "t1", "a", "b", "CALLS").await;
 
-    let results = compute_betweenness_centrality(&pool, "t1", None, None)
+    let results = compute_betweenness_centrality(&pool, "t1", &GraphScope::all(), None, None)
         .await
         .unwrap();
     assert_eq!(results.len(), 2);
@@ -569,7 +581,7 @@ async fn test_betweenness_with_sampling() {
     build_chain(&pool).await;
 
     // Sample only 2 source nodes
-    let results = compute_betweenness_centrality(&pool, "t1", None, Some(2))
+    let results = compute_betweenness_centrality(&pool, "t1", &GraphScope::all(), None, Some(2))
         .await
         .unwrap();
     assert_eq!(results.len(), 5);
@@ -582,9 +594,16 @@ async fn test_load_adjacency() {
     let pool = setup_graph_pool().await;
     build_diamond(&pool).await;
 
-    let graph = load_adjacency_graph(&pool, "t1", None, GenericityFilter::All, false)
-        .await
-        .unwrap();
+    let graph = load_adjacency_graph(
+        &pool,
+        "t1",
+        &GraphScope::all(),
+        None,
+        GenericityFilter::All,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(graph.nodes.len(), 4);
     assert_eq!(graph.outgoing.get("a").unwrap().len(), 2); // a -> b, a -> c
     assert_eq!(graph.incoming.get("d").unwrap().len(), 2); // b -> d, c -> d
@@ -600,9 +619,16 @@ async fn test_load_adjacency_filtered() {
     insert_edge(&pool, "t1", "a", "b", "IMPORTS").await;
 
     // Filter to CALLS only
-    let graph = load_adjacency_graph(&pool, "t1", Some(&["CALLS"]), GenericityFilter::All, false)
-        .await
-        .unwrap();
+    let graph = load_adjacency_graph(
+        &pool,
+        "t1",
+        &GraphScope::all(),
+        Some(&["CALLS"]),
+        GenericityFilter::All,
+        false,
+    )
+    .await
+    .unwrap();
     let out = graph.outgoing.get("a").unwrap();
     assert_eq!(out.len(), 1); // only the CALLS edge
 }
@@ -630,9 +656,16 @@ async fn test_load_adjacency_drops_use_ubiquitous_node() {
     insert_edge(&pool, "t1", "c0", "norm", "CALLS").await;
     insert_edge(&pool, "t1", "c1", "norm", "CALLS").await;
 
-    let graph = load_adjacency_graph(&pool, "t1", None, GenericityFilter::All, false)
-        .await
-        .unwrap();
+    let graph = load_adjacency_graph(
+        &pool,
+        "t1",
+        &GraphScope::all(),
+        None,
+        GenericityFilter::All,
+        false,
+    )
+    .await
+    .unwrap();
 
     assert!(
         !graph.nodes.contains_key("hub"),
@@ -651,9 +684,16 @@ async fn test_load_adjacency_drops_use_ubiquitous_node() {
     // real cycle might pass through such a node — it no longer does, because
     // measurement showed the setting fabricated every cross-file cycle it
     // reported on a Dart tenant (see `cycles`).
-    let raw = load_adjacency_graph(&pool, "t1", None, GenericityFilter::None, false)
-        .await
-        .unwrap();
+    let raw = load_adjacency_graph(
+        &pool,
+        "t1",
+        &GraphScope::all(),
+        None,
+        GenericityFilter::None,
+        false,
+    )
+    .await
+    .unwrap();
     assert!(
         raw.nodes.contains_key("hub"),
         "with genericity filters off, the ubiquitous node must be retained"
@@ -665,6 +705,7 @@ async fn test_load_adjacency_drops_use_ubiquitous_node() {
     let usage_only = load_adjacency_graph(
         &pool,
         "t1",
+        &GraphScope::all(),
         None,
         GenericityFilter::UsageUbiquityOnly,
         false,
@@ -722,6 +763,7 @@ async fn betweenness_sampled_sources_are_sorted_and_repeats_are_bit_identical() 
         let report = compute_betweenness_report(
             &pool,
             "t1",
+            &GraphScope::all(),
             None,
             Some(3),
             std::time::Duration::from_secs(20),
@@ -756,9 +798,16 @@ async fn betweenness_zero_budget_reports_budget_hit_with_finite_scores() {
     let pool = setup_graph_pool().await;
     build_hub_with_tail(&pool).await;
 
-    let report = compute_betweenness_report(&pool, "t1", None, None, std::time::Duration::ZERO)
-        .await
-        .unwrap();
+    let report = compute_betweenness_report(
+        &pool,
+        "t1",
+        &GraphScope::all(),
+        None,
+        None,
+        std::time::Duration::ZERO,
+    )
+    .await
+    .unwrap();
     assert!(report.budget_hit, "a zero budget must be reported as hit");
     assert_eq!(report.sources_processed, 0);
     assert_eq!(report.sources_total, 9);
@@ -778,7 +827,9 @@ async fn pagerank_repeats_are_bit_identical_and_ties_are_node_id_ordered() {
 
     let mut seen: Vec<Vec<(String, u64)>> = Vec::new();
     for _ in 0..8 {
-        let results = compute_pagerank(&pool, "t1", &config, None).await.unwrap();
+        let results = compute_pagerank(&pool, "t1", &GraphScope::all(), &config, None)
+            .await
+            .unwrap();
         seen.push(
             results
                 .iter()
@@ -829,6 +880,7 @@ async fn communities_equal_size_order_is_by_smallest_node_id_and_repeatable() {
         let report = detect_communities_report(
             &pool,
             "t1",
+            &GraphScope::all(),
             &config,
             None,
             std::time::Duration::from_secs(20),
@@ -863,9 +915,16 @@ async fn communities_zero_budget_reports_budget_hit() {
     build_two_clusters(&pool).await;
     let config = CommunityConfig::default();
 
-    let report = detect_communities_report(&pool, "t1", &config, None, std::time::Duration::ZERO)
-        .await
-        .unwrap();
+    let report = detect_communities_report(
+        &pool,
+        "t1",
+        &GraphScope::all(),
+        &config,
+        None,
+        std::time::Duration::ZERO,
+    )
+    .await
+    .unwrap();
     assert!(report.outcome.budget_hit);
     assert!(!report.outcome.converged);
     assert_eq!(report.outcome.iterations, 0);

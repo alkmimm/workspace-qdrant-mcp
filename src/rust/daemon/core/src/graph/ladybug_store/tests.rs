@@ -63,7 +63,10 @@ async fn test_ladybug_upsert_and_stats() {
     let result = store.upsert_node(&node).await;
     assert!(result.is_ok(), "upsert failed: {:?}", result.err());
 
-    let stats = store.stats(Some("test-tenant")).await.unwrap();
+    let stats = store
+        .stats(Some("test-tenant"), &crate::graph::GraphScope::all())
+        .await
+        .unwrap();
     assert_eq!(stats.total_nodes, 1);
 }
 

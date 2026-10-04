@@ -511,18 +511,24 @@ pub(super) async fn delete_tracked_file(
             phase: "fts5_cleanup",
             duration_ms: t0.elapsed().as_millis() as u64,
         });
-        // Graph edges and keyword extractions are keyed by (tenant, PATH), not by
+        // The graph is keyed by content generation (this row's base_point): the
+        // generation's rows go exactly when no tracked row references it any
+        // more. Another version of the path is another branch's graph and is
+        // untouched; a clone row still holding the base_point keeps it.
+        if let (Some(bp), false) = (bp, other_refs_bp) {
+            super::graph_ingest::delete_graph_generation(ctx, &item.tenant_id, relative_path, bp)
+                .await;
+        }
+        // Keyword extractions are still keyed by (tenant, PATH), not by
         // file_id — they describe the file, not one content generation. When
         // another generation still tracks this path (stage 3 covered delete, or
         // an overlap-debris strip, #224), purging them here would wipe the
-        // graph/keywords of a file that remains fully indexed — the #235/#245
-        // "edges wiped, never rebuilt" failure mode, self-inflicted. Only the
-        // last generation of a path may clear them. Checked two ways: the
+        // keywords of a file that remains fully indexed. Only the last
+        // generation of a path may clear them. Checked two ways: the
         // producer-stamped `covered` flag (prune deletes) AND an in-situ
         // survivor query — the latter needs no producer cooperation, so it also
         // protects watcher/update/overlap-sweep deletes. On a query error, skip
-        // the cleanup: stale graph edges for a truly-gone path are rebuilt on
-        // the next ingest of the path, wiping a live file's graph is not.
+        // the cleanup (conservative).
         let survivor = match tracked_files_schema::other_generation_exists(
             pool,
             watch_folder_id,
@@ -535,7 +541,7 @@ pub(super) async fn delete_tracked_file(
             Err(e) => {
                 warn!(
                     "[overlap] survivor check failed for '{}' (file_id={}): {} — keeping \
-                     path-keyed graph edges + keyword extraction (conservative)",
+                     the path-keyed keyword extraction (conservative)",
                     relative_path, existing.file_id, e
                 );
                 true
@@ -543,12 +549,11 @@ pub(super) async fn delete_tracked_file(
         };
         if covered || survivor {
             debug!(
-                "'{}' — keeping graph edges + keyword extraction: path still tracked by \
+                "'{}' — keeping keyword extraction: path still tracked by \
                  another generation (covered={}, survivor={})",
                 relative_path, covered, survivor
             );
         } else {
-            super::graph_ingest::delete_graph_edges(ctx, &item.tenant_id, relative_path).await;
             let doc_id = crate::generate_document_id(&item.tenant_id, abs_file_path);
             super::keyword_persist::delete_extraction(pool, &doc_id).await;
         }

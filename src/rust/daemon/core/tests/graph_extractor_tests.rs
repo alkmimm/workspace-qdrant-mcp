@@ -86,7 +86,13 @@ async fn test_extract_from_text_chunks() {
     store.upsert_nodes(&result.nodes).await.unwrap();
     store.insert_edges(&result.edges).await.unwrap();
 
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store
+        .stats(
+            Some(TENANT),
+            &workspace_qdrant_core::graph::GraphScope::all(),
+        )
+        .await
+        .unwrap();
     assert!(stats.total_nodes > 0);
     assert!(stats.total_edges > 0);
 }

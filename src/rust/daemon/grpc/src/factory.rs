@@ -337,7 +337,10 @@ impl GrpcServer {
             tracing::info!("Registering GraphService gRPC endpoint");
             router = router.add_service(InterceptedService::new(
                 proto::graph_service_server::GraphServiceServer::new(
-                    crate::services::GraphServiceImpl::new(graph_store),
+                    // state.db carries branch membership: every graph answer is
+                    // scoped to the asking branch's file versions.
+                    crate::services::GraphServiceImpl::new(graph_store)
+                        .with_state_pool(self.db_pool.clone()),
                 ),
                 auth_fn.clone(),
             ));

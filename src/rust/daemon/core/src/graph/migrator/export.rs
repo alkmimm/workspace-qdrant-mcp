@@ -18,7 +18,8 @@ pub async fn export_nodes_sqlite(
         Some(tid) => {
             sqlx::query(
                 "SELECT node_id, tenant_id, symbol_name, symbol_type,
-                        file_path, start_line, end_line, signature, language, is_test_symbol
+                        file_path, start_line, end_line, signature, language, is_test_symbol,
+                        generation
                  FROM graph_nodes WHERE tenant_id = ?1
                  ORDER BY node_id",
             )
@@ -29,7 +30,8 @@ pub async fn export_nodes_sqlite(
         None => {
             sqlx::query(
                 "SELECT node_id, tenant_id, symbol_name, symbol_type,
-                        file_path, start_line, end_line, signature, language, is_test_symbol
+                        file_path, start_line, end_line, signature, language, is_test_symbol,
+                        generation
                  FROM graph_nodes ORDER BY node_id",
             )
             .fetch_all(pool)
@@ -53,6 +55,7 @@ pub async fn export_nodes_sqlite(
                 signature: row.get("signature"),
                 language: row.get("language"),
                 is_test_symbol: row.get::<i64, _>("is_test_symbol") != 0,
+                generation: row.get("generation"),
             })
         })
         .collect::<Vec<_>>();
@@ -70,7 +73,7 @@ pub async fn export_edges_sqlite(
         Some(tid) => {
             sqlx::query(
                 "SELECT edge_id, tenant_id, source_node_id, target_node_id,
-                        edge_type, source_file, weight, metadata_json
+                        edge_type, source_file, weight, metadata_json, generation
                  FROM graph_edges WHERE tenant_id = ?1
                  ORDER BY edge_id",
             )
@@ -81,7 +84,7 @@ pub async fn export_edges_sqlite(
         None => {
             sqlx::query(
                 "SELECT edge_id, tenant_id, source_node_id, target_node_id,
-                        edge_type, source_file, weight, metadata_json
+                        edge_type, source_file, weight, metadata_json, generation
                  FROM graph_edges ORDER BY edge_id",
             )
             .fetch_all(pool)
@@ -105,6 +108,7 @@ pub async fn export_edges_sqlite(
                     source_file: row.get("source_file"),
                     weight: row.get("weight"),
                     metadata_json: row.get("metadata_json"),
+                    generation: row.get("generation"),
                 });
             }
             None => {
@@ -175,6 +179,8 @@ pub fn export_nodes_ladybug(
             // LadybugDB (secondary backend) does not persist this flag; default
             // false. A SQLite re-index re-derives it authoritatively.
             is_test_symbol: false,
+            // Nor generations: a LadybugDB graph is one unscoped version.
+            generation: String::new(),
         });
     }
 
@@ -229,6 +235,7 @@ pub fn export_edges_ladybug(
                 source_file: row[4].clone(),
                 weight: row[5].parse().unwrap_or(1.0),
                 metadata_json: None,
+                generation: String::new(),
             });
         }
     }

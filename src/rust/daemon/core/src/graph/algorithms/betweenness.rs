@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 /// still pass `max_samples` to cap the source set explicitly.
 const BETWEENNESS_TIME_BUDGET: Duration = Duration::from_secs(20);
 use sqlx::SqlitePool;
+
+use crate::graph::GraphScope;
 use tracing::info;
 
 use super::{load_adjacency_graph, GenericityFilter};
@@ -56,12 +58,14 @@ pub struct BetweennessReport {
 pub async fn compute_betweenness_centrality(
     pool: &SqlitePool,
     tenant_id: &str,
+    scope: &GraphScope,
     edge_types: Option<&[&str]>,
     max_samples: Option<usize>,
 ) -> Result<Vec<BetweennessEntry>, sqlx::Error> {
     compute_betweenness_report(
         pool,
         tenant_id,
+        scope,
         edge_types,
         max_samples,
         BETWEENNESS_TIME_BUDGET,
@@ -76,12 +80,20 @@ pub async fn compute_betweenness_centrality(
 pub async fn compute_betweenness_report(
     pool: &SqlitePool,
     tenant_id: &str,
+    scope: &GraphScope,
     edge_types: Option<&[&str]>,
     max_samples: Option<usize>,
     budget: Duration,
 ) -> Result<BetweennessReport, sqlx::Error> {
-    let graph =
-        load_adjacency_graph(pool, tenant_id, edge_types, GenericityFilter::All, false).await?;
+    let graph = load_adjacency_graph(
+        pool,
+        tenant_id,
+        scope,
+        edge_types,
+        GenericityFilter::All,
+        false,
+    )
+    .await?;
 
     if graph.nodes.len() < 3 {
         let mut entries: Vec<BetweennessEntry> = graph

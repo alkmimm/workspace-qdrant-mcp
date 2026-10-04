@@ -136,6 +136,15 @@ impl BranchCheckouts {
     }
 }
 
+/// The branch `main_root` has checked out: `Some` for a git repository (the
+/// writer's [`UNRESOLVED_BRANCH_LABEL`] for a detached or unborn HEAD, the
+/// same label its rows carry in that state), `None` for a folder that is not
+/// a git repository.
+pub fn head_branch(main_root: &Path) -> Option<String> {
+    let git_dir = resolve_git_dir(main_root)?;
+    Some(read_current_branch(&git_dir).unwrap_or_else(|| UNRESOLVED_BRANCH_LABEL.to_string()))
+}
+
 /// Whether `wt_root` is a genuine linked-worktree *checkout* rather than a
 /// stale/malformed admin entry that resolved to a non-worktree directory.
 ///

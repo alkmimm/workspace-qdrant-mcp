@@ -197,6 +197,7 @@ fn bench_query_1hop(c: &mut Criterion) {
                     black_box(start_id),
                     black_box(1),
                     None,
+                    &workspace_qdrant_core::graph::GraphScope::all(),
                 ))
                 .unwrap();
             });
@@ -228,6 +229,7 @@ fn bench_query_2hop(c: &mut Criterion) {
                     black_box(start_id),
                     black_box(2),
                     None,
+                    &workspace_qdrant_core::graph::GraphScope::all(),
                 ))
                 .unwrap();
             });
@@ -255,17 +257,22 @@ fn bench_impact_analysis(c: &mut Criterion) {
             let target = &all_nodes[0][funcs / 2].symbol_name;
 
             b.iter(|| {
-                rt.block_on(store.impact_analysis(black_box(tenant), black_box(target), None))
-                    .unwrap();
+                rt.block_on(store.impact_analysis(
+                    black_box(tenant),
+                    black_box(target),
+                    None,
+                    &workspace_qdrant_core::graph::GraphScope::all(),
+                ))
+                .unwrap();
             });
         });
     }
     group.finish();
 }
 
-fn bench_delete_edges_by_file(c: &mut Criterion) {
+fn bench_delete_generation(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("graph_delete_by_file");
+    let mut group = c.benchmark_group("graph_delete_generation");
 
     for funcs in [10, 50, 100] {
         group.bench_function(BenchmarkId::from_parameter(funcs), |b| {
@@ -276,15 +283,28 @@ fn bench_delete_edges_by_file(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for i in 0..iters {
-                    // Setup: insert nodes and edges for a fresh file
+                    // Setup: one version of a fresh file
+                    let file = format!("src/mod_{}.rs", i);
+                    let generation = format!("{file}@v1");
                     let nodes = gen_nodes(tenant, i as usize, funcs);
                     let edges = gen_edges(tenant, &nodes, i as usize);
-                    rt.block_on(store.upsert_nodes(&nodes)).unwrap();
-                    rt.block_on(store.insert_edges(&edges)).unwrap();
+                    let (nodes, edges) = workspace_qdrant_core::graph::stamp_generation(
+                        &file,
+                        &generation,
+                        &nodes,
+                        &edges,
+                    );
+                    rt.block_on(store.replace_generation(
+                        tenant,
+                        &file,
+                        &generation,
+                        &nodes,
+                        &edges,
+                    ))
+                    .unwrap();
 
-                    let file = format!("src/mod_{}.rs", i);
                     let start = std::time::Instant::now();
-                    rt.block_on(store.delete_edges_by_file(tenant, &file))
+                    rt.block_on(store.delete_generation(tenant, &generation))
                         .unwrap();
                     total += start.elapsed();
                 }
@@ -311,13 +331,14 @@ fn bench_reingest_file(c: &mut Criterion) {
             // Initial population
             let nodes = gen_nodes(tenant, 0, funcs);
             let edges = gen_edges(tenant, &nodes, 0);
-            rt.block_on(shared.reingest_file(tenant, "src/mod_0.rs", &nodes, &edges))
+            rt.block_on(shared.reingest_file(tenant, "src/mod_0.rs", "mod_0@v1", &nodes, &edges))
                 .unwrap();
 
             b.iter(|| {
                 rt.block_on(shared.reingest_file(
                     black_box(tenant),
                     black_box("src/mod_0.rs"),
+                    black_box("mod_0@v1"),
                     black_box(&nodes),
                     black_box(&edges),
                 ))
@@ -351,6 +372,7 @@ fn bench_pagerank(c: &mut Criterion) {
                 rt.block_on(compute_pagerank(
                     black_box(pool),
                     black_box(tenant),
+                    &workspace_qdrant_core::graph::GraphScope::all(),
                     black_box(&config),
                     None,
                 ))
@@ -382,6 +404,7 @@ fn bench_communities(c: &mut Criterion) {
                 rt.block_on(detect_communities(
                     black_box(pool),
                     black_box(tenant),
+                    &workspace_qdrant_core::graph::GraphScope::all(),
                     black_box(&config),
                     None,
                 ))
@@ -476,7 +499,7 @@ criterion_group!(
     bench_query_1hop,
     bench_query_2hop,
     bench_impact_analysis,
-    bench_delete_edges_by_file,
+    bench_delete_generation,
     bench_reingest_file,
     bench_pagerank,
     bench_communities,

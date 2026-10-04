@@ -169,6 +169,12 @@ pub async fn create_factory_store(dir: &std::path::Path) -> SharedGraphStore<Sql
         .expect("factory should create store")
 }
 
+/// The content generation the helpers store a path's extraction under: one
+/// version per path, so a re-ingest replaces it like the daemon does.
+pub fn generation_of(file_path: &str) -> String {
+    format!("{file_path}@v1")
+}
+
 /// Extract and ingest chunks into a store.
 pub async fn ingest_file_chunks(
     store: &SharedGraphStore<SqliteGraphStore>,
@@ -177,6 +183,14 @@ pub async fn ingest_file_chunks(
     file_path: &str,
 ) {
     let result = extractor::extract_edges(chunks, tenant_id, file_path);
-    store.upsert_nodes(&result.nodes).await.unwrap();
-    store.insert_edges(&result.edges).await.unwrap();
+    store
+        .reingest_file(
+            tenant_id,
+            file_path,
+            &generation_of(file_path),
+            &result.nodes,
+            &result.edges,
+        )
+        .await
+        .unwrap();
 }

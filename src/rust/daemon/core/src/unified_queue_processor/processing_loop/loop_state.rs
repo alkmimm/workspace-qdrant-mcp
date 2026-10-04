@@ -28,6 +28,8 @@ pub(super) struct LoopState {
     pub last_grammar_check: std::time::Instant,
     /// Maintenance task scheduler.
     pub maintenance_scheduler: crate::idle::MaintenanceScheduler,
+    /// Idle rebuild of graph generations the index holds but the graph lacks.
+    pub graph_backfill: crate::strategies::processing::file::GraphBackfill,
 }
 
 impl LoopState {
@@ -77,6 +79,7 @@ impl LoopState {
             idle_since: None,
             last_grammar_check,
             maintenance_scheduler,
+            graph_backfill: Default::default(),
         }
     }
 }

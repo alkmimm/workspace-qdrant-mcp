@@ -11,6 +11,7 @@ pub async fn betweenness(
     top_k: Option<u32>,
     max_samples: Option<u32>,
     edge_types: Vec<String>,
+    branch: Option<String>,
 ) -> Result<()> {
     output::section("Betweenness Centrality");
     output::kv("Tenant", tenant_id);
@@ -33,10 +34,12 @@ pub async fn betweenness(
             edge_types,
             max_samples,
             top_k,
+            branch,
         })
         .await
         .context("ComputeBetweenness RPC failed")?
         .into_inner();
+    super::print_scope(resp.scope.as_ref());
 
     if resp.entries.is_empty() {
         println!("No nodes found.");

@@ -11,7 +11,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 /// Current schema version for graph.db.
-pub const GRAPH_SCHEMA_VERSION: i32 = 6;
+pub const GRAPH_SCHEMA_VERSION: i32 = 7;
 
 /// Default graph database filename.
 pub const GRAPH_DB_FILENAME: &str = "graph.db";
@@ -169,6 +169,7 @@ impl GraphDbManager {
             4 => self.migrate_v4().await,
             5 => self.migrate_v5().await,
             6 => self.migrate_v6().await,
+            7 => super::schema_v7::migrate_v7(&self.pool).await,
             _ => Err(GraphDbError::Migration(format!(
                 "Unknown graph migration version: {}",
                 version
@@ -348,6 +349,16 @@ impl GraphDbManager {
     }
 }
 
+/// Bring a test's pool to the current graph schema through the same
+/// migration chain the daemon runs, so no test hand-writes a stale DDL.
+#[cfg(test)]
+pub(crate) async fn apply_graph_schema(pool: &SqlitePool) {
+    GraphDbManager::with_pool(pool.clone(), PathBuf::from(":memory:"))
+        .run_migrations()
+        .await
+        .expect("apply graph schema");
+}
+
 impl Clone for GraphDbManager {
     fn clone(&self) -> Self {
         Self {
@@ -366,7 +377,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db = tmp.path().join("graph.db");
 
-        // `new` opens the DB and runs all pending migrations (v1 → v5).
+        // `new` opens the DB and runs all pending migrations (v1 → v7).
         let mgr = GraphDbManager::new(&db).await.expect("open graph db");
 
         // Schema lands at the latest version.
@@ -375,16 +386,40 @@ mod tests {
             .await
             .expect("read schema version");
         assert_eq!(version, GRAPH_SCHEMA_VERSION);
-        assert_eq!(version, 6, "v6 must be applied");
+        assert_eq!(version, 7, "v7 must be applied");
 
-        // v5 adds the is_test_symbol column to graph_nodes.
-        let has_is_test: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pragma_table_info('graph_nodes') WHERE name = 'is_test_symbol'",
+        // v5's is_test_symbol survives the v7 rebuild, and v7 adds the
+        // generation to both tables' primary keys.
+        for (table, column, pk) in [
+            ("graph_nodes", "is_test_symbol", 0),
+            ("graph_nodes", "generation", 2),
+            ("graph_edges", "generation", 2),
+            ("graph_nodes", "node_id", 1),
+            ("graph_edges", "edge_id", 1),
+        ] {
+            let found: Option<i64> = sqlx::query_scalar(&format!(
+                "SELECT pk FROM pragma_table_info('{table}') WHERE name = ?1"
+            ))
+            .bind(column)
+            .fetch_optional(&mgr.pool)
+            .await
+            .expect("query pragma_table_info");
+            assert_eq!(found, Some(pk), "{table}.{column} (pk position {pk})");
+        }
+        let generations_table: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'graph_generations'",
         )
-        .fetch_one(&mgr.pool)
+        .fetch_optional(&mgr.pool)
         .await
-        .expect("query pragma_table_info");
-        assert_eq!(has_is_test, 1, "v5 must add graph_nodes.is_test_symbol");
+        .expect("query sqlite_master");
+        assert_eq!(generations_table.as_deref(), Some("graph_generations"));
+        // No foreign keys: node_id alone is no longer unique.
+        let fks: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_list('graph_edges')")
+                .fetch_one(&mgr.pool)
+                .await
+                .expect("query pragma_foreign_key_list");
+        assert_eq!(fks, 0);
 
         // The v2 covering index for the metrics aggregate exists.
         let idx_v2: Option<String> = sqlx::query_scalar(
@@ -420,9 +455,14 @@ mod tests {
         .expect("query sqlite_master");
         assert_eq!(idx_file.as_deref(), Some("idx_nodes_file"));
 
-        // v6 adds the composite indexes that make the per-file edge-cleanup
-        // delete probe (tenant_id, node_id) instead of scanning the tenant.
-        for idx in ["idx_edges_tenant_source", "idx_edges_tenant_target"] {
+        // The composite indexes the traversal and the generation delete probe
+        // (v6's two, recreated by v7, plus v7's generation indexes).
+        for idx in [
+            "idx_edges_tenant_source",
+            "idx_edges_tenant_target",
+            "idx_edges_generation",
+            "idx_nodes_generation",
+        ] {
             let found: Option<String> = sqlx::query_scalar(
                 "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?1",
             )
@@ -430,7 +470,7 @@ mod tests {
             .fetch_optional(&mgr.pool)
             .await
             .expect("query sqlite_master");
-            assert_eq!(found.as_deref(), Some(idx), "v6 must create {idx}");
+            assert_eq!(found.as_deref(), Some(idx), "missing {idx}");
         }
 
         // Re-running migrations on an up-to-date DB is a no-op (no error, no

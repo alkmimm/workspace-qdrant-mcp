@@ -8,15 +8,29 @@
 //! to instantiate the appropriate backend based on configuration.
 //! The graph is stored in a dedicated `graph.db` file separate from
 //! `state.db` to avoid lock contention with queue processing.
+//!
+//! Every row belongs to one content GENERATION of its file — the tracked
+//! file's `base_point`, `SHA256(tenant|relative_path|file_hash)` — and a
+//! generation's rows are written and deleted together. Which generations a
+//! branch holds is NOT stored here: `tracked_files.branches` is the authority,
+//! read at query time (`branch_scope`) and applied as a [`GraphScope`], so a
+//! branch sees exactly the versions of its files and nothing a sibling branch
+//! indexed later. Rows of the file-less stub nodes carry the empty generation
+//! and are visible in every scope.
 
 pub mod algorithms;
+pub mod branch_scope;
 pub mod extractor;
 pub mod factory;
 pub mod lsp_backfill;
+pub mod maintenance;
 pub mod migrator;
 mod schema;
+mod schema_v7;
+mod scope;
 mod shared;
 mod sqlite_store;
+mod store;
 
 #[cfg(feature = "ladybug")]
 pub mod ladybug_store;
@@ -32,10 +46,11 @@ pub use ladybug_store::{LadybugConfig, LadybugGraphStore};
 pub use schema::{
     GraphDbError, GraphDbManager, GraphDbResult, GRAPH_DB_FILENAME, GRAPH_SCHEMA_VERSION,
 };
-pub use shared::SharedGraphStore;
+pub use scope::{ExtractedGeneration, GenerationBranches, GraphScope};
+pub use shared::{stamp_generation, SharedGraphStore};
 pub use sqlite_store::SqliteGraphStore;
+pub use store::GraphStore;
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
@@ -190,6 +205,11 @@ pub struct GraphNode {
     /// production `.rs` file. Stubs and file nodes are always `false`.
     #[serde(default)]
     pub is_test_symbol: bool,
+    /// The content generation (`base_point`) whose extraction defined this
+    /// node; empty for a file-less stub and for a node another file's
+    /// extraction only referred to. Stamped by `replace_generation`.
+    #[serde(default)]
+    pub generation: String,
 }
 
 impl GraphNode {
@@ -215,6 +235,7 @@ impl GraphNode {
             signature: None,
             language: None,
             is_test_symbol: false,
+            generation: String::new(),
         }
     }
 
@@ -239,6 +260,7 @@ impl GraphNode {
             signature: None,
             language: None,
             is_test_symbol: false,
+            generation: String::new(),
         }
     }
 }
@@ -251,10 +273,15 @@ pub struct GraphEdge {
     pub source_node_id: String,
     pub target_node_id: String,
     pub edge_type: EdgeType,
-    /// The file that "owns" this edge (for deletion on re-ingestion).
+    /// The file whose extraction produced this edge.
     pub source_file: String,
     pub weight: f64,
     pub metadata_json: Option<String>,
+    /// The content generation of `source_file` that owns this edge: the edge
+    /// is visible exactly where that generation is. Stamped by
+    /// `replace_generation`.
+    #[serde(default)]
+    pub generation: String,
 }
 
 impl GraphEdge {
@@ -278,6 +305,7 @@ impl GraphEdge {
             source_file: source_file.into(),
             weight: 1.0,
             metadata_json: None,
+            generation: String::new(),
         }
     }
 }
@@ -331,146 +359,6 @@ pub struct GraphStats {
     pub total_edges: u64,
     pub nodes_by_type: std::collections::HashMap<String, u64>,
     pub edges_by_type: std::collections::HashMap<String, u64>,
-}
-
-/// Trait abstracting graph storage operations.
-///
-/// Implementations:
-/// - `SqliteGraphStore`: SQLite with recursive CTEs (default)
-/// - `LadybugGraphStore`: Kuzu fork with Cypher queries (`ladybug` feature)
-#[async_trait]
-pub trait GraphStore: Send + Sync {
-    /// Insert or update a node. If the node_id already exists, update metadata.
-    async fn upsert_node(&self, node: &GraphNode) -> GraphDbResult<()>;
-
-    /// Batch upsert multiple nodes in a single transaction.
-    async fn upsert_nodes(&self, nodes: &[GraphNode]) -> GraphDbResult<()>;
-
-    /// Insert an edge. Ignores duplicates (same edge_id).
-    async fn insert_edge(&self, edge: &GraphEdge) -> GraphDbResult<()>;
-
-    /// Batch insert multiple edges in a single transaction.
-    async fn insert_edges(&self, edges: &[GraphEdge]) -> GraphDbResult<()>;
-
-    /// Delete all edges owned by a specific file.
-    async fn delete_edges_by_file(&self, tenant_id: &str, file_path: &str) -> GraphDbResult<u64>;
-
-    /// Delete this file's NODES whose id is NOT in `keep`, plus the edges that
-    /// reference those deleted (stale) nodes.
-    ///
-    /// Nodes are only ever upserted, so a re-ingest that dropped symbols left
-    /// stale node generations behind and a file deletion left "ghost" nodes for a
-    /// path that no longer exists (issue #245). `reingest_file` passes the current
-    /// extraction's node ids as `keep`, so only genuinely-removed symbols' nodes
-    /// go; the ghost sweep and file-delete path pass an empty `keep` to remove all
-    /// of a gone file's nodes. Deleting the referencing edges first satisfies the
-    /// `graph_edges -> graph_nodes` foreign key (a stale node cannot be deleted
-    /// while an edge still points at it) and clears the now-dangling incoming
-    /// edges. Never touches the file-less stub nodes (`file_path = ''`); pass a
-    /// real path. Returns the number of nodes deleted. Default no-op.
-    async fn delete_file_nodes_except(
-        &self,
-        _tenant_id: &str,
-        _file_path: &str,
-        _keep: &[String],
-    ) -> GraphDbResult<u64> {
-        Ok(0)
-    }
-
-    /// Whether any edge is owned by `file_path` (source_file). One indexed
-    /// probe (`idx_edges_source_file`); the branch-dedup fast-path uses it to
-    /// detect a file whose edges were wiped by the update preamble's
-    /// content-row GC with nothing left to rewrite them (issue #235).
-    ///
-    /// Default `true` means "assume present": backends without a probe keep
-    /// the pre-#235 behavior of never triggering the dedup-path graph heal.
-    async fn file_has_edges(&self, _tenant_id: &str, _file_path: &str) -> GraphDbResult<bool> {
-        Ok(true)
-    }
-
-    /// Delete all nodes and edges for a tenant.
-    async fn delete_tenant(&self, tenant_id: &str) -> GraphDbResult<u64>;
-
-    /// Query nodes related to a given node within N hops.
-    async fn query_related(
-        &self,
-        tenant_id: &str,
-        node_id: &str,
-        max_hops: u32,
-        edge_types: Option<&[EdgeType]>,
-    ) -> GraphDbResult<Vec<TraversalNode>>;
-
-    /// Like [`query_related`](Self::query_related) but resolves the source
-    /// node(s) BY SYMBOL NAME (+ optional file_path) instead of a precomputed
-    /// node_id. A client computes node_id = SHA256(tenant|file_path|name|type),
-    /// which silently misses whenever its `symbol_type`/`file_path` differ from
-    /// what the extractor stored (e.g. an async fn keyed as "async_function" vs
-    /// "function"). This resolves the node the same robust way `impact_analysis`
-    /// does (name match, file_path as a soft narrowing), traverses forward from
-    /// every match, and merges (dedup by node_id, lowest depth wins).
-    ///
-    /// Default impl returns empty so the caller keeps its node_id-based result;
-    /// backends with name resolution override it.
-    async fn query_related_by_symbol(
-        &self,
-        _tenant_id: &str,
-        _symbol_name: &str,
-        _file_path: Option<&str>,
-        _max_hops: u32,
-        _edge_types: Option<&[EdgeType]>,
-    ) -> GraphDbResult<Vec<TraversalNode>> {
-        Ok(Vec::new())
-    }
-
-    /// Find all nodes that would be affected by changing a given symbol.
-    async fn impact_analysis(
-        &self,
-        tenant_id: &str,
-        symbol_name: &str,
-        file_path: Option<&str>,
-    ) -> GraphDbResult<ImpactReport>;
-
-    /// Get graph statistics, optionally filtered by tenant.
-    async fn stats(&self, tenant_id: Option<&str>) -> GraphDbResult<GraphStats>;
-
-    /// Delete orphaned nodes (nodes with no edges).
-    async fn prune_orphans(&self, tenant_id: &str) -> GraphDbResult<u64>;
-
-    /// Resolve dangling "stub" edges to real symbol nodes by name.
-    ///
-    /// Tree-sitter emits name-only stub callees/targets with an empty
-    /// `file_path` (a node_id that never matches the callee's real node).
-    /// This pass repoints each such edge to a real node with the same
-    /// `symbol_name` when an unambiguous match exists (same-file preference,
-    /// then unique-in-tenant), recomputing the edge_id, and prunes the
-    /// now-orphaned stub nodes. Stdlib/external names (no project node)
-    /// stay dangling and are naturally excluded from the resolved graph.
-    ///
-    /// Default impl is a no-op for backends that don't produce stub edges.
-    /// Returns the number of edges repointed.
-    async fn resolve_stub_edges(&self, _tenant_id: &str) -> GraphDbResult<u64> {
-        Ok(0)
-    }
-
-    /// Make a caller's LSP-resolved CALLS authoritative (R8.2 backfill).
-    ///
-    /// Deletes the caller's fuzzy CALLS edges to ANY node whose `symbol_name` is
-    /// in `resolved_names` (the by-name fan-out the LSP supersedes — by backfill
-    /// time the stub has usually already fanned out, so this clears by target
-    /// name, not by stub id), then inserts a precise CALLS edge to each
-    /// `precise_targets` node id (weight 1.0, `metadata.resolution = "lsp"`,
-    /// owned by `source_file` so a later re-ingest of that file cleans them up).
-    /// Returns the number of fuzzy edges deleted. Default impl: no-op.
-    async fn make_calls_authoritative(
-        &self,
-        _tenant_id: &str,
-        _caller_id: &str,
-        _source_file: &str,
-        _resolved_names: &[String],
-        _precise_targets: &[String],
-    ) -> GraphDbResult<u64> {
-        Ok(0)
-    }
 }
 
 /// Compute deterministic node ID from its identifying fields.

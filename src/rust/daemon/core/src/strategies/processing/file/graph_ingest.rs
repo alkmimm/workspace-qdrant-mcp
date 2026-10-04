@@ -22,13 +22,17 @@ use crate::graph::{compute_node_id, EdgeType, GraphEdge, NodeType};
 use crate::lsp::{resolved_call_edges, symbol_column_in_line};
 use crate::TextChunk;
 
-/// Extract graph relationships from text chunks and store them atomically.
+/// Extract graph relationships from text chunks and store them atomically as
+/// content `generation` (the file's `base_point`).
 ///
 /// Performs:
-/// 1. Delete old edges for this file (cleanup from previous ingestion)
-/// 2. Extract new nodes/edges from chunk metadata (tree-sitter baseline)
-/// 3. LSP precision pass for `CALLS` edges when a server is ready (additive)
-/// 4. Upsert nodes + insert edges in a single write-lock hold
+/// 1. Extract new nodes/edges from chunk metadata (tree-sitter baseline)
+/// 2. LSP precision pass for `CALLS` edges when a server is ready (additive)
+/// 3. Replace the generation's rows in a single write-lock hold — other
+///    versions of the same path (other branches) are untouched
+///
+/// An empty extraction is stored too: it records that this generation has no
+/// symbols, so neither the dedup heal nor the backfill retries it.
 ///
 /// All graph errors are logged and swallowed — graph failures must never
 /// block the main ingestion pipeline.
@@ -38,6 +42,7 @@ pub(super) async fn ingest_graph_edges(
     file_path: &str,
     abs_file_path: &str,
     chunks: &[TextChunk],
+    generation: &str,
 ) {
     let Some(ref graph_store) = ctx.graph_store else {
         return; // Graph not initialized — skip silently
@@ -58,19 +63,16 @@ pub(super) async fn ingest_graph_edges(
 
     let ExtractionResult { nodes, edges } = extraction;
 
-    if nodes.is_empty() && edges.is_empty() {
-        return;
-    }
-
     debug!(
-        "Graph: extracting {} nodes, {} edges for {}",
+        "Graph: extracting {} nodes, {} edges for {} (generation {})",
         nodes.len(),
         edges.len(),
-        file_path
+        file_path,
+        generation
     );
 
     match graph_store
-        .reingest_file(tenant_id, file_path, &nodes, &edges)
+        .reingest_file(tenant_id, file_path, generation, &nodes, &edges)
         .await
     {
         Ok(()) => {
@@ -238,100 +240,139 @@ fn suppress_fuzzy_calls(
     });
 }
 
-/// Rebuild a file's graph edges after a branch-dedup hit left them wiped
-/// (issue #235).
-///
-/// When an update changes a file's hash, the preamble GCs the old content-row,
-/// and that delete wipes the file's edges by path. If the NEW content then
-/// dedups against an existing content-row (revert, branch switch, merge
-/// restoring a known hash), `try_branch_dedup` returns before the graph phase,
-/// so nothing rewrites them. One indexed probe detects the gap; the rebuild
-/// re-parses with tree-sitter only — the embed skip that makes dedup cheap is
-/// preserved. Files wiped before this fix heal on their next dedup touch.
+/// Parse `file_path` and store its graph as content `generation` — the path
+/// shared by the dedup heal and the idle backfill. Tree-sitter only (plus the
+/// LSP pass when a server is already warm); the embed the dedup path skips is
+/// never paid here. A file no grammar covers is recorded as an empty
+/// extraction without parsing, so it is not retried.
 ///
 /// Best-effort like all graph work: errors are logged, never failing the
-/// pipeline.
-pub(super) async fn heal_edges_after_dedup(
+/// pipeline. `file_path`/`abs_file_path` are where the BYTES are read (the
+/// branch's own checkout); `relative_path` is the identity the graph keys on.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn rebuild_generation(
+    ctx: &ProcessingContext,
+    tenant_id: &str,
+    collection: &str,
+    file_path: &Path,
+    relative_path: &str,
+    abs_file_path: &str,
+    base_path: &str,
+    generation: &str,
+) {
+    let Some(ref graph_store) = ctx.graph_store else {
+        return;
+    };
+    let overrides = super::component::get_gitattributes(ctx, base_path).await;
+    if crate::tree_sitter::detect_language_with_overrides(file_path, relative_path, &overrides)
+        .is_none()
+    {
+        if let Err(e) = graph_store
+            .reingest_file(tenant_id, relative_path, generation, &[], &[])
+            .await
+        {
+            warn!(
+                "graph rebuild: recording {} (generation {}) failed: {}",
+                relative_path, generation, e
+            );
+        }
+        return;
+    }
+    let provider =
+        super::grammar::ensure_grammar_available(ctx, file_path, relative_path, &overrides).await;
+    let content = match ctx
+        .document_processor
+        .process_file_content_with_provider(file_path, collection, provider)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                "graph rebuild: parse failed for {} ({}): {}",
+                relative_path, abs_file_path, e
+            );
+            return;
+        }
+    };
+    ingest_graph_edges(
+        ctx,
+        tenant_id,
+        relative_path,
+        abs_file_path,
+        &content.chunks,
+        generation,
+    )
+    .await;
+}
+
+/// Build a generation's graph on a branch-dedup hit when it has none.
+///
+/// The dedup fast path shares an already-indexed content generation with a
+/// new branch and returns before the graph phase. The generation's graph is
+/// normally there already — and shared with the branch for free, since
+/// membership is read from `tracked_files` — but one indexed before graph
+/// generations existed, or whose extraction failed, has none, and nothing
+/// else would build it while the file stays unchanged. One indexed probe
+/// detects that.
+pub(super) async fn heal_generation_after_dedup(
     ctx: &ProcessingContext,
     item: &crate::unified_queue_schema::UnifiedQueueItem,
     file_path: &Path,
     relative_path: &str,
     abs_file_path: &str,
     base_path: &str,
+    generation: &str,
 ) {
     let Some(ref graph_store) = ctx.graph_store else {
         return;
     };
-
-    // Only code files produce graph data — text chunking carries no symbols.
-    let overrides = super::component::get_gitattributes(ctx, base_path).await;
-    if crate::tree_sitter::detect_language_with_overrides(file_path, relative_path, &overrides)
-        .is_none()
-    {
-        return;
-    }
-
     match graph_store
-        .file_has_edges(&item.tenant_id, relative_path)
+        .generation_extracted(&item.tenant_id, generation)
         .await
     {
-        Ok(true) => return, // edges intact — the common dedup hit
+        Ok(true) => return, // the common dedup hit
         Ok(false) => {}
         Err(e) => {
             warn!(
-                "graph heal: edge probe failed for {} (tenant {}): {} — skipping",
+                "graph heal: generation probe failed for {} (tenant {}): {} — skipping",
                 relative_path, item.tenant_id, e
             );
             return;
         }
     }
-
-    let provider =
-        super::grammar::ensure_grammar_available(ctx, file_path, relative_path, &overrides).await;
-    let content = match ctx
-        .document_processor
-        .process_file_content_with_provider(file_path, &item.collection, provider)
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(
-                "graph heal: re-parse failed for {} ({}): {}",
-                relative_path, abs_file_path, e
-            );
-            return;
-        }
-    };
     info!(
-        "graph heal: rebuilding edges for {} — dedup hit found none (#235)",
-        relative_path
+        "graph heal: building generation {} of {} — dedup hit found none",
+        generation, relative_path
     );
-    ingest_graph_edges(
+    rebuild_generation(
         ctx,
         &item.tenant_id,
+        &item.collection,
+        file_path,
         relative_path,
         abs_file_path,
-        &content.chunks,
+        base_path,
+        generation,
     )
     .await;
 }
 
-/// Delete graph edges for a file (called during file deletion).
+/// Delete one content generation's graph (it left the index).
 ///
 /// Non-blocking: errors are logged but don't fail the deletion pipeline.
-pub(super) async fn delete_graph_edges(ctx: &ProcessingContext, tenant_id: &str, file_path: &str) {
+pub(super) async fn delete_graph_generation(
+    ctx: &ProcessingContext,
+    tenant_id: &str,
+    relative_path: &str,
+    generation: &str,
+) {
     let Some(ref graph_store) = ctx.graph_store else {
         return;
     };
-
-    // Use reingest_file with empty nodes/edges to just delete old edges
-    if let Err(e) = graph_store
-        .reingest_file(tenant_id, file_path, &[], &[])
-        .await
-    {
+    if let Err(e) = graph_store.delete_generation(tenant_id, generation).await {
         warn!(
-            "Graph edge deletion failed for {} (tenant {}): {}",
-            file_path, tenant_id, e
+            "Graph generation delete failed for {} (generation {}, tenant {}): {}",
+            relative_path, generation, tenant_id, e
         );
     }
 }

@@ -4,6 +4,7 @@
 //! statistics, PageRank, community detection, betweenness centrality,
 //! and backend migration. All queries use a shared read lock on the graph store.
 
+mod algorithm_handlers;
 mod handlers;
 mod helpers;
 mod service_impl;

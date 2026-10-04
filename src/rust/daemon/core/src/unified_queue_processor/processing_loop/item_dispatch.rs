@@ -20,6 +20,44 @@ use crate::unified_queue_processor::error::UnifiedProcessorResult;
 use crate::unified_queue_processor::UnifiedQueueProcessor;
 
 impl UnifiedQueueProcessor {
+    /// The per-item processing context — also what the idle graph backfill
+    /// runs with, so it parses exactly as an item would.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_processing_context(
+        queue_manager: &QueueManager,
+        document_processor: &Arc<DocumentProcessor>,
+        embedding_generator: &Arc<EmbeddingGenerator>,
+        storage_client: &Arc<StorageClient>,
+        lsp_manager: &Option<Arc<RwLock<LanguageServerManager>>>,
+        embedding_semaphore: &Arc<tokio::sync::Semaphore>,
+        allowed_extensions: &Arc<AllowedExtensions>,
+        lexicon_manager: &Arc<LexiconManager>,
+        search_db: &Option<Arc<SearchDbManager>>,
+        graph_store: &Option<crate::graph::SharedGraphStore<crate::graph::SqliteGraphStore>>,
+        grammar_manager: &Option<Arc<RwLock<GrammarManager>>>,
+        ingestion_limits: &Arc<IngestionLimitsConfig>,
+    ) -> crate::context::ProcessingContext {
+        let mut ctx = crate::context::ProcessingContext::new(
+            queue_manager.pool().clone(),
+            Arc::new(queue_manager.clone()),
+            Arc::clone(storage_client),
+            Arc::clone(embedding_generator),
+            Arc::clone(document_processor),
+            Arc::clone(embedding_semaphore),
+            Arc::clone(lexicon_manager),
+            lsp_manager.clone(),
+            search_db.clone(),
+            Arc::clone(allowed_extensions),
+        );
+        if let Some(gs) = graph_store {
+            ctx = ctx.with_graph_store(gs.clone());
+        }
+        if let Some(gm) = grammar_manager {
+            ctx = ctx.with_grammar_manager(Arc::clone(gm));
+        }
+        ctx.with_ingestion_limits(Arc::clone(ingestion_limits))
+    }
+
     /// Process a single unified queue item based on its type
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
@@ -54,25 +92,20 @@ impl UnifiedQueueProcessor {
             item.queue_id, item.item_type, item.op, item.collection
         );
 
-        let mut ctx = crate::context::ProcessingContext::new(
-            queue_manager.pool().clone(),
-            Arc::new(queue_manager.clone()),
-            Arc::clone(storage_client),
-            Arc::clone(embedding_generator),
-            Arc::clone(document_processor),
-            Arc::clone(embedding_semaphore),
-            Arc::clone(lexicon_manager),
-            lsp_manager.clone(),
-            search_db.clone(),
-            Arc::clone(allowed_extensions),
+        let ctx = Self::build_processing_context(
+            queue_manager,
+            document_processor,
+            embedding_generator,
+            storage_client,
+            lsp_manager,
+            embedding_semaphore,
+            allowed_extensions,
+            lexicon_manager,
+            search_db,
+            graph_store,
+            grammar_manager,
+            ingestion_limits,
         );
-        if let Some(gs) = graph_store {
-            ctx = ctx.with_graph_store(gs.clone());
-        }
-        if let Some(gm) = grammar_manager {
-            ctx = ctx.with_grammar_manager(Arc::clone(gm));
-        }
-        ctx = ctx.with_ingestion_limits(Arc::clone(ingestion_limits));
 
         match item.item_type {
             ItemType::Text => {

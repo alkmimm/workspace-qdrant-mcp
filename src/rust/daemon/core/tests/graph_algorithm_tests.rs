@@ -35,21 +35,34 @@ async fn test_pagerank_on_extracted_graph() {
     let pool = guard.pool();
 
     let config = PageRankConfig::default();
-    let results = algorithms::compute_pagerank(pool, TENANT, &config, None)
-        .await
-        .unwrap();
+    let results = algorithms::compute_pagerank(
+        pool,
+        TENANT,
+        &workspace_qdrant_core::graph::GraphScope::all(),
+        &config,
+        None,
+    )
+    .await
+    .unwrap();
 
     assert!(
         !results.is_empty(),
         "PageRank should produce results for non-empty graph"
     );
 
-    // All scores should be positive and sum to ~1.0
+    // The raw PageRank vector sums to 1, and the IDF demotion (R3, #164) then
+    // scales each score by ln(N / count(name)) — a factor in [0, ln N] — so the
+    // reported scores are non-negative and sum to at most ln N (exactly ln N
+    // when every name is unique). The old "sums to ~1.0" assertion predated
+    // the demotion and had failed ever since, unnoticed: no gate ran this file.
+    assert!(results
+        .iter()
+        .all(|r| r.score.is_finite() && r.score >= 0.0));
     let total: f64 = results.iter().map(|r| r.score).sum();
+    let bound = (results.len() as f64).ln();
     assert!(
-        (total - 1.0).abs() < 0.01,
-        "PageRank scores should sum to ~1.0, got {}",
-        total
+        total > 0.0 && total <= bound + 1e-9,
+        "PageRank scores should sum to (0, ln N = {bound}], got {total}"
     );
 
     // Each entry should have valid metadata
@@ -80,14 +93,26 @@ async fn test_pagerank_with_edge_filter() {
     let config = PageRankConfig::default();
 
     // Only consider CALLS edges
-    let calls_only = algorithms::compute_pagerank(pool, TENANT, &config, Some(&["CALLS"]))
-        .await
-        .unwrap();
+    let calls_only = algorithms::compute_pagerank(
+        pool,
+        TENANT,
+        &workspace_qdrant_core::graph::GraphScope::all(),
+        &config,
+        Some(&["CALLS"]),
+    )
+    .await
+    .unwrap();
 
     // Only consider IMPORTS edges
-    let imports_only = algorithms::compute_pagerank(pool, TENANT, &config, Some(&["IMPORTS"]))
-        .await
-        .unwrap();
+    let imports_only = algorithms::compute_pagerank(
+        pool,
+        TENANT,
+        &workspace_qdrant_core::graph::GraphScope::all(),
+        &config,
+        Some(&["IMPORTS"]),
+    )
+    .await
+    .unwrap();
 
     // Both should succeed; results may differ in size/scores
     assert!(!calls_only.is_empty() || !imports_only.is_empty());
@@ -119,9 +144,15 @@ async fn test_community_detection_on_extracted_graph() {
         max_iterations: 100,
         min_community_size: 1,
     };
-    let communities = algorithms::detect_communities(pool, TENANT, &config, None)
-        .await
-        .unwrap();
+    let communities = algorithms::detect_communities(
+        pool,
+        TENANT,
+        &workspace_qdrant_core::graph::GraphScope::all(),
+        &config,
+        None,
+    )
+    .await
+    .unwrap();
 
     assert!(
         !communities.is_empty(),
@@ -159,9 +190,15 @@ async fn test_betweenness_on_extracted_graph() {
     let guard = store.read().await;
     let pool = guard.pool();
 
-    let results = algorithms::compute_betweenness_centrality(pool, TENANT, None, None)
-        .await
-        .unwrap();
+    let results = algorithms::compute_betweenness_centrality(
+        pool,
+        TENANT,
+        &workspace_qdrant_core::graph::GraphScope::all(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     assert!(
         !results.is_empty(),

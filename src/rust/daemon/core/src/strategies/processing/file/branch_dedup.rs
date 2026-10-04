@@ -39,7 +39,10 @@ use wqm_common::hashing::{compute_base_point, compute_content_hash};
 /// Outcome of [`try_branch_dedup`] — `Some` means the dedup fast-path completed
 /// and the caller must return early; `None` means the file is novel (or the
 /// shared points are missing) and the normal ingest pipeline should run.
-pub(super) struct DedupHit;
+pub(super) struct DedupHit {
+    /// The shared content generation (its graph is this branch's too).
+    pub base_point: String,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn try_branch_dedup(
@@ -293,7 +296,7 @@ pub(super) async fn try_branch_dedup(
     // Suppress unused warnings on payload — kept in the signature to mirror the
     // normal ingest entry-point and ease future field reuse.
     let _ = payload;
-    Ok(Some(DedupHit))
+    Ok(Some(DedupHit { base_point }))
 }
 
 // (copy_qdrant_chunks removed in Layer 2 stage 2: the content-row is shared, so

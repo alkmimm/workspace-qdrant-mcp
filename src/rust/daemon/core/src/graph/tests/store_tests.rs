@@ -59,7 +59,10 @@ async fn resolve_drops_unresolved_references_and_keeps_resolved_ones() {
         .await
         .unwrap();
 
-    store.resolve_stub_edges(TENANT).await.unwrap();
+    store
+        .resolve_stub_edges(TENANT, &GenerationBranches::unknown())
+        .await
+        .unwrap();
 
     let surviving: Vec<(String,)> = sqlx::query_as(
         "SELECT target_node_id FROM graph_edges
@@ -99,7 +102,7 @@ async fn test_upsert_node_insert() {
     store.upsert_node(&node).await.unwrap();
 
     // Verify via stats
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_nodes, 1);
 }
 
@@ -120,7 +123,7 @@ async fn test_upsert_node_update() {
     store.upsert_node(&full).await.unwrap();
 
     // Should still be one node
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_nodes, 1);
 
     // Verify file_path was updated (non-empty replaces empty)
@@ -144,7 +147,7 @@ async fn test_upsert_nodes_batch() {
     ];
     store.upsert_nodes(&nodes).await.unwrap();
 
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_nodes, 3);
 }
 
@@ -176,7 +179,7 @@ async fn test_insert_edge() {
     );
     store.insert_edge(&edge).await.unwrap();
 
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_edges, 1);
     assert_eq!(stats.edges_by_type.get("CALLS"), Some(&1));
 }
@@ -193,7 +196,7 @@ async fn test_insert_edge_duplicate_ignored() {
     store.insert_edge(&edge).await.unwrap();
     store.insert_edge(&edge).await.unwrap(); // duplicate -- should not error
 
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_edges, 1);
 }
 
@@ -217,37 +220,8 @@ async fn test_insert_edges_batch() {
     ];
     store.insert_edges(&edges).await.unwrap();
 
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_edges, 2);
-}
-
-// -- Delete edges by file --
-
-#[tokio::test]
-async fn test_delete_edges_by_file() {
-    let store = test_store().await;
-
-    let a = GraphNode::new(TENANT, "a.rs", "a", NodeType::Function);
-    let b = GraphNode::new(TENANT, "b.rs", "b", NodeType::Function);
-    let c = GraphNode::new(TENANT, "c.rs", "c", NodeType::Function);
-    store
-        .upsert_nodes(&[a.clone(), b.clone(), c.clone()])
-        .await
-        .unwrap();
-
-    let edges = vec![
-        GraphEdge::new(TENANT, &a.node_id, &b.node_id, EdgeType::Calls, "a.rs"),
-        GraphEdge::new(TENANT, &a.node_id, &c.node_id, EdgeType::Imports, "a.rs"),
-        GraphEdge::new(TENANT, &b.node_id, &c.node_id, EdgeType::Calls, "b.rs"),
-    ];
-    store.insert_edges(&edges).await.unwrap();
-
-    // Delete edges from a.rs only
-    let deleted = store.delete_edges_by_file(TENANT, "a.rs").await.unwrap();
-    assert_eq!(deleted, 2);
-
-    let stats = store.stats(Some(TENANT)).await.unwrap();
-    assert_eq!(stats.total_edges, 1); // only the b->c edge remains
 }
 
 // -- Delete tenant --
@@ -264,9 +238,9 @@ async fn test_delete_tenant() {
     store.insert_edge(&edge).await.unwrap();
 
     let deleted = store.delete_tenant(TENANT).await.unwrap();
-    assert_eq!(deleted, 3); // 1 edge + 2 nodes
+    assert_eq!(deleted, 3); // 1 edge + 2 nodes (no extraction records)
 
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_nodes, 0);
     assert_eq!(stats.total_edges, 0);
 }

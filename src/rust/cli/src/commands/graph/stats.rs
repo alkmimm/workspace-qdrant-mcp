@@ -11,7 +11,7 @@ use crate::output::columnar::ColumnarBuilder;
 use crate::output::gutter::Gutter;
 use crate::output::number::{format_usize, NumberLocale};
 
-pub async fn graph_stats(tenant_id: Option<String>) -> Result<()> {
+pub async fn graph_stats(tenant_id: Option<String>, branch: Option<String>) -> Result<()> {
     let mut client = DaemonClient::connect_default()
         .await
         .context("Cannot connect to daemon")?;
@@ -20,10 +20,12 @@ pub async fn graph_stats(tenant_id: Option<String>) -> Result<()> {
         .graph()
         .get_graph_stats(GraphStatsRequest {
             tenant_id: tenant_id.clone(),
+            branch,
         })
         .await
         .context("GetGraphStats RPC failed")?
         .into_inner();
+    super::print_scope(resp.scope.as_ref());
 
     canvas::print_title("Graph Statistics");
     canvas::print_blank();
