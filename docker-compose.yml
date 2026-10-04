@@ -250,9 +250,9 @@ services:
       WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD: ${WQM_GRAPH_CENTRALITY_GENERIC_THRESHOLD:-}
       WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS: ${WQM_GRAPH_CENTRALITY_SKIP_SYMBOLS:-}
       WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD: ${WQM_GRAPH_CENTRALITY_USAGE_THRESHOLD:-}
-      # Interval (s) of the graph ghost-node sweep (#245): removes nodes for files
-      # that no longer exist. Default 1800 (30 min); lower to force a sweep sooner.
-      WQM_GRAPH_GHOST_SWEEP_SECS: ${WQM_GRAPH_GHOST_SWEEP_SECS:-}
+      # Interval (s) of the graph generation sweep: retires graph generations no
+      # tracked file references (10 min grace). Default 1800 (30 min).
+      WQM_GRAPH_GENERATION_SWEEP_SECS: ${WQM_GRAPH_GENERATION_SWEEP_SECS:-}
       # ── Dead-branch generation prune (#224 stage 3) ──────────────────────────
       # _COVERED_DELETE: what to do with a stale Layer-2 generation whose path is
       #   still served by another generation on a LIVE branch. off | dry (default,

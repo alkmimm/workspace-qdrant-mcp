@@ -94,6 +94,15 @@ describe('expandGraphContext', () => {
     expect(call.tenant_id).toBe('test-tenant');
     expect(call.node_id).toBe(computeNodeId('test-tenant', 'src/auth.rs', 'authenticate', 'function'));
     expect(call.max_hops).toBe(1);
+    expect(call).not.toHaveProperty('branch');
+  });
+
+  it("asks the graph about the search's branch", async () => {
+    // The graph keeps each file's version per branch: a search on fase-5 must
+    // not annotate its hits with develop's callers.
+    const queryRelated = vi.fn().mockResolvedValue({ nodes: [], total: 0, query_time_ms: 0 });
+    await expandGraphContext(createMockDaemonClient(queryRelated), [codeResult()], 'fase-5');
+    expect(queryRelated.mock.calls[0][0].branch).toBe('fase-5');
   });
 
   it('should populate graph_context with callers and callees', async () => {

@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+
+use crate::graph::GraphScope;
 use tracing::{debug, info, warn};
 
 use super::{load_adjacency_graph, GenericityFilter};
@@ -82,10 +84,11 @@ pub struct CommunityReport {
 pub async fn detect_communities(
     pool: &SqlitePool,
     tenant_id: &str,
+    scope: &GraphScope,
     config: &CommunityConfig,
     edge_types: Option<&[&str]>,
 ) -> Result<Vec<Community>, sqlx::Error> {
-    detect_communities_report(pool, tenant_id, config, edge_types, LP_TIME_BUDGET)
+    detect_communities_report(pool, tenant_id, scope, config, edge_types, LP_TIME_BUDGET)
         .await
         .map(|r| r.communities)
 }
@@ -96,12 +99,20 @@ pub async fn detect_communities(
 pub async fn detect_communities_report(
     pool: &SqlitePool,
     tenant_id: &str,
+    scope: &GraphScope,
     config: &CommunityConfig,
     edge_types: Option<&[&str]>,
     budget: Duration,
 ) -> Result<CommunityReport, sqlx::Error> {
-    let graph =
-        load_adjacency_graph(pool, tenant_id, edge_types, GenericityFilter::All, false).await?;
+    let graph = load_adjacency_graph(
+        pool,
+        tenant_id,
+        scope,
+        edge_types,
+        GenericityFilter::All,
+        false,
+    )
+    .await?;
 
     if graph.nodes.is_empty() {
         return Ok(CommunityReport {

@@ -53,6 +53,21 @@ export interface TextSearchMatch {
 
 // ── GraphService ──
 
+/**
+ * Which branch a graph answer describes, and how much of that branch the graph
+ * covers. The graph keeps each file's versions per branch and answers from the
+ * versions the branch holds; versions not yet extracted (the daemon rebuilds
+ * them while idle) are missing from the answer.
+ */
+export interface GraphScopeProto {
+  /** The branch answered for; "*" = every branch; "" = not a git repository. */
+  branch: string;
+  /** File versions the branch holds in the index. */
+  indexed_files: number;
+  /** Of those, versions the graph has extracted. */
+  graphed_files: number;
+}
+
 export interface QueryRelatedRequest {
   tenant_id: string;
   node_id: string;
@@ -66,6 +81,9 @@ export interface QueryRelatedRequest {
   file_path?: string;
   /** Drop nodes whose best-path confidence < this (0/absent = all); precision filter for homonym fan-out. */
   min_confidence?: number;
+  /** Branch to answer for (absent = the branch the project's main folder has
+   *  checked out; "*" = every branch). */
+  branch?: string;
 }
 
 export interface QueryRelatedResponse {
@@ -77,6 +95,9 @@ export interface QueryRelatedResponse {
    * threshold that drops nothing is otherwise byte-identical to passing none.
    */
   filtered_by_min_confidence: number;
+  /** Which branch this describes and how much of it the graph has extracted.
+   *  Absent from a daemon that predates branch-aware graphs. */
+  scope?: GraphScopeProto;
 }
 
 export interface TraversalNodeProto {
@@ -99,6 +120,9 @@ export interface ImpactAnalysisRequest {
   top_k?: number;
   /** Drop impacted nodes whose best-path confidence < this (0/absent = all). */
   min_confidence?: number;
+  /** Branch to answer for (absent = the branch the project's main folder has
+   *  checked out; "*" = every branch). */
+  branch?: string;
 }
 
 export interface ImpactAnalysisResponse {
@@ -110,6 +134,9 @@ export interface ImpactAnalysisResponse {
    * threshold that drops nothing is otherwise byte-identical to passing none.
    */
   filtered_by_min_confidence: number;
+  /** Which branch this describes and how much of it the graph has extracted.
+   *  Absent from a daemon that predates branch-aware graphs. */
+  scope?: GraphScopeProto;
 }
 
 export interface ImpactNodeProto {
@@ -129,6 +156,9 @@ export interface PageRankRequest {
   tolerance?: number;
   edge_types?: string[];
   top_k?: number;
+  /** Branch to answer for (absent = the branch the project's main folder has
+   *  checked out; "*" = every branch). */
+  branch?: string;
 }
 
 export interface PageRankNodeProto {
@@ -143,10 +173,16 @@ export interface PageRankResponse {
   entries: PageRankNodeProto[];
   total: number;
   query_time_ms: number;
+  /** Which branch this describes and how much of it the graph has extracted.
+   *  Absent from a daemon that predates branch-aware graphs. */
+  scope?: GraphScopeProto;
 }
 
 export interface GraphStatsRequest {
   tenant_id?: string;
+  /** Branch to answer for (absent = the branch the project's main folder has
+   *  checked out; "*" = every branch). */
+  branch?: string;
 }
 
 export interface GraphStatsResponse {
@@ -154,6 +190,9 @@ export interface GraphStatsResponse {
   total_edges: number;
   nodes_by_type: Record<string, number>;
   edges_by_type: Record<string, number>;
+  /** Which branch this describes and how much of it the graph has extracted.
+   *  Absent from a daemon that predates branch-aware graphs. */
+  scope?: GraphScopeProto;
 }
 
 export interface CommunityMemberProto {
@@ -178,6 +217,9 @@ export interface CommunityRequest {
   top_k?: number;
   /** Members per community in the response (0/absent = all). */
   member_limit?: number;
+  /** Branch to answer for (absent = the branch the project's main folder has
+   *  checked out; "*" = every branch). */
+  branch?: string;
 }
 
 export interface CommunityResponse {
@@ -193,6 +235,9 @@ export interface CommunityResponse {
   iterations?: number;
   /** True when an iteration changed no label. */
   converged?: boolean;
+  /** Which branch this describes and how much of it the graph has extracted.
+   *  Absent from a daemon that predates branch-aware graphs. */
+  scope?: GraphScopeProto;
 }
 
 export interface BetweennessRequest {
@@ -200,6 +245,9 @@ export interface BetweennessRequest {
   edge_types?: string[];
   max_samples?: number;
   top_k?: number;
+  /** Branch to answer for (absent = the branch the project's main folder has
+   *  checked out; "*" = every branch). */
+  branch?: string;
 }
 
 export interface BetweennessNodeProto {
@@ -221,6 +269,9 @@ export interface BetweennessResponse {
   partial?: boolean;
   sources_processed?: number;
   sources_total?: number;
+  /** Which branch this describes and how much of it the graph has extracted.
+   *  Absent from a daemon that predates branch-aware graphs. */
+  scope?: GraphScopeProto;
 }
 
 export interface CycleRequest {
@@ -229,6 +280,9 @@ export interface CycleRequest {
   /** Minimum SCC members to report (absent/0 = 2, which skips self-loops). */
   min_cycle_size?: number;
   top_k?: number;
+  /** Branch to answer for (absent = the branch the project's main folder has
+   *  checked out; "*" = every branch). */
+  branch?: string;
 }
 
 export interface CycleMemberProto {
@@ -256,6 +310,9 @@ export interface CycleResponse {
    * about the code from "no cycles" as a consequence of filtering.
    */
   suppressed_ubiquitous: number;
+  /** Which branch this describes and how much of it the graph has extracted.
+   *  Absent from a daemon that predates branch-aware graphs. */
+  scope?: GraphScopeProto;
 }
 
 export interface TestGapsRequest {
@@ -264,6 +321,9 @@ export interface TestGapsRequest {
   edge_types?: string[];
   /** Return only top K gaps (0/absent = all); gap_count stays exact. */
   top_k?: number;
+  /** Branch to answer for (absent = the branch the project's main folder has
+   *  checked out; "*" = every branch). */
+  branch?: string;
 }
 
 export interface TestGapProto {
@@ -297,6 +357,9 @@ export interface TestGapsResponse {
    *  a repo whose ranking was full of demonstrably tested Flutter widgets
    *  reported 27.7% overall against this repo's healthy 28.3%. */
   coverage_by_language?: LanguageCoverageProto[];
+  /** Which branch this describes and how much of it the graph has extracted.
+   *  Absent from a daemon that predates branch-aware graphs. */
+  scope?: GraphScopeProto;
 }
 
 /** Per-language slice of the test-gap coverage summary. */

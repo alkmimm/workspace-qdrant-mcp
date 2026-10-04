@@ -12,6 +12,7 @@ pub async fn communities(
     min_size: Option<u32>,
     top_k: Option<u32>,
     edge_types: Vec<String>,
+    branch: Option<String>,
 ) -> Result<()> {
     output::section("Community Detection");
     output::kv("Tenant", tenant_id);
@@ -37,10 +38,12 @@ pub async fn communities(
             top_k,
             // CLI shows full members; member_limit (MCP-only sampling) stays unset.
             member_limit: None,
+            branch,
         })
         .await
         .context("DetectCommunities RPC failed")?
         .into_inner();
+    super::print_scope(resp.scope.as_ref());
 
     if resp.communities.is_empty() {
         println!("No communities detected.");

@@ -20,6 +20,34 @@ mod test_gaps;
 pub struct GraphArgs {
     #[command(subcommand)]
     command: GraphCommand,
+
+    /// Branch to answer for (default: the branch the project's main folder has
+    /// checked out; `*` = every branch at once). The graph keeps each file's
+    /// version per branch.
+    #[arg(long, global = true)]
+    branch: Option<String>,
+}
+
+/// Which branch the answer describes, and — while the graph does not yet
+/// cover every file version the branch holds (the daemon rebuilds missing
+/// versions when idle) — how much of it does.
+fn print_scope(scope: Option<&crate::grpc::client::workspace_daemon::GraphScopeProto>) {
+    let Some(scope) = scope else {
+        return;
+    };
+    let branch = match scope.branch.as_str() {
+        "" => "(not a git repository)",
+        "*" => "* (every branch)",
+        b => b,
+    };
+    crate::output::kv("Branch", branch);
+    if scope.graphed_files < scope.indexed_files {
+        crate::output::warning(format!(
+            "the graph covers {} of {} file versions on this branch; the rest is still \
+             being rebuilt, so this answer is partial",
+            scope.graphed_files, scope.indexed_files
+        ));
+    }
 }
 
 /// Confidence is a best-path edge-weight product in [0,1] — not a percentage.
@@ -212,6 +240,7 @@ enum GraphCommand {
 }
 
 pub async fn execute(args: GraphArgs) -> Result<()> {
+    let branch = args.branch;
     match args.command {
         GraphCommand::Query {
             node_id,
@@ -219,14 +248,16 @@ pub async fn execute(args: GraphArgs) -> Result<()> {
             hops,
             edge_types,
             min_confidence,
-        } => query::query_related(&node_id, &tenant, hops, edge_types, min_confidence).await,
+        } => {
+            query::query_related(&node_id, &tenant, hops, edge_types, min_confidence, branch).await
+        }
         GraphCommand::Impact {
             symbol,
             tenant,
             file,
             min_confidence,
-        } => impact::impact_analysis(&symbol, &tenant, file, min_confidence).await,
-        GraphCommand::Stats { tenant } => stats::graph_stats(tenant).await,
+        } => impact::impact_analysis(&symbol, &tenant, file, min_confidence, branch).await,
+        GraphCommand::Stats { tenant } => stats::graph_stats(tenant, branch).await,
         GraphCommand::Pagerank {
             tenant,
             damping,
@@ -242,6 +273,7 @@ pub async fn execute(args: GraphArgs) -> Result<()> {
                 tolerance,
                 top_k,
                 edge_types,
+                branch,
             )
             .await
         }
@@ -251,24 +283,27 @@ pub async fn execute(args: GraphArgs) -> Result<()> {
             min_size,
             top_k,
             edge_types,
-        } => communities::communities(&tenant, max_iterations, min_size, top_k, edge_types).await,
+        } => {
+            communities::communities(&tenant, max_iterations, min_size, top_k, edge_types, branch)
+                .await
+        }
         GraphCommand::Betweenness {
             tenant,
             top_k,
             max_samples,
             edge_types,
-        } => betweenness::betweenness(&tenant, top_k, max_samples, edge_types).await,
+        } => betweenness::betweenness(&tenant, top_k, max_samples, edge_types, branch).await,
         GraphCommand::Cycles {
             tenant,
             top_k,
             min_size,
             edge_types,
-        } => cycles::cycles(&tenant, top_k, min_size, edge_types).await,
+        } => cycles::cycles(&tenant, top_k, min_size, edge_types, branch).await,
         GraphCommand::TestGaps {
             tenant,
             top_k,
             edge_types,
-        } => test_gaps::test_gaps(&tenant, top_k, edge_types).await,
+        } => test_gaps::test_gaps(&tenant, top_k, edge_types, branch).await,
         GraphCommand::Migrate {
             from,
             to,

@@ -11,6 +11,7 @@ pub async fn cycles(
     top_k: Option<u32>,
     min_size: Option<u32>,
     edge_types: Vec<String>,
+    branch: Option<String>,
 ) -> Result<()> {
     output::section("Dependency Cycles");
     output::kv("Tenant", tenant_id);
@@ -33,10 +34,12 @@ pub async fn cycles(
             edge_types,
             min_cycle_size: min_size,
             top_k,
+            branch,
         })
         .await
         .context("DetectCycles RPC failed")?
         .into_inner();
+    super::print_scope(resp.scope.as_ref());
 
     // Printed before the cycles (or before the zero message) because a node the
     // ubiquity filter removed cannot appear in any cycle: the reader has to know

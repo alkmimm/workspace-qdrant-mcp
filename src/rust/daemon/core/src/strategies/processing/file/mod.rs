@@ -21,6 +21,7 @@ mod delete;
 mod delete_target;
 mod fts5_index;
 mod grammar;
+mod graph_backfill;
 mod graph_ingest;
 mod ingest;
 mod keyword_extract;
@@ -28,6 +29,8 @@ mod keyword_persist;
 mod store_track;
 mod update_preamble;
 mod zero_byte;
+
+pub(crate) use graph_backfill::{GraphBackfill, STEP_BUDGET as GRAPH_BACKFILL_STEP_BUDGET};
 
 use std::path::Path;
 

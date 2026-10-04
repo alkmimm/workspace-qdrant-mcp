@@ -513,23 +513,50 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib db_retry -- --test-threads=4
 
-# graph_edges reingest edge-cleanup DELETE tests run here, same rationale:
-# hermetic (on-disk tempdir SQLite graph store, no FTS5 trigram or timing
-# dependence). Guards the field-observed multi-second file deletes — a single
-# `source_node_id IN (…) OR target_node_id IN (…)` cannot use an index in SQLite,
-# so it full-scanned the tenant's edges (up to ~19s live). The fix is two-part:
-# split the disjunction into two single-column DELETEs, AND add the graph.db v6
-# composite indexes (tenant_id, source/target_node_id) so the planner probes
-# instead of scanning the tenant. The lib filter runs the v6 migration test
-# (applies + idempotent); the integration filters cover the incoming cross-file
-# edge cleanup on both the full-delete and partial-keep (re-ingest hot) paths.
+# Branch-aware graph runs here — the WHOLE graph suites, not a sample: the
+# core `graph::` module, the four graph integration binaries and the gRPC
+# GraphService tests. Hermetic (in-memory / tempdir SQLite, no embeddings, no
+# git binary). Until graph.db v7 the graph held ONE version of each file —
+# whichever branch was extracted last — so a branch's relations, impact and
+# hotspots answered with another branch's symbols, and a file a branch deleted
+# stayed in its answers (emnify-sms-sender 2026-10-03: two files deleted on the
+# phase-5 branch still carried 14 nodes). Rows are now keyed by content
+# generation and every read is scoped to the generations the asking branch
+# holds in tracked_files. The suites pin the v7 schema, a version's
+# replace/delete never touching another version's rows, scoped traversal /
+# impact / stats / algorithms, per-branch stub resolution, the LSP rewrite
+# staying inside its version, membership read from the authority, the
+# orphan-generation sweep's guards, the backfill finding a version only where
+# its bytes are, and the gRPC answer carrying its branch and coverage.
+# Gating whole suites is deliberate: none of these ran before, and one of them
+# (`test_pagerank_on_extracted_graph`) had been failing unnoticed since the IDF
+# demotion landed (#164). Exact counts asserted — libtest exits 0 when a filter
+# matches nothing.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
-    cargo test -p workspace-qdrant-core --lib graph::schema::tests::migrations -- --test-threads=4 \
- && cargo test -p workspace-qdrant-core --test graph_store_tests -- \
-        clears_incoming clears_ghost_and_stale --test-threads=4
+    cargo test -p workspace-qdrant-core --lib -- \
+        graph:: strategies::processing::file::graph_backfill::tests git::tips::tests \
+        strategies::processing::file::graph_ingest::tests \
+        --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
+    grep -q "^test result: ok\. 246 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 246 core graph tests (graph::, backfill, ingest, git::tips) to run and \
+pass. If you ADDED a test here, bump this count."; exit 1; } \
+ && cargo test -p workspace-qdrant-core --no-fail-fast \
+        --test graph_algorithm_tests --test graph_extractor_tests \
+        --test graph_migration_tests --test graph_store_tests \
+        -- --test-threads=4 2>&1 | tee /tmp/graph-integration.log; \
+    ! grep -q "FAILED" /tmp/graph-integration.log \
+    && awk '/^test result: ok\./ { n++; s += $4 } END { exit !(n == 4 && s == 25) }' \
+        /tmp/graph-integration.log \
+    || { echo "GATE: expected the 4 graph integration binaries to pass 25 tests \
+(4 algorithm + 2 extractor + 5 migration + 14 store). If you ADDED a test, bump this."; exit 1; } \
+ && cargo test -p workspace-qdrant-grpc --lib graph_service \
+        -- --test-threads=4 2>&1 | tee /tmp/graph-grpc.log; \
+    grep -q "^test result: ok\. 21 passed" /tmp/graph-grpc.log \
+    || { echo "GATE: expected exactly 21 GraphService tests to run and pass. If you ADDED a \
+test here, bump this count."; exit 1; }
 
 # test_gaps reliability guard runs here: hermetic (in-memory SQLite), and it
 # protects a REPORTING defect that is invisible to every other assertion —

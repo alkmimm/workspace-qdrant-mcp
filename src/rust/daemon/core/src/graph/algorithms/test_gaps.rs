@@ -37,6 +37,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+
+use crate::graph::GraphScope;
 use tracing::info;
 
 use super::{load_adjacency_graph, GenericityFilter};
@@ -313,6 +315,7 @@ fn is_testable_symbol_type(symbol_type: &str) -> bool {
 pub async fn detect_test_gaps(
     pool: &SqlitePool,
     tenant_id: &str,
+    scope: &GraphScope,
     edge_types: Option<&[&str]>,
     top_k: usize,
 ) -> Result<TestGapsReport, sqlx::Error> {
@@ -324,8 +327,15 @@ pub async fn detect_test_gaps(
     // generated/legacy trees are out of the coverage picture too.
     // `keep_test_nodes: true` — test files ARE the seeds of this measurement, so
     // the ranking-oriented path exclude must not delete them (#370).
-    let graph =
-        load_adjacency_graph(pool, tenant_id, Some(types), GenericityFilter::None, true).await?;
+    let graph = load_adjacency_graph(
+        pool,
+        tenant_id,
+        scope,
+        Some(types),
+        GenericityFilter::None,
+        true,
+    )
+    .await?;
     if graph.nodes.is_empty() {
         return Ok(TestGapsReport {
             total_production: 0,
@@ -517,7 +527,7 @@ mod tests {
                 symbol_name TEXT NOT NULL, symbol_type TEXT NOT NULL,
                 file_path TEXT NOT NULL, start_line INTEGER, end_line INTEGER,
                 signature TEXT, language TEXT,
-                is_test_symbol INTEGER NOT NULL DEFAULT 0,
+                is_test_symbol INTEGER NOT NULL DEFAULT 0, generation TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')",
         )
         .execute(&pool)
@@ -528,7 +538,7 @@ mod tests {
                 edge_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
                 source_node_id TEXT NOT NULL, target_node_id TEXT NOT NULL,
                 edge_type TEXT NOT NULL, source_file TEXT NOT NULL,
-                weight REAL DEFAULT 1.0, metadata_json TEXT,
+                weight REAL DEFAULT 1.0, metadata_json TEXT, generation TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT '')",
         )
         .execute(&pool)
@@ -604,7 +614,9 @@ mod tests {
         edge(&p, "op", "oq").await;
         edge(&p, "orr", "oq").await;
 
-        let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
+        let r = detect_test_gaps(&p, T, &GraphScope::all(), None, 0)
+            .await
+            .unwrap();
 
         // handler, service, orphan_p/q/r are the 5 production candidates (MAX excluded).
         assert_eq!(
@@ -649,7 +661,9 @@ mod tests {
         node(&p, "orph", "orphan", "function", "graph/other.rs").await;
         edge(&p, "it", "pt").await;
 
-        let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
+        let r = detect_test_gaps(&p, T, &GraphScope::all(), None, 0)
+            .await
+            .unwrap();
 
         // Candidates: detect_cycles + orphan (the inline test is NOT a candidate).
         assert_eq!(
@@ -681,7 +695,9 @@ mod tests {
         node(&p, "a", "a", "function", "a.rs").await;
         node(&p, "b", "b", "function", "b.rs").await;
         node(&p, "c", "c", "function", "c.rs").await;
-        let r = detect_test_gaps(&p, T, None, 2).await.unwrap();
+        let r = detect_test_gaps(&p, T, &GraphScope::all(), None, 2)
+            .await
+            .unwrap();
         assert_eq!(r.total_production, 3);
         assert_eq!(r.covered, 0, "no test files → nothing covered");
         assert_eq!(r.gap_count, 3, "true total survives truncation");
@@ -692,7 +708,9 @@ mod tests {
     #[tokio::test]
     async fn empty_graph_is_zero() {
         let p = pool().await;
-        let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
+        let r = detect_test_gaps(&p, T, &GraphScope::all(), None, 0)
+            .await
+            .unwrap();
         assert_eq!(r.total_production, 0);
         assert_eq!(r.gap_count, 0);
         assert!(r.gaps.is_empty());
@@ -721,7 +739,9 @@ mod tests {
         // The single edge the extractor did manage to resolve: 1/25 = 4%.
         edge(&p, "tm", "n0").await;
 
-        let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
+        let r = detect_test_gaps(&p, T, &GraphScope::all(), None, 0)
+            .await
+            .unwrap();
 
         assert_eq!(r.total_production, 25);
         assert_eq!(r.covered, 1);
@@ -758,7 +778,9 @@ mod tests {
             .await;
         }
 
-        let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
+        let r = detect_test_gaps(&p, T, &GraphScope::all(), None, 0)
+            .await
+            .unwrap();
 
         assert_eq!(r.covered, 0);
         assert_eq!(r.test_nodes, 0);
@@ -787,7 +809,9 @@ mod tests {
             edge(&p, "tm", &format!("n{i}")).await;
         }
 
-        let r = detect_test_gaps(&p, T, None, 0).await.unwrap();
+        let r = detect_test_gaps(&p, T, &GraphScope::all(), None, 0)
+            .await
+            .unwrap();
 
         assert_eq!(r.covered, 3, "30% — well above the implausibility floor");
         assert!(r.reliability_warning.is_none());

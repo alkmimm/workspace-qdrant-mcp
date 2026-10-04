@@ -126,6 +126,15 @@ impl BranchCheckouts {
             .or(self.single_tree.as_deref())
     }
 
+    /// Every checkout root (the main folder and each leaf worktree), deduplicated.
+    pub fn all_roots(&self) -> Vec<&Path> {
+        let mut roots: Vec<&Path> = self.roots.values().map(PathBuf::as_path).collect();
+        roots.extend(self.single_tree.as_deref());
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
     /// Whether `relative_path` is on disk in `branch`'s checkout.
     pub fn presence(&self, branch: &str, relative_path: &str) -> CheckoutPresence {
         match self.root_for(branch) {
@@ -134,6 +143,15 @@ impl BranchCheckouts {
             Some(_) => CheckoutPresence::Missing,
         }
     }
+}
+
+/// The branch `main_root` has checked out: `Some` for a git repository (the
+/// writer's [`UNRESOLVED_BRANCH_LABEL`] for a detached or unborn HEAD, the
+/// same label its rows carry in that state), `None` for a folder that is not
+/// a git repository.
+pub fn head_branch(main_root: &Path) -> Option<String> {
+    let git_dir = resolve_git_dir(main_root)?;
+    Some(read_current_branch(&git_dir).unwrap_or_else(|| UNRESOLVED_BRANCH_LABEL.to_string()))
 }
 
 /// Whether `wt_root` is a genuine linked-worktree *checkout* rather than a

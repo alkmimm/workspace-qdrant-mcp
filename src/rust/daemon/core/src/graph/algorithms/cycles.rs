@@ -41,6 +41,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+
+use crate::graph::GraphScope;
 use tracing::info;
 
 use super::{load_adjacency_graph, GenericityFilter};
@@ -104,6 +106,7 @@ const DEFAULT_CYCLE_EDGE_TYPES: &[&str] =
 pub async fn detect_cycles(
     pool: &SqlitePool,
     tenant_id: &str,
+    scope: &GraphScope,
     edge_types: Option<&[&str]>,
     min_cycle_size: usize,
 ) -> Result<CycleReport, sqlx::Error> {
@@ -111,6 +114,7 @@ pub async fn detect_cycles(
     let graph = load_adjacency_graph(
         pool,
         tenant_id,
+        scope,
         Some(types),
         GenericityFilter::UsageUbiquityOnly,
         false,
@@ -363,14 +367,14 @@ mod tests {
         sqlx::query(
             "CREATE TABLE graph_nodes (node_id TEXT PRIMARY KEY, tenant_id TEXT, \
              symbol_name TEXT, symbol_type TEXT, file_path TEXT, \
-             is_test_symbol INTEGER NOT NULL DEFAULT 0)",
+             is_test_symbol INTEGER NOT NULL DEFAULT 0, \n             generation TEXT NOT NULL DEFAULT '')",
         )
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
             "CREATE TABLE graph_edges (tenant_id TEXT, source_node_id TEXT, \
-             target_node_id TEXT, edge_type TEXT, weight REAL)",
+             target_node_id TEXT, edge_type TEXT, weight REAL, \n             generation TEXT NOT NULL DEFAULT '')",
         )
         .execute(&pool)
         .await
@@ -415,7 +419,10 @@ mod tests {
         edge(&pool, "b", "c", 1.0).await;
         edge(&pool, "c", "a", 1.0).await;
 
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
+        let cycles = detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
+            .await
+            .unwrap()
+            .cycles;
         assert_eq!(cycles.len(), 1, "one cycle");
         let c = &cycles[0];
         assert_eq!(c.members.len(), 3);
@@ -431,7 +438,7 @@ mod tests {
         node(&pool, "c", "c", "c.rs").await;
         edge(&pool, "a", "b", 1.0).await;
         edge(&pool, "b", "c", 1.0).await;
-        assert!(detect_cycles(&pool, "t", None, 2)
+        assert!(detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
             .await
             .unwrap()
             .cycles
@@ -448,7 +455,7 @@ mod tests {
         // (weight 0.2 < the 0.6 gate) → must be ignored → no cycle.
         edge(&pool, "b", "a", 0.2).await;
         assert!(
-            detect_cycles(&pool, "t", None, 2)
+            detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
                 .await
                 .unwrap()
                 .cycles
@@ -464,7 +471,10 @@ mod tests {
         node(&pool, "b", "b", "same.rs").await;
         edge(&pool, "a", "b", 1.0).await;
         edge(&pool, "b", "a", 1.0).await;
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
+        let cycles = detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
+            .await
+            .unwrap()
+            .cycles;
         assert_eq!(cycles.len(), 1);
         assert!(
             !cycles[0].cross_file,
@@ -496,7 +506,10 @@ mod tests {
         node(&pool, "svc", "getViewUrl", "resources_service.dart").await;
         edge(&pool, "repo", "svc", 1.0).await;
         edge(&pool, "svc", "repo", 1.0).await;
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
+        let cycles = detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
+            .await
+            .unwrap()
+            .cycles;
         assert_eq!(cycles.len(), 1);
         assert_eq!(cycles[0].members.len(), 2);
         assert!(cycles[0].cross_file);
@@ -524,7 +537,10 @@ mod tests {
         edge(&pool, "x", "y", 1.0).await;
         edge(&pool, "y", "x", 1.0).await;
 
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
+        let cycles = detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
+            .await
+            .unwrap()
+            .cycles;
         assert_eq!(cycles.len(), 4, "3 same-file + 1 cross-file");
         assert!(cycles[0].cross_file, "the cross-file cycle sorts first");
         assert!(
@@ -544,7 +560,10 @@ mod tests {
         edge(&pool, "b", "c", 1.0).await;
         edge(&pool, "c", "d", 1.0).await;
         edge(&pool, "d", "a", 1.0).await;
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
+        let cycles = detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
+            .await
+            .unwrap()
+            .cycles;
         assert_eq!(cycles.len(), 1);
         assert_eq!(cycles[0].members.len(), 4);
         assert!(cycles[0].cross_file);
@@ -562,7 +581,7 @@ mod tests {
         edge(&pool, "a", "c", 1.0).await;
         edge(&pool, "b", "d", 1.0).await;
         edge(&pool, "c", "d", 1.0).await;
-        assert!(detect_cycles(&pool, "t", None, 2)
+        assert!(detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
             .await
             .unwrap()
             .cycles
@@ -581,7 +600,10 @@ mod tests {
         edge(&pool, "c", "d", 1.0).await;
         edge(&pool, "d", "c", 1.0).await; // cycle 2
         edge(&pool, "a", "e", 1.0).await; // acyclic tail
-        let cycles = detect_cycles(&pool, "t", None, 2).await.unwrap().cycles;
+        let cycles = detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
+            .await
+            .unwrap()
+            .cycles;
         assert_eq!(cycles.len(), 2);
         assert!(cycles.iter().all(|c| c.members.len() == 2));
     }
@@ -596,14 +618,17 @@ mod tests {
         node(&pool, "r", "recurse", "r.rs").await;
         edge(&pool, "r", "r", 1.0).await;
         assert!(
-            detect_cycles(&pool, "t", None, 2)
+            detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
                 .await
                 .unwrap()
                 .cycles
                 .is_empty(),
             "min 2 skips self-loops"
         );
-        let with1 = detect_cycles(&pool, "t", None, 1).await.unwrap().cycles;
+        let with1 = detect_cycles(&pool, "t", &GraphScope::all(), None, 1)
+            .await
+            .unwrap()
+            .cycles;
         assert_eq!(with1.len(), 1, "min 1 reports the self-loop");
         assert_eq!(with1[0].members.len(), 1);
         assert!(!with1[0].cross_file);
@@ -660,9 +685,16 @@ mod tests {
         // Guard: without the ubiquity axis the artefact IS reported, at a weight
         // the confidence gate lets through. If this ever stops holding, the
         // fixture has drifted and the assertions below would pass vacuously.
-        let raw = load_adjacency_graph(&pool, "t", None, GenericityFilter::None, false)
-            .await
-            .unwrap();
+        let raw = load_adjacency_graph(
+            &pool,
+            "t",
+            &GraphScope::all(),
+            None,
+            GenericityFilter::None,
+            false,
+        )
+        .await
+        .unwrap();
         assert!(
             raw.nodes.contains_key("uc_add"),
             "fixture must survive the 0.6 gate — otherwise this tests nothing"
@@ -675,7 +707,9 @@ mod tests {
             "the fabricated return edge must be present in the raw graph"
         );
 
-        let report = detect_cycles(&pool, "t", None, 2).await.unwrap();
+        let report = detect_cycles(&pool, "t", &GraphScope::all(), None, 2)
+            .await
+            .unwrap();
         assert_eq!(
             report.suppressed_ubiquitous, 1,
             "exactly the ubiquitous `add` node is suppressed"

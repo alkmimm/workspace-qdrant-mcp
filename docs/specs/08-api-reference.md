@@ -803,6 +803,18 @@ Multi-tenant project lifecycle and session management.
 
 Code relationship graph queries and algorithms. Operates on the embedded graph database (`graph.db`).
 
+**Branch scoping (graph.db v7).** Graph rows are keyed by content generation —
+the tracked file's `base_point` — so each version of a file has its own nodes and
+edges. Every query request takes `optional string branch`: absent = the branch the
+project's main folder has checked out, `"*"` = every branch (unscoped). The handler
+reads which generations the branch sees from `tracked_files.branches` (the index
+authority; nothing is mirrored into graph.db) — its own, plus the trunk's for
+every path it holds none of and did not change between the tips — and every
+traversal, impact, stats and algorithm load admits only those rows. Every response carries
+`GraphScopeProto scope { branch, indexed_files, graphed_files }`: the branch
+answered for, the file versions it holds, and how many of them the graph has
+extracted (fewer while the idle backfill is still rebuilding them).
+
 | Method               | Used By | Purpose                                    | Status     |
 | -------------------- | ------- | ------------------------------------------ | ---------- |
 | `QueryRelated`       | CLI     | Traverse related nodes within N hops       | Production |

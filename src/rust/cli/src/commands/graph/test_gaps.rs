@@ -9,7 +9,12 @@ use crate::grpc::client::workspace_daemon::TestGapsRequest;
 use crate::grpc::client::DaemonClient;
 use crate::output;
 
-pub async fn test_gaps(tenant_id: &str, top_k: Option<u32>, edge_types: Vec<String>) -> Result<()> {
+pub async fn test_gaps(
+    tenant_id: &str,
+    top_k: Option<u32>,
+    edge_types: Vec<String>,
+    branch: Option<String>,
+) -> Result<()> {
     output::section("Test Gaps (production symbols no test reaches)");
     output::kv("Tenant", tenant_id);
     if let Some(k) = top_k {
@@ -27,10 +32,12 @@ pub async fn test_gaps(tenant_id: &str, top_k: Option<u32>, edge_types: Vec<Stri
             tenant_id: tenant_id.to_string(),
             edge_types,
             top_k,
+            branch,
         })
         .await
         .context("DetectTestGaps RPC failed")?
         .into_inner();
+    super::print_scope(resp.scope.as_ref());
 
     let pct = if resp.total_production > 0 {
         (resp.covered as f64 / resp.total_production as f64) * 100.0

@@ -411,3 +411,69 @@ compute waste (the expensive part) is already gone.
 - `tracked_files` still grows linearly with branch count (no schema change),
   but Qdrant `points_count` grows only with unique content (since we
   scroll-and-copy from existing).
+
+## The code graph follows the same generations (graph.db v7, 2026-10-04)
+
+Layer 2 gave each content generation of a path one physical Qdrant point set
+and one `tracked_files` row whose `branches` set says who holds it. Until
+graph.db v7 the code graph did not follow: a node was keyed by
+`(tenant, file, symbol, type)` alone, so it kept ONE version of each file —
+whichever branch was extracted last — and a dedup hit (which skips the graph
+phase) left whatever version was there. Measured on emnify-sms-sender
+(2026-10-03): `endpoint.ts` and `Message.ts`, deleted on the phase-5 branch,
+still carried 14 nodes in that branch's answers, and `page.tsx` answered with
+the trunk's calls.
+
+**Rows.** Every `graph_nodes` / `graph_edges` row carries the `generation` that
+produced it — the tracked row's `base_point` — and both primary keys include it.
+A node's id stays version-independent (`hash(tenant|file|symbol|type)`), so a
+cross-file edge targets "this symbol of that file" and resolves on each branch
+to whichever version of the target file that branch holds. File-less stub rows
+(and nodes an extraction only referred to) carry the empty generation and are
+visible everywhere. `graph_generations` records each extraction, including
+empty ones, so "no symbols" is not mistaken for "never extracted".
+
+**Writes.** An extraction replaces exactly its generation's rows
+(`replace_generation`); another version of the same path — another branch —
+is never touched. The delete path drops a generation's rows when its tracked
+row disappears and no clone still references the `base_point` (the same
+predicate that deletes the Qdrant points). The idle generation sweep
+(`graph::maintenance`) catches generations the delete path never saw, after a
+10-minute grace (the graph is written before the tracked row) and never for a
+tenant whose authority reads empty.
+
+**Dedup hits are free.** A branch that dedups onto an existing generation gets
+its graph without any graph write: membership is read, not copied. The dedup
+path only builds the graph when the generation was never extracted
+(`heal_generation_after_dedup`, tree-sitter only).
+
+**Reads.** Branch membership is NOT mirrored into graph.db. Every graph read
+resolves the asking branch to the generations it sees (`graph::branch_scope`;
+absent branch = the main folder's checkout, `*` = unscoped) and admits only
+those rows — traversal, impact, stats and every algorithm load. A feature
+branch is tagged only on the files it CHANGED, so its view is composed exactly
+like the MCP read surfaces' trunk fill-in (#408/#409): its own generations,
+plus the trunk's generation of every path it holds none of and did not change
+between the two tips (`git::paths_changed_between`, no rename detection — a
+path renamed or deleted on the branch is changed). The trunk is git's default
+branch when the index holds files under it, else the most-tagged branch. A
+branch git does not resolve and the index never tagged (a typo) inherits
+nothing. Nothing can drift, because every branch create, switch, share and
+prune already maintains the authority. The by-name stub resolver uses the same
+membership, with the trunk's generations visible to every branch: a candidate
+definition only counts for an edge when some branch sees both, so a name
+defined once per branch resolves uniquely on each branch instead of as an
+ambiguous fan-out across all of them.
+
+**Rebuild.** v7 drops the old rows (nothing recorded which version produced
+them). While the queue is idle, the backfill lists tracked generations without
+an extraction record and rebuilds each from a checkout that has exactly that
+version on disk (the branch's own checkouts first, then any other checkout —
+hash-verified either way); versions no checkout holds wait until one does. Responses report coverage
+(`scope.graphed_files` of `scope.indexed_files`) so a partial graph is never
+read as a complete one.
+
+**Known limit.** Resolution confidence is decided once per edge row. An edge
+from a generation that several branches share is resolved against the union of
+those branches' candidates, so a name that moved between files on only some of
+them can still score as a fan-out there.

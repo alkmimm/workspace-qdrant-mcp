@@ -284,6 +284,32 @@ impl UnifiedQueueProcessor {
             .await
         {
             Ok(items) if items.is_empty() => {
+                // Graph backfill first, bounded by its own budget: it parses
+                // with the same context an item gets, and yields well before
+                // the next poll so arriving work is not held up.
+                if graph_store.is_some() {
+                    let ctx = Self::build_processing_context(
+                        queue_manager,
+                        document_processor,
+                        embedding_generator,
+                        storage_client,
+                        lsp_manager,
+                        embedding_semaphore,
+                        allowed_extensions,
+                        lexicon_manager,
+                        search_db,
+                        graph_store,
+                        grammar_manager,
+                        ingestion_limits,
+                    );
+                    state
+                        .graph_backfill
+                        .step(
+                            &ctx,
+                            crate::strategies::processing::file::GRAPH_BACKFILL_STEP_BUDGET,
+                        )
+                        .await;
+                }
                 run_idle_work(
                     state,
                     config,

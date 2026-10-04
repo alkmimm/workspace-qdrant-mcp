@@ -3,6 +3,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+
+use crate::graph::GraphScope;
 use tracing::{debug, info};
 
 use super::{load_adjacency_graph, AdjacencyGraph, GenericityFilter};
@@ -45,11 +47,19 @@ impl Default for PageRankConfig {
 pub async fn compute_pagerank(
     pool: &SqlitePool,
     tenant_id: &str,
+    scope: &GraphScope,
     config: &PageRankConfig,
     edge_types: Option<&[&str]>,
 ) -> Result<Vec<PageRankEntry>, sqlx::Error> {
-    let graph =
-        load_adjacency_graph(pool, tenant_id, edge_types, GenericityFilter::All, false).await?;
+    let graph = load_adjacency_graph(
+        pool,
+        tenant_id,
+        scope,
+        edge_types,
+        GenericityFilter::All,
+        false,
+    )
+    .await?;
 
     if graph.nodes.is_empty() {
         return Ok(Vec::new());

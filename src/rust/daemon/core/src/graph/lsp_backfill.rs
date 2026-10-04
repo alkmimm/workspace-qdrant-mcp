@@ -13,6 +13,11 @@
 //! we resolve the callee by `(file, name)`, preferring the node whose
 //! `start_line` is closest to the LSP line. This is exactly the method-call case
 //! R8 exists to fix, so getting the kind right is load-bearing.
+//!
+//! The server reads the project's MAIN folder, so the backfill works inside the
+//! scope of the branch checked out there: it asks about that version of each
+//! file, binds callees to that version's nodes, and rewrites only that
+//! version's edges. Another branch's version of the same file keeps its own.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,7 +25,7 @@ use std::sync::Arc;
 use sqlx::Row;
 use tokio::sync::RwLock;
 
-use super::{NodeType, SharedGraphStore, SqliteGraphStore};
+use super::{GraphScope, NodeType, SharedGraphStore, SqliteGraphStore};
 use crate::lsp::{symbol_column_in_line, LanguageServerManager, ResolvedCall};
 
 /// A callable definition in the graph (a potential caller with outgoing calls).
@@ -30,6 +35,8 @@ pub(crate) struct CallerNode {
     pub symbol_name: String,
     pub node_type: NodeType,
     pub start_line: u32,
+    /// The file version the caller row belongs to (its edges are rewritten there).
+    pub generation: String,
 }
 
 /// Relativize an absolute LSP path to the project-relative form the graph keys
@@ -71,6 +78,7 @@ pub(crate) async fn tenant_callers(
     store: &SharedGraphStore<SqliteGraphStore>,
     tenant_id: &str,
     language_ids: &[String],
+    scope: &GraphScope,
 ) -> Vec<CallerNode> {
     if language_ids.is_empty() {
         return Vec::new();
@@ -80,9 +88,9 @@ pub(crate) async fn tenant_callers(
         .map(|i| format!("?{}", i + 2))
         .collect();
     let sql = format!(
-        "SELECT file_path, symbol_name, symbol_type, start_line
+        "SELECT file_path, symbol_name, symbol_type, start_line, generation
          FROM graph_nodes
-         WHERE tenant_id = ?1 AND file_path <> '' AND start_line IS NOT NULL
+         WHERE tenant_id = ?1 AND generation <> '' AND start_line IS NOT NULL
            AND symbol_type IN ('function','async_function','method')
            AND language IN ({})",
         lang_ph.join(", ")
@@ -93,6 +101,7 @@ pub(crate) async fn tenant_callers(
     }
     let rows = q.fetch_all(guard.pool()).await.unwrap_or_default();
     rows.iter()
+        .filter(|r| scope.admits(r.get::<String, _>("generation").as_str()))
         .filter_map(|r| {
             let st: String = r.get("symbol_type");
             Some(CallerNode {
@@ -100,6 +109,7 @@ pub(crate) async fn tenant_callers(
                 symbol_name: r.get("symbol_name"),
                 node_type: NodeType::from_str(&st)?,
                 start_line: r.get::<i64, _>("start_line") as u32,
+                generation: r.get("generation"),
             })
         })
         .collect()
@@ -115,10 +125,11 @@ async fn callee_node_id(
     rel_file: &str,
     name: &str,
     line: u32,
+    scope: &GraphScope,
 ) -> Option<String> {
     let guard = store.read().await;
     let rows = sqlx::query(
-        "SELECT node_id, start_line FROM graph_nodes
+        "SELECT node_id, start_line, generation FROM graph_nodes
          WHERE tenant_id = ?1 AND file_path = ?2 AND symbol_name = ?3",
     )
     .bind(tenant_id)
@@ -128,6 +139,7 @@ async fn callee_node_id(
     .await
     .ok()?;
     rows.iter()
+        .filter(|r| scope.admits(r.get::<String, _>("generation").as_str()))
         .min_by_key(|r| {
             let sl = r
                 .get::<Option<i64>, _>("start_line")
@@ -148,6 +160,7 @@ pub(crate) async fn authoritative_args_for_caller(
     tenant_id: &str,
     project_root: &str,
     resolved: &[ResolvedCall],
+    scope: &GraphScope,
 ) -> (Vec<String>, Vec<String>) {
     let mut names: Vec<String> = Vec::new();
     let mut targets: Vec<String> = Vec::new();
@@ -155,7 +168,8 @@ pub(crate) async fn authoritative_args_for_caller(
         let Some(rel) = relativize(&call.file, project_root) else {
             continue;
         };
-        let Some(node_id) = callee_node_id(store, tenant_id, &rel, &call.name, call.line).await
+        let Some(node_id) =
+            callee_node_id(store, tenant_id, &rel, &call.name, call.line, scope).await
         else {
             continue; // out-of-project or not indexed — leave the fuzzy edge.
         };
@@ -185,8 +199,9 @@ pub async fn run_backfill_tenant(
     tenant_id: &str,
     project_root: &str,
     language_ids: &[String],
+    scope: &GraphScope,
 ) -> u64 {
-    let mut callers = tenant_callers(store, tenant_id, language_ids).await;
+    let mut callers = tenant_callers(store, tenant_id, language_ids, scope).await;
     // Group callers by file so we open each document in the LSP exactly ONCE
     // (didOpen is required for call-hierarchy but too costly to pay per-caller).
     callers.sort_by(|a, b| a.file_path.cmp(&b.file_path));
@@ -237,7 +252,7 @@ pub async fn run_backfill_tenant(
             continue;
         }
         let (names, targets) =
-            authoritative_args_for_caller(store, tenant_id, project_root, &resolved).await;
+            authoritative_args_for_caller(store, tenant_id, project_root, &resolved, scope).await;
         if names.is_empty() {
             continue;
         }
@@ -248,7 +263,14 @@ pub async fn run_backfill_tenant(
             caller.node_type,
         );
         if let Ok(n) = store
-            .make_calls_authoritative(tenant_id, &caller_id, &caller.file_path, &names, &targets)
+            .make_calls_authoritative(
+                tenant_id,
+                &caller_id,
+                &caller.file_path,
+                &caller.generation,
+                &names,
+                &targets,
+            )
             .await
         {
             superseded += n;
@@ -278,17 +300,7 @@ mod tests {
             )
             .await
             .unwrap();
-        sqlx::query(
-            "CREATE TABLE graph_nodes (
-                node_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, symbol_name TEXT NOT NULL,
-                symbol_type TEXT NOT NULL, file_path TEXT NOT NULL, start_line INTEGER,
-                end_line INTEGER, signature TEXT, language TEXT,
-                is_test_symbol INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        crate::graph::schema::apply_graph_schema(&pool).await;
         SharedGraphStore::new(SqliteGraphStore::new(pool))
     }
 
@@ -332,8 +344,14 @@ mod tests {
             },
         ];
 
-        let (names, targets) =
-            authoritative_args_for_caller(&store, t, "/home/u/doc-v2", &resolved).await;
+        let (names, targets) = authoritative_args_for_caller(
+            &store,
+            t,
+            "/home/u/doc-v2",
+            &resolved,
+            &GraphScope::all(),
+        )
+        .await;
 
         assert_eq!(names, vec!["build".to_string(), "helper".to_string()]);
         // The METHOD `build` binds to its Method node_id (NOT a Function guess).
@@ -355,12 +373,15 @@ mod tests {
         let store = mk_store().await;
         let mut dart = GraphNode::new(t, "lib/a.dart", "build", NodeType::Method);
         dart.start_line = Some(10);
+        dart.generation = "g1".into();
         dart.language = Some("dart".into());
         let mut java = GraphNode::new(t, "src/A.java", "run", NodeType::Method);
         java.start_line = Some(20);
+        java.generation = "g1".into();
         java.language = Some("java".into());
         // A dart node with no start_line must be excluded regardless of language.
         let mut noline = GraphNode::new(t, "lib/b.dart", "helper", NodeType::Function);
+        noline.generation = "g1".into();
         noline.language = Some("dart".into());
         store
             .upsert_nodes(&[dart.clone(), java.clone(), noline.clone()])
@@ -368,7 +389,8 @@ mod tests {
             .unwrap();
 
         // Per-language scoping: the Dart server's pass sees only Dart callers.
-        let dart_callers = tenant_callers(&store, t, &["dart".to_string()]).await;
+        let dart_callers =
+            tenant_callers(&store, t, &["dart".to_string()], &GraphScope::all()).await;
         assert_eq!(
             dart_callers.len(),
             1,
@@ -376,12 +398,23 @@ mod tests {
         );
         assert_eq!(dart_callers[0].symbol_name, "build");
 
-        let java_callers = tenant_callers(&store, t, &["java".to_string()]).await;
+        let java_callers =
+            tenant_callers(&store, t, &["java".to_string()], &GraphScope::all()).await;
         assert_eq!(java_callers.len(), 1);
         assert_eq!(java_callers[0].symbol_name, "run");
 
+        // A branch's scope sees only its own versions' callers.
+        let other_branch = GraphScope::generations(["g2".to_string()].into_iter().collect());
+        assert!(
+            tenant_callers(&store, t, &["dart".to_string()], &other_branch)
+                .await
+                .is_empty()
+        );
+
         // Empty filter resolves nothing (guards the `IN ()` SQL).
-        assert!(tenant_callers(&store, t, &[]).await.is_empty());
+        assert!(tenant_callers(&store, t, &[], &GraphScope::all())
+            .await
+            .is_empty());
     }
 
     #[test]

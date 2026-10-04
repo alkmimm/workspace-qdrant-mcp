@@ -107,7 +107,8 @@ async function enrichOneResult(
     nodeId: string;
     filePath: string;
     symbolName: string;
-  }
+  },
+  branch: string | undefined
 ): Promise<void> {
   try {
     const response = await Promise.race([
@@ -119,6 +120,9 @@ async function enrichOneResult(
         tenant_id: target.tenantId,
         node_id: target.nodeId,
         max_hops: 1,
+        // The graph keeps each file's version per branch: describe the
+        // relations on the branch the search ran on, not another branch's.
+        ...(branch !== undefined ? { branch } : {}),
       }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Graph query timeout')), GRAPH_QUERY_TIMEOUT_MS)
@@ -154,14 +158,17 @@ async function enrichOneResult(
  * For each result that has chunk_symbol_name and chunk_chunk_type metadata,
  * queries the daemon GraphService for callers and callees. Queries run in
  * parallel with a per-query timeout. Failures are silently ignored — the
- * result simply won't have a graph_context field.
+ * result simply won't have a graph_context field. `branch` is the search's
+ * effective branch (`*` = every branch; undefined = the daemon's default, the
+ * main folder's checkout).
  */
 export async function expandGraphContext(
   daemonClient: DaemonClient,
-  results: SearchResult[]
+  results: SearchResult[],
+  branch?: string
 ): Promise<void> {
   const targets = collectEnrichmentTargets(results);
   if (targets.length === 0) return;
   logDebug('Fetching graph context', { count: targets.length });
-  await Promise.all(targets.map((t) => enrichOneResult(daemonClient, t)));
+  await Promise.all(targets.map((t) => enrichOneResult(daemonClient, t, branch)));
 }

@@ -83,11 +83,11 @@ pub(crate) async fn ingest_file_content(
     )
     .await
     {
-        Ok(Some(_hit)) => {
-            // Issue #235: the update preamble's content-row GC may have wiped
-            // this file's graph edges, and the dedup return skips the phase
-            // that rewrites them. Probe-and-rebuild (tree-sitter only).
-            graph_ingest::heal_edges_after_dedup(
+        Ok(Some(hit)) => {
+            // The shared generation's graph is this branch's graph too; build
+            // it only if it was never extracted (the dedup return skips the
+            // graph phase). Probe-and-rebuild, tree-sitter only.
+            graph_ingest::heal_generation_after_dedup(
                 ctx,
                 item,
                 file_path,
@@ -97,6 +97,7 @@ pub(crate) async fn ingest_file_content(
                 // worktree file has different content at the same coordinates.
                 read_abs_path,
                 base_path,
+                &hit.base_point,
             )
             .await;
             return Ok(());
@@ -439,6 +440,7 @@ async fn run_middle_phases(
         document_content,
         file_document_id,
         relative_path,
+        base_point,
         &mut points,
         timings,
     )
@@ -506,6 +508,7 @@ async fn run_keyword_and_graph_phases(
     document_content: &crate::DocumentContent,
     file_document_id: &str,
     relative_path: &str,
+    base_point: &str,
     points: &mut [crate::storage::DocumentPoint],
     timings: &mut Vec<PhaseTiming>,
 ) {
@@ -544,6 +547,7 @@ async fn run_keyword_and_graph_phases(
         relative_path,
         &read_abs_path,
         &document_content.chunks,
+        base_point,
     )
     .await;
     timings.push(PhaseTiming {

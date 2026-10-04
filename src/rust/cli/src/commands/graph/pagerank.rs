@@ -13,6 +13,7 @@ pub async fn pagerank(
     tolerance: Option<f64>,
     top_k: Option<u32>,
     edge_types: Vec<String>,
+    branch: Option<String>,
 ) -> Result<()> {
     output::section("PageRank");
     output::kv("Tenant", tenant_id);
@@ -37,10 +38,12 @@ pub async fn pagerank(
             tolerance,
             edge_types,
             top_k,
+            branch,
         })
         .await
         .context("ComputePageRank RPC failed")?
         .into_inner();
+    super::print_scope(resp.scope.as_ref());
 
     if resp.entries.is_empty() {
         println!("No nodes found.");

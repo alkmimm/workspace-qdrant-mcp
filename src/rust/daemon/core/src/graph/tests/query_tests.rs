@@ -34,7 +34,7 @@ async fn test_query_related_1_hop() {
     let (a, b, _c, _d) = build_call_chain(&store).await;
 
     let results = store
-        .query_related(TENANT, &a.node_id, 1, None)
+        .query_related(TENANT, &a.node_id, 1, None, &GraphScope::all())
         .await
         .unwrap();
 
@@ -49,7 +49,7 @@ async fn test_query_related_2_hops() {
     let (a, _b, _c, _d) = build_call_chain(&store).await;
 
     let results = store
-        .query_related(TENANT, &a.node_id, 2, None)
+        .query_related(TENANT, &a.node_id, 2, None, &GraphScope::all())
         .await
         .unwrap();
 
@@ -64,7 +64,7 @@ async fn test_query_related_3_hops_reaches_end() {
     let (a, _b, _c, _d) = build_call_chain(&store).await;
 
     let results = store
-        .query_related(TENANT, &a.node_id, 3, None)
+        .query_related(TENANT, &a.node_id, 3, None, &GraphScope::all())
         .await
         .unwrap();
 
@@ -78,7 +78,7 @@ async fn test_query_related_max_hops_boundary() {
 
     // max_hops=0 should return nothing
     let results = store
-        .query_related(TENANT, &a.node_id, 0, None)
+        .query_related(TENANT, &a.node_id, 0, None, &GraphScope::all())
         .await
         .unwrap();
     assert_eq!(results.len(), 0);
@@ -104,7 +104,13 @@ async fn test_query_related_edge_type_filter() {
 
     // Filter to CALLS only
     let results = store
-        .query_related(TENANT, &a.node_id, 1, Some(&[EdgeType::Calls]))
+        .query_related(
+            TENANT,
+            &a.node_id,
+            1,
+            Some(&[EdgeType::Calls]),
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
@@ -112,7 +118,13 @@ async fn test_query_related_edge_type_filter() {
 
     // Filter to USES_TYPE only
     let results = store
-        .query_related(TENANT, &a.node_id, 1, Some(&[EdgeType::UsesType]))
+        .query_related(
+            TENANT,
+            &a.node_id,
+            1,
+            Some(&[EdgeType::UsesType]),
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
@@ -172,7 +184,7 @@ async fn test_query_related_same_depth_keeps_strongest_path_confidence() {
         .unwrap();
 
     let results = store
-        .query_related(TENANT, &s.node_id, 2, None)
+        .query_related(TENANT, &s.node_id, 2, None, &GraphScope::all())
         .await
         .unwrap();
     let c_hit = results
@@ -214,7 +226,10 @@ async fn test_impact_same_depth_keeps_strongest_caller_confidence() {
     // Weak edge first (see forward test).
     store.insert_edges(&[weak, strong]).await.unwrap();
 
-    let report = store.impact_analysis(TENANT, "target", None).await.unwrap();
+    let report = store
+        .impact_analysis(TENANT, "target", None, &GraphScope::all())
+        .await
+        .unwrap();
     assert_eq!(report.total_impacted, 1);
     assert!(
         (report.impacted_nodes[0].confidence - 0.9).abs() < 1e-9,
@@ -250,7 +265,7 @@ async fn test_query_related_reconvergent_dedup() {
     store.insert_edges(&edges).await.unwrap();
 
     let results = store
-        .query_related(TENANT, &a.node_id, 3, None)
+        .query_related(TENANT, &a.node_id, 3, None, &GraphScope::all())
         .await
         .unwrap();
 
@@ -299,7 +314,7 @@ async fn test_impact_analysis_direct_callers() {
     store.insert_edges(&edges).await.unwrap();
 
     let report = store
-        .impact_analysis(TENANT, "target_fn", Some("lib.rs"))
+        .impact_analysis(TENANT, "target_fn", Some("lib.rs"), &GraphScope::all())
         .await
         .unwrap();
 
@@ -350,7 +365,7 @@ async fn test_impact_strict_filepath_drops_ambiguous_fanout() {
 
     // Strict: file_path anchors the target → the 0.3 fan-out edge is dropped.
     let strict = store
-        .impact_analysis(TENANT, "remove", Some("lib.rs"))
+        .impact_analysis(TENANT, "remove", Some("lib.rs"), &GraphScope::all())
         .await
         .unwrap();
     assert_eq!(
@@ -366,7 +381,10 @@ async fn test_impact_strict_filepath_drops_ambiguous_fanout() {
     assert_eq!(strict.impacted_nodes[0].symbol_name, "confident_caller");
 
     // Broad: no file_path → unchanged, both callers returned.
-    let broad = store.impact_analysis(TENANT, "remove", None).await.unwrap();
+    let broad = store
+        .impact_analysis(TENANT, "remove", None, &GraphScope::all())
+        .await
+        .unwrap();
     assert_eq!(
         broad.total_impacted, 2,
         "unanchored impact stays broad and keeps the fan-out"
@@ -405,7 +423,7 @@ async fn test_impact_analysis_transitive() {
     store.insert_edges(&edges).await.unwrap();
 
     let report = store
-        .impact_analysis(TENANT, "target", Some("c.rs"))
+        .impact_analysis(TENANT, "target", Some("c.rs"), &GraphScope::all())
         .await
         .unwrap();
 
@@ -430,7 +448,7 @@ async fn test_impact_analysis_symbol_not_found() {
     let store = test_store().await;
 
     let report = store
-        .impact_analysis(TENANT, "nonexistent", None)
+        .impact_analysis(TENANT, "nonexistent", None, &GraphScope::all())
         .await
         .unwrap();
 
@@ -443,7 +461,7 @@ async fn test_impact_analysis_symbol_not_found() {
 #[tokio::test]
 async fn test_stats_empty() {
     let store = test_store().await;
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_nodes, 0);
     assert_eq!(stats.total_edges, 0);
 }
@@ -459,7 +477,7 @@ async fn test_stats_by_type() {
     ];
     store.upsert_nodes(&nodes).await.unwrap();
 
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_nodes, 3);
     assert_eq!(stats.nodes_by_type.get("function"), Some(&2));
     assert_eq!(stats.nodes_by_type.get("struct"), Some(&1));
@@ -473,7 +491,7 @@ async fn test_stats_all_tenants() {
     let node_b = GraphNode::new("tenant-b", "b.rs", "y", NodeType::Function);
     store.upsert_nodes(&[node_a, node_b]).await.unwrap();
 
-    let stats = store.stats(None).await.unwrap();
+    let stats = store.stats(None, &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_nodes, 2);
 }
 
@@ -504,7 +522,7 @@ async fn test_prune_orphans() {
     let pruned = store.prune_orphans(TENANT).await.unwrap();
     assert_eq!(pruned, 1);
 
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_nodes, 2); // only connected nodes remain
 }
 

@@ -12,6 +12,7 @@ pub async fn query_related(
     max_hops: u32,
     edge_types: Vec<String>,
     min_confidence: Option<f64>,
+    branch: Option<String>,
 ) -> Result<()> {
     output::section("Graph Query");
     output::kv("Node ID", node_id);
@@ -43,10 +44,12 @@ pub async fn query_related(
             symbol_name: None,
             file_path: None,
             min_confidence,
+            branch,
         })
         .await
         .context("QueryRelated RPC failed")?
         .into_inner();
+    super::print_scope(resp.scope.as_ref());
 
     if resp.nodes.is_empty() {
         println!("No related nodes found.");

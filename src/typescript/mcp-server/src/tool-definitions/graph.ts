@@ -12,7 +12,7 @@ export const graphToolDefinition = {
   },
   description:
     'Navigate the code-relationship graph: callers/callees, change-impact, importance ranking, module clusters, and circular dependencies. ' +
-    'Built from symbol relations (calls, contains, uses-type, imports) extracted during indexing. ' +
+    'Built from symbol relations (calls, contains, uses-type, imports) extracted during indexing, per branch: answers describe the branch at your cwd (or `branch`). ' +
     'Use this to understand how code connects before editing — e.g. "what calls this function?", "what breaks if I change X?", "what are the most central functions?". ' +
     'Required args per action: relations → symbol + filePath; impact/usages → symbol; stats/hotspots/bridges/modules/cycles/test_gaps → none (project-wide). ' +
     'Each relations/impact/usages node carries a `confidence` (best-path certainty): ~1.0 precise, 0.7 tenant-unique name, ~1/N (e.g. 0.17) an ambiguous same-name fan-out; pass `minConfidence` (e.g. 0.5) to suppress the low-confidence homonym noise.',
@@ -91,6 +91,11 @@ export const graphToolDefinition = {
         items: { type: 'string' },
         description:
           'Filter by edge type (e.g. ["CALLS","IMPORTS","CONTAINS","USES_TYPE","EXTENDS","IMPLEMENTS"]). Omitted = all types for hotspots/bridges/modules, but dependency edges only (CONTAINS excluded) for relations.',
+      },
+      branch: {
+        type: 'string',
+        description:
+          "Branch to answer for. Default: the branch checked out at your cwd (a worktree answers for its own branch), like search/grep/list. The graph keeps each file's version per branch, so an answer only contains code that exists on that branch. '*' answers across every branch at once (the old mixed view). Every response carries `scope`: the branch it describes plus `indexed_files`/`graphed_files` — while graphed < indexed the daemon is still rebuilding that branch's graph and the answer is partial (a `hint` says so).",
       },
       projectId: {
         type: 'string',

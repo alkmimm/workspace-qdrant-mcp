@@ -734,6 +734,17 @@ service GraphService {
     rpc MigrateGraph(GraphMigrateRequest) returns (GraphMigrateResponse);
 }
 
+// Which branch a graph answer describes, and how much of that branch the graph
+// covers. The graph keeps one set of rows per version of each file and answers
+// from the versions the branch holds; versions not yet extracted (the idle
+// backfill rebuilds them) are missing from the answer, so graphed_files below
+// indexed_files means a partial graph, not absent code.
+message GraphScopeProto {
+    string branch = 1;                            // The branch answered for; "*" = every branch (unscoped); "" = the project is not a git repository
+    uint32 indexed_files = 2;                     // File versions the branch holds in the index
+    uint32 graphed_files = 3;                     // Of those, versions the graph has extracted
+}
+
 // QueryRelated Request
 message QueryRelatedRequest {
     string tenant_id = 1;                         // Project tenant_id
@@ -744,6 +755,7 @@ message QueryRelatedRequest {
     optional string symbol_name = 6;              // Fallback: resolve the source node BY NAME when node_id misses (robust to symbolType/path mismatch in client-side node_id computation)
     optional string file_path = 7;                // [relative] Optional narrowing for symbol_name resolution
     optional double min_confidence = 8;           // Drop nodes whose best-path confidence < this (0/absent = all; >1.0 rejected as INVALID_ARGUMENT); precision filter for homonym fan-out
+    optional string branch = 9;                 // Branch to answer for (absent = the branch the project's main folder has checked out; "*" = every branch)
 }
 
 // QueryRelated Response
@@ -754,6 +766,7 @@ message QueryRelatedResponse {
     // How many nodes min_confidence removed. Zero is the interesting value: a
     // threshold that drops nothing is otherwise byte-identical to passing none.
     uint32 filtered_by_min_confidence = 4;
+    GraphScopeProto scope = 5;                  // Which branch this describes and how much of it the graph has extracted
 }
 
 // A node discovered during graph traversal
@@ -775,6 +788,7 @@ message ImpactAnalysisRequest {
     optional string file_path = 3;                // [relative] Narrow to specific file (relative path)
     optional uint32 top_k = 4;                    // Max impacted nodes returned, nearest-first (0/absent = all)
     optional double min_confidence = 5;           // Drop impacted nodes whose best-path confidence < this (0/absent = all; >1.0 rejected as INVALID_ARGUMENT)
+    optional string branch = 6;                 // Branch to answer for (absent = the branch the project's main folder has checked out; "*" = every branch)
 }
 
 // ImpactAnalysis Response
@@ -785,6 +799,7 @@ message ImpactAnalysisResponse {
     // How many nodes min_confidence removed. Zero is the interesting value: a
     // threshold that drops nothing is otherwise byte-identical to passing none.
     uint32 filtered_by_min_confidence = 4;
+    GraphScopeProto scope = 5;                  // Which branch this describes and how much of it the graph has extracted
 }
 
 // A node impacted by a symbol change
@@ -800,6 +815,7 @@ message ImpactNodeProto {
 // GraphStats Request
 message GraphStatsRequest {
     optional string tenant_id = 1;                // Empty = all tenants
+    optional string branch = 2;                 // Branch to answer for (absent = the branch the project's main folder has checked out; "*" = every branch)
 }
 
 // GraphStats Response
@@ -808,6 +824,7 @@ message GraphStatsResponse {
     uint64 total_edges = 2;
     map<string, uint64> nodes_by_type = 3;        // {"function": 1234, "class": 567}
     map<string, uint64> edges_by_type = 4;        // {"CALLS": 5678, "IMPORTS": 234}
+    GraphScopeProto scope = 5;                  // Which branch this describes and how much of it the graph has extracted
 }
 
 // PageRank Request
@@ -818,6 +835,7 @@ message PageRankRequest {
     optional double tolerance = 4;                // Convergence threshold (default: 1e-6)
     repeated string edge_types = 5;               // Filter edges; empty = all
     optional uint32 top_k = 6;                    // Return only top K results (0 = all)
+    optional string branch = 7;                 // Branch to answer for (absent = the branch the project's main folder has checked out; "*" = every branch)
 }
 
 // PageRank Response
@@ -825,6 +843,7 @@ message PageRankResponse {
     repeated PageRankNodeProto entries = 1;
     uint32 total = 2;
     int64 query_time_ms = 3;
+    GraphScopeProto scope = 4;                  // Which branch this describes and how much of it the graph has extracted
 }
 
 // A PageRank score for a node
@@ -844,6 +863,7 @@ message CommunityRequest {
     repeated string edge_types = 4;               // Filter edges; empty = all
     optional uint32 top_k = 5;                    // Return only the top K largest communities (0 = all)
     optional uint32 member_limit = 6;             // Members per community in response (0/absent = all)
+    optional string branch = 7;                 // Branch to answer for (absent = the branch the project's main folder has checked out; "*" = every branch)
 }
 
 // Community Detection Response
@@ -858,6 +878,7 @@ message CommunityResponse {
     bool partial = 4;
     uint32 iterations = 5;                        // Label-propagation iterations completed
     bool converged = 6;                           // True when a fixpoint was reached
+    GraphScopeProto scope = 7;                  // Which branch this describes and how much of it the graph has extracted
 }
 
 // A detected community
@@ -881,6 +902,7 @@ message BetweennessRequest {
     repeated string edge_types = 2;               // Filter edges; empty = all
     optional uint32 max_samples = 3;              // Sample sources for large graphs (0 = all)
     optional uint32 top_k = 4;                    // Return only top K results (0 = all)
+    optional string branch = 5;                 // Branch to answer for (absent = the branch the project's main folder has checked out; "*" = every branch)
 }
 
 // Betweenness Centrality Response
@@ -896,6 +918,7 @@ message BetweennessResponse {
     bool partial = 4;
     uint32 sources_processed = 5;
     uint32 sources_total = 6;
+    GraphScopeProto scope = 7;                  // Which branch this describes and how much of it the graph has extracted
 }
 
 // A betweenness centrality score for a node
@@ -913,6 +936,7 @@ message CycleRequest {
     repeated string edge_types = 2;               // Filter edges; empty = dependency defaults (CALLS/IMPORTS/USES_TYPE/EXTENDS/IMPLEMENTS)
     optional uint32 min_cycle_size = 3;           // Minimum SCC members to report (absent/0 = 2)
     optional uint32 top_k = 4;                    // Return only top K cycles (0 = all)
+    optional string branch = 5;                 // Branch to answer for (absent = the branch the project's main folder has checked out; "*" = every branch)
 }
 
 // Dependency Cycle Detection Response
@@ -924,6 +948,7 @@ message CycleResponse {
     // node cannot appear in any cycle, so this is what separates "no cycles" as
     // a fact about the code from "no cycles" as a consequence of filtering.
     uint32 suppressed_ubiquitous = 4;
+    GraphScopeProto scope = 5;                  // Which branch this describes and how much of it the graph has extracted
 }
 
 // A detected dependency cycle (a strongly-connected component)
@@ -946,6 +971,7 @@ message TestGapsRequest {
     string tenant_id = 1;
     repeated string edge_types = 2;               // Edges meaning "exercised by"; empty = CALLS/USES_TYPE
     optional uint32 top_k = 3;                    // Return only top K gaps (0/absent = all); total is always exact
+    optional string branch = 4;                 // Branch to answer for (absent = the branch the project's main folder has checked out; "*" = every branch)
 }
 
 // Test-Gap Detection Response. Coverage = call-graph reachability from test
@@ -960,6 +986,7 @@ message TestGapsResponse {
     optional string reliability_warning = 7;      // Set when test_nodes > 0 but coverage is implausibly low: the test->production edges did not resolve (DI containers, alias imports, dynamic dispatch), so the ranking is not trustworthy
     uint32 excluded_non_production = 8;           // Candidates dropped from the denominator as TOOLING (scripts/), reported so a moved denominator is visible
     repeated LanguageCoverageProto coverage_by_language = 9; // Coverage split by extension, largest first — a global ratio hides a per-language extraction failure
+    GraphScopeProto scope = 10;                  // Which branch this describes and how much of it the graph has extracted
 }
 
 // Per-language slice of the coverage summary.

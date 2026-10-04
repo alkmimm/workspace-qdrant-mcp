@@ -28,6 +28,7 @@ use sqlx::{Row, SqlitePool};
 use tracing::debug;
 
 use crate::file_classification::is_test_file;
+use crate::graph::GraphScope;
 
 // ─── Internal adjacency representation ─────────────────────────────────
 
@@ -292,18 +293,29 @@ fn centrality_usage_threshold(total_definitions: usize) -> usize {
 pub(super) async fn load_adjacency_graph(
     pool: &SqlitePool,
     tenant_id: &str,
+    scope: &GraphScope,
     edge_types: Option<&[&str]>,
     genericity: GenericityFilter,
     keep_test_nodes: bool,
 ) -> Result<AdjacencyGraph, sqlx::Error> {
     // Load nodes
     let node_rows = sqlx::query(
-        "SELECT node_id, symbol_name, symbol_type, file_path, is_test_symbol
+        "SELECT node_id, generation, symbol_name, symbol_type, file_path, is_test_symbol
          FROM graph_nodes WHERE tenant_id = ?1",
     )
     .bind(tenant_id)
     .fetch_all(pool)
     .await?;
+    // Only the versions the branch holds, one row per node: an unscoped read
+    // sees one row per version of the node's file.
+    let mut seen_nodes: HashSet<String> = HashSet::new();
+    let node_rows: Vec<_> = node_rows
+        .into_iter()
+        .filter(|r| {
+            scope.admits(r.get::<String, _>("generation").as_str())
+                && seen_nodes.insert(r.get("node_id"))
+        })
+        .collect();
 
     // Pre-pass: count file-backed definitions per symbol name, for the dynamic
     // genericity filter below (stubs with empty file_path don't count).
@@ -329,26 +341,29 @@ pub(super) async fn load_adjacency_graph(
         let indeg_rows = if let Some(types) = edge_types {
             let placeholders: Vec<String> = types.iter().map(|t| format!("'{}'", t)).collect();
             let query = format!(
-                "SELECT target_node_id, COUNT(*) AS indeg FROM graph_edges
+                "SELECT target_node_id, generation, COUNT(*) AS indeg FROM graph_edges
                  WHERE tenant_id = ?1 AND weight >= 0.6 AND edge_type IN ({})
-                 GROUP BY target_node_id",
+                 GROUP BY target_node_id, generation",
                 placeholders.join(", ")
             );
             sqlx::query(&query).bind(tenant_id).fetch_all(pool).await?
         } else {
             sqlx::query(
-                "SELECT target_node_id, COUNT(*) AS indeg FROM graph_edges
+                "SELECT target_node_id, generation, COUNT(*) AS indeg FROM graph_edges
                  WHERE tenant_id = ?1 AND weight >= 0.6
-                 GROUP BY target_node_id",
+                 GROUP BY target_node_id, generation",
             )
             .bind(tenant_id)
             .fetch_all(pool)
             .await?
         };
         for row in &indeg_rows {
+            if !scope.admits(row.get::<String, _>("generation").as_str()) {
+                continue;
+            }
             let nid: String = row.get("target_node_id");
             let indeg: i64 = row.get("indeg");
-            indeg_by_node.insert(nid, indeg.max(0) as usize);
+            *indeg_by_node.entry(nid).or_default() += indeg.max(0) as usize;
         }
     }
 
@@ -429,14 +444,14 @@ pub(super) async fn load_adjacency_graph(
     let edge_rows = if let Some(types) = edge_types {
         let placeholders: Vec<String> = types.iter().map(|t| format!("'{}'", t)).collect();
         let query = format!(
-            "SELECT source_node_id, target_node_id FROM graph_edges
+            "SELECT source_node_id, target_node_id, edge_type, generation FROM graph_edges
              WHERE tenant_id = ?1 AND weight >= 0.6 AND edge_type IN ({})",
             placeholders.join(", ")
         );
         sqlx::query(&query).bind(tenant_id).fetch_all(pool).await?
     } else {
         sqlx::query(
-            "SELECT source_node_id, target_node_id FROM graph_edges
+            "SELECT source_node_id, target_node_id, edge_type, generation FROM graph_edges
              WHERE tenant_id = ?1 AND weight >= 0.6",
         )
         .bind(tenant_id)
@@ -447,10 +462,19 @@ pub(super) async fn load_adjacency_graph(
     let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
     let mut incoming: HashMap<String, Vec<String>> = HashMap::new();
     let mut dropped_dangling = 0usize;
+    // An unscoped read sees an unchanged edge once per version of its file;
+    // count each (source, target, type) once, as before versions existed.
+    let mut seen_edges: HashSet<(String, String, String)> = HashSet::new();
 
     for row in &edge_rows {
+        if !scope.admits(row.get::<String, _>("generation").as_str()) {
+            continue;
+        }
         let src: String = row.get("source_node_id");
         let tgt: String = row.get("target_node_id");
+        if !seen_edges.insert((src.clone(), tgt.clone(), row.get("edge_type"))) {
+            continue;
+        }
         // Drop edges whose endpoint is a skipped stub (absent from `nodes`).
         // A stub is not a real node; counting it in a source's out-degree leaks
         // PageRank rank to nowhere — a node whose out-edges ALL point at stubs is

@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::graph::{
     schema::{GraphDbError, GraphDbResult},
-    EdgeType, GraphEdge, GraphNode, GraphStats, GraphStore, ImpactNode, ImpactReport,
+    EdgeType, GraphEdge, GraphNode, GraphScope, GraphStats, GraphStore, ImpactNode, ImpactReport,
     TraversalNode,
 };
 
@@ -244,28 +244,40 @@ impl GraphStore for LadybugGraphStore {
         Ok(())
     }
 
-    async fn delete_edges_by_file(&self, tenant_id: &str, file_path: &str) -> GraphDbResult<u64> {
-        let _lock = self.write_lock.lock().await;
-        let conn = self.connect()?;
-        for rel_type in &[
-            "CALLS",
-            "CONTAINS",
-            "IMPORTS",
-            "USES_TYPE",
-            "EXTENDS",
-            "IMPLEMENTS",
-        ] {
-            let cypher = format!(
-                "MATCH (a:GraphNode)-[r:{}]->(b:GraphNode) \
+    /// LadybugDB keeps ONE unscoped version per file (it has no generations):
+    /// a replacement drops the file's edges and writes the new extraction.
+    async fn replace_generation(
+        &self,
+        tenant_id: &str,
+        file_path: &str,
+        _generation: &str,
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+    ) -> GraphDbResult<()> {
+        {
+            let _lock = self.write_lock.lock().await;
+            let conn = self.connect()?;
+            for rel_type in &[
+                "CALLS",
+                "CONTAINS",
+                "IMPORTS",
+                "USES_TYPE",
+                "EXTENDS",
+                "IMPLEMENTS",
+            ] {
+                let cypher = format!(
+                    "MATCH (a:GraphNode)-[r:{}]->(b:GraphNode) \
                  WHERE r.tenant_id = '{}' AND r.source_file = '{}' \
                  DELETE r",
-                rel_type,
-                escape_cypher(tenant_id),
-                escape_cypher(file_path),
-            );
-            self.exec(&conn, &cypher)?;
+                    rel_type,
+                    escape_cypher(tenant_id),
+                    escape_cypher(file_path),
+                );
+                self.exec(&conn, &cypher)?;
+            }
         }
-        Ok(0) // LadybugDB doesn't return affected row count
+        self.upsert_nodes(nodes).await?;
+        self.insert_edges(edges).await
     }
 
     async fn delete_tenant(&self, tenant_id: &str) -> GraphDbResult<u64> {
@@ -301,6 +313,7 @@ impl GraphStore for LadybugGraphStore {
         node_id: &str,
         max_hops: u32,
         edge_types: Option<&[EdgeType]>,
+        _scope: &GraphScope,
     ) -> GraphDbResult<Vec<TraversalNode>> {
         let conn = self.connect()?;
         let rel_pattern = match edge_types {
@@ -352,6 +365,7 @@ impl GraphStore for LadybugGraphStore {
         tenant_id: &str,
         symbol_name: &str,
         file_path: Option<&str>,
+        _scope: &GraphScope,
     ) -> GraphDbResult<ImpactReport> {
         let conn = self.connect()?;
         let file_filter = match file_path {
@@ -394,7 +408,11 @@ impl GraphStore for LadybugGraphStore {
         })
     }
 
-    async fn stats(&self, tenant_id: Option<&str>) -> GraphDbResult<GraphStats> {
+    async fn stats(
+        &self,
+        tenant_id: Option<&str>,
+        _scope: &GraphScope,
+    ) -> GraphDbResult<GraphStats> {
         let conn = self.connect()?;
         let filter = match tenant_id {
             Some(tid) => format!(" WHERE n.tenant_id = '{}'", escape_cypher(tid)),

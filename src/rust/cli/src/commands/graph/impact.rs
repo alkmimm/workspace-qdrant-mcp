@@ -11,6 +11,7 @@ pub async fn impact_analysis(
     tenant_id: &str,
     file_path: Option<String>,
     min_confidence: Option<f64>,
+    branch: Option<String>,
 ) -> Result<()> {
     output::section("Impact Analysis");
     output::kv("Symbol", symbol_name);
@@ -36,10 +37,12 @@ pub async fn impact_analysis(
             // CLI shows all impacted nodes; top_k (MCP-only cap) stays unset.
             top_k: None,
             min_confidence,
+            branch,
         })
         .await
         .context("ImpactAnalysis RPC failed")?
         .into_inner();
+    super::print_scope(resp.scope.as_ref());
 
     if resp.impacted_nodes.is_empty() {
         println!("No impacted nodes found.");

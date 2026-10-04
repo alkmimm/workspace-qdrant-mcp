@@ -8,10 +8,12 @@ mod graph_helpers;
 
 use graph_helpers::{
     build_rust_file_chunks, build_rust_main_chunks, build_typescript_chunks, create_factory_store,
-    ingest_file_chunks, TENANT,
+    generation_of, ingest_file_chunks, TENANT,
 };
 use tempfile::tempdir;
-use workspace_qdrant_core::graph::{extractor, EdgeType, GraphEdge, GraphNode, NodeType};
+use workspace_qdrant_core::graph::{
+    compute_node_id, extractor, EdgeType, GraphEdge, GraphNode, GraphScope, NodeType,
+};
 
 // ────────────────────────────────────────────────────────────────────────────
 // 1. Extraction -> Store -> Query pipeline
@@ -50,7 +52,7 @@ async fn test_pipeline_extract_store_query_rust() {
     store.insert_edges(&result.edges).await.unwrap();
 
     // Verify store has the data
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert!(stats.total_nodes > 0, "store should have nodes");
     assert!(stats.total_edges > 0, "store should have edges");
 
@@ -97,7 +99,7 @@ async fn test_pipeline_extract_store_query_typescript() {
     store.upsert_nodes(&result.nodes).await.unwrap();
     store.insert_edges(&result.edges).await.unwrap();
 
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert!(stats.total_nodes > 0);
     assert!(stats.total_edges > 0);
 }
@@ -122,7 +124,7 @@ async fn test_cross_file_graph_queries() {
     ingest_file_chunks(&store, &build_rust_main_chunks(), TENANT, "src/main.rs").await;
 
     // Stats should reflect both files
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert!(
         stats.total_nodes >= 6,
         "expected at least 6 nodes across 2 files, got {}",
@@ -137,7 +139,7 @@ async fn test_cross_file_graph_queries() {
     // Verify we can query related nodes from main's function
     let main_node = GraphNode::new(TENANT, "src/main.rs", "main", NodeType::Function);
     let related = store
-        .query_related(TENANT, &main_node.node_id, 1, None)
+        .query_related(TENANT, &main_node.node_id, 1, None, &GraphScope::all())
         .await
         .unwrap();
 
@@ -169,7 +171,12 @@ async fn test_impact_analysis_end_to_end() {
 
     // Impact analysis on "process" -- who calls it?
     let report = store
-        .impact_analysis(TENANT, "process", Some("src/processor.rs"))
+        .impact_analysis(
+            TENANT,
+            "process",
+            Some("src/processor.rs"),
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
 
@@ -194,7 +201,12 @@ async fn test_impact_analysis_isolated_symbol() {
 
     // "validate" is called by "process" within the same file
     let report = store
-        .impact_analysis(TENANT, "validate", Some("src/processor.rs"))
+        .impact_analysis(
+            TENANT,
+            "validate",
+            Some("src/processor.rs"),
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
 
@@ -228,13 +240,16 @@ async fn test_factory_lifecycle() {
     let node = GraphNode::new(TENANT, "lib.rs", "Config", NodeType::Struct);
     store.upsert_nodes(&[node.clone()]).await.unwrap();
 
-    let stats = store.stats(Some(TENANT)).await.unwrap();
+    let stats = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert_eq!(stats.total_nodes, 1);
 
     // Drop and reopen -- should work without re-migration
     drop(store);
     let store2 = create_factory_store(dir.path()).await;
-    let stats2 = store2.stats(Some(TENANT)).await.unwrap();
+    let stats2 = store2
+        .stats(Some(TENANT), &GraphScope::all())
+        .await
+        .unwrap();
     assert_eq!(stats2.total_nodes, 1, "data should persist across reopen");
 }
 
@@ -253,7 +268,7 @@ async fn test_reingest_file_atomic() {
     )
     .await;
 
-    let stats_v1 = store.stats(Some(TENANT)).await.unwrap();
+    let stats_v1 = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     let edges_v1 = stats_v1.total_edges;
 
     // Re-ingest with modified chunks (removed calls from process)
@@ -268,13 +283,14 @@ async fn test_reingest_file_atomic() {
         .reingest_file(
             TENANT,
             "src/processor.rs",
+            &generation_of("src/processor.rs"),
             &result_v2.nodes,
             &result_v2.edges,
         )
         .await
         .unwrap();
 
-    let stats_v2 = store.stats(Some(TENANT)).await.unwrap();
+    let stats_v2 = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert!(
         stats_v2.total_edges <= edges_v1,
         "re-ingestion should not increase edges when calls were removed: v1={}, v2={}",
@@ -311,9 +327,15 @@ async fn test_tenant_isolation() {
     )
     .await;
 
-    let stats_a = store.stats(Some(tenant_a)).await.unwrap();
-    let stats_b = store.stats(Some(tenant_b)).await.unwrap();
-    let stats_all = store.stats(None).await.unwrap();
+    let stats_a = store
+        .stats(Some(tenant_a), &GraphScope::all())
+        .await
+        .unwrap();
+    let stats_b = store
+        .stats(Some(tenant_b), &GraphScope::all())
+        .await
+        .unwrap();
+    let stats_all = store.stats(None, &GraphScope::all()).await.unwrap();
 
     assert_eq!(
         stats_a.total_nodes, stats_b.total_nodes,
@@ -328,8 +350,14 @@ async fn test_tenant_isolation() {
     // Deleting tenant A should not affect tenant B
     store.delete_tenant(tenant_a).await.unwrap();
 
-    let stats_a_after = store.stats(Some(tenant_a)).await.unwrap();
-    let stats_b_after = store.stats(Some(tenant_b)).await.unwrap();
+    let stats_a_after = store
+        .stats(Some(tenant_a), &GraphScope::all())
+        .await
+        .unwrap();
+    let stats_b_after = store
+        .stats(Some(tenant_b), &GraphScope::all())
+        .await
+        .unwrap();
 
     assert_eq!(stats_a_after.total_nodes, 0, "tenant A should be empty");
     assert_eq!(
@@ -356,7 +384,7 @@ async fn test_prune_orphans_after_reingest() {
     )
     .await;
 
-    let stats_before = store.stats(Some(TENANT)).await.unwrap();
+    let stats_before = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
 
     // Re-ingest with no calls (all stubs become orphans)
     let mut empty_chunks = build_rust_file_chunks();
@@ -365,13 +393,19 @@ async fn test_prune_orphans_after_reingest() {
     }
     let result = extractor::extract_edges(&empty_chunks, TENANT, "src/processor.rs");
     store
-        .reingest_file(TENANT, "src/processor.rs", &result.nodes, &result.edges)
+        .reingest_file(
+            TENANT,
+            "src/processor.rs",
+            &generation_of("src/processor.rs"),
+            &result.nodes,
+            &result.edges,
+        )
         .await
         .unwrap();
 
     let pruned = store.prune_orphans(TENANT).await.unwrap();
 
-    let stats_after = store.stats(Some(TENANT)).await.unwrap();
+    let stats_after = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
     assert!(
         stats_after.total_nodes <= stats_before.total_nodes,
         "pruning should not increase node count"
@@ -412,7 +446,13 @@ async fn test_query_related_edge_type_filter() {
 
     // Filter to CALLS only
     let calls_only = store
-        .query_related(TENANT, &a.node_id, 1, Some(&[EdgeType::Calls]))
+        .query_related(
+            TENANT,
+            &a.node_id,
+            1,
+            Some(&[EdgeType::Calls]),
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -424,7 +464,13 @@ async fn test_query_related_edge_type_filter() {
 
     // Filter to USES_TYPE only
     let types_only = store
-        .query_related(TENANT, &a.node_id, 1, Some(&[EdgeType::UsesType]))
+        .query_related(
+            TENANT,
+            &a.node_id,
+            1,
+            Some(&[EdgeType::UsesType]),
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -436,173 +482,150 @@ async fn test_query_related_edge_type_filter() {
 
     // No filter -- should get both
     let all = store
-        .query_related(TENANT, &a.node_id, 1, None)
+        .query_related(TENANT, &a.node_id, 1, None, &GraphScope::all())
         .await
         .unwrap();
     assert_eq!(all.len(), 2, "no filter should return all relationships");
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// 8. file_has_edges probe (issue #235 — dedup-path graph heal)
+// 8. Extraction records (dedup-path heal + idle backfill probe)
 // ────────────────────────────────────────────────────────────────────────────
 
-/// The probe must track the wipe: true after ingest, false after a
-/// `reingest_file` with empty edges — the #235 state the dedup heal detects —
-/// and true again once edges are rewritten.
+/// The probe answers per generation: true once a version was extracted (even
+/// with no symbols), false for a version never extracted or since deleted.
 #[tokio::test]
-async fn test_file_has_edges_tracks_wipe_and_rebuild() {
+async fn test_generation_extracted_tracks_each_version() {
     let dir = tempdir().unwrap();
     let store = create_factory_store(dir.path()).await;
+    let path = "src/processor.rs";
 
-    ingest_file_chunks(
-        &store,
-        &build_rust_file_chunks(),
-        TENANT,
-        "src/processor.rs",
-    )
-    .await;
-
+    ingest_file_chunks(&store, &build_rust_file_chunks(), TENANT, path).await;
+    let v1 = generation_of(path);
+    assert!(store.generation_extracted(TENANT, &v1).await.unwrap());
     assert!(
-        store
-            .file_has_edges(TENANT, "src/processor.rs")
+        !store
+            .generation_extracted(TENANT, "src/processor.rs@v2")
             .await
             .unwrap(),
-        "ingested file must report edges"
-    );
-    assert!(
-        !store.file_has_edges(TENANT, "src/never.rs").await.unwrap(),
-        "un-ingested file must report no edges"
+        "another version of the same path was never extracted"
     );
     assert!(
         !store
-            .file_has_edges("other-tenant", "src/processor.rs")
+            .generation_extracted("other-tenant", &v1)
             .await
             .unwrap(),
         "probe must be tenant-scoped"
     );
 
-    // reingest_file with empty nodes/edges (the delete path). Since #245 this
-    // also drops the file's NODES (no ghost left behind), so file_has_edges
-    // reports the gap and the #235 dedup heal still detects it and rebuilds.
+    // A version with no symbols still counts as extracted (no retry loop).
     store
-        .reingest_file(TENANT, "src/processor.rs", &[], &[])
+        .reingest_file(TENANT, "README.md", "readme@v1", &[], &[])
         .await
         .unwrap();
-    assert!(
-        !store
-            .file_has_edges(TENANT, "src/processor.rs")
-            .await
-            .unwrap(),
-        "post-wipe the probe must report the gap"
-    );
+    assert!(store
+        .generation_extracted(TENANT, "readme@v1")
+        .await
+        .unwrap());
 
-    // The heal path rewrites via the same atomic swap.
-    ingest_file_chunks(
-        &store,
-        &build_rust_file_chunks(),
-        TENANT,
-        "src/processor.rs",
-    )
-    .await;
-    assert!(
-        store
-            .file_has_edges(TENANT, "src/processor.rs")
-            .await
-            .unwrap(),
-        "rebuild must restore the probe to true"
-    );
+    // Deleting the version clears its record; rebuilding restores it.
+    store.delete_generation(TENANT, &v1).await.unwrap();
+    assert!(!store.generation_extracted(TENANT, &v1).await.unwrap());
+    ingest_file_chunks(&store, &build_rust_file_chunks(), TENANT, path).await;
+    assert!(store.generation_extracted(TENANT, &v1).await.unwrap());
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// 9. Node lifecycle: no ghost / stale-generation nodes (issue #245)
+// 9. Generation lifecycle (the per-version successor of #245)
 // ────────────────────────────────────────────────────────────────────────────
 
-/// `reingest_file` must make the node set authoritative per re-ingest: a file
-/// deletion (empty nodes) leaves NO nodes for the path (no ghost), and a
-/// re-ingest that drops symbols removes their stale node generations. Node ids
-/// are deterministic, so unchanged symbols survive the swap.
+/// Re-ingesting a version replaces exactly that version's rows: a dropped
+/// symbol leaves no stale node, and another version of the same path (another
+/// branch) is untouched.
 #[tokio::test]
-async fn test_reingest_file_clears_ghost_and_stale_nodes() {
-    use workspace_qdrant_core::graph::compute_node_id;
-
+async fn test_reingest_replaces_only_its_own_version() {
     let dir = tempdir().unwrap();
     let store = create_factory_store(dir.path()).await;
+    let all = GraphScope::all();
 
-    // Generation 1: two functions in the file, plus one edge between them.
     let foo = GraphNode::new(TENANT, "src/m.rs", "foo", NodeType::Function);
     let bar = GraphNode::new(TENANT, "src/m.rs", "bar", NodeType::Function);
+    let foo_calls_bar = GraphEdge::new(
+        TENANT,
+        &foo.node_id,
+        &bar.node_id,
+        EdgeType::Calls,
+        "src/m.rs",
+    );
     store
         .reingest_file(
             TENANT,
             "src/m.rs",
+            "m@v1",
             &[foo.clone(), bar.clone()],
-            &[GraphEdge::new(
-                TENANT,
-                &foo.node_id,
-                &bar.node_id,
-                EdgeType::Calls,
-                "src/m.rs",
-            )],
+            &[foo_calls_bar.clone()],
         )
         .await
         .unwrap();
-
-    let n_after_gen1 = store.stats(Some(TENANT)).await.unwrap().total_nodes;
-    assert_eq!(n_after_gen1, 2, "both symbols present after gen 1");
-
-    // Generation 2: `bar` was removed (renamed away); only `foo` remains. The
-    // stale `bar` node must NOT linger.
     store
-        .reingest_file(TENANT, "src/m.rs", &[foo.clone()], &[])
+        .reingest_file(
+            TENANT,
+            "src/m.rs",
+            "m@v2",
+            &[foo.clone(), bar.clone()],
+            &[foo_calls_bar],
+        )
         .await
         .unwrap();
-    let n_after_gen2 = store.stats(Some(TENANT)).await.unwrap().total_nodes;
-    assert_eq!(n_after_gen2, 1, "dropped symbol's stale node must be gone");
-    // `foo` kept its deterministic id across the swap.
-    let foo_related = store
-        .query_related_by_symbol(TENANT, "foo", Some("src/m.rs"), 1, None)
+    assert_eq!(
+        store.stats(Some(TENANT), &all).await.unwrap().total_nodes,
+        4,
+        "two versions x two symbols"
+    );
+
+    // v1 drops `bar`; v2 keeps it.
+    store
+        .reingest_file(TENANT, "src/m.rs", "m@v1", &[foo.clone()], &[])
         .await
         .unwrap();
-    let _ = foo_related; // presence, not traversal, is the point here
+    let v1 = GraphScope::generations(["m@v1".to_string()].into_iter().collect());
+    let v2 = GraphScope::generations(["m@v2".to_string()].into_iter().collect());
+    assert_eq!(
+        store.stats(Some(TENANT), &v1).await.unwrap().total_nodes,
+        1,
+        "v1's stale `bar` is gone"
+    );
+    assert_eq!(
+        store.stats(Some(TENANT), &v2).await.unwrap().total_nodes,
+        2,
+        "v2 is untouched"
+    );
     assert_eq!(
         foo.node_id,
         compute_node_id(TENANT, "src/m.rs", "foo", NodeType::Function),
-        "unchanged symbol id is stable across re-ingest"
-    );
-
-    // File deletion (empty): no ghost node for the now-absent path.
-    store
-        .reingest_file(TENANT, "src/m.rs", &[], &[])
-        .await
-        .unwrap();
-    assert_eq!(
-        store.stats(Some(TENANT)).await.unwrap().total_nodes,
-        0,
-        "deleting a file must leave NO ghost nodes (issue #245)"
+        "an unchanged symbol keeps its id across versions"
     );
 }
 
-/// A node that is the TARGET of ANOTHER file's edge must still be deletable when
-/// its file is removed — the delete clears the referencing (now dangling) edge
-/// first, satisfying the `graph_edges -> graph_nodes` foreign key. This is the
-/// exact cross-file case the live #245 sweep hit as `FOREIGN KEY constraint
-/// failed`; a same-file edge (removed by `delete_edges_by_file`) never exposed it.
+/// Deleting the version that defines a cross-file target leaves the other
+/// file's edge in place — it belongs to that file's version — but a branch
+/// that no longer holds the target cannot reach anything through it.
 #[tokio::test]
-async fn test_delete_file_nodes_clears_incoming_cross_file_edge() {
+async fn test_deleted_target_version_is_unreachable_not_rewritten() {
     let dir = tempdir().unwrap();
     let store = create_factory_store(dir.path()).await;
 
-    // File A defines `foo`; file B defines `bar` and calls A::foo (bar -> foo).
     let foo = GraphNode::new(TENANT, "src/a.rs", "foo", NodeType::Function);
     let bar = GraphNode::new(TENANT, "src/b.rs", "bar", NodeType::Function);
     store
-        .reingest_file(TENANT, "src/a.rs", &[foo.clone()], &[])
+        .reingest_file(TENANT, "src/a.rs", "a@v1", &[foo.clone()], &[])
         .await
         .unwrap();
     store
         .reingest_file(
             TENANT,
             "src/b.rs",
+            "b@v1",
             &[bar.clone()],
             &[GraphEdge::new(
                 TENANT,
@@ -614,119 +637,55 @@ async fn test_delete_file_nodes_clears_incoming_cross_file_edge() {
         )
         .await
         .unwrap();
-    assert_eq!(store.stats(Some(TENANT)).await.unwrap().total_nodes, 2);
 
-    // Delete file A: foo is an incoming-edge target from B. Must succeed (no FK
-    // error), removing foo AND the now-dangling bar -> foo edge; bar survives.
-    let deleted = store
-        .delete_nodes_by_file(TENANT, "src/a.rs")
-        .await
-        .unwrap();
+    let deleted = store.delete_generation(TENANT, "a@v1").await.unwrap();
+    assert_eq!(deleted, 1, "only foo's row");
+    let all = GraphScope::all();
+    let stats = store.stats(Some(TENANT), &all).await.unwrap();
     assert_eq!(
-        deleted, 1,
-        "foo removed despite being a cross-file edge target"
-    );
-    let stats = store.stats(Some(TENANT)).await.unwrap();
-    assert_eq!(stats.total_nodes, 1, "only bar remains");
-    assert_eq!(stats.total_edges, 0, "the dangling bar -> foo edge is gone");
-}
-
-/// The re-ingest hot path (partial keep, NOT a full file delete) must still clear
-/// a dropped symbol's INCOMING cross-file edge. This is the exact production
-/// scenario the graph_edges OR-delete split guards: a file re-ingest that drops
-/// one of several symbols, where the dropped symbol was the target of another
-/// file's edge. `delete_file_nodes_except` runs with a NON-EMPTY keep list here
-/// (unlike the full-delete case above), so the stale set is a subset — the split
-/// `target_node_id IN (…)` DELETE must remove exactly the edge into the dropped
-/// symbol and leave the kept symbol's incoming edge intact.
-#[tokio::test]
-async fn test_reingest_partial_keep_clears_incoming_edge_to_dropped_symbol() {
-    let dir = tempdir().unwrap();
-    let store = create_factory_store(dir.path()).await;
-
-    // File A defines `foo` and `bar`; file B's `caller` calls BOTH (two incoming
-    // edges into A's symbols, owned by B so A's re-ingest does not touch them).
-    let foo = GraphNode::new(TENANT, "src/a.rs", "foo", NodeType::Function);
-    let bar = GraphNode::new(TENANT, "src/a.rs", "bar", NodeType::Function);
-    let caller = GraphNode::new(TENANT, "src/b.rs", "caller", NodeType::Function);
-    store
-        .reingest_file(TENANT, "src/a.rs", &[foo.clone(), bar.clone()], &[])
-        .await
-        .unwrap();
-    store
-        .reingest_file(
-            TENANT,
-            "src/b.rs",
-            &[caller.clone()],
-            &[
-                GraphEdge::new(
-                    TENANT,
-                    &caller.node_id,
-                    &foo.node_id,
-                    EdgeType::Calls,
-                    "src/b.rs",
-                ),
-                GraphEdge::new(
-                    TENANT,
-                    &caller.node_id,
-                    &bar.node_id,
-                    EdgeType::Calls,
-                    "src/b.rs",
-                ),
-            ],
-        )
-        .await
-        .unwrap();
-    let stats = store.stats(Some(TENANT)).await.unwrap();
-    assert_eq!(stats.total_nodes, 3, "foo, bar, caller present after setup");
-    assert_eq!(
-        stats.total_edges, 2,
-        "caller -> foo and caller -> bar present"
+        (stats.total_nodes, stats.total_edges),
+        (1, 1),
+        "b's edge is b's"
     );
 
-    // Re-ingest A keeping only `foo` (bar dropped). `bar` is an incoming-edge
-    // target from B, so its now-dangling edge must go; `foo` and its incoming
-    // edge survive.
-    store
-        .reingest_file(TENANT, "src/a.rs", &[foo.clone()], &[])
+    let b_only = GraphScope::generations(["b@v1".to_string()].into_iter().collect());
+    let reached = store
+        .query_related(TENANT, &bar.node_id, 1, None, &b_only)
         .await
         .unwrap();
-    let stats = store.stats(Some(TENANT)).await.unwrap();
-    assert_eq!(stats.total_nodes, 2, "bar dropped; foo + caller remain");
-    assert_eq!(
-        stats.total_edges, 1,
-        "only the dangling caller -> bar edge is cleared; caller -> foo survives"
+    assert!(
+        reached.is_empty(),
+        "foo is defined by no version the scope holds"
     );
 }
 
-/// The file-less tree-sitter stub nodes (`file_path = ''`) must never be wiped
-/// by a per-file node delete — they belong to no file and are pruned elsewhere.
+/// The file-less stub rows belong to no version: deleting a version spares
+/// them, and the empty generation itself can never be deleted or replaced.
 #[tokio::test]
-async fn test_delete_nodes_by_file_spares_stub_nodes() {
+async fn test_generation_delete_spares_stub_nodes() {
     let dir = tempdir().unwrap();
     let store = create_factory_store(dir.path()).await;
+    let all = GraphScope::all();
 
     let real = GraphNode::new(TENANT, "src/m.rs", "foo", NodeType::Function);
-    let stub = GraphNode::new(TENANT, "", "unresolved_callee", NodeType::Function);
+    let stub = GraphNode::stub(TENANT, "unresolved_callee", NodeType::Function);
     store
-        .upsert_nodes(&[real.clone(), stub.clone()])
+        .reingest_file(TENANT, "src/m.rs", "m@v1", &[real, stub], &[])
         .await
         .unwrap();
-
-    // Delete by the real file: the stub (empty file_path) survives.
-    let deleted = store
-        .delete_nodes_by_file(TENANT, "src/m.rs")
-        .await
-        .unwrap();
-    assert_eq!(deleted, 1, "only the file's own node is deleted");
+    assert_eq!(store.delete_generation(TENANT, "m@v1").await.unwrap(), 1);
     assert_eq!(
-        store.stats(Some(TENANT)).await.unwrap().total_nodes,
+        store.stats(Some(TENANT), &all).await.unwrap().total_nodes,
         1,
-        "the file-less stub node must remain"
+        "the stub remains"
     );
-
-    // An empty-path delete is a guarded no-op (never mass-wipes stubs).
-    let deleted_empty = store.delete_nodes_by_file(TENANT, "").await.unwrap();
-    assert_eq!(deleted_empty, 0, "empty path is a no-op");
-    assert_eq!(store.stats(Some(TENANT)).await.unwrap().total_nodes, 1);
+    assert_eq!(
+        store.delete_generation(TENANT, "").await.unwrap(),
+        0,
+        "never mass-wipes stubs"
+    );
+    assert!(store
+        .reingest_file(TENANT, "src/m.rs", "", &[], &[])
+        .await
+        .is_err());
 }

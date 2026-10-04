@@ -1401,7 +1401,9 @@ export async function finalizeResults(
   // Context expansion applies to the code results only — scratchpad notes carry
   // no parent unit or graph node, so they are appended afterwards untouched.
   if (params.options.expandContext) await expandParentContext(qdrantClient, finalResults);
-  if (params.options.includeGraphContext) await expandGraphContext(daemonClient, finalResults);
+  if (params.options.includeGraphContext) {
+    await expandGraphContext(daemonClient, finalResults, params.options.branch);
+  }
 
   // Append the project-memory recall lane AFTER the code top-k so notes never
   // displace code. They are tenant-filtered + capped upstream and self-label via
