@@ -53,6 +53,7 @@ import {
   resolveEffectiveBranch,
   resolveProjectIdentity,
 } from './branch-scope.js';
+import { admitFallbackEntries } from './fallback-guard.js';
 import { FIELD_BASE_POINT, FIELD_BRANCH, FIELD_TENANT_ID } from '../common/native-bridge.js';
 
 /**
@@ -1278,11 +1279,21 @@ export async function finalizeResults(
   // Drop the base-branch copy for any path the caller's branch already answered,
   // BEFORE fusion, so the stale generation cannot win on score and cannot shape
   // the ranking either. Same precedence `list` and the FTS lanes apply.
-  const branchScoped = dropFallbackDuplicatesByPath(
-    scopedResults,
-    params.options.branch,
-    params.options.fallbackBranch,
-    (r) => (r.metadata['relative_path'] ?? r.metadata['file_path']) as string | undefined,
+  const resultPath = (r: SearchResult) =>
+    (r.metadata['relative_path'] ?? r.metadata['file_path']) as string | undefined;
+  // Then the trunk-only entries that survive must be ones whose trunk copy IS
+  // the branch's copy — not changed between the tips, not held by the branch
+  // (see fallback-guard): a file the branch deleted or changed is never filled.
+  const branchScoped = await admitFallbackEntries(
+    dropFallbackDuplicatesByPath(
+      scopedResults,
+      params.options.branch,
+      params.options.fallbackBranch,
+      resultPath,
+      (r) => r.metadata['branch']
+    ),
+    params.options.fallbackGuard,
+    resultPath,
     (r) => r.metadata['branch']
   );
   const fusedResults = applyRRFFusion(branchScoped, params.mode);

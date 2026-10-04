@@ -35,6 +35,8 @@ export interface ListOptions {
    * internally for feature-branch views; not a caller-facing argument).
    */
   fallbackBranch?: string;
+  /** Internal: paths `fallbackBranch` must never fill (see `fallback-guard`). */
+  fallbackRefusedPaths?: readonly string[];
   /** Filter by component (dot-separated ID or prefix, e.g. "daemon" or "daemon.core") */
   component?: string;
   /** Opaque pagination cursor from a previous response's next_token */

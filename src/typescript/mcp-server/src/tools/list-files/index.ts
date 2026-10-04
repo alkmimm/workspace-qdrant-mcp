@@ -27,6 +27,7 @@ import {
   resolveFallbackBranch,
   resolveProjectIdentity,
 } from '../branch-scope.js';
+import { createFallbackGuard } from '../fallback-guard.js';
 import { projectEcho } from '../project-echo.js';
 import { listNoMatchMessage } from '../empty-diagnosis.js';
 import { SUMMARY_SCAN_CAP, assembleSummaryResponse } from './summary.js';
@@ -193,8 +194,22 @@ export class ListFilesTool {
       ? this.stateManager.getBaseBranch(watchFolderId, concreteEffective)
       : null;
     const fallbackBranch = resolveFallbackBranch({ effectiveBranch, baseBranch });
+    // The trunk fills in only paths whose copy IS the branch's: git's changed
+    // set between the tips is refused in SQL (the "branch already has it"
+    // half of the rule is the query's own NOT IN) — see fallback-guard.
+    const fallbackGuard = createFallbackGuard({
+      stateManager: this.stateManager,
+      watchFolderId,
+      projectRoot: projectPath ?? undefined,
+      branch: concreteEffective,
+      fallbackBranch,
+    });
     const scopedOptions = fallbackBranch
-      ? { ...effectiveOptions, fallbackBranch }
+      ? {
+          ...effectiveOptions,
+          fallbackBranch,
+          fallbackRefusedPaths: (await fallbackGuard?.refusedPaths()) ?? [],
+        }
       : effectiveOptions;
 
     const response = this.buildListResult(
@@ -462,7 +477,10 @@ export class ListFilesTool {
     if (options.pathExclude) baseOpts.excludeGlob = options.pathExclude;
     const branch = concreteBranchFilter(options.branch);
     if (branch) baseOpts.branch = branch;
-    if (branch && options.fallbackBranch) baseOpts.fallbackBranch = options.fallbackBranch;
+    if (branch && options.fallbackBranch) {
+      baseOpts.fallbackBranch = options.fallbackBranch;
+      if (options.fallbackRefusedPaths) baseOpts.fallbackRefusedPaths = options.fallbackRefusedPaths;
+    }
     if (componentBasePaths && componentBasePaths.length > 0)
       baseOpts.componentBasePaths = componentBasePaths;
 

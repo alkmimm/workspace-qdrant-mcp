@@ -20,6 +20,9 @@ export {
   getFileAnnotationsByFilePaths,
 } from './tracked-files.js';
 
+export type { BranchFileCount } from './branch-paths.js';
+export { getPathsTrackedOnBranch, getTrackedFileCountsByBranch } from './branch-paths.js';
+
 export type { ChunkCandidateEntry, ListChunkCandidatesOptions } from './chunks.js';
 export { listChunkCandidates } from './chunks.js';
 

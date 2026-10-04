@@ -621,3 +621,52 @@ describe('content generations collapse to one entry per file', () => {
     expect(entry?.isTest).toBe(true);
   });
 });
+
+describe('feature-branch view refuses trunk paths git reports as changed', () => {
+  // Regression (emnify-sms-sender, 2026-10-03): the trunk fill-in resurrected
+  // files the feature branch had DELETED — the branch holds no row for them, so
+  // "path not already on the branch" admitted the trunk's. A path git reports as
+  // changed between the tips has no valid trunk copy for the branch.
+  let db: DatabaseType;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.exec(TRACKED_FILES_SCHEMA);
+    seedProject(db);
+    seedFile(db, 'app/actions/endpoint.ts', { branch: 'develop' }); // deleted on feat
+    seedFile(db, 'app/actions/users.ts', { branch: 'develop' }); // unchanged on feat
+    seedFile(db, 'app/page.tsx', { branch: 'develop' });
+    seedFile(db, 'app/page.tsx', { branch: 'feat' }); // changed on feat
+    seedFile(db, 'src/new.ts', { branch: 'feat' }); // added on feat
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  const view = {
+    watchFolderId: WATCH_ID,
+    branch: 'feat',
+    fallbackBranch: 'develop',
+    fallbackRefusedPaths: ['app/actions/endpoint.ts', 'app/page.tsx', 'src/new.ts'],
+  };
+
+  it('lists the branch files plus only the unchanged trunk files', () => {
+    expect(listTrackedFiles(db, view).data.map((f) => f.relativePath)).toEqual([
+      'app/actions/users.ts',
+      'app/page.tsx',
+      'src/new.ts',
+    ]);
+  });
+
+  it('counts the same set', () => {
+    expect(countTrackedFiles(db, view)).toBe(3);
+  });
+
+  it('without the refused set keeps the previous behaviour (resurrects endpoint.ts)', () => {
+    const withoutGit = { watchFolderId: WATCH_ID, branch: 'feat', fallbackBranch: 'develop' };
+    expect(listTrackedFiles(db, withoutGit).data.map((f) => f.relativePath)).toContain(
+      'app/actions/endpoint.ts'
+    );
+  });
+});
