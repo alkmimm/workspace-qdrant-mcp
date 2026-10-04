@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::error;
 
 use crate::allowed_extensions::{AllowedExtensions, FileRoute};
-use crate::patterns::exclusion::should_exclude_file;
+use crate::patterns::exclusion::should_exclude_file_in;
 use crate::patterns::global_ignore::is_globally_ignored;
 use crate::queue_operations::QueueError;
 
@@ -27,7 +27,8 @@ pub(super) async fn should_filter_debounced_event(
         return true;
     }
     if !matches!(event.event_kind, EventKind::Remove(_)) {
-        if should_exclude_file(&event.path.to_string_lossy()) {
+        let root = config.read().await.path.clone();
+        if should_exclude_file_in(&root, &event.path.to_string_lossy()) {
             return true;
         }
         let collection_for_check = {

@@ -13,7 +13,9 @@ use walkdir::WalkDir;
 use crate::allowed_extensions::AllowedExtensions;
 use crate::context::ProcessingContext;
 use crate::file_classification::classify_file_type;
-use crate::patterns::exclusion::{should_exclude_directory, should_exclude_file};
+use crate::patterns::exclusion::{
+    is_reincluded_dir, should_exclude_directory, should_exclude_file, should_exclude_file_in,
+};
 use crate::queue_operations::QueueManager;
 use crate::specs::parse_payload;
 use crate::storage::DocumentPoint;
@@ -295,7 +297,10 @@ async fn walk_and_enqueue(
         .into_iter()
         .filter_entry(|e| {
             if e.file_type().is_dir() && e.depth() > 0 {
+                // Same override the folder scan applies: a directory
+                // `global.wqmignore` re-includes is walked despite its name.
                 !should_exclude_directory(&e.file_name().to_string_lossy())
+                    || is_reincluded_dir(library_root, e.path())
             } else {
                 true
             }
@@ -358,7 +363,7 @@ async fn enqueue_library_file(
         .to_string_lossy();
     let abs_path = path.to_string_lossy();
 
-    if should_exclude_file(&rel_path) || should_exclude_file(&abs_path) {
+    if should_exclude_file(&rel_path) || should_exclude_file_in(library_root, &abs_path) {
         return Ok(FileEnqueueResult::Excluded);
     }
     if !allowed_extensions.is_allowed(&abs_path, &item.collection) {

@@ -156,6 +156,25 @@ impl ExclusionEngine {
 
     /// Check if a file should be excluded
     pub fn should_exclude(&self, file_path: &str) -> ExclusionResult {
+        self.should_exclude_with(file_path, &|_| false)
+    }
+
+    /// [`Self::should_exclude`], where `reincluded_dir(prefix)` reports that the
+    /// user explicitly re-included the DIRECTORY `prefix` (the path up to and
+    /// including one segment) — a `global.wqmignore` negation such as
+    /// `!**/src/**/out/`.
+    ///
+    /// Only a directory-segment rule (`out`, `build`, `node_modules`, …) yields
+    /// to it, and only for the segment whose directory was re-included: a path
+    /// with another excluded segment stays excluded, and the file-level rules
+    /// (hidden components, exact / prefix / suffix names) never yield, so a
+    /// negation meant for `ports/out` cannot re-include a hidden directory or a
+    /// `.tmp` file below it.
+    pub fn should_exclude_with(
+        &self,
+        file_path: &str,
+        reincluded_dir: &dyn Fn(&str) -> bool,
+    ) -> ExclusionResult {
         // Whitelist check: .github/ is explicitly allowed
         if self.is_github_path(file_path) {
             return ExclusionResult {
@@ -221,9 +240,10 @@ impl ExclusionEngine {
         // A raw `file_path.contains("out")` silently excluded every file whose
         // path merely contains "out" (e.g. "RouteDefinition.java" — "Route"
         // contains "out"; also "layout.tsx", "checkout.go", "about.md"). See
-        // `segment_or_suffix_match`.
+        // `segment_or_suffix_match`. A directory segment the user re-included
+        // does not count (see `should_exclude_with`).
         for pattern in &self.contains_patterns {
-            if segment_or_suffix_match(file_path, pattern) {
+            if segment_or_suffix_match(file_path, pattern, reincluded_dir) {
                 return ExclusionResult {
                     excluded: true,
                     rule: self.find_rule_for_pattern(pattern),
@@ -399,10 +419,34 @@ impl ExclusionEngine {
 /// (`node_modules` == `.../node_modules/...`); dotfile/extension tokens match a
 /// filename suffix (`.tmp` matches `notes.tmp`); the Office lock-file prefix
 /// `~$` matches `~$doc.docx`.
-fn segment_or_suffix_match(path: &str, pattern: &str) -> bool {
-    path.split(|c: char| c == '/' || c == '\\').any(|seg| {
-        seg == pattern
+///
+/// A whole-name match on a DIRECTORY component (not the final component) is
+/// skipped when `reincluded_dir` reports that directory — the path prefix
+/// ending at that segment — as explicitly re-included by the user.
+pub(super) fn segment_or_suffix_match(
+    path: &str,
+    pattern: &str,
+    reincluded_dir: &dyn Fn(&str) -> bool,
+) -> bool {
+    let mut start = 0usize;
+    loop {
+        let end = path[start..]
+            .find(['/', '\\'])
+            .map_or(path.len(), |i| start + i);
+        let seg = &path[start..end];
+        let is_last = end == path.len();
+        let hit = seg == pattern
             || (pattern.starts_with('.') && seg.ends_with(pattern))
-            || (pattern.starts_with("~$") && seg.starts_with("~$"))
-    })
+            || (pattern.starts_with("~$") && seg.starts_with("~$"));
+        if hit {
+            let directory_match = seg == pattern && !is_last;
+            if !(directory_match && reincluded_dir(&path[..end])) {
+                return true;
+            }
+        }
+        if is_last {
+            return false;
+        }
+        start = end + 1;
+    }
 }

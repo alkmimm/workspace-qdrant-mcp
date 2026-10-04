@@ -93,26 +93,13 @@ pub fn matcher_from(ignore_file: &Path) -> Option<Gitignore> {
     build_matcher(ignore_file)
 }
 
-/// Match `path` against the cached matcher, checking the path and every parent
-/// directory so a directory pattern (e.g. `**/state/qdrant/`) excludes the
-/// files nested beneath it.
-fn matches(cached: &CachedMatcher, path: &Path, is_dir: bool) -> bool {
-    cached
-        .matcher
-        .matched_path_or_any_parents(path, is_dir)
-        .is_ignore()
-}
-
-/// Returns `true` when `path` is excluded by `global.wqmignore`.
+/// Run `query` against the process-wide matcher for `global.wqmignore`.
 ///
 /// Cheap on the hot path: a single `stat` of `global.wqmignore` detects edits;
 /// the compiled matcher is rebuilt only when the mtime changes. Returns `false`
-/// (do not exclude) when the file is absent or unreadable — callers keep their
-/// other filters, so a missing global ignore never blocks indexing.
-///
-/// Pass `is_dir = true` only when `path` is known to be a directory; for a
-/// regular file `false` is correct (parent directories are still consulted).
-pub fn is_globally_ignored(path: &Path, is_dir: bool) -> bool {
+/// when the file is absent or unreadable — callers keep their other filters,
+/// so a missing global ignore never blocks (nor re-includes) anything.
+fn query_global(query: impl Fn(&Gitignore) -> bool) -> bool {
     let Some(ignore_path) = resolve_global_ignore_path() else {
         return false;
     };
@@ -123,7 +110,7 @@ pub fn is_globally_ignored(path: &Path, is_dir: bool) -> bool {
         let guard = GLOBAL_IGNORE.read().unwrap();
         if let Some(cached) = guard.as_ref() {
             if cached.path == ignore_path && cached.loaded_mtime == current_mtime {
-                return matches(cached, path, is_dir);
+                return query(&cached.matcher);
             }
         }
     }
@@ -133,28 +120,50 @@ pub fn is_globally_ignored(path: &Path, is_dir: bool) -> bool {
     // Re-check: another thread may have rebuilt between the locks.
     if let Some(cached) = guard.as_ref() {
         if cached.path == ignore_path && cached.loaded_mtime == current_mtime {
-            return matches(cached, path, is_dir);
+            return query(&cached.matcher);
         }
     }
 
     let Some(matcher) = build_matcher(&ignore_path) else {
-        // File missing/unreadable: drop any stale cache and do not exclude.
+        // File missing/unreadable: drop any stale cache and answer no.
         *guard = None;
         return false;
     };
 
-    let cached = CachedMatcher {
-        matcher,
-        loaded_mtime: current_mtime,
-        path: ignore_path.clone(),
-    };
-    let result = matches(&cached, path, is_dir);
+    let result = query(&matcher);
     debug!(
         "[global_ignore] (re)loaded matcher from {}",
         ignore_path.display()
     );
-    *guard = Some(cached);
+    *guard = Some(CachedMatcher {
+        matcher,
+        loaded_mtime: current_mtime,
+        path: ignore_path,
+    });
     result
+}
+
+/// Returns `true` when `path` is excluded by `global.wqmignore`.
+///
+/// Checks the path and every parent directory so a directory pattern (e.g.
+/// `**/state/qdrant/`) excludes the files nested beneath it. Pass
+/// `is_dir = true` only when `path` is known to be a directory; for a regular
+/// file `false` is correct (parent directories are still consulted).
+pub fn is_globally_ignored(path: &Path, is_dir: bool) -> bool {
+    query_global(|m| m.matched_path_or_any_parents(path, is_dir).is_ignore())
+}
+
+/// Returns `true` when `global.wqmignore` explicitly RE-INCLUDES `path`: the
+/// deciding match for it (or its nearest matched parent) is a `!` negation.
+///
+/// This is what lets the user's file override the compiled exclusion engine:
+/// `out/` there names build output, and `!**/src/**/out/` re-includes the
+/// hexagonal `ports/out` / `adapters/out` source packages below a `src/` tree.
+/// The engine's own `out` token knew nothing of that negation, so the walk and
+/// the watcher dropped ~440 such sources in one repository and the startup
+/// recovery flagged them "excluded" on every restart (2026-10-04).
+pub fn is_globally_whitelisted(path: &Path, is_dir: bool) -> bool {
+    query_global(|m| m.matched_path_or_any_parents(path, is_dir).is_whitelist())
 }
 
 /// Test-only hook: build a matcher from an explicit file and query a path,
@@ -164,6 +173,15 @@ pub fn is_globally_ignored(path: &Path, is_dir: bool) -> bool {
 pub(crate) fn is_ignored_by_file(ignore_file: &Path, query: &Path, is_dir: bool) -> bool {
     match build_matcher(ignore_file) {
         Some(m) => m.matched_path_or_any_parents(query, is_dir).is_ignore(),
+        None => false,
+    }
+}
+
+/// Test-only twin of [`is_globally_whitelisted`] for an explicit file.
+#[cfg(test)]
+pub(crate) fn is_whitelisted_by_file(ignore_file: &Path, query: &Path, is_dir: bool) -> bool {
+    match build_matcher(ignore_file) {
+        Some(m) => m.matched_path_or_any_parents(query, is_dir).is_whitelist(),
         None => false,
     }
 }
@@ -299,6 +317,50 @@ mod tests {
             !is_ignored_by_file(&ig, cfg_file, false),
             "and the file stays re-included"
         );
+    }
+
+    /// The shipped example, so these tests pin what a fresh install gets.
+    const SHIPPED_EXAMPLE: &str = include_str!("../../../../../../assets/global.wqmignore.example");
+
+    /// Regression (bws-engineer, 2026-10-04): `out/` names build output, but
+    /// `!**/src/**/out/` re-includes hexagonal `port/out` packages below a
+    /// `src/` tree. The directory must read as WHITELISTED (an explicit
+    /// re-include the exclusion engine defers to), not merely "not ignored".
+    #[test]
+    fn shipped_example_reincludes_out_dirs_below_src() {
+        let (_d, ig) = write_global(SHIPPED_EXAMPLE);
+        let port_out = Path::new(
+            "/home/u/repos/bws-engineer/api-service/src/main/java/com/x/events/application/port/out",
+        );
+        assert!(is_whitelisted_by_file(&ig, port_out, true));
+        assert!(!is_ignored_by_file(&ig, port_out, true));
+        // Relative form (startup recovery and cleanup pass repo-relative paths).
+        assert!(is_whitelisted_by_file(
+            &ig,
+            Path::new("worker-command/src/main/java/x/adapters/out"),
+            true
+        ));
+    }
+
+    /// A real build-output directory stays excluded and is NOT whitelisted.
+    #[test]
+    fn shipped_example_keeps_build_output_out_dirs_excluded() {
+        let (_d, ig) = write_global(SHIPPED_EXAMPLE);
+        let build_out = Path::new("/home/u/repos/web/out");
+        assert!(is_ignored_by_file(&ig, build_out, true));
+        assert!(!is_whitelisted_by_file(&ig, build_out, true));
+    }
+
+    /// A path no rule mentions is neither ignored nor whitelisted: the
+    /// engine's own decision stands.
+    #[test]
+    fn unmentioned_path_is_not_whitelisted() {
+        let (_d, ig) = write_global(SHIPPED_EXAMPLE);
+        assert!(!is_whitelisted_by_file(
+            &ig,
+            Path::new("/home/u/repos/app/src/lib"),
+            true
+        ));
     }
 
     // End-to-end through the PUBLIC `is_globally_ignored` — the exact function
