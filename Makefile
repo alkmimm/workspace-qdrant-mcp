@@ -271,6 +271,12 @@ backup-db: check-env
 # for the ~10 GiB copy and rehearse on it. Most redeploys ship no schema
 # change, and on 2026-09-16 that unconditional copy was one of the two that
 # filled the WSL2 page cache to its ceiling and took the Windows host down.
+# needed.py answers in its OUTPUT (SKIP:/NEEDED:) and also exits 10 for NEEDED;
+# under `set -e` that exit status, carried by the `need=$$(...)` assignment,
+# killed the recipe the one time it mattered — whenever a migration WAS
+# pending (first hit: graph.db v7, 2026-10-04). `|| true` keeps the decision
+# on the printed line; a crash that prints nothing still falls through to the
+# rehearsal (unknown means rehearse).
 rehearse-migrations: check-env
 	@docker run --rm \
 	  -v "$(MEMEXD_DB_VOLUME)":/live:ro \
@@ -282,7 +288,7 @@ rehearse-migrations: check-env
 	   mkdir -p /tmp/probe; \
 	   WQM_DATABASE_PATH=/tmp/probe/memexd.db /usr/local/bin/memexd \
 	     --foreground --migrate-only > /tmp/probe.log 2>&1 || true; \
-	   need=$$(python3 /needed.py /live /tmp/probe.log); echo "$$need"; \
+	   need=$$(python3 /needed.py /live /tmp/probe.log) || true; echo "$$need"; \
 	   if echo "$$need" | grep -q "^SKIP:"; then exit 0; fi; \
 	   out=$$(python3 /copy.py /live /tmp/rehearsal); echo "$$out"; \
 	   if echo "$$out" | grep -q "^SKIP:"; then exit 0; fi; \
