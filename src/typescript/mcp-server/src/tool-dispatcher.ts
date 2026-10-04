@@ -25,6 +25,7 @@ import { storeUrl, storeScratchpad, storeFeedback } from './store-handlers.js';
 import { handleEmbedding } from './tools/embedding.js';
 import { handleHelp } from './tools/help.js';
 import { handleWorkspaceIndex } from './tools/workspace-index.js';
+import { probeBranchCoverage } from './tools/branch-coverage.js';
 import { handleGraph } from './tools/graph.js';
 import { getQdrantClient } from './clients/qdrant-client-factory.js';
 import { PROJECTS_COLLECTION } from './tools/retrieve-types.js';
@@ -321,7 +322,17 @@ async function routeToolInner(
           return null;
         }
       };
-      return handleWorkspaceIndex(args, daemonClient, projectDetector, probeQdrantPointCount);
+      // Per-branch coverage: the queue can read "complete" while a branch's
+      // content is missing from the index. Index counts + git tips.
+      const branchCoverage = (tenantId: string) =>
+        probeBranchCoverage(components.stateManager, tenantId);
+      return handleWorkspaceIndex(
+        args,
+        daemonClient,
+        projectDetector,
+        probeQdrantPointCount,
+        branchCoverage
+      );
     }
     case 'graph':
       return handleGraph(args, daemonClient, projectDetector, components.stateManager);

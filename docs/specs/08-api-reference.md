@@ -639,6 +639,35 @@ project reported by the daemon's `ListProjects`. Response shape:
 When the daemon can't estimate yet, `eta_seconds` is omitted and the
 summary ends with `· ETA unknown (warming up)`.
 
+**Per-branch coverage** (`indexing_status`, `project_status`, and the index
+view `list_branches` attaches). The queue numbers above describe work
+processed, so they stay at 100% when content later leaves the index (on
+2026-10-03 a worktree branch sat at 102 of its 400 files under a "complete"
+status). Each response also carries:
+
+```json
+"index_coverage": {
+  "trunk": "develop",
+  "branches": [
+    { "branch": "develop", "indexed_files": 126, "checkout": "/repo", "tip_files": 145, "ratio": 0.87 },
+    { "branch": "feat/x", "indexed_files": 102, "checkout": "/repo/.claude/worktrees/wt", "tip_files": 400, "ratio": 0.26 }
+  ],
+  "other_indexed_branches": 4
+},
+"coverage_warnings": [
+  "Branch 'feat/x' (checked out at …): the index holds 102 of the 400 files in its tip (26%), against 87% on the trunk 'develop' — reads scoped to it can miss files; verify absence on disk."
+]
+```
+
+`indexed_files` counts distinct paths the index holds under the branch;
+`tip_files` counts every file in the branch tip (git), including ones the
+daemon never indexes, so a branch is judged against the trunk's own ratio
+(warned below half of it; below 40% when the trunk ratio is unknown; tips
+under 20 files are not judged). Only the trunk and checked-out branches are
+listed in full — the rest are counted in `other_indexed_branches`
+(`list_branches` lists them all). Best-effort: without git the block holds
+index counts only, and with neither it is omitted.
+
 ### Removed/Automated Features
 
 The following are **not exposed as MCP tools**:
