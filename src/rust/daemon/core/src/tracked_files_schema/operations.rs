@@ -609,14 +609,27 @@ pub async fn get_tracked_file_paths(
 pub async fn get_tracked_files_with_hashes(
     pool: &SqlitePool,
     watch_folder_id: &str,
+    branch: Option<&str>,
 ) -> Result<Vec<(String, String, String)>, sqlx::Error> {
     // `file_mtime` rides along so the startup recovery can prove a file
     // unchanged with a `stat` instead of re-hashing it (see
     // `content_hash_reusing_mtime` for why that read is the expensive part).
+    //
+    // `branch` restricts the rows to one content generation per path — the
+    // one tagged with the branch whose checkout the caller compares against.
+    // Another branch's generation (a linked worktree's, stored main-anchored)
+    // is not "deleted" or "modified" because the main folder lacks or
+    // differs from it. Untagged rows (libraries, non-git) always qualify.
     let rows = sqlx::query(
-        "SELECT relative_path, file_hash, file_mtime FROM tracked_files WHERE watch_folder_id = ?1",
+        "SELECT relative_path, file_hash, file_mtime FROM tracked_files
+         WHERE watch_folder_id = ?1
+           AND (?2 IS NULL
+                OR COALESCE(json_array_length(tracked_files.branches), 0) = 0
+                OR EXISTS (
+                    SELECT 1 FROM json_each(tracked_files.branches) WHERE value = ?2))",
     )
     .bind(watch_folder_id)
+    .bind(branch)
     .fetch_all(pool)
     .await?;
 

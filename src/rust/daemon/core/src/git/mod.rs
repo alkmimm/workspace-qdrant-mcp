@@ -1,5 +1,6 @@
 mod branch_detector;
 mod branch_lifecycle;
+mod checkouts;
 mod diff_tree;
 mod reflog;
 mod tree_ops;
@@ -42,3 +43,7 @@ pub use tree_ops::{get_blob_hash, ls_tree_submodules};
 
 // Re-export from worktree
 pub use worktree::{find_main_worktree_path, list_linked_worktrees, LinkedWorktree};
+
+// Re-export from checkouts
+pub(crate) use checkouts::{canonicalize_host_path, is_leaf_worktree_root};
+pub use checkouts::{BranchCheckouts, CheckoutPresence};

@@ -15,9 +15,9 @@ use tracing::{debug, info, warn};
 
 use crate::lifecycle::WatchFolderLifecycle;
 use crate::queue_operations::QueueManager;
-use crate::unified_queue_schema::{FilePayload, ItemType, QueueOperation};
 use crate::watching_queue::WatchManager;
-use wqm_common::paths::RelativePath;
+
+use missing_files::{enqueue_delete_for_missing_tracked_files, remove_stale_tracked_files};
 
 /// Statistics returned by `clean_stale_state`.
 #[derive(Debug, Clone, Default)]
@@ -231,221 +231,6 @@ async fn purge_orphan_tenant_items(pool: &SqlitePool) -> Result<u64, String> {
     Ok(count)
 }
 
-/// Step 4b (F-036): Enqueue Delete ops for tracked files that no longer exist on disk.
-///
-/// Iterates all tracked files, checks disk existence, and enqueues a
-/// `(File, Delete)` queue item for each missing file. The composite uniqueness
-/// key `(tenant_id, branch, collection, item_type, op, file_path)` makes this
-/// operation idempotent: re-running on the next startup will silently skip files
-/// that already have a pending or in-progress Delete item.
-async fn enqueue_delete_for_missing_tracked_files(
-    pool: &SqlitePool,
-    queue_manager: &QueueManager,
-) -> Result<u64, String> {
-    info!("Enqueueing Delete ops for tracked files missing on disk (F-036)...");
-    let tracked_rows = sqlx::query(
-        "SELECT tf.file_id, tf.relative_path, wf.path AS watch_path, \
-                wf.tenant_id, wf.collection, je.value AS branch \
-         FROM tracked_files tf \
-         JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id, \
-              json_each(tf.branches) je",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to query tracked files for delete enqueue: {}", e))?;
-
-    let mut enqueued: u64 = 0;
-    for row in &tracked_rows {
-        let relative_path: String = row.get("relative_path");
-        let watch_path: String = row.get("watch_path");
-        let tenant_id: String = row.get("tenant_id");
-        let collection: String = row.get("collection");
-        let branch: String = row.get("branch");
-        let resolved_watch_path = WatchManager::resolve_local_watch_path(&watch_path);
-
-        let abs_path = resolved_watch_path.join(&relative_path);
-        if abs_path.exists() {
-            continue;
-        }
-
-        let abs_path_str = abs_path.to_string_lossy();
-        // `tracked_files.relative_path` is already validated; use it as the
-        // anchored payload form directly.
-        let relative = match RelativePath::from_user_input(&relative_path) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(
-                    "tracked_files.relative_path {:?} failed validation: {}",
-                    relative_path, e
-                );
-                continue;
-            }
-        };
-        let file_payload = FilePayload {
-            file_path: relative,
-            file_type: None,
-            file_hash: None,
-            size_bytes: None,
-            old_path: None,
-        };
-        let payload_json = serde_json::to_string(&file_payload)
-            .map_err(|e| format!("Failed to serialize FilePayload: {}", e))?;
-
-        match queue_manager
-            .enqueue_unified(
-                ItemType::File,
-                QueueOperation::Delete,
-                &tenant_id,
-                &collection,
-                &payload_json,
-                Some(&branch),
-                None,
-            )
-            .await
-        {
-            Ok((_, true)) => {
-                debug!("Enqueued Delete for missing tracked file: {}", abs_path_str);
-                enqueued += 1;
-            }
-            Ok((_, false)) => {
-                // Idempotent dedup: Delete already queued from a previous startup.
-                debug!(
-                    "Delete already queued for missing tracked file: {}",
-                    abs_path_str
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to enqueue Delete for missing tracked file {}: {}",
-                    abs_path_str, e
-                );
-            }
-        }
-    }
-
-    if enqueued > 0 {
-        info!(
-            "Enqueued {} Delete op(s) for tracked files missing on disk",
-            enqueued
-        );
-    } else {
-        debug!("No missing tracked files require Delete enqueue");
-    }
-    Ok(enqueued)
-}
-
-/// Step 5 (F-036): Remove tracked_files entries whose files no longer exist on
-/// disk AND whose Delete op is not still in flight.
-///
-/// A tracked_files row is only removed when the corresponding Delete queue item
-/// has been durably processed (deleted from queue = done) or never existed. If a
-/// pending or in-progress Delete item exists for the file, the row is kept so
-/// that the Delete handler can still resolve the file's identity on completion.
-///
-/// Post-T7: the in-flight check matches on the relative path that is stored in
-/// `unified_queue.file_path` and is scoped to the row's tenant + collection so
-/// that two tenants sharing an identical relative path under different
-/// watch-folder roots do not cross-contaminate.
-async fn remove_stale_tracked_files(pool: &SqlitePool) -> Result<u64, String> {
-    info!("Checking tracked files against filesystem...");
-    let tracked_rows = sqlx::query(
-        "SELECT tf.file_id, tf.relative_path, wf.path AS watch_path, \
-                wf.tenant_id, je.value AS branch, \
-                wf.collection \
-         FROM tracked_files tf \
-         JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id, \
-              json_each(tf.branches) je",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to query tracked files: {}", e))?;
-
-    let mut removable_file_ids: Vec<i64> = Vec::new();
-    for row in &tracked_rows {
-        let file_id: i64 = row.get("file_id");
-        let relative_path: String = row.get("relative_path");
-        let watch_path: String = row.get("watch_path");
-        let tenant_id: String = row.get("tenant_id");
-        let collection: String = row.get("collection");
-        let resolved_watch_path = WatchManager::resolve_local_watch_path(&watch_path);
-
-        let abs_path = resolved_watch_path.join(&relative_path);
-        if abs_path.exists() {
-            continue;
-        }
-
-        // File is missing on disk. Only remove the tracked_files row if there is
-        // no pending or in-progress Delete item for this relative path within the
-        // same tenant + collection scope. A Delete item in flight means the
-        // downstream cleanup (Qdrant, FTS, graph) has not yet been applied —
-        // removing the row now would orphan that state.
-        let in_flight: i64 = match sqlx::query_scalar(
-            "SELECT COUNT(*) FROM unified_queue \
-             WHERE file_path = ?1 \
-               AND tenant_id = ?2 \
-               AND collection = ?3 \
-               AND op = 'delete' \
-               AND item_type = 'file' \
-               AND status IN ('pending', 'in_progress')",
-        )
-        .bind(&relative_path)
-        .bind(&tenant_id)
-        .bind(&collection)
-        .fetch_one(pool)
-        .await
-        {
-            Ok(count) => count,
-            Err(e) => {
-                warn!(
-                    "Failed to check in-flight Delete for {} (tenant={}, collection={}): {} — skipping row to preserve F-036 safety guarantee",
-                    relative_path, tenant_id, collection, e
-                );
-                continue;
-            }
-        };
-
-        if in_flight > 0 {
-            debug!(
-                "Keeping tracked_files row for {} — Delete op still in flight",
-                relative_path
-            );
-        } else {
-            debug!(
-                "Tracked file missing on disk and no Delete in flight, removing: {}",
-                relative_path
-            );
-            removable_file_ids.push(file_id);
-        }
-    }
-
-    if !removable_file_ids.is_empty() {
-        for chunk in removable_file_ids.chunks(500) {
-            let placeholders: String = chunk
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let delete_sql = format!(
-                "DELETE FROM tracked_files WHERE file_id IN ({})",
-                placeholders
-            );
-            sqlx::query(&delete_sql)
-                .execute(pool)
-                .await
-                .map_err(|e| format!("Failed to delete stale tracked files: {}", e))?;
-        }
-        let count = removable_file_ids.len() as u64;
-        info!(
-            "Removed {} stale tracked files (Delete not in flight)",
-            count
-        );
-        Ok(count)
-    } else {
-        debug!("All tracked files still exist on disk or have Delete ops in flight");
-        Ok(0)
-    }
-}
-
 /// Step 4: Remove orphan qdrant_chunks (file_id not in tracked_files).
 async fn remove_orphan_chunks(pool: &SqlitePool) -> Result<u64, String> {
     info!("Cleaning orphan qdrant_chunks...");
@@ -514,6 +299,7 @@ pub async fn validate_watch_folders(pool: &SqlitePool) -> Result<WatchValidation
 pub mod branch_prune;
 pub(crate) mod ignore_enqueue;
 pub mod ignore_sync;
+mod missing_files;
 
 /// Reconcile ignore rules for all active projects at startup.
 ///
@@ -613,6 +399,7 @@ pub async fn reconcile_all_ignore_rules(
 mod tests {
     mod branch_prune;
     mod clean_stale_state;
+    mod missing_files;
     mod validate_watch_folders;
 
     use sqlx::sqlite::SqlitePoolOptions;

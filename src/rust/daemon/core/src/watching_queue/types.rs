@@ -214,6 +214,12 @@ pub struct WatchingQueueStats {
     pub events_throttled: u64, // Task 461.8: Events skipped due to queue depth
 }
 
+/// The branch label [`get_current_branch`] writes when HEAD names no branch
+/// (detached, unborn, unreadable). Readers that map a stored label back to a
+/// checkout use it too: content tagged with it while the main folder was
+/// detached lives in the main folder (see `git::BranchCheckouts`).
+pub const UNRESOLVED_BRANCH_LABEL: &str = "main";
+
 /// Get the current Git branch name for a repository
 ///
 /// This function detects the current Git branch for a directory within a Git repository.
@@ -241,7 +247,7 @@ pub struct WatchingQueueStats {
 /// // Returns: "feature/new-api" or "main"
 /// ```
 pub fn get_current_branch(repo_path: &Path) -> String {
-    const DEFAULT_BRANCH: &str = "main";
+    const DEFAULT_BRANCH: &str = UNRESOLVED_BRANCH_LABEL;
 
     match get_current_branch_opt(repo_path) {
         Some(branch) => branch,

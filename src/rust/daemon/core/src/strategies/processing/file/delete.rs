@@ -217,23 +217,26 @@ pub(super) async fn process_file_delete(
     let mut timings: Vec<PhaseTiming> = Vec::new();
     let target_path = Path::new(abs_file_path);
     let detected_language = detect_language(target_path);
-
-    if delete_target_still_exists(target_path) {
-        if bypasses_on_disk_skip(item) {
-            // Reconciler-driven delete (branch pruning or ignore-rule exclusion),
-            // NOT a stale watcher event: the file is still on disk but its index
-            // entry must be reconciled anyway — a pruned branch's tag dropped, or a
-            // now-ignored file removed. Fall through to the reference-counted
-            // removal below.
-            debug!(
-                "Reconciler delete for '{}' on branch '{}': file still on disk \
-                 — proceeding (not a stale watcher event)",
-                abs_file_path, item.branch
-            );
-        } else {
+    if bypasses_on_disk_skip(item) {
+        // Reconciler-driven delete (branch pruning or ignore-rule exclusion),
+        // NOT a stale watcher event: whether or not the file is still on disk,
+        // its index entry must be reconciled — a pruned branch's tag dropped, or
+        // a now-ignored file removed. No disk probe needed; fall through to the
+        // reference-counted removal below.
+        debug!(
+            "Reconciler delete for '{}' on branch '{}' — on-disk check bypassed",
+            abs_file_path, item.branch
+        );
+    } else {
+        // Staleness is judged in the item branch's own checkout (a linked
+        // worktree's content is stored main-anchored) — see `delete_target`.
+        let stale_probe =
+            super::delete_target::stale_probe_path(abs_file_path, relative_path, &item.branch);
+        if delete_target_still_exists(&stale_probe) {
             info!(
-                "Skipping stale delete for existing file on disk: {}",
-                abs_file_path
+                "Skipping stale delete for existing file on disk: {} (branch {})",
+                stale_probe.display(),
+                item.branch
             );
             record_delete_timings(ctx, item, pool, detected_language, &timings).await;
             return Ok(());
@@ -733,11 +736,7 @@ fn preserve_pruned_entry(
 /// invariant every consumer of this module assumes). A pair that does not
 /// compose is treated as not ignored, which keeps the preserve conservative.
 fn ignored_under_current_rules(abs_file_path: &str, relative_path: &str) -> bool {
-    let Some(root) = abs_file_path
-        .strip_suffix(relative_path)
-        .map(|r| r.trim_end_matches(['/', '\\']))
-        .filter(|r| !r.is_empty())
-    else {
+    let Some(root) = super::delete_target::main_root_of(abs_file_path, relative_path) else {
         return false;
     };
     super::is_ignored_at_dequeue(root, Path::new(abs_file_path))

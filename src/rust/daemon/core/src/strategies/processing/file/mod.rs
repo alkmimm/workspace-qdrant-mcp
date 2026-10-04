@@ -18,6 +18,7 @@ mod branch_dedup;
 mod chunk_embed;
 mod component;
 mod delete;
+mod delete_target;
 mod fts5_index;
 mod grammar;
 mod graph_ingest;

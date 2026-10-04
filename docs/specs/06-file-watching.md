@@ -205,6 +205,35 @@ generation still holds the path before deleting by bare `(file_path,
 tenant_id)` — see `docs/specs/21-cross-branch-dedup.md` for the Layer-2 model
 these protect.
 
+#### "Missing on disk" is judged in the branch's own checkout (2026-10-03)
+
+A linked worktree's content is stored MAIN-anchored (its rows live under the
+main watch folder, tagged with the worktree's branch — see
+`branch_switch/worktree_membership.rs`). So "is this file still on disk?" has
+no answer at the main root for a worktree branch: a worktree-only file is
+never there, and a file the worktree branch deleted may still be. Every
+on-disk staleness decision per `(path, branch)` resolves the branch's checkout
+through `git::BranchCheckouts` — the main folder for its HEAD, the leaf
+worktree for a worktree branch, nothing for a branch no checkout has (left to
+branch pruning):
+
+| Path | Decision |
+|---|---|
+| `idle/tasks/filesystem_reconcile.rs` | enqueue a Delete only for branches whose checkout lost the file |
+| `startup/reconciliation/missing_files.rs` (F-036 steps 4b/5) | same; a row is dropped only when every branch it carries lost the file |
+| `startup/recovery` (`detect_deleted_files`, flagged rows) | judge only rows tagged with the main folder's HEAD |
+| `file/delete_target.rs` (delete handler's stale check) | probe the item branch's checkout, not the main folder |
+| `queue_operations/delete_completion.rs` (F-036 post-completion) | probe the branch's checkout, and remove only rows whose set ⊆ {item branch} |
+
+Before this, all five joined the main root. Measured over 27 h of logs: 492 of
+the idle reconcile's 533 deletes were files that still existed in a worktree
+(emnify-sms-sender 421/421, bws-engineer 40/40, Finance 16/16, DOC-V2 15/20) —
+a worktree-only file was indexed at each tenant scan and gone ~8 minutes
+later. The post-completion cleanup then removed EVERY generation of the path,
+so the next delete for another branch found no row and fell through to the
+path-keyed Qdrant filter delete, leaving search.db rows orphaned (135 in one
+tenant). Gated in `make validate` (38 tests).
+
 #### Allowed Extensions by Category
 
 **1. Systems Languages**

@@ -255,15 +255,27 @@ async fn detect_deleted_files(
     startup_config: &StartupConfig,
     stats: &mut RecoveryStats,
 ) {
-    let tracked =
-        match tracked_files_schema::get_tracked_files_with_hashes(pool, watch_folder_id).await {
-            Ok(t) => t,
-            Err(e) => {
-                warn!("Failed to query tracked_files: {}", e);
-                stats.errors += 1;
-                return;
-            }
-        };
+    // The main folder is the checkout of its HEAD branch only. Rows of other
+    // branches (a linked worktree's generations are stored main-anchored)
+    // are judged in their own checkout by the idle reconcile, never here:
+    // compared with the main folder, a worktree-only file reads as deleted
+    // and a divergent one as modified. A non-git folder or a detached HEAD
+    // has no branch to scope by and keeps every row.
+    let head = crate::watching_queue::get_current_branch_opt(root);
+    let tracked = match tracked_files_schema::get_tracked_files_with_hashes(
+        pool,
+        watch_folder_id,
+        head.as_deref(),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("Failed to query tracked_files: {}", e);
+            stats.errors += 1;
+            return;
+        }
+    };
 
     let reconcile_modified = startup_config.reconcile_modified_on_startup;
     let batch_size = startup_config.startup_enqueue_batch_size;

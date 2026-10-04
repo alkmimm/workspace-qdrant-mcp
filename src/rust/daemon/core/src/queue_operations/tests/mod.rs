@@ -14,6 +14,7 @@ use tempfile::tempdir;
 // `fork/fixes`. Drop the dangling declaration so `cargo test` can run.
 mod cascade_priority_tests;
 mod concurrency_tests;
+mod delete_completion_tests;
 mod destination_tests;
 mod enqueue_dequeue_tests;
 mod failure_tests;

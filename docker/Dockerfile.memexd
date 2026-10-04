@@ -423,6 +423,36 @@ count."; exit 1; }; \
     || { echo "GATE: expected exactly 12 git_integration_tests to run and pass. If you ADDED \
 a test here, bump this count."; exit 1; }
 
+# "Missing on disk" is per (path, branch), judged in the branch's OWN checkout.
+# A linked worktree's content is stored main-anchored, and until 2026-10-03
+# every deletion path joined the MAIN root: the idle reconcile enqueued deletes
+# for every worktree-only file (492 of 533 in 27 h were false), the startup
+# F-036 steps did the same and step 5 dropped the rows outright, the delete
+# handler's stale check looked in the wrong tree, and the post-completion
+# cleanup removed EVERY generation of the path — stranding other branches'
+# Qdrant points and search.db rows. These pin the shared resolver
+# (`git::checkouts`) and each consumer. Hermetic: tempdir git admin fixtures +
+# in-memory/tempfile SQLite. NAMES via module path, exact count asserted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        git::checkouts::tests \
+        idle::tasks::filesystem_reconcile::tests \
+        strategies::processing::file::delete_target::tests \
+        queue_operations::tests::delete_completion_tests \
+        queue_operations::tests::stats_cleanup_tests::test_delete_unified_item \
+        tracked_files_schema::tests::branch_scope_tests \
+        startup::reconciliation::tests::missing_files \
+        startup::reconciliation::tests::clean_stale_state \
+        --test-threads=4 2>&1 | tee /tmp/branch-checkouts.log; \
+    grep -q "^test result: ok\. 39 passed" /tmp/branch-checkouts.log \
+    || { echo "GATE: expected exactly 39 branch-checkout deletion tests to run and pass — \
+libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
+un-gate the rule that keeps worktree-only files from being deleted. If you ADDED a test here, \
+bump this count."; exit 1; }
+
 # Qdrant payload-index manifests run here, same rationale: hermetic (pure const
 # assertions, no Qdrant and no DB) and they guard a SILENT performance cliff —
 # a field used in a production filter but missing from the manifest makes that
