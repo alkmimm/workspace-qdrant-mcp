@@ -62,7 +62,7 @@ impl GraphServiceImpl {
             .map(|g| g.generation)
             .collect();
         let graphed = resolved
-            .held
+            .visible
             .iter()
             .filter(|g| extracted.contains(*g))
             .count();
@@ -70,7 +70,7 @@ impl GraphServiceImpl {
             resolved.scope,
             GraphScopeProto {
                 branch: resolved.branch,
-                indexed_files: resolved.held.len() as u32,
+                indexed_files: resolved.visible.len() as u32,
                 graphed_files: graphed as u32,
             },
         ))

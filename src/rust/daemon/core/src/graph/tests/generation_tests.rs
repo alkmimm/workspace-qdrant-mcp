@@ -209,11 +209,12 @@ async fn deleting_a_generation_removes_only_its_rows() {
         .await
         .unwrap();
     assert_eq!(dev.len(), 1, "develop's version survives");
-    let stubs = store.stats(Some(TENANT), &scope(&[])).await.unwrap();
-    assert_eq!(
-        stubs.total_nodes, 1,
-        "the generation-less stub row survives"
-    );
+    // The stub row survives (unscoped: develop's render + 2 helpers + stub),
+    // and a scoped count leaves it out — it is no branch's symbol.
+    let all = store.stats(Some(TENANT), &GraphScope::all()).await.unwrap();
+    assert_eq!(all.total_nodes, 4);
+    let none = store.stats(Some(TENANT), &scope(&[])).await.unwrap();
+    assert_eq!(none.total_nodes, 0);
     // Deleting the shared stub namespace is refused.
     assert_eq!(store.delete_generation(TENANT, "").await.unwrap(), 0);
 }

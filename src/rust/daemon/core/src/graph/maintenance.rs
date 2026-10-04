@@ -121,16 +121,19 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE tracked_files (watch_folder_id TEXT, base_point TEXT)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "CREATE TABLE tracked_files (watch_folder_id TEXT, relative_path TEXT,
+                base_point TEXT, branches TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO watch_folders VALUES ('w', 't')")
             .execute(&pool)
             .await
             .unwrap();
         for g in generations {
-            sqlx::query("INSERT INTO tracked_files VALUES ('w', ?1)")
+            sqlx::query(r#"INSERT INTO tracked_files VALUES ('w', ?1, ?1, '["main"]')"#)
                 .bind(g)
                 .execute(&pool)
                 .await

@@ -448,20 +448,28 @@ path only builds the graph when the generation was never extracted
 (`heal_generation_after_dedup`, tree-sitter only).
 
 **Reads.** Branch membership is NOT mirrored into graph.db. Every graph read
-resolves the asking branch to the generations `tracked_files.branches` gives it
-(`graph::branch_scope`; absent branch = the main folder's checkout, `*` =
-unscoped) and admits only those rows — traversal, impact, stats and every
-algorithm load. Nothing can drift, because every branch create, switch, share
-and prune already maintains the authority. The by-name stub resolver uses the
-same membership: a candidate definition only counts for an edge when some
-branch holds both, so a name defined once per branch resolves uniquely on each
-branch instead of as an ambiguous fan-out across all of them.
+resolves the asking branch to the generations it sees (`graph::branch_scope`;
+absent branch = the main folder's checkout, `*` = unscoped) and admits only
+those rows — traversal, impact, stats and every algorithm load. A feature
+branch is tagged only on the files it CHANGED, so its view is composed exactly
+like the MCP read surfaces' trunk fill-in (#408/#409): its own generations,
+plus the trunk's generation of every path it holds none of and did not change
+between the two tips (`git::paths_changed_between`, no rename detection — a
+path renamed or deleted on the branch is changed). The trunk is git's default
+branch when the index holds files under it, else the most-tagged branch. A
+branch git does not resolve and the index never tagged (a typo) inherits
+nothing. Nothing can drift, because every branch create, switch, share and
+prune already maintains the authority. The by-name stub resolver uses the same
+membership, with the trunk's generations visible to every branch: a candidate
+definition only counts for an edge when some branch sees both, so a name
+defined once per branch resolves uniquely on each branch instead of as an
+ambiguous fan-out across all of them.
 
 **Rebuild.** v7 drops the old rows (nothing recorded which version produced
 them). While the queue is idle, the backfill lists tracked generations without
 an extraction record and rebuilds each from a checkout that has exactly that
-version on disk (the branch's own checkout, hash-verified); versions no
-checkout holds wait until one does. Responses report coverage
+version on disk (the branch's own checkouts first, then any other checkout —
+hash-verified either way); versions no checkout holds wait until one does. Responses report coverage
 (`scope.graphed_files` of `scope.indexed_files`) so a partial graph is never
 read as a complete one.
 

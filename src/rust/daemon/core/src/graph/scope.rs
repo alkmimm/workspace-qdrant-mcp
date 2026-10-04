@@ -60,9 +60,13 @@ pub struct ExtractedGeneration {
 ///
 /// Used by the stub resolver: a candidate definition only counts for an edge
 /// when some branch holds both the edge's generation and the candidate's.
+/// The trunk's generations are `universal`: a feature branch is tagged only on
+/// the files it changed and sees the trunk's copy of the rest, so a trunk
+/// generation is co-visible with every branch's.
 #[derive(Debug, Clone, Default)]
 pub struct GenerationBranches {
     by_generation: HashMap<String, Vec<String>>,
+    universal: HashSet<String>,
 }
 
 impl GenerationBranches {
@@ -88,14 +92,23 @@ impl GenerationBranches {
                 }
             }
         }
-        Self { by_generation }
+        Self {
+            by_generation,
+            universal: HashSet::new(),
+        }
+    }
+
+    /// Mark generations visible on every branch (the trunk's).
+    pub fn with_universal(mut self, universal: HashSet<String>) -> Self {
+        self.universal = universal;
+        self
     }
 
     /// Whether some branch holds both generations. Unknown membership on
     /// either side (a stub's empty generation, a legacy row, a generation the
     /// rows did not mention) answers `true` — never narrower than before.
     pub fn co_visible(&self, a: &str, b: &str) -> bool {
-        if a == b {
+        if a == b || self.universal.contains(a) || self.universal.contains(b) {
             return true;
         }
         match (self.by_generation.get(a), self.by_generation.get(b)) {
@@ -146,6 +159,16 @@ mod tests {
         assert!(m.co_visible("both", "dev"));
         assert!(m.co_visible("both", "f5"));
         assert!(m.co_visible("dev", "dev"));
+    }
+
+    #[test]
+    fn a_trunk_generation_is_co_visible_with_every_branch() {
+        let m = GenerationBranches::from_rows([
+            ("dev".to_string(), vec!["develop".to_string()]),
+            ("f5".to_string(), vec!["fase-5".to_string()]),
+        ])
+        .with_universal(["dev".to_string()].into_iter().collect());
+        assert!(m.co_visible("f5", "dev"));
     }
 
     #[test]

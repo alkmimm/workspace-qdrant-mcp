@@ -126,6 +126,15 @@ impl BranchCheckouts {
             .or(self.single_tree.as_deref())
     }
 
+    /// Every checkout root (the main folder and each leaf worktree), deduplicated.
+    pub fn all_roots(&self) -> Vec<&Path> {
+        let mut roots: Vec<&Path> = self.roots.values().map(PathBuf::as_path).collect();
+        roots.extend(self.single_tree.as_deref());
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
     /// Whether `relative_path` is on disk in `branch`'s checkout.
     pub fn presence(&self, branch: &str, relative_path: &str) -> CheckoutPresence {
         match self.root_for(branch) {

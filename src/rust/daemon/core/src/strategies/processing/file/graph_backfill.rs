@@ -182,13 +182,15 @@ impl GraphBackfill {
     }
 }
 
-/// The on-disk copy of exactly this version: the file at its path in the
-/// checkout of one of the branches that hold it, whose content hash is the
-/// generation's. A row with no branch set is a legacy row; its one tree is the
-/// watch root.
+/// The on-disk copy of exactly this version: the file at its path in a
+/// checkout whose bytes hash to the generation's. The checkouts of the
+/// branches that hold the version are tried first; then every other checkout,
+/// because a version is often byte-identical elsewhere (a trunk nobody has
+/// checked out shares most files with the main folder's branch). A row with
+/// no branch set is a legacy row; its one tree is the watch root.
 fn locate_version(p: &Pending) -> Option<PathBuf> {
     let checkouts = BranchCheckouts::discover_cached(&p.watch_root);
-    let roots: Vec<&Path> = if p.branches.is_empty() {
+    let mut roots: Vec<&Path> = if p.branches.is_empty() {
         vec![p.watch_root.as_path()]
     } else {
         p.branches
@@ -196,6 +198,11 @@ fn locate_version(p: &Pending) -> Option<PathBuf> {
             .filter_map(|b| checkouts.root_for(b))
             .collect()
     };
+    for root in checkouts.all_roots() {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
     roots.into_iter().find_map(|root| {
         let abs = root.join(&p.relative_path);
         let matches =
@@ -241,6 +248,11 @@ mod tests {
         assert_eq!(
             locate_version(&pending(dir.path(), "gone.rs", &hash, &["main"])),
             None
+        );
+        // A branch with no checkout of its own: found wherever the bytes are.
+        assert_eq!(
+            locate_version(&pending(dir.path(), "a.rs", &hash, &["develop"])),
+            Some(file.clone())
         );
         // A legacy row (no branch set) is looked up in the watch root.
         assert_eq!(

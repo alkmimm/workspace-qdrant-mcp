@@ -377,7 +377,11 @@ impl SqliteGraphStore {
                 q = q.bind(tid);
             }
             for row in q.fetch_all(&self.pool).await? {
-                if !scope.admits(row.get::<String, _>("generation").as_str()) {
+                let generation: String = row.get("generation");
+                // A branch's counts are what its file versions define: the
+                // generation-less stub rows are unresolved names shared by the
+                // whole tenant, not symbols of this branch.
+                if !scope.admits(&generation) || (scope.is_scoped() && generation.is_empty()) {
                     continue;
                 }
                 let kind: String = row.get("kind");

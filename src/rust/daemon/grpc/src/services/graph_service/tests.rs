@@ -477,6 +477,10 @@ mod branch_scoping {
             ("legacy.ts", "legacy-dev", "develop"),
             ("modern.ts", "modern-f5", "fase-5"),
             ("notes.md", "notes-f5", "fase-5"),
+            // develop is the trunk (most tagged): fase-5 is tagged only on what
+            // it changed and sees develop's copy of everything else.
+            ("shared.ts", "shared-dev", "develop"),
+            ("util.ts", "util-dev", "develop"),
         ] {
             sqlx::query("INSERT INTO tracked_files VALUES ('w', ?1, ?2, json_array(?3))")
                 .bind(path)
@@ -526,8 +530,13 @@ mod branch_scoping {
             .scope
             .expect("every answer says which branch it describes");
         assert_eq!(scope.branch, "fase-5");
-        assert_eq!(scope.indexed_files, 3, "page-f5, modern-f5, notes-f5");
-        assert_eq!(scope.graphed_files, 2, "notes.md was never extracted");
+        // Its own page-f5, modern-f5, notes-f5, plus develop's copy of the paths
+        // it holds none of (no git here, so every such path fills in).
+        assert_eq!(scope.indexed_files, 6);
+        assert_eq!(
+            scope.graphed_files, 3,
+            "page-f5, modern-f5 and the filled-in legacy-dev were extracted"
+        );
     }
 
     #[tokio::test]
