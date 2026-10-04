@@ -112,4 +112,5 @@ export type {
   TestGapsRequest,
   TestGapsResponse,
   TestGapProto,
+  GraphScopeProto,
 } from './grpc-types-search-graph.js';

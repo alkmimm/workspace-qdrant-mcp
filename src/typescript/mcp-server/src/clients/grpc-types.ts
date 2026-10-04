@@ -95,6 +95,7 @@ export {
   type TestGapsRequest,
   type TestGapsResponse,
   type TestGapProto,
+  type GraphScopeProto,
   // QueueWriteService
   type EnqueueItemRequest,
   type EnqueueItemResponse,

@@ -647,7 +647,10 @@ Navigate the **code-relationship graph** the daemon builds from symbol relations
 | `memberLimit` | number | No | `10` | Members listed per community for `modules` (`0` = all; each community reports its true `member_count`) |
 | `maxSamples` | number | No | — | For `bridges`: sample N source nodes for betweenness on large graphs (`0`/omit = exact) |
 | `edgeTypes` | string[] | No | — | Filter by edge type, e.g. `["CALLS","IMPORTS","CONTAINS","USES_TYPE","EXTENDS","IMPLEMENTS"]` |
+| `branch` | string | No | branch at `cwd` | Branch to answer for — same rule as `search`/`grep`/`list` (a worktree answers for its own branch). `*` = every branch at once |
 | `projectId` / `cwd` | string | No | — | Project scoping — same semantics as `search`/`grep`/`list` |
+
+> **Per-branch answers.** The graph keeps each file's version per branch (one set of rows per content version, keyed like the shared Qdrant points), so an answer only contains code that exists on the branch it describes: a file the branch deleted is gone, and a file it rewrote shows its own symbols, not the trunk's. Every response carries `scope` — `branch` plus `indexed_files` (file versions the branch holds) and `graphed_files` (of those, versions the graph has extracted). While `graphed_files < indexed_files` the daemon is still building that branch's graph in the background and a `hint` leads the response saying the answer is partial; a branch with `indexed_files: 0` is almost always a misspelled name.
 
 ### Actions
 

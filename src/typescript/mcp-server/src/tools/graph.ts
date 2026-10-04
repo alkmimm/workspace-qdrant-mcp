@@ -16,6 +16,12 @@
  * operates on the SAME project as the other tools). It does NOT fall back to
  * "first active project" — that silently returned a different project's graph
  * when the cwd didn't match — it errors instead, asking for `projectId`/`cwd`.
+ *
+ * Branch resolution is the one search/grep/list use: an explicit `branch` wins
+ * (`*` = every branch), otherwise the branch checked out at the project path.
+ * The daemon keeps each file's version per branch and answers from the
+ * versions that branch holds; every response carries `scope` (the branch it
+ * describes and how much of it the graph has extracted).
  */
 
 import { createHash } from 'node:crypto';
@@ -23,7 +29,11 @@ import { createHash } from 'node:crypto';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { ProjectDetector } from '../utils/project-detector.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
-import { resolveProjectIdentity, type ProjectIdentity } from './branch-scope.js';
+import {
+  resolveEffectiveBranch,
+  resolveProjectIdentity,
+  type ProjectIdentity,
+} from './branch-scope.js';
 import { projectEcho } from './project-echo.js';
 import type {
   ImpactAnalysisRequest,
@@ -33,6 +43,7 @@ import type {
   CycleRequest,
   TestGapsRequest,
   QueryRelatedRequest,
+  GraphScopeProto,
 } from '../clients/grpc-types.js';
 
 type JsonObject = Record<string, unknown>;
@@ -164,6 +175,32 @@ export function partialCommunityHint(iterations: number): string {
   );
 }
 
+/**
+ * The caveat for an answer drawn from a partial graph. The daemon rebuilds a
+ * branch's file versions in the background (after the per-branch graph
+ * migration, and for any version whose extraction failed); until it finishes,
+ * symbols in the missing files are absent from every action's answer — absent,
+ * not unused. A branch that holds no files at all is almost always a typo.
+ */
+export function graphCoverageHint(scope: GraphScopeProto | undefined): string | undefined {
+  if (!scope || scope.branch === '*') return undefined;
+  const indexed = scope.indexed_files ?? 0;
+  const graphed = scope.graphed_files ?? 0;
+  const where = scope.branch ? `branch '${scope.branch}'` : 'this project';
+  if (indexed === 0) {
+    return (
+      `${where} holds no indexed files, so the graph has nothing to answer from. Check the ` +
+      `branch name (list_branches in workspace_index), or pass branch:"*" for every branch.`
+    );
+  }
+  if (graphed >= indexed) return undefined;
+  return (
+    `PARTIAL GRAPH: it covers ${graphed} of ${indexed} file versions on ${where} — the daemon is ` +
+    `still building the rest. Symbols defined or referenced only in the missing files are absent ` +
+    `from this answer (absent, not unused); re-run later for a complete one.`
+  );
+}
+
 function graphNoEdgesHint(kind: 'usages' | 'impact' | 'relations'): string {
   const what =
     kind === 'relations'
@@ -265,13 +302,30 @@ async function runGraphAction(
   const action = str(args, 'action') ?? 'stats';
   const identity = await resolveTenantIdentity(args, projectDetector, stateManager);
   const edgeTypes = strArray(args, 'edgeTypes');
+  // The SAME branch rule as search/grep/list: explicit `branch` wins, else the
+  // branch checked out at the project path. Undefined lets the daemon answer for
+  // the branch the project's main folder has checked out.
+  const branch = resolveEffectiveBranch({
+    explicitBranch: str(args, 'branch'),
+    scope: 'project',
+    projectId: identity.projectId,
+    projectPath: identity.projectPath,
+  });
   const result = await dispatchGraphAction(
     action,
     args,
     identity.projectId,
     edgeTypes,
-    daemonClient
+    daemonClient,
+    branch
   );
+  // Lead with the coverage caveat, ahead of any action-specific hint: a partial
+  // graph qualifies every number below it.
+  const coverage = graphCoverageHint(result.scope as GraphScopeProto | undefined);
+  if (coverage !== undefined) {
+    const existing = typeof result.hint === 'string' ? result.hint : undefined;
+    result.hint = existing ? `${coverage} ${existing}` : coverage;
+  }
   // Read-side project echo (shared with search/grep/list/retrieve): which
   // tenant the graph answered for and how it was resolved.
   const explicit = str(args, 'projectId') ?? str(args, 'tenantId');
@@ -283,11 +337,13 @@ async function dispatchGraphAction(
   args: JsonObject,
   tenant: string,
   edgeTypes: ReturnType<typeof strArray>,
-  daemonClient: DaemonClient
+  daemonClient: DaemonClient,
+  branch: string | undefined
 ): Promise<Record<string, unknown>> {
+  const onBranch = branch !== undefined ? { branch } : {};
   switch (action) {
     case 'stats': {
-      const r = await daemonClient.getGraphStats({ tenant_id: tenant });
+      const r = await daemonClient.getGraphStats({ tenant_id: tenant, ...onBranch });
       return { success: true, action, tenant_id: tenant, ...r };
     }
 
@@ -311,6 +367,7 @@ async function dispatchGraphAction(
       const topK = num(args, 'topK') ?? 50;
       const req: ImpactAnalysisRequest = {
         tenant_id: tenant,
+        ...onBranch,
         symbol_name: symbol,
         top_k: topK,
         ...(filePath ? { file_path: filePath } : {}),
@@ -429,6 +486,7 @@ async function dispatchGraphAction(
     case 'hotspots': {
       const req: PageRankRequest = {
         tenant_id: tenant,
+        ...onBranch,
         top_k: num(args, 'topK') ?? 20,
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
       };
@@ -442,6 +500,7 @@ async function dispatchGraphAction(
       const maxSamples = num(args, 'maxSamples');
       const req: BetweennessRequest = {
         tenant_id: tenant,
+        ...onBranch,
         top_k: num(args, 'topK') ?? 20,
         ...(maxSamples !== undefined ? { max_samples: maxSamples } : {}),
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
@@ -477,6 +536,7 @@ async function dispatchGraphAction(
       const minSize = num(args, 'minSize');
       const req: CycleRequest = {
         tenant_id: tenant,
+        ...onBranch,
         top_k: num(args, 'topK') ?? 20,
         ...(minSize !== undefined ? { min_cycle_size: minSize } : {}),
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
@@ -512,6 +572,7 @@ async function dispatchGraphAction(
       // NOT execution coverage; it complements, not replaces, coverage tools.
       const req: TestGapsRequest = {
         tenant_id: tenant,
+        ...onBranch,
         top_k: num(args, 'topK') ?? 20,
         ...(edgeTypes ? { edge_types: edgeTypes } : {}),
       };
@@ -547,6 +608,7 @@ async function dispatchGraphAction(
       const memberLimitWire = memberLimit > 0 ? Math.floor(memberLimit) : 0;
       const req: CommunityRequest = {
         tenant_id: tenant,
+        ...onBranch,
         top_k: num(args, 'topK') ?? 20,
         member_limit: memberLimitWire,
         ...(minSize !== undefined ? { min_community_size: minSize } : {}),
@@ -575,6 +637,7 @@ async function dispatchGraphAction(
         ...(hint !== undefined ? { hint } : {}),
         total_communities: r.total_communities,
         query_time_ms: r.query_time_ms,
+        ...(r.scope !== undefined ? { scope: r.scope } : {}),
         member_limit: memberLimit,
         partial,
         ...(r.iterations !== undefined ? { iterations: r.iterations } : {}),
@@ -597,6 +660,7 @@ async function dispatchGraphAction(
       const minConfidence = minConfidenceArg(args);
       const req: QueryRelatedRequest = {
         tenant_id: tenant,
+        ...onBranch,
         node_id: nodeId,
         max_hops: num(args, 'maxHops') ?? 1,
         // Daemon caps the traversal list to top_k (nearest-by-depth first) and
