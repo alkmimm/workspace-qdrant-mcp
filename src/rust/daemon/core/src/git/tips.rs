@@ -59,6 +59,8 @@ pub fn paths_changed_between(
     let prefix = repo
         .workdir()
         .and_then(|w| {
+            // CATEGORY-B: process-local only — both sides resolved the same way
+            // to compute the root's prefix inside the repository; never stored.
             let w = std::fs::canonicalize(w).ok()?;
             let r = std::fs::canonicalize(repo_root).ok()?;
             r.strip_prefix(&w).ok().map(Path::to_path_buf)
