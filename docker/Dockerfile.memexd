@@ -538,9 +538,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         graph:: strategies::processing::file::graph_backfill::tests git::tips::tests \
+        strategies::processing::file::graph_ingest::tests \
         --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
-    grep -q "^test result: ok\. 243 passed" /tmp/graph-core.log \
-    || { echo "GATE: expected exactly 243 core graph tests (graph::, the backfill, git::tips) to run and \
+    grep -q "^test result: ok\. 246 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 246 core graph tests (graph::, backfill, ingest, git::tips) to run and \
 pass. If you ADDED a test here, bump this count."; exit 1; } \
  && cargo test -p workspace-qdrant-core --no-fail-fast \
         --test graph_algorithm_tests --test graph_extractor_tests \

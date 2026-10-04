@@ -264,9 +264,10 @@ pub(crate) async fn rebuild_generation(
         return;
     };
     let overrides = super::component::get_gitattributes(ctx, base_path).await;
-    if crate::tree_sitter::detect_language_with_overrides(file_path, relative_path, &overrides)
-        .is_none()
-    {
+    let has_language =
+        crate::tree_sitter::detect_language_with_overrides(file_path, relative_path, &overrides)
+            .is_some();
+    if nothing_to_extract(file_path, has_language) {
         if let Err(e) = graph_store
             .reingest_file(tenant_id, relative_path, generation, &[], &[])
             .await
@@ -303,6 +304,14 @@ pub(crate) async fn rebuild_generation(
         generation,
     )
     .await;
+}
+
+/// Whether a file has no symbols to extract and is recorded as an empty
+/// extraction without parsing: no grammar covers it, or it is empty (an empty
+/// `__init__.py`). The parser refuses an empty file outright, so without this
+/// the backfill retried — and warned about — every one of them on each pass.
+fn nothing_to_extract(file_path: &Path, has_language: bool) -> bool {
+    !has_language || std::fs::metadata(file_path).is_ok_and(|m| m.len() == 0)
 }
 
 /// Build a generation's graph on a branch-dedup hit when it has none.
@@ -419,6 +428,21 @@ mod tests {
             .iter()
             .any(|e| e.source_node_id == other && e.edge_type == EdgeType::Calls));
         assert_eq!(edges.len(), 3);
+    }
+
+    #[test]
+    fn empty_or_grammarless_files_are_recorded_without_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("__init__.py");
+        std::fs::write(&empty, "").unwrap();
+        let code = dir.path().join("lib.py");
+        std::fs::write(&code, "def f():\n    pass\n").unwrap();
+        assert!(
+            nothing_to_extract(&empty, true),
+            "the parser refuses empty files"
+        );
+        assert!(nothing_to_extract(&code, false), "no grammar covers it");
+        assert!(!nothing_to_extract(&code, true));
     }
 
     #[test]
