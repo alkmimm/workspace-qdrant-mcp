@@ -549,7 +549,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # impact / stats / algorithms, per-branch stub resolution, the LSP rewrite
 # staying inside its version, membership read from the authority, the
 # orphan-generation sweep's guards, the backfill finding a version only where
-# its bytes are, and the gRPC answer carrying its branch and coverage.
+# its bytes are — on disk, or at a live branch tip in git when no checkout
+# holds it — and the gRPC answer carrying its branch and coverage.
 # Gating whole suites is deliberate: none of these ran before, and one of them
 # (`test_pagerank_on_extracted_graph`) had been failing unnoticed since the IDF
 # demotion landed (#164). Exact counts asserted — libtest exits 0 when a filter
@@ -562,8 +563,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         graph:: strategies::processing::file::graph_backfill::tests git::tips::tests \
         strategies::processing::file::graph_ingest::tests \
         --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
-    grep -q "^test result: ok\. 246 passed" /tmp/graph-core.log \
-    || { echo "GATE: expected exactly 246 core graph tests (graph::, backfill, ingest, git::tips) to run and \
+    grep -q "^test result: ok\. 248 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 248 core graph tests (graph::, backfill, ingest, git::tips) to run and \
 pass. If you ADDED a test here, bump this count."; exit 1; } \
  && cargo test -p workspace-qdrant-core --no-fail-fast \
         --test graph_algorithm_tests --test graph_extractor_tests \

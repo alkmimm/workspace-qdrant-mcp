@@ -548,6 +548,7 @@ async fn run_keyword_and_graph_phases(
         &read_abs_path,
         &document_content.chunks,
         base_point,
+        true,
     )
     .await;
     timings.push(PhaseTiming {
