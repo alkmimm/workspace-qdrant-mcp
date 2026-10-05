@@ -469,7 +469,11 @@ ambiguous fan-out across all of them.
 them). While the queue is idle, the backfill lists tracked generations without
 an extraction record and rebuilds each from a checkout that has exactly that
 version on disk (the branch's own checkouts first, then any other checkout —
-hash-verified either way); versions no checkout holds wait until one does. Responses report coverage
+hash-verified either way). A version no checkout holds is read from git — the
+tip of a live (local) branch that holds it, hash-verified the same way — and
+extracted with tree-sitter only: the project's language server sees another
+branch's files, so its call resolution would answer for the wrong code. Only a
+version no checkout and no live tip holds waits. Responses report coverage
 (`scope.graphed_files` of `scope.indexed_files`) so a partial graph is never
 read as a complete one.
 

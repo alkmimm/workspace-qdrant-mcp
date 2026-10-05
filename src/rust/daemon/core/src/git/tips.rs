@@ -56,17 +56,7 @@ pub fn paths_changed_between(
     if let Some(hit) = CHANGED_CACHE.lock().unwrap().get(&key) {
         return Some(Arc::clone(hit));
     }
-    let prefix = repo
-        .workdir()
-        .and_then(|w| {
-            // CATEGORY-B: process-local only — both sides resolved the same way
-            // to compute the root's prefix inside the repository; never stored.
-            let w = std::fs::canonicalize(w).ok()?;
-            let r = std::fs::canonicalize(repo_root).ok()?;
-            r.strip_prefix(&w).ok().map(Path::to_path_buf)
-        })
-        .unwrap_or_default();
-    let prefix = prefix.to_string_lossy().replace('\\', "/");
+    let prefix = root_prefix(&repo, repo_root);
     let base_tree = repo.find_commit(base_oid).ok()?.tree().ok()?;
     let head_tree = repo.find_commit(head_oid).ok()?.tree().ok()?;
     let diff = repo
@@ -95,6 +85,44 @@ pub fn paths_changed_between(
     }
     cache.insert(key, Arc::clone(&changed));
     Some(changed)
+}
+
+/// The bytes of `relative_path` (relative to `repo_root`) at the tip of the
+/// LOCAL branch `branch` — the version that branch holds, whether or not any
+/// checkout has it. Local refs only, matching the branch prune's notion of a
+/// live branch: a branch it treats as deleted is not read. `None` when git
+/// cannot say: not a repository, no such local branch, no such path at that
+/// tip, or a path that is not a file.
+pub fn blob_at_branch_tip(repo_root: &Path, branch: &str, relative_path: &str) -> Option<Vec<u8>> {
+    let repo = git2::Repository::open(repo_root).ok()?;
+    let tip = repo.refname_to_id(&format!("refs/heads/{branch}")).ok()?;
+    let tree = repo.find_commit(tip).ok()?.tree().ok()?;
+    let prefix = root_prefix(&repo, repo_root);
+    let path = if prefix.is_empty() {
+        relative_path.to_string()
+    } else {
+        format!("{prefix}/{relative_path}")
+    };
+    let entry = tree.get_path(Path::new(&path)).ok()?;
+    let blob = entry.to_object(&repo).ok()?.into_blob().ok()?;
+    Some(blob.content().to_vec())
+}
+
+/// Where `repo_root` sits inside its repository's working tree, `/`-separated
+/// ("" at the top): tree paths are repository-relative, the index's are
+/// root-relative.
+fn root_prefix(repo: &git2::Repository, repo_root: &Path) -> String {
+    let prefix = repo
+        .workdir()
+        .and_then(|w| {
+            // CATEGORY-B: process-local only — both sides resolved the same way
+            // to compute the root's prefix inside the repository; never stored.
+            let w = std::fs::canonicalize(w).ok()?;
+            let r = std::fs::canonicalize(repo_root).ok()?;
+            r.strip_prefix(&w).ok().map(Path::to_path_buf)
+        })
+        .unwrap_or_default();
+    prefix.to_string_lossy().replace('\\', "/")
 }
 
 fn branch_tip(repo: &git2::Repository, branch: &str) -> Option<git2::Oid> {
@@ -187,6 +215,18 @@ mod tests {
         assert!(paths_changed_between(dir.path(), "develop", "no-such").is_none());
         let plain = tempfile::tempdir().unwrap();
         assert!(paths_changed_between(plain.path(), "a", "b").is_none());
+    }
+
+    #[test]
+    fn a_branch_tip_yields_its_own_version_of_a_file() {
+        let dir = two_branch_repo();
+        let at = |branch, path| blob_at_branch_tip(dir.path(), branch, path);
+        assert_eq!(at("develop", "a.ts").as_deref(), Some(&b"1"[..]));
+        assert_eq!(at("feature", "a.ts").as_deref(), Some(&b"2"[..]));
+        assert_eq!(at("feature", "src/new.ts").as_deref(), Some(&b"1"[..]));
+        assert!(at("develop", "src/new.ts").is_none(), "not at that tip");
+        assert!(at("feature", "src").is_none(), "a directory is not a file");
+        assert!(at("no-such", "a.ts").is_none());
     }
 
     #[test]

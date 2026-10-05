@@ -7,12 +7,14 @@
 //! queue is idle this walks the tracked generations, finds the ones with no
 //! extraction record, and rebuilds each from a checkout that has exactly that
 //! version on disk: the main folder for its HEAD branch, a linked worktree for
-//! a worktree branch. A generation whose bytes no checkout holds (a branch
-//! switched away from) waits until one does; its graph is then built by the
-//! dedup heal or by this pass on a later refresh.
+//! a worktree branch. A generation whose bytes no checkout holds is read from
+//! git instead — the tip of a live branch that holds it (see
+//! `stage_from_git`); one no live tip holds either (a branch that moved on,
+//! or only deleted branches) waits, and its graph is built by the dedup heal or
+//! by this pass on a later refresh.
 
 use std::collections::{HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sqlx::Row;
@@ -46,6 +48,8 @@ pub(crate) struct GraphBackfill {
     pending: VecDeque<Pending>,
     refreshed_at: Option<Instant>,
     rebuilt: u64,
+    /// Of `rebuilt`, the versions read from git rather than a checkout.
+    from_git: u64,
     unreachable: u64,
 }
 
@@ -77,9 +81,15 @@ impl GraphBackfill {
                     break;
                 }
             }
-            let Some(abs) = locate_version(&p) else {
-                self.unreachable += 1;
-                continue;
+            let (abs, staged) = match locate_version(&p) {
+                Some(abs) => (abs, None),
+                None => match stage_from_git(&p) {
+                    Some(staged) => (staged.path.clone(), Some(staged)),
+                    None => {
+                        self.unreachable += 1;
+                        continue;
+                    }
+                },
             };
             let abs_str = abs.to_string_lossy().to_string();
             super::graph_ingest::rebuild_generation(
@@ -91,17 +101,25 @@ impl GraphBackfill {
                 &abs_str,
                 &p.watch_root.to_string_lossy(),
                 &p.generation,
+                // Bytes read from git are in no checkout the project's language
+                // server sees; resolving their calls there would answer for
+                // another branch's code.
+                staged.is_none(),
             )
             .await;
+            if staged.is_some() {
+                self.from_git += 1;
+            }
             rebuilt += 1;
             self.rebuilt += 1;
         }
         if rebuilt > 0 && self.pending.is_empty() {
             info!(
                 rebuilt = self.rebuilt,
+                from_git = self.from_git,
                 unreachable = self.unreachable,
                 "Graph backfill drained: every reachable generation has a graph \
-                 (unreachable = versions no checkout holds on disk right now)"
+                 (unreachable = versions neither a checkout nor a live branch tip holds)"
             );
         }
         rebuilt
@@ -211,6 +229,40 @@ fn locate_version(p: &Pending) -> Option<PathBuf> {
     })
 }
 
+/// A version staged from git; its temp dir lives as long as this does.
+struct StagedVersion {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+}
+
+/// A version no checkout holds, read from git: the tip of a branch that holds
+/// it and that nobody has checked out — a trunk beside a main folder on another
+/// branch, a merged branch whose local ref survives (1,284 such versions on the
+/// live stack, 2026-10-05). Staged in a temp dir at its relative path, because
+/// language detection reads the name, and accepted only when it hashes to the
+/// generation's own hash: a tip that moved on no longer holds this version.
+fn stage_from_git(p: &Pending) -> Option<StagedVersion> {
+    // The relative path becomes a path under the temp dir: plain names only.
+    let plain = Path::new(&p.relative_path)
+        .components()
+        .all(|c| matches!(c, Component::Normal(_)));
+    if !plain {
+        return None;
+    }
+    p.branches.iter().find_map(|branch| {
+        let bytes = crate::git::blob_at_branch_tip(&p.watch_root, branch, &p.relative_path)?;
+        let dir = tempfile::Builder::new()
+            .prefix("wqm-graph-version-")
+            .tempdir()
+            .ok()?;
+        let path = dir.path().join(&p.relative_path);
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        std::fs::write(&path, bytes).ok()?;
+        let matches = compute_file_hash(&path).is_ok_and(|hash| hash == p.file_hash);
+        matches.then_some(StagedVersion { _dir: dir, path })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +311,53 @@ mod tests {
             locate_version(&pending(dir.path(), "a.rs", &hash, &[])),
             Some(file)
         );
+    }
+
+    /// A repository whose branch `feat` holds `src/a.rs` in git only: no
+    /// checkout has that version on disk.
+    fn repo_with_branch_only_version(content: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let blob = repo.blob(content.as_bytes()).unwrap();
+        let mut src = repo.treebuilder(None).unwrap();
+        src.insert("a.rs", blob, 0o100644).unwrap();
+        let mut root = repo.treebuilder(None).unwrap();
+        root.insert("src", src.write().unwrap(), 0o040000).unwrap();
+        let tree = repo.find_tree(root.write().unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let commit = repo.commit(None, &sig, &sig, "c", &tree, &[]).unwrap();
+        repo.reference("refs/heads/feat", commit, true, "").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_version_only_git_holds_is_staged_from_its_branch_tip() {
+        let content = "fn feat() {}\n";
+        let dir = repo_with_branch_only_version(content);
+        let hash = wqm_common::hashing::compute_content_hash(content);
+        // Held by a deleted branch and by `feat`, which no checkout has.
+        let p = pending(dir.path(), "src/a.rs", &hash, &["gone", "feat"]);
+        assert_eq!(locate_version(&p), None, "no checkout holds it");
+
+        let staged = stage_from_git(&p).expect("staged from feat's tip");
+        assert_eq!(
+            compute_file_hash(&staged.path).unwrap(),
+            hash,
+            "feat's bytes"
+        );
+        assert!(
+            staged.path.ends_with("src/a.rs"),
+            "staged under its own name, for language detection"
+        );
+
+        // Another version of the path: the tip does not hold it.
+        let other = pending(dir.path(), "src/a.rs", "another-hash", &["feat"]);
+        assert!(stage_from_git(&other).is_none());
+        // Only deleted branches hold it: nothing to read.
+        let dead = pending(dir.path(), "src/a.rs", &hash, &["gone"]);
+        assert!(stage_from_git(&dead).is_none());
+        // A path that would leave the staging dir is never written.
+        let escape = pending(dir.path(), "../a.rs", &hash, &["feat"]);
+        assert!(stage_from_git(&escape).is_none());
     }
 }

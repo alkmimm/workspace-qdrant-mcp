@@ -43,6 +43,7 @@ pub(super) async fn ingest_graph_edges(
     abs_file_path: &str,
     chunks: &[TextChunk],
     generation: &str,
+    resolve_with_lsp: bool,
 ) {
     let Some(ref graph_store) = ctx.graph_store else {
         return; // Graph not initialized — skip silently
@@ -51,15 +52,19 @@ pub(super) async fn ingest_graph_edges(
     let mut extraction = extract_edges_from_text_chunks(chunks, tenant_id, file_path);
 
     // Additive LSP precision pass (best-effort; no-op when no server is ready).
-    resolve_calls_via_lsp(
-        ctx,
-        tenant_id,
-        file_path,
-        abs_file_path,
-        chunks,
-        &mut extraction,
-    )
-    .await;
+    // Off for bytes no checkout holds: the server answers for the files it can
+    // see, which belong to another branch.
+    if resolve_with_lsp {
+        resolve_calls_via_lsp(
+            ctx,
+            tenant_id,
+            file_path,
+            abs_file_path,
+            chunks,
+            &mut extraction,
+        )
+        .await;
+    }
 
     let ExtractionResult { nodes, edges } = extraction;
 
@@ -259,6 +264,7 @@ pub(crate) async fn rebuild_generation(
     abs_file_path: &str,
     base_path: &str,
     generation: &str,
+    resolve_with_lsp: bool,
 ) {
     let Some(ref graph_store) = ctx.graph_store else {
         return;
@@ -302,6 +308,7 @@ pub(crate) async fn rebuild_generation(
         abs_file_path,
         &content.chunks,
         generation,
+        resolve_with_lsp,
     )
     .await;
 }
@@ -362,6 +369,7 @@ pub(super) async fn heal_generation_after_dedup(
         abs_file_path,
         base_path,
         generation,
+        true,
     )
     .await;
 }
