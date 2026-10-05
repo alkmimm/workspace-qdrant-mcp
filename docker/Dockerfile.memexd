@@ -271,6 +271,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # line number past the end of the file. The whole pre-existing suite passed
 # throughout, because it asserts only COUNT(*) and never uses content with a
 # trailing newline. These assert the full ordered content.
+# `dedup_share_*` guard the cost side of the same diff base: a cross-branch dedup
+# hit sent an EMPTY old side for a row whose lines were indexed, so every new
+# worktree branch rewrote every shared file (15.7k full rewrites in one burst,
+# measured 2026-10-05) — correct output, silent cost, no test noticed.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
@@ -279,9 +283,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         reingest_keeps_content_verbatim reingest_with_desynced_old_content \
         reingest_with_same_length_stale_old_content \
         reingest_heals_an_already_corrupted_file \
+        branch_dedup::tests::dedup_share_ \
         --test-threads=4 2>&1 | tee /tmp/fts-reingest.log; \
-    grep -q "^test result: ok\. 4 passed" /tmp/fts-reingest.log \
-    || { echo "GATE: expected exactly 4 FTS re-ingest tests to run and pass — a \
+    grep -q "^test result: ok\. 6 passed" /tmp/fts-reingest.log \
+    || { echo "GATE: expected exactly 6 FTS re-ingest tests to run and pass — a \
 rename or move silently empties a positional filter, and libtest exits 0 when a \
 filter matches nothing (the v48 lesson, 30 lines above)"; exit 1; }
 

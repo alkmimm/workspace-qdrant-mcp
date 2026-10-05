@@ -13,8 +13,9 @@
 //!    `base_point` (+ chunk_count, source `dedup_share`).
 //! 3. Copy the `qdrant_chunks` mirror rows from the source row (same point_ids,
 //!    since the base_point — hence every point_id — is shared).
-//! 4. Enqueue FTS5 work so search.db gets `code_lines` + `file_metadata` for the
-//!    current branch (FTS5 stays per-branch; search filters by `fm.branch = ?`).
+//! 4. Enqueue FTS5 work so search.db's `file_metadata.branches` gains the
+//!    current branch. The content-row's `code_lines` already hold this content,
+//!    so the change diffs against the cached claim and leaves them untouched.
 //! 5. Flip qdrant_status=done, search_status=in_progress.
 //!
 //! This makes `git checkout` between branches near-free on the indexed-data
@@ -24,6 +25,7 @@
 
 use std::path::Path;
 
+use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
 
 use crate::context::ProcessingContext;
@@ -219,18 +221,18 @@ pub(super) async fn try_branch_dedup(
         match crate::document_processor::redaction::read_for_index(file_path).await {
             Ok((new_content, _redacted_lines)) => {
                 let new_hash = compute_content_hash(&new_content);
-                let change = FileChange {
+                let change = dedup_fts_change(
+                    &ctx.pool,
                     file_id,
-                    size_bytes: Some(new_content.len() as i64),
-                    old_content: String::new(),
-                    new_content: new_content.clone(),
-                    tenant_id: item.tenant_id.clone(),
-                    branch: Some(item.branch.clone()),
-                    file_path: abs_file_path.to_string(),
-                    base_point: Some(base_point.clone()),
-                    relative_path: Some(relative_path.to_string()),
-                    file_hash: Some(file_hash.clone()),
-                };
+                    &new_content,
+                    &item.tenant_id,
+                    &item.branch,
+                    abs_file_path,
+                    &base_point,
+                    relative_path,
+                    &file_hash,
+                )
+                .await;
                 let work = Fts5WorkItem {
                     change,
                     new_content_bytes: new_content.into_bytes(),
@@ -299,6 +301,180 @@ pub(super) async fn try_branch_dedup(
     Ok(Some(DedupHit { base_point }))
 }
 
+/// The FTS5 change for a dedup hit. `insert_tracked_file_tx` merged the branch
+/// into the EXISTING content-row, so `file_id`'s `code_lines` already hold this
+/// exact content: the old side must be the cache's claim about those rows. An
+/// empty claim against present rows trips the guard in
+/// `apply_diff_to_code_lines`, which then rewrites every line of the file.
+/// Measured 2026-10-05: each new DOC-V2 worktree branch (~5.2k dedup hits)
+/// rewrote ~5.2k files — 15.7k "indexed_content disagrees" rebuilds in one
+/// burst. With the cached base the diff is a no-op and the change only adds the
+/// branch to `file_metadata.branches`, which is what this step is for.
+#[allow(clippy::too_many_arguments)]
+async fn dedup_fts_change(
+    state_pool: &SqlitePool,
+    file_id: i64,
+    new_content: &str,
+    tenant_id: &str,
+    branch: &str,
+    abs_file_path: &str,
+    base_point: &str,
+    relative_path: &str,
+    file_hash: &str,
+) -> FileChange {
+    let old_content = super::fts5_index::cached_diff_base(state_pool, file_id)
+        .await
+        .map(|(content, _hash)| content)
+        .unwrap_or_default();
+    FileChange {
+        file_id,
+        size_bytes: Some(new_content.len() as i64),
+        old_content,
+        new_content: new_content.to_string(),
+        tenant_id: tenant_id.to_string(),
+        branch: Some(branch.to_string()),
+        file_path: abs_file_path.to_string(),
+        base_point: Some(base_point.to_string()),
+        relative_path: Some(relative_path.to_string()),
+        file_hash: Some(file_hash.to_string()),
+    }
+}
+
 // (copy_qdrant_chunks removed in Layer 2 stage 2: the content-row is shared, so
 // `insert_tracked_file_tx` merges the branch into the existing row whose mirror
 // already references the shared points — there is nothing to copy.)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fts_batch_processor::{FtsBatchConfig, FtsBatchProcessor};
+    use crate::indexed_content_schema::{self, CREATE_INDEXED_CONTENT_SQL};
+    use crate::search_db::SearchDbManager;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    const CONTENT: &str = "package com.doc.model;\n\nimport java.util.List;\n\nclass A {}\n";
+
+    /// state.db with one tracked content-row; returns the pool and its file_id.
+    async fn state_with_row() -> (SqlitePool, i64) {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for sql in [
+            "PRAGMA foreign_keys = ON",
+            crate::watch_folders_schema::CREATE_WATCH_FOLDERS_SQL,
+            crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL,
+            CREATE_INDEXED_CONTENT_SQL,
+            "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, created_at, updated_at)
+             VALUES ('w1', '/repo', 'projects', 't1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let file_id = sqlx::query(
+            "INSERT INTO tracked_files (watch_folder_id, relative_path, file_mtime, file_hash, created_at, updated_at)
+             VALUES ('w1', 'A.java', '2026-01-01T00:00:00Z', 'h', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        (pool, file_id)
+    }
+
+    async fn dedup_change_for(state: &SqlitePool, file_id: i64, branch: &str) -> FileChange {
+        dedup_fts_change(
+            state,
+            file_id,
+            CONTENT,
+            "t1",
+            branch,
+            "/repo/A.java",
+            "bp",
+            "A.java",
+            "h",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn dedup_share_diffs_against_the_cached_content() {
+        // Live 2026-10-05: every dedup hit sent `old_content: ""` for a row whose
+        // lines were already indexed, so the guard rewrote the whole file — one
+        // full rewrite per file per new worktree branch (15.7k in one burst).
+        let (state, file_id) = state_with_row().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let search = SearchDbManager::new(&tmp.path().join("search.db"))
+            .await
+            .unwrap();
+        let mut fts = FtsBatchProcessor::new(&search, FtsBatchConfig::default());
+
+        // The content-row as its first ingest left it: lines + cache claim.
+        let mut first = dedup_change_for(&state, file_id, "main").await;
+        first.old_content = String::new();
+        fts.add_change(first);
+        fts.flush_forced_batch().await.unwrap();
+        indexed_content_schema::upsert_indexed_content(
+            &state,
+            file_id,
+            CONTENT.as_bytes(),
+            &compute_content_hash(CONTENT),
+        )
+        .await
+        .unwrap();
+
+        // Another branch shares the same content (the batch lane, as the
+        // batch writer runs it).
+        let change = dedup_change_for(&state, file_id, "feat/x").await;
+        assert_eq!(
+            change.old_content, CONTENT,
+            "the diff base is the cached claim"
+        );
+        fts.add_change(change);
+        let stats = fts.flush_forced_batch().await.unwrap();
+
+        assert_eq!(
+            (
+                stats.lines_inserted,
+                stats.lines_deleted,
+                stats.lines_updated
+            ),
+            (0, 0, 0),
+            "sharing content another branch indexed must not rewrite its lines"
+        );
+        let lines: Vec<String> =
+            sqlx::query_scalar("SELECT content FROM code_lines WHERE file_id = ?1 ORDER BY seq")
+                .bind(file_id)
+                .fetch_all(search.pool())
+                .await
+                .unwrap();
+        assert_eq!(lines, CONTENT.split('\n').collect::<Vec<_>>());
+        let branches: String =
+            sqlx::query_scalar("SELECT branches FROM file_metadata WHERE file_id = ?1")
+                .bind(file_id)
+                .fetch_one(search.pool())
+                .await
+                .unwrap();
+        let mut branches: Vec<String> = serde_json::from_str(&branches).unwrap();
+        branches.sort();
+        assert_eq!(
+            branches,
+            vec!["feat/x", "main"],
+            "the step's job: add the branch"
+        );
+        search.close().await;
+    }
+
+    #[tokio::test]
+    async fn dedup_share_without_a_cache_entry_claims_nothing() {
+        // No cache row = no claim: `""`, which the diff guard turns into a
+        // rebuild when the file does have rows (never a diff against a guess).
+        let (state, file_id) = state_with_row().await;
+        assert_eq!(
+            dedup_change_for(&state, file_id, "feat/x")
+                .await
+                .old_content,
+            ""
+        );
+    }
+}
