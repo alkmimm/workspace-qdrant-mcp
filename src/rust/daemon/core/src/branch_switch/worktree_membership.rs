@@ -350,7 +350,9 @@ pub(super) async fn enqueue_worktree_divergent(
 /// `.claude/worktrees/` self-exclusion a worktree-anchored test would trigger
 /// (that rule matches absolute paths and their parents, so anchoring inside the
 /// worktree does not save it). Build once per worktree; reuse across candidates.
-fn main_eligibility_gate(main_project_root: &str) -> crate::patterns::ignore_gate::IgnoreGate {
+pub(super) fn main_eligibility_gate(
+    main_project_root: &str,
+) -> crate::patterns::ignore_gate::IgnoreGate {
     let main_root = Path::new(main_project_root);
     let global = crate::patterns::global_ignore::resolve_global_ignore_path();
     crate::patterns::ignore_gate::IgnoreGate::for_dir(main_root, Some(main_root), global.as_deref())
@@ -362,7 +364,7 @@ fn main_eligibility_gate(main_project_root: &str) -> crate::patterns::ignore_gat
 /// through this so a worktree branch never indexes files the main scan omits, and
 /// disallowed types are dropped at discovery instead of enqueued only to be
 /// skipped at the ingest guard and re-churned every scan.
-fn worktree_path_eligible(
+pub(super) fn worktree_path_eligible(
     main_project_root: &str,
     gate: &crate::patterns::ignore_gate::IgnoreGate,
     allowed_extensions: &AllowedExtensions,

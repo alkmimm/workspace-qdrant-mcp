@@ -12,18 +12,23 @@
 //!   1. Uses `diff_tree` to find changed files since last known commit
 //!   2. Enqueues changed files for update
 
+mod branch_tips;
 mod db;
 mod handlers;
 mod queue;
+mod tip_stage;
 mod types;
 mod worktree_discovery;
 mod worktree_membership;
 
 #[cfg(test)]
+mod branch_tips_tests;
+#[cfg(test)]
 mod membership_tests;
 #[cfg(test)]
 mod tests;
 
+pub use branch_tips::BranchTipFollower;
 pub use handlers::{handle_git_event, reconcile_branch_membership};
 pub use types::BranchSwitchStats;
 pub use worktree_discovery::{reconcile_worktree_branches, WorktreeDiscovery};

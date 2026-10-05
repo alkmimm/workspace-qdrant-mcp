@@ -119,6 +119,23 @@ Net effect: switching or branching skips the (dominant) embed cost; only
 genuinely changed files pay the full pipeline. Storage still duplicates per
 branch — that is what Layer 2 removes.
 
+**Who follows a branch.** The main folder's HEAD is followed by the git watcher
+(B above), a linked worktree by worktree discovery (`branch_switch::worktree_discovery`),
+and a local branch with **no** checkout by the branch tip follower
+(`branch_switch::branch_tips`, every `WQM_BRANCH_TIP_FOLLOW_SECS`). Such a branch
+moves too — a pull in a worktree since removed, `git fetch origin b:b`, a reset —
+and until 2026-10-05 nothing followed it: bws-engineer's `master` kept 508
+tagged rows at versions its tip no longer had. The follower checks each such
+branch once per tip. A tagged path is current when any generation carrying the
+tag is the tip's content (per PATH). A path whose content moved, or that the move
+touched, is re-ingested from the tip's blob: it is staged under
+`<db dir>/branch-tips/` and read through `read_root`, so the ordinary update
+path moves the tag (dedup when another branch holds that content), with no
+language server for those bytes. A path the tip no longer has drops the tag
+through the prune's per-branch delete (C). A tip whose re-ingest could not enter
+the queue (an older tip's item for the same path still pending) is planned again
+on the next pass, so an intermediate version is never where the branch rests.
+
 ### C. Branch pruning — orphaned-branch tag removal (delete side)
 
 The inverse of dedup-append. [`startup/reconciliation/branch_prune.rs`](../../src/rust/daemon/core/src/startup/reconciliation/branch_prune.rs)

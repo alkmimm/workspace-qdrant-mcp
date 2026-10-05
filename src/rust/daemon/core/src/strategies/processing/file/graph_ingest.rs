@@ -369,7 +369,7 @@ pub(super) async fn heal_generation_after_dedup(
         abs_file_path,
         base_path,
         generation,
-        true,
+        !super::item_metadata::reads_git_stage(item),
     )
     .await;
 }

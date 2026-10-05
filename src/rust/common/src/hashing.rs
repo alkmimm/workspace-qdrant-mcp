@@ -159,7 +159,6 @@ fn hash_file_bytes_streaming(path: &Path) -> std::io::Result<String> {
 /// byte-integrity checksum. A pure line-ending change no longer counts as a
 /// content change — by design, since the indexed text is identical.
 pub fn compute_file_hash(path: &Path) -> std::io::Result<String> {
-    const MAX_NORMALIZE_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB
     let too_large = std::fs::metadata(path)
         .map(|m| m.len() > MAX_NORMALIZE_BYTES)
         .unwrap_or(true);
@@ -168,16 +167,23 @@ pub fn compute_file_hash(path: &Path) -> std::io::Result<String> {
     }
 
     let bytes = std::fs::read(path)?;
-    match std::str::from_utf8(&bytes) {
-        Ok(text) => {
-            let normalized = normalize_line_endings(text);
-            Ok(compute_content_hash(&normalized))
-        }
-        Err(_) => {
-            // Binary file: hash the raw bytes (already in memory) unchanged.
+    Ok(compute_bytes_hash(&bytes))
+}
+
+/// Above this size a file is hashed raw, without EOL normalization.
+const MAX_NORMALIZE_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB
+
+/// [`compute_file_hash`] of content already in memory — the same identity for
+/// the same bytes (a git blob, say), with no file on disk.
+pub fn compute_bytes_hash(bytes: &[u8]) -> String {
+    let normalizable = bytes.len() as u64 <= MAX_NORMALIZE_BYTES;
+    match std::str::from_utf8(bytes) {
+        Ok(text) if normalizable => compute_content_hash(&normalize_line_endings(text)),
+        // Binary, or too large to normalize: the raw bytes, unchanged.
+        _ => {
             let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            Ok(format!("{:x}", hasher.finalize()))
+            hasher.update(bytes);
+            format!("{:x}", hasher.finalize())
         }
     }
 }

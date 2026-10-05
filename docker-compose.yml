@@ -257,6 +257,10 @@ services:
       # whose branch tip moves) is reconciled after two stable passes, instead
       # of waiting for the next tenant scan. Default 60, floor 10.
       WQM_WORKTREE_DISCOVERY_SECS: ${WQM_WORKTREE_DISCOVERY_SECS:-}
+      # Interval (s) of the branch tip follower: a local branch nobody has
+      # checked out whose tip moved is re-ingested from git (default 120,
+      # floor 30, 0 = off). Tip versions are staged beside the databases.
+      WQM_BRANCH_TIP_FOLLOW_SECS: ${WQM_BRANCH_TIP_FOLLOW_SECS:-}
       # ── Dead-branch generation prune (#224 stage 3) ──────────────────────────
       # _COVERED_DELETE: what to do with a stale Layer-2 generation whose path is
       #   still served by another generation on a LIVE branch. off | dry (default,
