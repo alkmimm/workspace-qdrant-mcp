@@ -785,6 +785,25 @@ exits 0 when a positional filter matches nothing, so a module rename would silen
 the preserve guard that decides whether a pruned branch's last generation leaves the index. \
 If you ADDED a test here, bump this count."; exit 1; }
 
+# The branch prune itself: which dead branch is pruned, which is the protected
+# corpus (guard 3), and how often it runs. Its 7 integration tests ran in NO
+# gate until 2026-10-05, while guard 3 protected a deleted worktree branch that
+# out-counted HEAD (5,280 files to 5,260) and the start-up-only cycle left
+# 74,846 candidates deferred. Hermetic: tempdir git repos + in-memory SQLite.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        startup::reconciliation::branch_prune \
+        startup::reconciliation::tests::branch_prune:: \
+        --test-threads=4 2>&1 | tee /tmp/branch-prune.log; \
+    grep -q "^test result: ok\. 18 passed" /tmp/branch-prune.log \
+    || { echo "GATE: expected exactly 18 branch-prune tests to run and pass (4 payload/count + \
+6 policy + 8 integration) — libtest exits 0 when a positional filter matches nothing, so a \
+module rename would silently un-gate the guards that decide which branch's index is deleted. \
+If you ADDED a test here, bump this count."; exit 1; }
+
 # The exclusion engine — the gate every folder scan and watcher event passes
 # through — must honour the ingestion allowlist's exact file names. Until
 # 2026-09-19 it excluded every hidden path component, so `.gitignore`,

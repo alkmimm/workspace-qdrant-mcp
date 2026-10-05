@@ -217,21 +217,43 @@ pub fn spawn_background_reconciliation(queue_pool: SqlitePool) -> tokio::task::J
         // reconciliation is the canonical purge path (otherwise a deleted branch
         // leaves its indexed documents orphaned forever). Runs after the ignore
         // reconcile in the same background task. Non-fatal.
-        match workspace_qdrant_core::startup::reconciliation::branch_prune::prune_orphaned_branches(
-            &queue_pool,
-            &qm,
-        )
-        .await
-        {
-            Ok(s) if s.branches_pruned > 0 => info!(
-                "[startup-bg] Branch prune complete: {} orphaned branch(es), \
-                 {} file delete(s) enqueued",
-                s.branches_pruned, s.files_enqueued
-            ),
-            Ok(_) => {}
-            Err(e) => warn!("[startup-bg] Branch prune failed: {}", e),
+        run_branch_prune(&queue_pool, &qm, "[startup-bg]").await;
+
+        // ...and again on an interval: one capped cycle per boot never caught up
+        // with deleted worktree branches (see `branch_prune_policy::prune_interval`).
+        let Some(every) =
+            workspace_qdrant_core::startup::reconciliation::branch_prune_policy::prune_interval()
+        else {
+            return;
+        };
+        info!("[branch_prune] periodic prune every {}s", every.as_secs());
+        let mut interval = tokio::time::interval(every);
+        interval.tick().await; // the start-up cycle above was this one
+        loop {
+            interval.tick().await;
+            run_branch_prune(&queue_pool, &qm, "[branch_prune]").await;
         }
     })
+}
+
+/// One branch-prune cycle; non-fatal, logged under `label`.
+async fn run_branch_prune(
+    queue_pool: &SqlitePool,
+    qm: &Arc<workspace_qdrant_core::queue_operations::QueueManager>,
+    label: &str,
+) {
+    match workspace_qdrant_core::startup::reconciliation::branch_prune::prune_orphaned_branches(
+        queue_pool, qm,
+    )
+    .await
+    {
+        Ok(s) if s.branches_pruned > 0 => info!(
+            "{} Branch prune complete: {} orphaned branch(es), {} file delete(s) enqueued",
+            label, s.branches_pruned, s.files_enqueued
+        ),
+        Ok(_) => {}
+        Err(e) => warn!("{} Branch prune failed: {}", label, e),
+    }
 }
 
 /// Initialize the shared pause flag from database state (Task 543.16).

@@ -249,6 +249,47 @@ async fn never_prunes_largest_branch_even_if_absent_from_git() {
     assert_eq!(file_delete_count(&pool).await, 0, "no deletes enqueued");
 }
 
+/// Live 2026-10-05: a deleted worktree branch holds the trunk's files PLUS its
+/// own new ones, so it out-counted HEAD (5,280 to 5,260 on DOC-V2) and guard 3
+/// protected it forever as "the corpus". HEAD holding the corpus itself means a
+/// larger dead branch is an offshoot, and it is pruned.
+#[tokio::test]
+async fn prunes_a_dead_worktree_offshoot_larger_than_head() {
+    let pool = create_test_pool().await;
+    setup_schema(&pool).await;
+    let qm = Arc::new(QueueManager::new(pool.clone()));
+
+    let repo_dir = TempDir::new().unwrap();
+    init_repo(repo_dir.path(), &[]);
+    // git's own default branch name (master or main, per its configuration).
+    let head = Repository::open(repo_dir.path())
+        .unwrap()
+        .head()
+        .unwrap()
+        .shorthand()
+        .unwrap()
+        .to_string();
+    let repo_path = repo_dir.path().to_str().unwrap();
+
+    insert_watch_folder(&pool, "w1", "t1", repo_path).await;
+    for f in ["a", "b", "c"] {
+        insert_tracked_file(&pool, "w1", &head, &format!("src/{f}.rs")).await;
+    }
+    // The deleted worktree branch: the trunk's three files plus one of its own.
+    for f in ["a", "b", "c", "new"] {
+        insert_tracked_file(&pool, "w1", "wt/gone", &format!("src/{f}.rs")).await;
+    }
+
+    let stats = prune_orphaned_branches(&pool, &qm).await.expect("prune");
+
+    assert_eq!(
+        stats.branches_pruned, 1,
+        "the offshoot is pruned, not protected as the corpus"
+    );
+    assert_eq!(stats.files_enqueued, 4);
+    assert_eq!(stats.files_covered, 3, "HEAD serves a, b and c");
+}
+
 /// A branch literally named `main`/`master` is never pruned even when git has no
 /// such branch — the exact shape of the incident (content under fallback "main").
 #[tokio::test]

@@ -122,8 +122,9 @@ branch — that is what Layer 2 removes.
 ### C. Branch pruning — orphaned-branch tag removal (delete side)
 
 The inverse of dedup-append. [`startup/reconciliation/branch_prune.rs`](../../src/rust/daemon/core/src/startup/reconciliation/branch_prune.rs)
-(`prune_orphaned_branches`, run from the startup/admin reconciliation entrypoint)
-compares the branches present in `tracked_files` against the repo's **live** git
+(`prune_orphaned_branches`, run from the startup/admin reconciliation entrypoint
+and then every `WQM_BRANCH_PRUNE_INTERVAL_SECS`, default 900 — one capped cycle
+per boot never drained the deleted worktree branches) compares the branches present in `tracked_files` against the repo's **live** git
 branches and enqueues `file|delete` for every tracked file on a branch that no
 longer exists — otherwise a deleted branch's tags linger in the index forever.
 Each delete carries the dead branch and flows through the **branch-scoped,
@@ -133,6 +134,10 @@ reference-counted** removal in [`file/delete.rs`](../../src/rust/daemon/core/src
 deletes the physical point **only** when that empties the set AND no other clone
 references the `base_point`. branch_prune's own guards never prune the corpus
 branch, a `main`/`master` label, or any project whose HEAD isn't in the live set.
+The corpus is the largest tracked branch only when HEAD's own branch holds less
+than half as many files (a mislabeled corpus); otherwise HEAD is the corpus, and
+a larger dead branch — a deleted worktree carries the trunk's files plus its
+own — is pruned like any other (`branch_prune_policy::elect_primary`).
 
 > **Fix 2026-06-30 (PR #181) — branch-prune deletes vs. the on-disk skip.**
 > `process_file_delete` skips any delete whose target **still exists on disk**
