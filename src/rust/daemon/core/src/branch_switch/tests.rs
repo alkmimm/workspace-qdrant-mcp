@@ -15,9 +15,7 @@ use crate::unified_queue_schema::{
 };
 use crate::watch_folders_schema;
 
-use super::db::{
-    fetch_paths_missing_branch, fetch_unchanged_paths_with_chunker, update_last_commit_hash,
-};
+use super::db::{fetch_unchanged_paths_with_chunker, update_last_commit_hash};
 
 /// Test helper: the unchanged paths (dropping the chunker_version the handler
 /// uses to route stale files) so the membership-focused assertions read cleanly.
@@ -41,7 +39,7 @@ use super::reconcile_branch_membership;
 use super::reconcile_worktree_branches;
 use super::types::BranchSwitchStats;
 
-async fn create_test_pool() -> SqlitePool {
+pub(super) async fn create_test_pool() -> SqlitePool {
     SqlitePoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(5))
@@ -50,7 +48,7 @@ async fn create_test_pool() -> SqlitePool {
         .expect("Failed to create in-memory SQLite pool")
 }
 
-async fn setup_tables(pool: &SqlitePool) {
+pub(super) async fn setup_tables(pool: &SqlitePool) {
     sqlx::query("PRAGMA foreign_keys = ON")
         .execute(pool)
         .await
@@ -75,7 +73,12 @@ async fn setup_tables(pool: &SqlitePool) {
     }
 }
 
-async fn insert_watch_folder(pool: &SqlitePool, watch_id: &str, tenant_id: &str, path: &str) {
+pub(super) async fn insert_watch_folder(
+    pool: &SqlitePool,
+    watch_id: &str,
+    tenant_id: &str,
+    path: &str,
+) {
     sqlx::query(
         "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled, is_archived, created_at, updated_at)
          VALUES (?1, ?2, 'projects', ?3, 1, 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')"
@@ -86,7 +89,7 @@ async fn insert_watch_folder(pool: &SqlitePool, watch_id: &str, tenant_id: &str,
     .execute(pool).await.unwrap();
 }
 
-async fn insert_tracked_file(
+pub(super) async fn insert_tracked_file(
     pool: &SqlitePool,
     watch_id: &str,
     branches_list: &[&str],
@@ -517,24 +520,6 @@ async fn test_branch_membership_bulk_chunks_large_lists() {
             "path src/f{i}.rs present in some chunk"
         );
     }
-}
-
-/// fetch_paths_missing_branch selects files tracked under any branch but NOT the
-/// target branch, regardless of WHICH other branch tags them (event-independent).
-#[tokio::test]
-async fn test_fetch_paths_missing_branch_selects_untagged() {
-    let pool = create_test_pool().await;
-    setup_tables(&pool).await;
-    insert_watch_folder(&pool, "w1", "t1", "/tmp/project").await;
-    insert_tracked_file(&pool, "w1", &["main"], "h_a", "src/a.rs").await; // missing feat
-    insert_tracked_file(&pool, "w1", &["main", "feat"], "h_b", "src/b.rs").await; // tagged
-    insert_tracked_file(&pool, "w1", &["dev-clean"], "h_c", "src/c.rs").await; // missing feat
-
-    let mut paths = fetch_paths_missing_branch(&pool, "w1", "feat")
-        .await
-        .unwrap();
-    paths.sort();
-    assert_eq!(paths, vec!["src/a.rs".to_string(), "src/c.rs".to_string()]);
 }
 
 /// reconcile enqueues an Add (dedup fast-path) only for files that are BOTH

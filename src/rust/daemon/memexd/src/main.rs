@@ -19,6 +19,7 @@ mod queue_init;
 mod relative_path_hook;
 mod shutdown;
 mod startup;
+mod worktree_discovery_task;
 
 use memexd::control_port;
 #[cfg(windows)]
@@ -230,6 +231,11 @@ async fn run_daemon(
         &qc.allowed_extensions,
         &qc.mirror_storage,
         &daemon_config,
+    );
+    // New linked worktrees are reconciled as they appear, not at the next scan.
+    let _worktree_discovery = worktree_discovery_task::start(
+        db_handles.queue_pool.clone(),
+        Arc::clone(&qc.allowed_extensions),
     );
 
     let _ignore_reconcile_handle =
