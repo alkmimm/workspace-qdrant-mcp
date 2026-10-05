@@ -458,6 +458,23 @@ libtest exits 0 when a positional filter matches nothing, so a module rename wou
 un-gate the rule that keeps worktree-only files from being deleted. If you ADDED a test here, \
 bump this count."; exit 1; }
 
+# Branch membership + worktree discovery (the whole `branch_switch` module). Its
+# 17 pre-existing tests ran in NO gate until 2026-10-05, while two defects lived
+# in this module: membership candidates were judged per ROW (~900 paths per
+# branch re-enqueued and skipped on every scan, forever), and worktrees were
+# reconciled only on a full tenant scan (three DOC-V2 worktrees waited 15 h for a
+# daemon restart). Hermetic: in-memory SQLite + tempdir git admin fixtures.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
+        --test-threads=4 2>&1 | tee /tmp/branch-switch.log; \
+    grep -q "^test result: ok\. 25 passed" /tmp/branch-switch.log \
+    || { echo "GATE: expected exactly 25 branch_switch tests to run and pass — libtest exits 0 \
+when a positional filter matches nothing, so a module rename would silently un-gate the \
+membership reconcile and worktree discovery. If you ADDED a test here, bump this count."; exit 1; }
+
 # Qdrant payload-index manifests run here, same rationale: hermetic (pure const
 # assertions, no Qdrant and no DB) and they guard a SILENT performance cliff —
 # a field used in a production filter but missing from the manifest makes that

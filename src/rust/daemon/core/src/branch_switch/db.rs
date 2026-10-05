@@ -69,6 +69,14 @@ pub async fn fetch_unchanged_paths_with_chunker(
 /// before re-enqueuing as an `Add` so the dedup fast-path appends the branch
 /// without re-embedding. The `NOT EXISTS` makes it idempotent: a file already
 /// tagged with `branch` is excluded, so a reconciled project yields an empty set.
+///
+/// Membership is judged per PATH, like [`fetch_unchanged_paths_with_chunker`]:
+/// a path has one row per content generation, and a branch holds only one of
+/// them. Asking per ROW reported every path that also has another branch's
+/// version as "missing", forever — measured 2026-10-05 on DOC-V2: 905 of 958
+/// candidates for `main` and 894 of 1,081 for a worktree branch, each re-enqueued
+/// on every scan and skipped as unchanged (in all sampled paths the branch's own
+/// row was exactly the version on its disk).
 pub async fn fetch_paths_missing_branch(
     pool: &SqlitePool,
     watch_folder_id: &str,
@@ -78,7 +86,12 @@ pub async fn fetch_paths_missing_branch(
         "SELECT DISTINCT t.relative_path
          FROM tracked_files t
          WHERE t.watch_folder_id = ?1
-           AND NOT EXISTS (SELECT 1 FROM json_each(t.branches) WHERE value = ?2)",
+           AND NOT EXISTS (
+               SELECT 1 FROM tracked_files n, json_each(n.branches) nb
+               WHERE n.watch_folder_id = t.watch_folder_id
+                 AND n.relative_path = t.relative_path
+                 AND nb.value = ?2
+           )",
     )
     .bind(watch_folder_id)
     .bind(branch)
