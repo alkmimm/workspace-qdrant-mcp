@@ -33,7 +33,9 @@
 //!
 //! 1. Path missing, repo unopenable, or zero live branches → skip the project.
 //! 2. HEAD branch not in the live set → labels untrustworthy → skip the project.
-//! 3. Never prune the project's largest tracked branch (its corpus).
+//! 3. Never prune the project's corpus branch — the largest tracked branch,
+//!    unless HEAD's own branch already holds the corpus (see
+//!    `branch_prune_policy::elect_primary`).
 //! 4. Never prune a branch named `main` or `master` (default-name safety net).
 //!
 //! Only a branch that is absent from git AND passes all guards is pruned.
@@ -76,6 +78,7 @@ use std::collections::{HashMap, HashSet};
 use sqlx::SqlitePool;
 use tracing::{debug, info, warn};
 
+use super::branch_prune_policy::elect_primary;
 use crate::git::BranchLifecycleDetector;
 use crate::queue_operations::QueueManager;
 use crate::unified_queue_schema::{FilePayload, ItemType, QueueOperation};
@@ -141,7 +144,8 @@ impl BranchPruneStats {
 /// Bounds the blast radius of one prune cycle: if the coverage computation is
 /// ever wrong, at most this many stale generations can go before a human sees
 /// the counts. Covered candidates beyond the cap are simply not enqueued — the
-/// prune runs at every startup, so they are picked up by the next cycle.
+/// prune repeats on an interval (see `branch_prune_policy::prune_interval`), so
+/// they are picked up by the next cycle.
 /// Uncovered deletes and multi-tag shrinks are untouched (pre-existing
 /// behaviour, not deletion-capable).
 ///
@@ -420,29 +424,6 @@ async fn branch_file_counts(
     .map_err(|e| format!("query tracked branches: {e}"))
 }
 
-/// Elect the project's corpus branch from per-branch distinct-file counts: the
-/// branch covering the most files is never pruned (guard 3).
-///
-/// Pure so the tie policy is testable. Ties are decided deliberately, never by
-/// `max_by_key` over an unordered `GROUP BY` — which branch is PROTECTED must
-/// not depend on SQLite's row order between boots:
-/// 1. HEAD wins a tie — a checked-out branch is the corpus by definition.
-/// 2. Otherwise the lexicographically first name wins: an arbitrary but STABLE
-///    choice, so the same project protects the same branch on every boot.
-fn elect_primary<'a>(counts: &'a [(String, i64)], head: &str) -> Option<&'a str> {
-    let max = counts.iter().map(|(_, n)| *n).max()?;
-    let mut tied: Vec<&'a str> = counts
-        .iter()
-        .filter(|(_, n)| *n == max)
-        .map(|(b, _)| b.as_str())
-        .collect();
-    if let Some(h) = tied.iter().find(|b| **b == head) {
-        return Some(*h);
-    }
-    tied.sort_unstable();
-    tied.into_iter().next()
-}
-
 /// For each `relative_path` in this watch folder, the `file_id`s of the
 /// generations that carry at least one LIVE branch tag.
 ///
@@ -604,63 +585,6 @@ mod tests {
     use wqm_common::hashing::generate_idempotency_key;
     use wqm_common::paths::RelativePath;
     use wqm_common::queue_types::{ItemType, QueueOperation};
-
-    fn counts(pairs: &[(&str, i64)]) -> Vec<(String, i64)> {
-        pairs.iter().map(|(b, n)| (b.to_string(), *n)).collect()
-    }
-
-    // ── guard 3: corpus election (#224) ───────────────────────────────────
-
-    #[test]
-    fn corpus_election_ignores_generation_debris() {
-        // The live deadlock this fix exists for: a DEAD branch accumulated stale
-        // generations and out-counted the real corpus in ROWS, protecting itself
-        // forever. Counting distinct FILES elects `main` — the counts here are
-        // what the fixed query returns (paths, not rows).
-        let c = counts(&[
-            ("fix/is-test-lookup-relative-path", 1859),
-            ("main", 1869),
-            ("codex/linux-codex-register", 2),
-        ]);
-        assert_eq!(elect_primary(&c, "main"), Some("main"));
-    }
-
-    #[test]
-    fn corpus_election_still_protects_a_mislabeled_corpus() {
-        // The failure mode guard 3 was BORN for (example-service / example-tool,
-        // whose whole corpus was indexed under a bogus label): the mislabeled
-        // branch holds ALL of the project's files, so it must stay the elected
-        // corpus and thus stay unprunable. Counting files instead of rows must
-        // not weaken this.
-        let c = counts(&[("bogus-main", 3000), ("dev-clean", 12), ("feat/x", 3)]);
-        assert_eq!(elect_primary(&c, "dev-clean"), Some("bogus-main"));
-    }
-
-    #[test]
-    fn corpus_election_breaks_ties_with_head_then_deterministically() {
-        // HEAD wins a tie: a checked-out branch IS the corpus.
-        let c = counts(&[("feat/b", 100), ("main", 100), ("feat/a", 100)]);
-        assert_eq!(elect_primary(&c, "main"), Some("main"));
-
-        // No HEAD among the tied → stable, order-independent choice. The input
-        // order comes from an unordered GROUP BY, so the same tie must elect the
-        // same branch on every boot (which branch is PROTECTED cannot flap).
-        let c1 = counts(&[("feat/b", 100), ("feat/a", 100)]);
-        let c2 = counts(&[("feat/a", 100), ("feat/b", 100)]);
-        assert_eq!(elect_primary(&c1, "main"), Some("feat/a"));
-        assert_eq!(
-            elect_primary(&c1, "main"),
-            elect_primary(&c2, "main"),
-            "row order must not decide which branch is protected"
-        );
-    }
-
-    #[test]
-    fn corpus_election_handles_empty_and_single() {
-        assert_eq!(elect_primary(&[], "main"), None);
-        let c = counts(&[("only", 7)]);
-        assert_eq!(elect_primary(&c, "main"), Some("only"));
-    }
 
     /// The query itself, against the production DDL: it must count FILES, not
     /// ROWS. Reproduces the live shape — a dead branch with several generations

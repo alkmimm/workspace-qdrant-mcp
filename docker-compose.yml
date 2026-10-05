@@ -259,9 +259,12 @@ services:
       #   observe only) | on. Generations NOTHING else serves are always preserved
       #   (the mislabeled-corpus guard).
       # _COVERED_CAP: per-run ceiling on those deletes (0 = unlimited, default
-      #   500); the rest is deferred to the next startup. See docker/.env.example.
+      #   500); the rest is deferred to the next cycle. See docker/.env.example.
+      # _INTERVAL_SECS: seconds between prune cycles after the start-up one
+      #   (default 900, 0 = start-up only, floor 60).
       WQM_BRANCH_PRUNE_COVERED_DELETE: ${WQM_BRANCH_PRUNE_COVERED_DELETE:-}
       WQM_BRANCH_PRUNE_COVERED_CAP: ${WQM_BRANCH_PRUNE_COVERED_CAP:-}
+      WQM_BRANCH_PRUNE_INTERVAL_SECS: ${WQM_BRANCH_PRUNE_INTERVAL_SECS:-}
       # ── Overlap-group producer fix (#224) ────────────────────────────────────
       # _BRANCH_AT_PROCESS: re-read HEAD at PROCESS time for ingest ops so the
       #   branch tag is paired with the bytes actually hashed (kill switch;

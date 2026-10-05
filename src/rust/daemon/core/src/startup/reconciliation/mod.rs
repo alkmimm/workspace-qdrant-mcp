@@ -297,6 +297,7 @@ pub async fn validate_watch_folders(pool: &SqlitePool) -> Result<WatchValidation
 }
 
 pub mod branch_prune;
+pub mod branch_prune_policy;
 pub(crate) mod ignore_enqueue;
 pub mod ignore_sync;
 mod missing_files;
