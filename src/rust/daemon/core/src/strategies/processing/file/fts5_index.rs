@@ -282,6 +282,31 @@ pub(super) async fn update_fts5_for_file(
     .await
 }
 
+/// The `indexed_content` cache's claim about what `code_lines` holds for
+/// `file_id`, as `(content, hash)`: the diff base every FTS5 change for an
+/// existing row must carry. `None` means there is no claim — a first ingest, or
+/// a failed read (logged) — and the caller sends `""`, which the batch lane's
+/// guard turns into a full rebuild if the file has rows after all.
+pub(super) async fn cached_diff_base(
+    state_pool: &SqlitePool,
+    file_id: i64,
+) -> Option<(String, String)> {
+    match indexed_content_schema::get_indexed_content(state_pool, file_id).await {
+        Ok(Some((cached_bytes, cached_hash))) => Some((
+            String::from_utf8(cached_bytes).unwrap_or_default(),
+            cached_hash,
+        )),
+        Ok(None) => None,
+        Err(e) => {
+            warn!(
+                "FTS5: failed to read indexed_content cache for file_id={}: {}",
+                file_id, e
+            );
+            None
+        }
+    }
+}
+
 /// Fetch old content from the indexed_content cache.
 ///
 /// Returns `Some(old_content)` to proceed, `None` if content is unchanged (skip).
@@ -292,40 +317,29 @@ async fn fetch_old_content(
     new_hash: &str,
     uplift: bool,
 ) -> Option<String> {
-    match indexed_content_schema::get_indexed_content(state_pool, file_id).await {
-        Ok(Some((cached_bytes, cached_hash))) => {
-            if cached_hash == new_hash && !uplift {
-                debug!(
-                    "FTS5: content unchanged (hash match), skipping: {}",
-                    file_path
-                );
-                return None;
-            }
-            // `uplift` is forced re-processing — the op the admin re-embed uses
-            // precisely to bypass unchanged-hash skips. It already bypasses the
-            // `tracked_files` skip; honouring it here too is what makes that
-            // promise true for the TEXT index. Measured 2026-08-12: a forced
-            // per-tenant re-embed left 79 of 82 files still corrupted because
-            // this gate returned early — the file's bytes had not changed, so
-            // the hash always matched and `code_lines` was never revisited.
-            // Falling through with the cached content keeps the work cheap when
-            // the rows are already correct (the diff is a no-op) and lets
-            // `apply_diff_to_code_lines` rebuild when they are not.
-            // Content changed -- use cached content as diff base
-            Some(String::from_utf8(cached_bytes).unwrap_or_default())
-        }
-        Ok(None) => {
-            // New file -- no old content to diff against
-            Some(String::new())
-        }
-        Err(e) => {
-            warn!(
-                "FTS5: failed to read indexed_content cache for file_id={}: {}",
-                file_id, e
-            );
-            Some(String::new())
-        }
+    let Some((cached, cached_hash)) = cached_diff_base(state_pool, file_id).await else {
+        // New file (or unreadable cache) -- no old content to diff against
+        return Some(String::new());
+    };
+    if cached_hash == new_hash && !uplift {
+        debug!(
+            "FTS5: content unchanged (hash match), skipping: {}",
+            file_path
+        );
+        return None;
     }
+    // `uplift` is forced re-processing — the op the admin re-embed uses
+    // precisely to bypass unchanged-hash skips. It already bypasses the
+    // `tracked_files` skip; honouring it here too is what makes that
+    // promise true for the TEXT index. Measured 2026-08-12: a forced
+    // per-tenant re-embed left 79 of 82 files still corrupted because
+    // this gate returned early — the file's bytes had not changed, so
+    // the hash always matched and `code_lines` was never revisited.
+    // Falling through with the cached content keeps the work cheap when
+    // the rows are already correct (the diff is a no-op) and lets
+    // `apply_diff_to_code_lines` rebuild when they are not.
+    // Content changed -- use cached content as diff base
+    Some(cached)
 }
 
 /// Execute the FTS5 update using either full_rewrite or diff mode.
