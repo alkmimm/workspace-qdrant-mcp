@@ -558,7 +558,10 @@ async fn enqueue_branch_deletes(
 /// way); `FilePayload`'s serde ignores unknown fields, and the delete
 /// executor keeps reading the item's `branch` COLUMN — this field exists only
 /// to differentiate the key, never as a second source of truth.
-fn build_prune_delete_payload(rel_path: &RelativePath, branch: &str) -> Result<String, String> {
+pub(crate) fn build_prune_delete_payload(
+    rel_path: &RelativePath,
+    branch: &str,
+) -> Result<String, String> {
     let payload = FilePayload {
         file_path: rel_path.clone(),
         file_type: None,

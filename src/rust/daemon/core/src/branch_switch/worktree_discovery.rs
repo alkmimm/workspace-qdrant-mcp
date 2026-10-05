@@ -297,18 +297,10 @@ impl WorktreeDiscovery {
         queue_manager: &QueueManager,
         allowed_extensions: &AllowedExtensions,
     ) -> usize {
-        let projects: Vec<(String, String, String)> = match sqlx::query_as(
-            "SELECT watch_id, path, tenant_id FROM watch_folders
-             WHERE enabled = 1 AND COALESCE(is_archived, 0) = 0 AND collection = ?1
-               AND parent_watch_id IS NULL AND COALESCE(is_worktree, 0) = 0",
-        )
-        .bind(COLLECTION_PROJECTS)
-        .fetch_all(pool)
-        .await
-        {
+        let projects = match super::db::fetch_main_project_folders(pool).await {
             Ok(rows) => rows,
             Err(e) => {
-                warn!("worktree discovery: listing projects failed: {}", e);
+                warn!("worktree discovery: {}", e);
                 return 0;
             }
         };

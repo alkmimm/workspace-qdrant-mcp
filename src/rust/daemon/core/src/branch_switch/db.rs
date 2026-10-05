@@ -1,7 +1,7 @@
 //! Database operations for branch switch: unchanged-file discovery and commit
 //! hash tracking.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::SqlitePool;
 use wqm_common::timestamps;
@@ -146,6 +146,89 @@ pub async fn update_last_commit_hash(
     .await
     .map_err(|e| format!("Failed to update last_commit_hash: {}", e))?;
     Ok(())
+}
+
+/// Every enabled project's MAIN folder: `(watch_id, path, tenant_id)` — the
+/// folders whose git repository owns branches and linked worktrees.
+pub(super) async fn fetch_main_project_folders(
+    pool: &SqlitePool,
+) -> Result<Vec<(String, String, String)>, String> {
+    sqlx::query_as(
+        "SELECT watch_id, path, tenant_id FROM watch_folders
+         WHERE enabled = 1 AND COALESCE(is_archived, 0) = 0 AND collection = 'projects'
+           AND parent_watch_id IS NULL AND COALESCE(is_worktree, 0) = 0",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to list project folders: {}", e))
+}
+
+/// Every branch name tagged on at least one row of `watch_folder_id`.
+pub(super) async fn fetch_tagged_branches(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+) -> Result<Vec<String>, String> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT je.value FROM tracked_files, json_each(branches) je
+         WHERE watch_folder_id = ?1",
+    )
+    .bind(watch_folder_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch tagged branches: {}", e))?;
+    Ok(rows.into_iter().map(|(b,)| b).collect())
+}
+
+/// Each path `branch` is tagged on, with the content hash of every generation
+/// of that path carrying the tag (usually one; more is shadowed debris).
+pub(super) async fn fetch_branch_tagged_hashes(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    branch: &str,
+) -> Result<HashMap<String, Vec<String>>, String> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT relative_path, file_hash FROM tracked_files
+         WHERE watch_folder_id = ?1
+           AND EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?2)",
+    )
+    .bind(watch_folder_id)
+    .bind(branch)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch branch-tagged hashes: {}", e))?;
+    let mut by_path: HashMap<String, Vec<String>> = HashMap::new();
+    for (rel, hash) in rows {
+        by_path.entry(rel).or_default().push(hash);
+    }
+    Ok(by_path)
+}
+
+/// Whether a generation of `relative_path` NOT tagged `branch` carries a live
+/// branch — i.e. the path stays indexed once `branch` lets go of it. The branch
+/// prune's "covered" fact, for one path.
+pub(super) async fn path_served_without_branch(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    relative_path: &str,
+    branch: &str,
+    live: &HashSet<String>,
+) -> Result<bool, String> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT branches FROM tracked_files
+         WHERE watch_folder_id = ?1 AND relative_path = ?2
+           AND NOT EXISTS (SELECT 1 FROM json_each(branches) WHERE value = ?3)",
+    )
+    .bind(watch_folder_id)
+    .bind(relative_path)
+    .bind(branch)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to check path coverage: {}", e))?;
+    Ok(rows.iter().any(|(raw,)| {
+        serde_json::from_str::<Vec<String>>(raw)
+            .map(|tags| tags.iter().any(|t| live.contains(t)))
+            .unwrap_or(false)
+    }))
 }
 
 /// Fetch watch folder info: (path, collection, tenant_id).

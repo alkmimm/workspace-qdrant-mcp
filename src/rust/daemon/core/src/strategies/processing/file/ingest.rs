@@ -548,7 +548,8 @@ async fn run_keyword_and_graph_phases(
         &read_abs_path,
         &document_content.chunks,
         base_point,
-        true,
+        // A version staged from git is in no tree the language server sees.
+        !super::item_metadata::reads_git_stage(item),
     )
     .await;
     timings.push(PhaseTiming {

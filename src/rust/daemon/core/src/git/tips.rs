@@ -111,7 +111,7 @@ pub fn blob_at_branch_tip(repo_root: &Path, branch: &str, relative_path: &str) -
 /// Where `repo_root` sits inside its repository's working tree, `/`-separated
 /// ("" at the top): tree paths are repository-relative, the index's are
 /// root-relative.
-fn root_prefix(repo: &git2::Repository, repo_root: &Path) -> String {
+pub(crate) fn root_prefix(repo: &git2::Repository, repo_root: &Path) -> String {
     let prefix = repo
         .workdir()
         .and_then(|w| {

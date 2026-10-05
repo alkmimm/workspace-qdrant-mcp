@@ -12,6 +12,7 @@
 //! - [`shutdown`]: Graceful shutdown with cleanup
 
 mod background;
+mod branch_tip_task;
 mod database;
 mod grpc_setup;
 mod pressure_metrics;
@@ -234,6 +235,11 @@ async fn run_daemon(
     );
     // New linked worktrees are reconciled as they appear, not at the next scan.
     let _worktree_discovery = worktree_discovery_task::start(
+        db_handles.queue_pool.clone(),
+        Arc::clone(&qc.allowed_extensions),
+    );
+    // ...and branches nobody has checked out are followed as their tips move.
+    let _branch_tips = branch_tip_task::start(
         db_handles.queue_pool.clone(),
         Arc::clone(&qc.allowed_extensions),
     );
