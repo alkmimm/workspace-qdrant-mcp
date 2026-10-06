@@ -8,6 +8,7 @@ use crate::unified_queue_schema::{
     CREATE_UNIFIED_QUEUE_INDEXES_SQL, CREATE_UNIFIED_QUEUE_SQL,
 };
 
+use super::file_routing::route_file_item;
 use super::{QueueError, QueueManager, QueueResult};
 
 impl QueueManager {
@@ -56,7 +57,20 @@ impl QueueManager {
             Self::validate_enqueue_params(tenant_id, collection, payload_json, item_type, op)?;
 
         let branch = branch.unwrap_or("main");
-        let metadata = metadata.unwrap_or("{}");
+        // A project folder's library-format document is enqueued into the
+        // project's library, whichever producer sent it (see `file_routing`).
+        let routed = route_file_item(
+            item_type,
+            tenant_id,
+            collection,
+            &payload,
+            metadata.unwrap_or("{}"),
+        );
+        let (tenant_id, collection, metadata) = (
+            routed.tenant_id.as_ref(),
+            routed.collection.as_ref(),
+            routed.metadata.as_ref(),
+        );
 
         // The idempotency key is a cross-producer contract — the SAME algorithm in
         // the TS server, the daemon, and the CLI: SHA256(item_type|op|tenant|
@@ -230,7 +244,8 @@ impl QueueManager {
     ///
     /// All items must share the same `item_type`, `op`, `tenant_id`, and
     /// `collection`. Enforcing that at the call site keeps the idempotency
-    /// key / payload validation cheap.
+    /// key / payload validation cheap. The format routing still applies per
+    /// item: a library-format document is inserted under the project's library.
     pub async fn enqueue_unified_batch(
         &self,
         item_type: ItemType,
@@ -253,7 +268,6 @@ impl QueueManager {
             return Err(QueueError::EmptyCollection);
         }
         let branch = branch.unwrap_or("main");
-        let metadata = "{}";
 
         let mut tx = self.pool.begin().await?;
         let mut inserted: u64 = 0;
@@ -262,6 +276,12 @@ impl QueueManager {
             let payload: serde_json::Value = serde_json::from_str(payload_json)
                 .map_err(|e| QueueError::InvalidPayloadJson(e.to_string()))?;
             Self::validate_payload_for_type(item_type, op, &payload)?;
+            let routed = route_file_item(item_type, tenant_id, collection, &payload, "{}");
+            let (tenant_id, collection, metadata) = (
+                routed.tenant_id.as_ref(),
+                routed.collection.as_ref(),
+                routed.metadata.as_ref(),
+            );
 
             let key_payload = Self::idempotency_payload_json(item_type, payload_json);
             let idempotency_key = generate_unified_idempotency_key(

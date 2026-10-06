@@ -16,8 +16,10 @@ use wqm_common::constants::COLLECTION_LIBRARIES;
 pub struct RoutingConfig {
     /// Extensions that always route to libraries (lowercase, with leading dot).
     /// Default: `.pdf`, `.epub`, `.docx`, `.doc`, `.rtf`, `.odt`, `.mobi`,
-    ///          `.pptx`, `.ppt`, `.pages`, `.key`, `.odp`,
-    ///          `.xlsx`, `.xls`, `.ods`, `.parquet`
+    ///          `.pptx`, `.ppt`, `.pages`, `.odp`,
+    ///          `.xlsx`, `.xls`, `.ods`, `.parquet` — never `.key`, which in a
+    ///          source repository is a PEM private key (see
+    ///          `allowed_extensions::routing::LIBRARY_ROUTED_EXTENSIONS`).
     pub library_extensions: Vec<String>,
 
     /// Where to route `.docx` files found in project folders.
@@ -43,7 +45,6 @@ impl Default for RoutingConfig {
                 ".pptx".into(),
                 ".ppt".into(),
                 ".pages".into(),
-                ".key".into(),
                 ".odp".into(),
                 ".xlsx".into(),
                 ".xls".into(),

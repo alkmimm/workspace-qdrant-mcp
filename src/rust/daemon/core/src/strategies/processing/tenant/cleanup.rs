@@ -104,8 +104,10 @@ async fn cleanup_tracked_files(
     let mut files_cleaned = 0u64;
     for (_file_id, rel_path, _branch) in &tracked_files {
         let abs_path = Path::new(base_path).join(rel_path);
+        // `is_indexable`, not `is_allowed`: a project's .pdf/.docx lives in its
+        // library and is not excluded; calling it so queued its deletion.
         let should_clean = should_exclude_file(rel_path)
-            || !allowed_extensions.is_allowed(&abs_path.to_string_lossy(), &item.collection);
+            || !allowed_extensions.is_indexable(&abs_path.to_string_lossy(), &item.collection);
         if !should_clean {
             continue;
         }
@@ -175,7 +177,7 @@ async fn cleanup_excluded_files_qdrant_fallback(
         };
 
         let should_clean = should_exclude_file(&rel_str)
-            || !allowed_extensions.is_allowed(qdrant_file, &item.collection);
+            || !allowed_extensions.is_indexable(qdrant_file, &item.collection);
         if !should_clean {
             continue;
         }

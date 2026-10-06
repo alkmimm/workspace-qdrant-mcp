@@ -466,7 +466,10 @@ bump this count."; exit 1; }
 # daemon restart). Also the branch tip follower: a local branch nobody has
 # checked out moved and nothing followed it (bws-engineer `master`: 508 tagged
 # rows held versions its tip no longer had), plus the item-metadata flags the
-# processor reads for those items. Hermetic: in-memory SQLite + tempdir git repos.
+# processor reads for those items, and library-format documents following their
+# branches (the one row the follower left stale was a `.docx`: every path here
+# judged it ineligible and enqueued it under `projects`). Hermetic: in-memory
+# SQLite + tempdir git repos.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
@@ -474,8 +477,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
         strategies::processing::file::item_metadata \
         --test-threads=4 2>&1 | tee /tmp/branch-switch.log; \
-    grep -q "^test result: ok\. 30 passed" /tmp/branch-switch.log \
-    || { echo "GATE: expected exactly 30 branch_switch + item_metadata tests to run and pass — \
+    grep -q "^test result: ok\. 33 passed" /tmp/branch-switch.log \
+    || { echo "GATE: expected exactly 33 branch_switch + item_metadata tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the membership reconcile, worktree discovery and the branch tip follower. If you ADDED \
 a test here, bump this count."; exit 1; }
@@ -769,6 +772,31 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 when a positional filter matches nothing, so a module rename would silently un-gate the \
 eligibility rule that keeps the reconciler from re-enqueueing un-indexable files forever (and \
 from deleting library-routed documents). If you ADDED a test here, bump this count."; exit 1; }
+
+# The same rule, everywhere else. A project folder's .pdf/.docx is indexed into
+# the project's `-refs` library, but until 2026-10-05 only the file watcher
+# routed it there: the folder scan, the exclusion cleanup, worktree membership
+# and the branch tip follower judged it with `is_allowed(.., "projects")`
+# (ineligible — the cleanup queued its deletion), and every other producer
+# enqueued it under `projects`, where the ingest guard drops an add and a delete
+# hits the wrong Qdrant collection. Routing now happens where every File item
+# enters the queue; eligibility is `is_indexable`. `.key` is never routed: in a
+# source repository it is a PEM private key (bws-engineer holds three).
+# Hermetic: in-memory SQLite + tempdirs. Module paths, exact count asserted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        queue_operations::file_routing \
+        allowed_extensions::routing \
+        strategies::processing::folder::file_entry \
+        --test-threads=4 2>&1 | tee /tmp/library-routing.log; \
+    grep -q "^test result: ok\. 8 passed" /tmp/library-routing.log \
+    || { echo "GATE: expected exactly 8 library-routing tests to run and pass — libtest exits 0 \
+when a positional filter matches nothing, so a module rename would silently un-gate the rule \
+that sends a project's documents to its library from every producer. If you ADDED a test \
+here, bump this count."; exit 1; }
 
 # The branch-prune delete's preserve guard ("the file is still on disk, so
 # reconciliation will re-tag it") must yield to the ignore rules in force:

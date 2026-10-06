@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::allowed_extensions::extensions::LIBRARY_ROUTED_EXTENSIONS;
+    use crate::allowed_extensions::routing::LIBRARY_ROUTED_EXTENSIONS;
     use crate::allowed_extensions::{AllowedExtensions, FileRoute};
 
     #[test]

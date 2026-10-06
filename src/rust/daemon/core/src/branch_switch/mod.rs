@@ -24,6 +24,8 @@ mod worktree_membership;
 #[cfg(test)]
 mod branch_tips_tests;
 #[cfg(test)]
+mod library_routing_tests;
+#[cfg(test)]
 mod membership_tests;
 #[cfg(test)]
 mod tests;

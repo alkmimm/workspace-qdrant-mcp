@@ -257,7 +257,12 @@ pub(super) async fn enqueue_unchanged_files(
                 continue;
             }
         }
-        if crate::tree_sitter::chunker::stored_fingerprint_is_stale(chunker_version.as_deref()) {
+        // A library-format document's points live in the project's library, but
+        // the bulk re-key tags points in its own collection (`projects`) and
+        // would miss them; the per-file Add is routed there by the queue.
+        if crate::allowed_extensions::is_library_routed(&rel)
+            || crate::tree_sitter::chunker::stored_fingerprint_is_stale(chunker_version.as_deref())
+        {
             to_rechunk.push(rel);
         } else {
             to_rekey.push(rel);

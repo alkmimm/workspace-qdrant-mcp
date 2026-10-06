@@ -359,11 +359,17 @@ pub(super) fn main_eligibility_gate(
 }
 
 /// Whether `rel` passes the MAIN folder's full eligibility — the ignore `gate`
-/// (from [`main_eligibility_gate`]) plus the extension/filename allowlist — the
-/// exact filter the folder scan applies. Worktree-read items run every candidate
-/// through this so a worktree branch never indexes files the main scan omits, and
-/// disallowed types are dropped at discovery instead of enqueued only to be
-/// skipped at the ingest guard and re-churned every scan.
+/// (from [`main_eligibility_gate`]) plus [`AllowedExtensions::is_indexable`] —
+/// the exact filter the folder scan applies. Worktree-read items run every
+/// candidate through this so a worktree branch never indexes files the main scan
+/// omits, and disallowed types are dropped at discovery instead of enqueued only
+/// to be skipped at the ingest guard and re-churned every scan.
+///
+/// `is_indexable`, not `is_allowed`: a library-format document (`.docx`, `.pdf`)
+/// is indexed into the project's library, and the queue routes the item there.
+/// With `is_allowed` such a file was never eligible here, so worktree branches
+/// and branches with no checkout never followed it (bws-engineer `master`, a
+/// `.docx` left on a version its tip no longer had, 2026-10-05).
 pub(super) fn worktree_path_eligible(
     main_project_root: &str,
     gate: &crate::patterns::ignore_gate::IgnoreGate,
@@ -373,7 +379,7 @@ pub(super) fn worktree_path_eligible(
 ) -> bool {
     let main_root = Path::new(main_project_root);
     !gate.is_ignored_with_ancestors(main_root, &main_root.join(rel))
-        && allowed_extensions.is_allowed(rel, collection)
+        && allowed_extensions.is_indexable(rel, collection)
 }
 
 /// Enqueue a single `File/Add` for a worktree file, flagged

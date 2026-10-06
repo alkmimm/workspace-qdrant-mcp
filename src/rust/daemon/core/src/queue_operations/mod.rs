@@ -8,6 +8,7 @@ mod delete_completion;
 mod dequeue;
 mod destination;
 mod enqueue;
+mod file_routing;
 mod query;
 mod triage;
 mod update;
