@@ -516,33 +516,6 @@ impl UnifiedQueueProcessor {
         state.adaptive_target_permits = Some(target);
     }
 
-    /// Check memory pressure; sleep and return `true` (→ `continue`) if over limit.
-    async fn handle_memory_pressure(
-        config: &UnifiedProcessorConfig,
-        _poll_interval: Duration,
-    ) -> bool {
-        if !Self::check_memory_pressure(config.max_memory_percent).await {
-            return false;
-        }
-        let rss = Self::current_rss_mb();
-        if Self::check_process_rss() {
-            warn!(
-                "Process RSS {}MB exceeds {}MB limit, pausing processing for 10s",
-                rss,
-                Self::max_rss_mb()
-            );
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        } else {
-            info!(
-                "System memory pressure detected (<{}% available, RSS={}MB), pausing for 5s",
-                100u8.saturating_sub(config.max_memory_percent),
-                rss
-            );
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-        true
-    }
-
     /// Probe Qdrant when circuit breaker is open; return `true` (→ `continue`) if still down.
     async fn handle_circuit_breaker(
         config: &UnifiedProcessorConfig,

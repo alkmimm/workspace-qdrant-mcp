@@ -141,7 +141,7 @@ Use these when ingestion is the bottleneck:
 | `WQM_RESOURCE_ONNX_INTRA_THREADS` | auto | ONNX threads per embedding job |
 | `WQM_RESOURCE_INTER_ITEM_DELAY_MS` | `50` | Delay between queue items |
 | `WORKSPACE_QDRANT_AUTO_INGESTION__MAX_FILES_PER_BATCH` | `5` | Files queued per auto-ingestion burst |
-| `WQM_MAX_RSS_MB` | `2048` | Safety valve that pauses processing when RSS grows too high |
+| `WQM_MAX_RSS_MB` | `2048` (compose: `8192`) | Safety valve that pauses queue processing while the daemon's RSS is above it. A pause is logged once, becomes an ERROR after 10 min (repeated every 30 min with its duration), and its end is logged — nothing is indexed until the memory is released |
 
 `WQM_QUEUE_TARGET_THROUGHPUT` is monitoring-only and does not throttle the queue. `WQM_STARTUP_*` only affects startup / reconcile catch-up.
 

@@ -50,4 +50,7 @@ pub enum HierarchyError {
 
     #[error("Embedding error: {0}")]
     Embedding(crate::embedding::EmbeddingError),
+
+    #[error("Clustering task failed: {0}")]
+    Clustering(String),
 }

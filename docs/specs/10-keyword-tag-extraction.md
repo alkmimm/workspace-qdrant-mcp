@@ -33,7 +33,13 @@ Tags are deduplicated across documents into canonical tags per collection. A nig
 - **Level 2**: Sub-domains (e.g., "async-runtime", "http-server")
 - **Level 3**: Specific topics (e.g., "tokio-executor", "hyper-routing")
 
-Hierarchy is stored in `canonical_tags` (nodes) and `tag_hierarchy_edges` (parent-child relationships). Rebuild is triggered nightly or via `wqm tags rebuild-hierarchy`.
+Hierarchy is stored in `canonical_tags` (nodes) and `tag_hierarchy_edges` (parent-child relationships). Rebuild is triggered nightly (02:00 in the daemon's time zone, UTC in the container) or via `wqm tags rebuild-hierarchy`.
+
+**Cost.** Levels 2 and 1 use average-linkage clustering, cut at the level's threshold. It is computed with the nearest-neighbour-chain algorithm (Lance–Williams updates) over the upper triangle of the similarity matrix in `f32`:
+- **Cost:** O(n²) time, and n(n-1)/2 floats of memory.
+- **Off the async runtime:** the build runs in `spawn_blocking`.
+- **Memory budget:** a level whose matrix would exceed 2 GiB (about 32k tags) clusters only its most-documented tags; the rest stay singleton clusters, and a WARN says so.
+- **Why:** the first implementation was a greedy O(n³)+ loop over an n×n `f64` matrix. On 2026-10-06, DOC-V2's 31k tags took 7.7 GB and ~10.5 h every night. While that memory was held, the queue processor's RSS brake (`WQM_MAX_RSS_MB`) paused all indexing.
 
 ### Search Query Expansion
 

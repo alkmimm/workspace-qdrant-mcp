@@ -3,9 +3,115 @@
 //! Contains process RSS checks and system memory pressure checks used to gate
 //! processing when memory is constrained.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use tracing::{debug, error, info, warn};
+
+use crate::unified_queue_processor::config::UnifiedProcessorConfig;
 use crate::unified_queue_processor::UnifiedQueueProcessor;
 
+/// When the RSS brake engaged (unix seconds; 0 = released).
+static RSS_PAUSED_SINCE: AtomicU64 = AtomicU64::new(0);
+/// When the current RSS pause last escalated to ERROR (0 = not yet).
+static RSS_PAUSE_ESCALATED_AT: AtomicU64 = AtomicU64::new(0);
+
+/// A pause longer than this is no longer a hiccup.
+const RSS_PAUSE_ESCALATE_AFTER_SECS: u64 = 10 * 60;
+/// How often a pause that goes on repeats its ERROR.
+const RSS_PAUSE_ESCALATE_EVERY_SECS: u64 = 30 * 60;
+
+/// Whether an RSS pause that began at `since` and last escalated at
+/// `escalated_at` (0 = never) should escalate at `now`.
+fn rss_pause_escalation_due(since: u64, escalated_at: u64, now: u64) -> bool {
+    now.saturating_sub(since) >= RSS_PAUSE_ESCALATE_AFTER_SECS
+        && (escalated_at == 0 || now.saturating_sub(escalated_at) >= RSS_PAUSE_ESCALATE_EVERY_SECS)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The RSS brake is on: announce it once, escalate if it lasts.
+fn rss_brake_engaged(rss_mb: u64, limit_mb: u64) {
+    let now = unix_now();
+    let since = match RSS_PAUSED_SINCE.compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst)
+    {
+        Ok(_) => {
+            warn!(
+                "Process RSS {}MB exceeds {}MB limit (WQM_MAX_RSS_MB), pausing queue processing until it falls",
+                rss_mb, limit_mb
+            );
+            now
+        }
+        Err(since) => since,
+    };
+    if rss_pause_escalation_due(since, RSS_PAUSE_ESCALATED_AT.load(Ordering::SeqCst), now) {
+        RSS_PAUSE_ESCALATED_AT.store(now, Ordering::SeqCst);
+        error!(
+            "Queue processing has been paused for {} min: process RSS {}MB stays above the {}MB \
+             limit (WQM_MAX_RSS_MB). Nothing is indexed until something releases that memory; \
+             restarting memexd does.",
+            now.saturating_sub(since) / 60,
+            rss_mb,
+            limit_mb
+        );
+    } else {
+        debug!(
+            "Process RSS {}MB exceeds {}MB limit, pausing processing for 10s",
+            rss_mb, limit_mb
+        );
+    }
+}
+
+/// The RSS brake is off: log the end of a pause, if one was on.
+fn rss_brake_released() {
+    let since = RSS_PAUSED_SINCE.swap(0, Ordering::SeqCst);
+    if since != 0 {
+        RSS_PAUSE_ESCALATED_AT.store(0, Ordering::SeqCst);
+        info!(
+            "Process RSS back under the limit after {} min; queue processing resumed",
+            unix_now().saturating_sub(since) / 60
+        );
+    }
+}
+
 impl UnifiedQueueProcessor {
+    /// Check memory pressure; sleep and return `true` (→ `continue`) if over limit.
+    ///
+    /// The RSS brake pauses until the process shrinks, and nothing in this loop
+    /// can make that happen. Until 2026-10-06 the nightly tag hierarchy held
+    /// ~8 GB for ~10 h and the queue sat paused behind a WARN repeated every
+    /// 10 s (2,000+ a day) that read like noise. A pause is now announced once,
+    /// escalated to ERROR after 10 min (repeated every 30, with its duration),
+    /// and its end is logged.
+    pub(super) async fn handle_memory_pressure(
+        config: &UnifiedProcessorConfig,
+        _poll_interval: Duration,
+    ) -> bool {
+        if !Self::check_memory_pressure(config.max_memory_percent).await {
+            rss_brake_released();
+            return false;
+        }
+        let rss = Self::current_rss_mb();
+        if Self::check_process_rss() {
+            rss_brake_engaged(rss, Self::max_rss_mb());
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        } else {
+            rss_brake_released();
+            info!(
+                "System memory pressure detected (<{}% available, RSS={}MB), pausing for 5s",
+                100u8.saturating_sub(config.max_memory_percent),
+                rss
+            );
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        true
+    }
+
     /// Default maximum RSS in megabytes before pausing processing.
     /// Acts as a safety valve against memory leaks in the processing pipeline.
     /// Overridable at runtime via the `WQM_MAX_RSS_MB` env var.
@@ -181,5 +287,33 @@ impl UnifiedQueueProcessor {
             let min_available = 100u8.saturating_sub(max_memory_percent);
             available_percent < min_available
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Live 2026-10-06: the queue sat paused from 02:47 to 09:57 UTC behind a
+    /// per-10s WARN. A short pause stays quiet; a long one is an ERROR, again
+    /// every 30 minutes while it lasts.
+    #[test]
+    fn a_long_rss_pause_escalates_and_keeps_reminding() {
+        let since = 1_000_000;
+        assert!(!rss_pause_escalation_due(since, 0, since));
+        assert!(!rss_pause_escalation_due(since, 0, since + 9 * 60));
+        assert!(rss_pause_escalation_due(since, 0, since + 10 * 60));
+
+        let escalated = since + 10 * 60;
+        assert!(!rss_pause_escalation_due(
+            since,
+            escalated,
+            escalated + 29 * 60
+        ));
+        assert!(rss_pause_escalation_due(
+            since,
+            escalated,
+            escalated + 30 * 60
+        ));
     }
 }

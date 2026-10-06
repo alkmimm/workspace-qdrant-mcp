@@ -1,7 +1,7 @@
 //! Tests for canonical tag deduplication and hierarchical clustering.
 
 use super::build_hierarchy;
-use super::clustering::{average_linkage_sim, compute_centroid, merge_duplicates};
+use super::clustering::{compute_centroid, merge_duplicates};
 use super::types::{CanonicalConfig, TagWithVector};
 
 fn make_tag(phrase: &str, vector: Vec<f32>, doc_count: u32) -> TagWithVector {
@@ -129,19 +129,6 @@ fn test_compute_centroid_empty() {
     let vecs: Vec<Vec<f32>> = vec![];
     let centroid = compute_centroid(vecs.iter());
     assert!(centroid.is_empty());
-}
-
-#[test]
-fn test_average_linkage_sim() {
-    let sim_matrix = vec![
-        vec![1.0, 0.8, 0.1],
-        vec![0.8, 1.0, 0.2],
-        vec![0.1, 0.2, 1.0],
-    ];
-
-    let sim = average_linkage_sim(&[0, 1], &[2], &sim_matrix);
-    // (0.1 + 0.2) / 2 = 0.15
-    assert!((sim - 0.15).abs() < 1e-6, "Expected 0.15, got {}", sim);
 }
 
 #[test]
