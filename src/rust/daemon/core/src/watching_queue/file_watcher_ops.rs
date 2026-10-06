@@ -138,7 +138,6 @@ impl FileWatcherQueue {
                 event,
                 config,
                 queue_manager,
-                allowed_extensions,
                 error_tracker,
                 throttle_state,
                 events_processed,
@@ -263,7 +262,6 @@ impl FileWatcherQueue {
                 event,
                 config,
                 queue_manager,
-                allowed_extensions,
                 error_tracker,
                 throttle_state,
                 events_processed,
@@ -294,7 +292,6 @@ impl FileWatcherQueue {
                     event,
                     config,
                     queue_manager,
-                    allowed_extensions,
                     error_tracker,
                     throttle_state,
                     events_processed,
@@ -332,7 +329,6 @@ impl FileWatcherQueue {
         event: FileEvent,
         config: &Arc<RwLock<WatchConfig>>,
         queue_manager: &Arc<QueueManager>,
-        allowed_extensions: &Arc<AllowedExtensions>,
         error_tracker: &Arc<WatchErrorTracker>,
         throttle_state: &Arc<QueueThrottleState>,
         events_processed: &Arc<Mutex<u64>>,
@@ -416,7 +412,7 @@ impl FileWatcherQueue {
             }
         }
 
-        let routed = Self::resolve_routing_and_payload(&event, config, allowed_extensions).await;
+        let routed = Self::resolve_routing_and_payload(&event, config).await;
         let (final_collection, final_tenant, branch, metadata, payload_json) = match routed {
             Some(r) => r,
             None => {
@@ -477,7 +473,6 @@ impl FileWatcherQueue {
     async fn resolve_routing_and_payload(
         event: &FileEvent,
         config: &Arc<RwLock<WatchConfig>>,
-        allowed_extensions: &Arc<AllowedExtensions>,
     ) -> Option<(String, String, String, Option<String>, String)> {
         let file_type = classify_file_type(&event.path);
         let (collection, tenant_id, branch, watch_root_str) = {
@@ -496,27 +491,13 @@ impl FileWatcherQueue {
 
         let file_absolute_path = event.path.to_string_lossy().to_string();
 
-        let (final_collection, final_tenant, metadata) = match allowed_extensions.route_file(
-            &file_absolute_path,
-            &collection,
-            &tenant_id,
-        ) {
-            FileRoute::LibraryCollection { source_project_id }
-                if collection != COLLECTION_LIBRARIES =>
-            {
-                let meta = source_project_id
-                    .as_ref()
-                    .map(|pid| crate::format_routing::routing_metadata_json(pid));
-                let lib_name = source_project_id
-                    .as_ref()
-                    .map(|pid| crate::format_routing::generate_library_name(pid))
-                    .unwrap_or_else(|| tenant_id.clone());
-                debug!("Format-based routing override: {} -> libraries (source_project={}, library_name={})",
-                        file_absolute_path, tenant_id, lib_name);
-                (COLLECTION_LIBRARIES.to_string(), lib_name, meta)
-            }
-            _ => (collection.clone(), tenant_id.clone(), None),
-        };
+        // A library-format document in a project folder (.pdf, .docx, …) goes
+        // to the project's `-refs` library, but that routing happens where
+        // every producer's item enters the queue (`queue_operations::
+        // file_routing`), not here: until 2026-10-05 the watcher was the only
+        // producer that routed it, and the others' items were dropped.
+        let (final_collection, final_tenant, metadata): (String, String, Option<String>) =
+            (collection, tenant_id, None);
 
         debug!(
             "Multi-tenant routing: file={}, collection={}, tenant={}, file_type={}, branch={}",

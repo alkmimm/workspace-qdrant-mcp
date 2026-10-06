@@ -10,7 +10,11 @@ use super::branch_tips::{plan_branch, TipPlan};
 use super::tests::{create_test_pool, insert_tracked_file, insert_watch_folder, setup_tables};
 use super::BranchTipFollower;
 
-fn commit(repo: &git2::Repository, files: &[(&str, &str)], parent: Option<git2::Oid>) -> git2::Oid {
+pub(super) fn commit(
+    repo: &git2::Repository,
+    files: &[(&str, &str)],
+    parent: Option<git2::Oid>,
+) -> git2::Oid {
     let mut builder = repo.treebuilder(None).unwrap();
     for (path, content) in files {
         let blob = repo.blob(content.as_bytes()).unwrap();
@@ -28,7 +32,7 @@ fn commit(repo: &git2::Repository, files: &[(&str, &str)], parent: Option<git2::
 }
 
 /// The content identity the index stores for these one-line test files.
-fn h(content: &str) -> String {
+pub(super) fn h(content: &str) -> String {
     wqm_common::hashing::compute_content_hash(content)
 }
 

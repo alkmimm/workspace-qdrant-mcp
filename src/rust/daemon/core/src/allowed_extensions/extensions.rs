@@ -4,19 +4,8 @@ use std::path::Path;
 use glob::Pattern;
 use wqm_common::constants::COLLECTION_LIBRARIES;
 
-use super::types::FileRoute;
-
-/// Extensions for binary/reference formats that route to the `libraries` collection
-/// even when discovered inside a project folder.
-///
-/// These are document formats (PDF, EPUB, etc.) that are unlikely to be "source code"
-/// and are better served by the library ingestion pipeline. Source-like formats
-/// (e.g., `.md`, `.txt`, `.html`) stay in `projects` because they are typically
-/// project documentation meant to be searched alongside code.
-pub(super) const LIBRARY_ROUTED_EXTENSIONS: &[&str] = &[
-    ".pdf", ".epub", ".docx", ".doc", ".rtf", ".odt", ".mobi", ".chm", ".pptx", ".ppt", ".pages",
-    ".key", ".odp", ".xlsx", ".xls", ".ods", ".numbers", ".parquet",
-];
+// Which collection a file routes to (and the documents a project folder sends
+// to its library) lives in `super::routing`.
 
 /// Source code, config, and documentation extensions allowed in project collections.
 const PROJECT_EXTENSION_LIST: &[&str] = &[
@@ -482,7 +471,7 @@ impl AllowedExtensions {
     /// Whether the file NAME (ignoring extension) is a well-known indexable
     /// file — a build/CI/config/docs file the extension allowlist misses.
     /// Case-insensitive; checks the exact set first, then the variant globs.
-    fn filename_allowed(&self, path: &Path) -> bool {
+    pub(super) fn filename_allowed(&self, path: &Path) -> bool {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             return false;
         };
@@ -523,75 +512,5 @@ impl AllowedExtensions {
         // Extension missing or not allowlisted — fall back to the well-known
         // filename allowlist so extensionless build/CI/config files index.
         self.filename_allowed(path)
-    }
-
-    /// Route a file to the appropriate Qdrant collection based on its extension
-    /// and the watch folder's configured collection.
-    ///
-    /// # Routing logic
-    ///
-    /// 1. **Library watch folders** (`watch_collection == "libraries"`):
-    ///    Files with extensions in the library allowlist route to `LibraryCollection`.
-    ///    All others are `Excluded`.
-    ///
-    /// 2. **Project watch folders** (`watch_collection == "projects"`):
-    ///    - If the extension is in `LIBRARY_ROUTED_EXTENSIONS` (binary document formats
-    ///      like `.pdf`, `.docx`, `.epub`), the file routes to `LibraryCollection` with
-    ///      `source_project_id` set to the project's tenant_id, so the library entry
-    ///      can be traced back to its origin project.
-    ///    - If the extension is in the project allowlist, it routes to `ProjectCollection`.
-    ///    - Otherwise, the file is `Excluded`.
-    ///
-    /// # Arguments
-    /// * `file_path` - Path to the file being routed.
-    /// * `watch_collection` - The collection configured on the watch folder (`"projects"` or `"libraries"`).
-    /// * `tenant_id` - The tenant identifier (project ID or library name) for the watch folder.
-    pub fn route_file(
-        &self,
-        file_path: &str,
-        watch_collection: &str,
-        tenant_id: &str,
-    ) -> FileRoute {
-        let path = Path::new(file_path);
-        let ext_dotted = path
-            .extension()
-            .map(|ext| format!(".{}", ext.to_string_lossy().to_lowercase()));
-
-        if watch_collection == COLLECTION_LIBRARIES {
-            // Library watch folder: accept any library-allowed extension or a
-            // well-known filename.
-            if ext_dotted
-                .as_ref()
-                .is_some_and(|d| self.library_extensions.contains(d))
-                || self.filename_allowed(path)
-            {
-                return FileRoute::LibraryCollection {
-                    source_project_id: None,
-                };
-            }
-            return FileRoute::Excluded;
-        }
-
-        // Project watch folder: check for library-routed override first, then
-        // the project extension allowlist.
-        if let Some(ref dotted) = ext_dotted {
-            if LIBRARY_ROUTED_EXTENSIONS.contains(&dotted.as_str()) {
-                return FileRoute::LibraryCollection {
-                    source_project_id: Some(tenant_id.to_string()),
-                };
-            }
-            if self.project_extensions.contains(dotted) {
-                return FileRoute::ProjectCollection;
-            }
-        }
-
-        // Extension missing or not allowlisted — well-known build/CI/config/docs
-        // files (text/code, never binary documents) route to the project
-        // collection so Dockerfiles, Jenkinsfiles and Makefiles get indexed.
-        if self.filename_allowed(path) {
-            return FileRoute::ProjectCollection;
-        }
-
-        FileRoute::Excluded
     }
 }

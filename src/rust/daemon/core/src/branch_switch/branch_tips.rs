@@ -289,8 +289,10 @@ async fn apply_plan(
     let gate = main_eligibility_gate(t.root);
     let (mut reingested, mut untagged, mut settled) = (0usize, 0usize, true);
     for (rel, bytes) in plan.reingest {
-        // A path the move added must pass the main scan's eligibility; a tagged
-        // one already did when it was indexed.
+        // Every re-ingest passes the main scan's eligibility — a path the move
+        // added must, a tagged one did when it was indexed. A library-format
+        // document is followed like any file: the queue routes it to the
+        // project's library (it was refused here until 2026-10-05).
         if !worktree_path_eligible(t.root, &gate, allowed_extensions, COLLECTION_PROJECTS, &rel) {
             continue;
         }

@@ -6,10 +6,12 @@
 //! extensions are not in the appropriate allowlist are silently skipped.
 
 mod extensions;
+mod routing;
 mod types;
 
 #[cfg(test)]
 mod tests;
 
 pub use extensions::{is_allowlisted_filename, AllowedExtensions};
+pub use routing::is_library_routed;
 pub use types::FileRoute;

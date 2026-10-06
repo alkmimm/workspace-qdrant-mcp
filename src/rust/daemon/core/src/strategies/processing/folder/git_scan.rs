@@ -42,7 +42,8 @@ use crate::queue_operations::QueueManager;
 use crate::unified_queue_processor::UnifiedProcessorResult;
 use crate::unified_queue_schema::UnifiedQueueItem;
 
-use super::scan::{enqueue_submodule, parse_iso8601_to_system_time, process_file_entry};
+use super::file_entry::process_file_entry;
+use super::scan::{enqueue_submodule, parse_iso8601_to_system_time};
 
 /// git filemode for a gitlink (submodule) index entry.
 const GIT_FILEMODE_COMMIT: u32 = 0o160000;
