@@ -4,6 +4,7 @@
 //! builds a 3-level hierarchy via agglomerative clustering.
 
 mod clustering;
+mod linkage;
 mod types;
 
 pub use types::{CanonicalConfig, CanonicalHierarchy, CanonicalTag, TagWithVector};
@@ -40,5 +41,7 @@ pub fn build_hierarchy(tags: &[TagWithVector], config: &CanonicalConfig) -> Cano
     }
 }
 
+#[cfg(test)]
+mod linkage_tests;
 #[cfg(test)]
 mod tests;

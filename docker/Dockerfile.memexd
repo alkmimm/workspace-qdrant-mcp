@@ -798,6 +798,29 @@ when a positional filter matches nothing, so a module rename would silently un-g
 that sends a project's documents to its library from every producer. If you ADDED a test \
 here, bump this count."; exit 1; }
 
+# The nightly canonical tag hierarchy and the RSS brake it used to trip. The
+# clustering kept an n×n f64 matrix and rescanned every cluster pair on every
+# merge (O(n³)+): DOC-V2's 31k tags took 7.7 GB and ~10.5 h every night, and
+# while that memory was held the queue processor's RSS brake (8 GB) paused
+# ALL indexing — ~10 h a day since at least 2026-09-30, with no ERROR, only
+# a WARN every 10 s. Pinned here: the nearest-neighbour chain cuts the same
+# clusters as the greedy loop (seeded random cases against a reference), the
+# matrix budget, the scale, and the brake's escalation. Hermetic, exact count.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        keyword_extraction::canonical_tags \
+        keyword_extraction::hierarchy_builder \
+        unified_queue_processor::processing_loop::memory_pressure \
+        --test-threads=4 2>&1 | tee /tmp/tag-hierarchy.log; \
+    grep -q "^test result: ok\. 26 passed" /tmp/tag-hierarchy.log \
+    || { echo "GATE: expected exactly 26 tag-hierarchy + RSS-brake tests to run and pass — \
+libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
+un-gate the clustering that stalled indexing every night. If you ADDED a test here, bump this \
+count."; exit 1; }
+
 # The branch-prune delete's preserve guard ("the file is still on disk, so
 # reconciliation will re-tag it") must yield to the ignore rules in force:
 # a git-ignored file on a dead branch is never re-tagged, and until

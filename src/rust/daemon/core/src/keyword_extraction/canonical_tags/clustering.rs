@@ -1,7 +1,17 @@
 //! Clustering algorithms for canonical tag deduplication and hierarchy building.
 
+use tracing::warn;
+
 use super::super::semantic_rerank::cosine_similarity;
+use super::linkage::{average_linkage_clusters, matrix_bytes};
 use super::types::{CanonicalTag, TagWithVector};
+
+/// Most bytes one level's similarity matrix may take. Past it only the most
+/// documented tags are clustered and the rest stay singleton clusters: the
+/// long tail of the hierarchy degrades instead of the daemon's memory. 2 GiB
+/// clusters ~32k tags at once (DOC-V2 had 31k level-3 tags on 2026-10-06) and
+/// keeps the daemon well under its 8 GiB RSS brake (`WQM_MAX_RSS_MB`).
+pub(super) const MAX_CLUSTER_MATRIX_BYTES: usize = 2 << 30;
 
 /// Merge near-duplicate tags using single-linkage clustering.
 ///
@@ -85,113 +95,84 @@ pub(super) fn cluster_tags(
     threshold: f64,
     level: u8,
 ) -> Vec<CanonicalTag> {
-    let n = tags.len();
-    if n == 0 {
+    cluster_tags_within(tags, threshold, level, MAX_CLUSTER_MATRIX_BYTES)
+}
+
+/// [`cluster_tags`] with an explicit memory budget for the similarity matrix.
+pub(super) fn cluster_tags_within(
+    tags: &mut [CanonicalTag],
+    threshold: f64,
+    level: u8,
+    budget_bytes: usize,
+) -> Vec<CanonicalTag> {
+    if tags.is_empty() {
         return Vec::new();
     }
-
-    // Compute pairwise similarity matrix
-    let sim_matrix = build_similarity_matrix(tags);
-
-    // Agglomerative clustering with average linkage
-    let (active, cluster_members) = agglomerative_cluster(n, threshold, &sim_matrix);
-
-    // Build output from active clusters
-    build_cluster_output(tags, &active, &cluster_members, &sim_matrix, level)
+    let clustered = clustered_subset(tags, budget_bytes, level);
+    let vectors: Vec<&[f32]> = clustered
+        .iter()
+        .map(|&i| tags[i].centroid.as_slice())
+        .collect();
+    let mut groups: Vec<Vec<usize>> = average_linkage_clusters(&vectors, threshold)
+        .into_iter()
+        .map(|group| group.into_iter().map(|k| clustered[k]).collect())
+        .collect();
+    if clustered.len() < tags.len() {
+        let mut in_matrix = vec![false; tags.len()];
+        for &i in &clustered {
+            in_matrix[i] = true;
+        }
+        groups.extend((0..tags.len()).filter(|&i| !in_matrix[i]).map(|i| vec![i]));
+        groups.sort_unstable_by_key(|group| group[0]);
+    }
+    build_cluster_output(tags, &groups, level)
 }
 
-/// Compute a symmetric pairwise similarity matrix from tag centroids.
-fn build_similarity_matrix(tags: &[CanonicalTag]) -> Vec<Vec<f64>> {
-    let n = tags.len();
-    let mut sim_matrix = vec![vec![0.0f64; n]; n];
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let sim = cosine_similarity(&tags[i].centroid, &tags[j].centroid);
-            sim_matrix[i][j] = sim;
-            sim_matrix[j][i] = sim;
+/// The tags clustered at this level, ascending: all of them when their matrix
+/// fits `budget_bytes`, else the most documented that fit.
+fn clustered_subset(tags: &[CanonicalTag], budget_bytes: usize, level: u8) -> Vec<usize> {
+    let cap = largest_fitting(budget_bytes);
+    if tags.len() <= cap {
+        return (0..tags.len()).collect();
+    }
+    warn!(
+        hierarchy_level = level,
+        tags = tags.len(),
+        clustered = cap,
+        "Tag hierarchy: the similarity matrix would exceed its memory budget; clustering the {} most-documented tags, the rest stay singleton clusters",
+        cap
+    );
+    let mut by_docs: Vec<usize> = (0..tags.len()).collect();
+    by_docs.sort_by(|&a, &b| tags[b].doc_count.cmp(&tags[a].doc_count).then(a.cmp(&b)));
+    by_docs.truncate(cap);
+    by_docs.sort_unstable();
+    by_docs
+}
+
+/// The largest item count whose similarity matrix fits `budget_bytes`.
+pub(super) fn largest_fitting(budget_bytes: usize) -> usize {
+    let (mut lo, mut hi) = (1usize, 1usize << 20);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if matrix_bytes(mid) <= budget_bytes {
+            lo = mid;
+        } else {
+            hi = mid - 1;
         }
     }
-    sim_matrix
+    lo
 }
 
-/// Run agglomerative clustering with average linkage, merging clusters whose
-/// similarity exceeds `threshold`. Returns `(active, cluster_members)`.
-fn agglomerative_cluster(
-    n: usize,
-    threshold: f64,
-    sim_matrix: &[Vec<f64>],
-) -> (Vec<bool>, Vec<Vec<usize>>) {
-    let mut cluster_id: Vec<usize> = (0..n).collect();
-    let mut active: Vec<bool> = vec![true; n];
-    let mut cluster_members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-
-    loop {
-        // Find the most similar pair of active clusters
-        let mut best_sim = f64::NEG_INFINITY;
-        let mut best_pair = (0, 0);
-
-        for i in 0..n {
-            if !active[i] {
-                continue;
-            }
-            for j in (i + 1)..n {
-                if !active[j] {
-                    continue;
-                }
-                let avg_sim =
-                    average_linkage_sim(&cluster_members[i], &cluster_members[j], sim_matrix);
-                if avg_sim > best_sim {
-                    best_sim = avg_sim;
-                    best_pair = (i, j);
-                }
-            }
-        }
-
-        if best_sim < threshold || best_pair == (0, 0) && n > 1 {
-            if best_sim < threshold {
-                break;
-            }
-        }
-
-        // Merge best_pair.1 into best_pair.0
-        let (a, b) = best_pair;
-        let members_b = cluster_members[b].clone();
-        cluster_members[a].extend(members_b);
-        active[b] = false;
-
-        for &m in &cluster_members[a] {
-            cluster_id[m] = a;
-        }
-
-        if active.iter().filter(|&&a| a).count() <= 1 {
-            break;
-        }
-    }
-
-    // Suppress unused warning: cluster_id is maintained for correctness but
-    // the final result is built from active cluster indices directly.
-    let _ = cluster_id;
-
-    (active, cluster_members)
-}
-
-/// Build canonical-tag output from active cluster groups, setting parent links
-/// on the input tags.
+/// Build canonical-tag output from cluster groups (member indices into `tags`),
+/// setting parent links on the input tags.
 fn build_cluster_output(
     tags: &mut [CanonicalTag],
-    active: &[bool],
-    cluster_members: &[Vec<usize>],
-    _sim_matrix: &[Vec<f64>],
+    groups: &[Vec<usize>],
     level: u8,
 ) -> Vec<CanonicalTag> {
-    let n = active.len();
     let mut result = Vec::new();
 
-    for i in 0..n {
-        if !active[i] {
-            continue;
-        }
-        let members = &cluster_members[i];
+    for members in groups {
         if members.is_empty() {
             continue;
         }
@@ -241,33 +222,6 @@ fn closest_to_centroid(members: &[usize], tags: &[CanonicalTag], centroid: &[f32
         })
         .copied()
         .unwrap_or(members[0])
-}
-
-/// Compute average linkage similarity between two clusters.
-pub(super) fn average_linkage_sim(
-    cluster_a: &[usize],
-    cluster_b: &[usize],
-    sim_matrix: &[Vec<f64>],
-) -> f64 {
-    if cluster_a.is_empty() || cluster_b.is_empty() {
-        return 0.0;
-    }
-
-    let mut total = 0.0;
-    let mut count = 0;
-
-    for &a in cluster_a {
-        for &b in cluster_b {
-            total += sim_matrix[a][b];
-            count += 1;
-        }
-    }
-
-    if count == 0 {
-        0.0
-    } else {
-        total / count as f64
-    }
 }
 
 /// Compute centroid (mean) of a set of vectors.

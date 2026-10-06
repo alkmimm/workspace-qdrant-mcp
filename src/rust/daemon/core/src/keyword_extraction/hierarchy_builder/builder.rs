@@ -88,14 +88,22 @@ impl HierarchyBuilder {
 
         let tags_collected = tags_with_vectors.len();
 
-        // Step 4: Build hierarchy
-        let hierarchy = canonical_tags::build_hierarchy(&tags_with_vectors, &self.config.canonical);
+        // Step 4: Build hierarchy. CPU-bound for minutes on a large tenant (an
+        // O(n²) similarity matrix), so it runs off the async workers.
+        let canonical = self.config.canonical.clone();
+        let started = std::time::Instant::now();
+        let hierarchy = tokio::task::spawn_blocking(move || {
+            canonical_tags::build_hierarchy(&tags_with_vectors, &canonical)
+        })
+        .await
+        .map_err(|e| HierarchyError::Clustering(e.to_string()))?;
 
         info!(
             tenant_id,
             level3 = hierarchy.level3.len(),
             level2 = hierarchy.level2.len(),
             level1 = hierarchy.level1.len(),
+            build_secs = started.elapsed().as_secs(),
             "Hierarchy built, persisting to SQLite"
         );
 
