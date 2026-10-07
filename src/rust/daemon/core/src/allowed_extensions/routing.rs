@@ -119,7 +119,7 @@ impl AllowedExtensions {
     ///
     /// This is the eligibility every path that decides "should this file be in
     /// the index" must share: the folder scan, the startup reconciler
-    /// (`ignore_sync::retain_indexable`), the exclusion cleanup, worktree
+    /// (`eligible_walk::retain_indexable`), the exclusion cleanup, worktree
     /// membership and the branch tip follower. Until 2026-10-05 all but the
     /// reconciler and the file watcher asked [`Self::is_allowed`] with the
     /// folder's collection, so a project's `.docx` was ineligible there: worktree

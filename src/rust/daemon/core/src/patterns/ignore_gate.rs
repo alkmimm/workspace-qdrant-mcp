@@ -274,6 +274,52 @@ mod tests {
         assert!(gate.is_ignored_with_ancestors(&root, &inner));
     }
 
+    /// The dequeue-time check (gate built for the file's parent, ancestors
+    /// replayed) on Laravel's placeholder shape: each kept-empty directory
+    /// holds a `.gitignore` of `*` + `!.gitignore`, and `storage/app/` also
+    /// re-includes `public/`. Git tracks every one of those `.gitignore` files
+    /// and the walk keeps them; the replay used to test each directory against
+    /// its OWN `*` and drop them — 12 adds re-enqueued at every start on a
+    /// Laravel tenant (#402). Ignored content and an excluded parent still are.
+    #[test]
+    fn ancestor_replay_keeps_laravel_placeholder_gitignores() {
+        let proj = tempfile::tempdir().unwrap();
+        let root = proj.path();
+        let placeholders = [
+            "storage/logs",
+            "storage/framework/cache",
+            "storage/framework/cache/data",
+            "bootstrap/cache",
+        ];
+        for dir in placeholders {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            write(&root.join(dir), ".gitignore", "*\n!data/\n!.gitignore\n");
+        }
+        let app = root.join("storage/app");
+        fs::create_dir_all(app.join("public")).unwrap();
+        write(&app, ".gitignore", "*\n!public/\n!.gitignore\n");
+        write(&app.join("public"), ".gitignore", "*\n!.gitignore\n");
+        write(root, ".gitignore", "/vendor\n");
+
+        let dequeue = |file: &Path| {
+            IgnoreGate::for_dir(file.parent().unwrap(), Some(root), None)
+                .is_ignored_with_ancestors(root, file)
+        };
+        for dir in placeholders
+            .iter()
+            .chain(&["storage/app", "storage/app/public"])
+        {
+            let gitignore = root.join(dir).join(".gitignore");
+            assert!(!dequeue(&gitignore), "{dir}/.gitignore must be kept");
+        }
+        assert!(dequeue(&root.join("storage/logs/laravel.log")));
+        assert!(dequeue(&root.join("storage/app/public/avatar.txt")));
+        assert!(
+            dequeue(&root.join("vendor/pkg/.gitignore")),
+            "excluded parent"
+        );
+    }
+
     #[test]
     fn shared_global_constructor_matches_for_dir_semantics() {
         let body = "**/proto/src/generated/\n*OuterClass.java\n";

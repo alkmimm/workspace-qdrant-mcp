@@ -9,8 +9,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use ignore::WalkBuilder;
 use tracing::debug;
+
+use super::project_walk::project_walk_builder;
 
 /// Eligibility status for a single directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,15 +37,9 @@ impl EligibilityTrie {
     /// `.wqmignore` as an additional ignore filename (standard for project
     /// scans).
     pub fn build(project_root: &Path, add_custom_ignore: bool) -> Result<Self, String> {
-        let mut builder = WalkBuilder::new(project_root);
-        builder
-            .hidden(false) // include dotfiles — .gitignore handles exclusion
-            .git_ignore(true)
-            .git_global(false)
-            .git_exclude(false)
-            // Also treat .gitignore as a custom ignore filename so it works
-            // even when the directory is not inside a git repository.
-            .add_custom_ignore_filename(".gitignore");
+        // The shared project walker: no `.ignore` files, no parent
+        // directories — exactly the sources the ignore gate honours (#402).
+        let mut builder = project_walk_builder(project_root);
 
         if add_custom_ignore {
             builder.add_custom_ignore_filename(".wqmignore");
@@ -200,6 +195,20 @@ mod tests {
         let trie = EligibilityTrie::build(root.path(), true).unwrap();
         // build/ is excluded by gitignore (WalkBuilder doesn't see wqmignore reinclusion)
         assert!(!trie.is_eligible(&build).unwrap().eligible);
+    }
+
+    /// A `.ignore` file (ripgrep's convention) is not an ignore source wqm
+    /// honours: the directories it lists stay eligible (#402).
+    #[test]
+    fn build_trie_ignores_dot_ignore_files() {
+        let root = tmp();
+        fs::write(root.path().join(".ignore"), "storage/\n").unwrap();
+        let storage = root.path().join("src").join("storage");
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(storage.join("search.rs"), "fn s() {}").unwrap();
+
+        let trie = EligibilityTrie::build(root.path(), true).unwrap();
+        assert!(trie.is_eligible(&storage).unwrap().eligible);
     }
 
     #[test]

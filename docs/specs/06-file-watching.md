@@ -168,11 +168,11 @@ The folder scanner reads two optional ignore files from the project root (and re
 > Observed 2026-07-16: 16 tracked protos invisible, 8 with no indexed copy
 > anywhere (#279 context).
 
-#### Ignore reconciliation invariants (#278 / #280 / #284)
+#### Ignore reconciliation invariants (#278 / #280 / #284 / #402)
 
 The ignore reconciler (`startup/reconciliation/ignore_sync.rs`, also fired at
-runtime by `watching_queue/ignore_watch.rs`) obeys five invariants, each one a
-live incident from 2026-07-16:
+runtime by `watching_queue/ignore_watch.rs`) obeys six invariants, each one a
+live incident (the first five from 2026-07-16):
 
 1. **Staleness is per `(path, branch)`, never per path.** The stale remedy
    (`file|delete`) drops ONE branch tag from the Layer-2 content row, so a
@@ -200,6 +200,21 @@ live incident from 2026-07-16:
    tenant-wide reconciles in 15 minutes (#284). Note: the mtime cache is keyed
    by the ignore file's path *relative to the project root* — a basename key
    collapses all of a project's ignore files into one slot (#278 D3).
+6. **The walk and the ingest agree on every file (#402, 2026-10-07).** The
+   reconciler diffs its walk against what the ingest keeps, so any file one
+   keeps and the other drops comes back at every start. The walk
+   (`eligible_walk::walk_eligible_files`, built on
+   `patterns::project_walk::project_walk_builder`) honours exactly the
+   ignore gate's sources — project `.gitignore`/`.wqmignore` from the project
+   root down, plus `global.wqmignore`: no `.ignore` files (ripgrep's
+   convention) and nothing above the project root. A tracked `.ignore` listing
+   `storage/` and `backup/` made the walk call 22 live source files stale and
+   strip `main` from them at every boot. And a directory is never matched by
+   its OWN ignore file (git semantics): the dequeue gate's ancestor replay
+   used to read Laravel's placeholder `storage/logs/.gitignore` (`*` +
+   `!.gitignore`) as ignoring `storage/logs/` itself, dropping a file git
+   tracks and the walk keeps. `the_walk_and_the_dequeue_gate_agree_on_every_file`
+   pins the agreement; the reconciler logs the stale/missing paths at debug.
 
 Deletion-side guards live in `strategies/processing/file/`: the fallback
 filter-delete (and the Update path's defensive sweep, #281) require that NO

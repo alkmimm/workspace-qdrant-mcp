@@ -19,6 +19,7 @@ pub mod global_ignore;
 pub mod ignore_gate;
 pub mod manager;
 pub mod project;
+pub mod project_walk;
 
 pub use comprehensive::{
     BuildSystemConfig, ComprehensivePatternError, ComprehensivePatternManager, ComprehensiveResult,
