@@ -54,6 +54,10 @@ pub struct ExtractedGeneration {
     pub file_path: String,
     /// ISO-8601 UTC, as every other graph timestamp.
     pub extracted_at: String,
+    /// Written by the current extractor (`GRAPH_EXTRACTOR_VERSION`). A stale
+    /// extraction still answers queries and still belongs to the orphan
+    /// sweep, but the backfill rebuilds it.
+    pub current: bool,
 }
 
 /// The branches that hold each generation of one tenant.

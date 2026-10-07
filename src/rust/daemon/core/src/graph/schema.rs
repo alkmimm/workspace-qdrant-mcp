@@ -11,7 +11,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 /// Current schema version for graph.db.
-pub const GRAPH_SCHEMA_VERSION: i32 = 8;
+pub const GRAPH_SCHEMA_VERSION: i32 = 9;
 
 /// Default graph database filename.
 pub const GRAPH_DB_FILENAME: &str = "graph.db";
@@ -171,6 +171,7 @@ impl GraphDbManager {
             6 => self.migrate_v6().await,
             7 => super::schema_v7::migrate_v7(&self.pool).await,
             8 => super::schema_v8::migrate_v8(&self.pool).await,
+            9 => super::schema_v9::migrate_v9(&self.pool).await,
             _ => Err(GraphDbError::Migration(format!(
                 "Unknown graph migration version: {}",
                 version
@@ -387,13 +388,15 @@ mod tests {
             .await
             .expect("read schema version");
         assert_eq!(version, GRAPH_SCHEMA_VERSION);
-        assert_eq!(version, 8, "v8 must be applied");
+        assert_eq!(version, 9, "v9 must be applied");
 
         // v5's is_test_symbol survives the v7 rebuild, v7 adds the generation
-        // to both tables' primary keys, and v8 the member's container.
+        // to both tables' primary keys, v8 the member's container and v9 the
+        // extractor that wrote each extraction.
         for (table, column, pk) in [
             ("graph_nodes", "is_test_symbol", 0),
             ("graph_nodes", "parent_symbol", 0),
+            ("graph_generations", "extractor_version", 0),
             ("graph_nodes", "generation", 2),
             ("graph_edges", "generation", 2),
             ("graph_nodes", "node_id", 1),

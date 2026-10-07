@@ -5,7 +5,7 @@
 //! | tier                          | result                 |
 //! |-------------------------------|------------------------|
 //! | language-server site (R8)     | `[(node, 1.0)]` each   |
-//! | receiver-typed member (R7)    | `[(member, 0.97)]` each |
+//! | receiver-typed member (R7)    | `[(member, 0.97)]` each, plus the tiers below for untyped sites |
 //! | own-file definition           | `[(node, 1.0)]`        |
 //! | caller's class (R2 scope)     | `[(node, 0.95)]`       |
 //! | unique                        | `[(node, 0.7)]`        |
@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 
 use sqlx::{Row, SqlitePool};
 
-use super::resolution_tiers::{LSP_CONFIDENCE, RECEIVER_CONFIDENCE};
+use super::resolution_tiers::{ReceiverHint, LSP_CONFIDENCE, RECEIVER_CONFIDENCE};
 use super::SqliteGraphStore;
 use crate::graph::lsp_sites::{LspSite, LspSites};
 use crate::graph::{GenerationBranches, GraphDbResult};
@@ -65,8 +65,8 @@ pub(super) struct StubRef<'q> {
     pub caller_lang: Option<&'q str>,
     /// Restrict the pool to container kinds (a CONTAINS parent).
     pub container_only: bool,
-    /// Declared types of the call's receiver, as the extractor read them.
-    pub receiver: Option<&'q [String]>,
+    /// What the extractor read about the call's receivers.
+    pub receiver: Option<&'q ReceiverHint>,
     /// Where the language server said the callee is defined.
     pub lsp: Option<&'q LspSites>,
 }
@@ -142,15 +142,22 @@ impl<'m> CandidateIndex<'m> {
         if in_pool.is_empty() {
             return Picked::default();
         }
-        let targets = match stub.receiver.and_then(|t| self.by_receiver(&in_pool, t)) {
-            Some(decided) => decided,
-            None => {
-                let pool: Vec<(&str, &str)> = in_pool
-                    .iter()
-                    .map(|c| (c.node_id.as_str(), c.file_path.as_str()))
-                    .collect();
-                self.by_name_tiers(stub, &pool)
-            }
+        let by_name = || {
+            let pool: Vec<(&str, &str)> = in_pool
+                .iter()
+                .map(|c| (c.node_id.as_str(), c.file_path.as_str()))
+                .collect();
+            self.by_name_tiers(stub, &pool)
+        };
+        let targets = match stub.receiver {
+            None => by_name(),
+            Some(hint) => match self.by_receiver(&in_pool, hint) {
+                None => by_name(),
+                // What the typed sites prove stands; the untyped ones keep
+                // their by-name answer beside it.
+                Some(decided) if hint.untyped_sites => merge_targets(decided, by_name()),
+                Some(decided) => decided,
+            },
         };
         Picked {
             targets,
@@ -220,29 +227,27 @@ impl<'m> CandidateIndex<'m> {
             .collect()
     }
 
-    /// The receiver's declared type names the callee's class: its member is
-    /// the target, wherever the files sit. A receiver typed by a class this
-    /// tenant does not declare is a library's (Firestore's `WriteBatch`) —
-    /// leave the call unresolved rather than bind it to a same-named method of
-    /// ours. `None` = undecided: a tenant class without the member (inherited)
-    /// falls through to the by-name tiers.
-    fn by_receiver(&self, pool: &[&Candidate], types: &[String]) -> Option<Vec<(String, f64)>> {
+    /// The receiver's type names the callee's class: its member is the target,
+    /// wherever the files sit. A variable typed by a class this tenant does not
+    /// declare is a library's object (Firestore's `WriteBatch`) — leave the
+    /// call unresolved rather than bind it to a same-named method of ours. A
+    /// class named as the receiver proves less (`Utils.format()` may name a
+    /// namespace or an object), so it never rules our code out. `None` =
+    /// undecided: a tenant class without the member (inherited) falls through
+    /// to the by-name tiers.
+    fn by_receiver(&self, pool: &[&Candidate], hint: &ReceiverHint) -> Option<Vec<(String, f64)>> {
+        let named = |p: &str| hint.types.iter().chain(&hint.static_types).any(|t| t == p);
         let members: Vec<(String, f64)> = pool
             .iter()
-            .filter(|c| {
-                c.parent_symbol
-                    .as_deref()
-                    .is_some_and(|p| types.iter().any(|t| t == p))
-            })
+            .filter(|c| c.parent_symbol.as_deref().is_some_and(named))
             .map(|c| (c.node_id.clone(), RECEIVER_CONFIDENCE))
             .collect();
         if !members.is_empty() {
             return Some(members);
         }
-        if !types.iter().any(|t| self.container_names.contains(t)) {
-            return Some(Vec::new());
-        }
-        None
+        let library = hint.static_types.is_empty()
+            && !hint.types.iter().any(|t| self.container_names.contains(t));
+        library.then(Vec::new)
     }
 
     fn by_name_tiers(&self, stub: &StubRef, pool: &[(&str, &str)]) -> Vec<(String, f64)> {
@@ -302,6 +307,17 @@ impl<'m> CandidateIndex<'m> {
             _ => None,
         }
     }
+}
+
+/// `more` added to `targets`, a node in both keeping its higher confidence.
+fn merge_targets(mut targets: Vec<(String, f64)>, more: Vec<(String, f64)>) -> Vec<(String, f64)> {
+    for (node_id, confidence) in more {
+        match targets.iter_mut().find(|(n, _)| *n == node_id) {
+            Some(kept) => kept.1 = kept.1.max(confidence),
+            None => targets.push((node_id, confidence)),
+        }
+    }
+    targets
 }
 
 /// R2.5 — EXACTLY ONE candidate in the deepest directory prefix shared with

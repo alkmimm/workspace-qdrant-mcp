@@ -6,7 +6,7 @@ use tracing::debug;
 use wqm_common::timestamps::now_utc;
 
 use super::candidate_pick::{CandidateIndex, StubRef};
-use super::resolution_tiers::{receiver_types, resolution_metadata};
+use super::resolution_tiers::{receiver_hint, resolution_metadata};
 use super::writes::INSERT_EDGE_SQL;
 use super::SqliteGraphStore;
 use crate::graph::lsp_sites::lsp_sites;
@@ -134,7 +134,7 @@ async fn repoint_target_stubs(
         let source_node_id: String = d.get("source_node_id");
         let generation: String = d.get("generation");
         let metadata = d.get::<Option<String>, _>("metadata_json");
-        let receiver = receiver_types(metadata.as_deref());
+        let receiver = receiver_hint(metadata.as_deref());
         let lsp = lsp_sites(metadata.as_deref());
         let picked = index.pick_all(&StubRef {
             name: &peer_name,
@@ -143,7 +143,7 @@ async fn repoint_target_stubs(
             caller_class: index.container_of(&source_node_id),
             caller_lang: index.language_of(&source_node_id),
             container_only: false,
-            receiver: receiver.as_deref(),
+            receiver: receiver.as_ref(),
             lsp: lsp.as_ref(),
         });
         let candidates = picked.targets;

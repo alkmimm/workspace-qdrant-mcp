@@ -274,6 +274,49 @@ async fn an_empty_extraction_is_recorded_and_an_empty_generation_refused() {
     );
 }
 
+/// A generation an older extractor wrote is rebuilt by the backfill (it no
+/// longer counts as extracted) yet keeps answering, and stays listed for the
+/// orphan sweep, until its rebuild replaces it.
+#[tokio::test]
+async fn an_older_extractors_generation_is_rebuilt_but_still_answers() {
+    let store = SharedGraphStore::new(test_store().await);
+    let node = GraphNode::new(TENANT, "a.rs", "f", NodeType::Function);
+    store
+        .reingest_file(TENANT, "a.rs", "a1", &[node.clone()], &[])
+        .await
+        .unwrap();
+    assert!(store.generation_extracted(TENANT, "a1").await.unwrap());
+    assert!(store.extracted_generations(TENANT).await.unwrap()[0].current);
+
+    {
+        let guard = store.read().await;
+        sqlx::query("UPDATE graph_generations SET extractor_version = ?1")
+            .bind(GRAPH_EXTRACTOR_VERSION - 1)
+            .execute(guard.pool())
+            .await
+            .unwrap();
+    }
+    assert!(!store.generation_extracted(TENANT, "a1").await.unwrap());
+    let listed = store.extracted_generations(TENANT).await.unwrap();
+    assert_eq!(listed.len(), 1, "still the orphan sweep's to judge");
+    assert!(!listed[0].current);
+    {
+        let guard = store.read().await;
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM graph_nodes WHERE generation = 'a1'")
+                .fetch_one(guard.pool())
+                .await
+                .unwrap();
+        assert_eq!(rows, 1, "the stale rows answer until the rebuild");
+    }
+
+    store
+        .reingest_file(TENANT, "a.rs", "a1", &[node], &[])
+        .await
+        .unwrap();
+    assert!(store.generation_extracted(TENANT, "a1").await.unwrap());
+}
+
 #[tokio::test]
 async fn delete_tenant_clears_the_extraction_records_too() {
     let (store, _) = two_branch_store().await;

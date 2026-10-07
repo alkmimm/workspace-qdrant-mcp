@@ -29,6 +29,7 @@ pub mod migrator;
 mod schema;
 mod schema_v7;
 mod schema_v8;
+mod schema_v9;
 mod scope;
 mod shared;
 mod sqlite_store;
@@ -48,6 +49,7 @@ pub use ladybug_store::{LadybugConfig, LadybugGraphStore};
 pub use schema::{
     GraphDbError, GraphDbManager, GraphDbResult, GRAPH_DB_FILENAME, GRAPH_SCHEMA_VERSION,
 };
+pub use schema_v9::GRAPH_EXTRACTOR_VERSION;
 pub use scope::{ExtractedGeneration, GenerationBranches, GraphScope};
 pub use shared::{stamp_generation, SharedGraphStore};
 pub use sqlite_store::SqliteGraphStore;

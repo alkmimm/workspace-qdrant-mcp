@@ -414,3 +414,52 @@ async fn a_language_server_site_binds_the_definition_sitting_there() {
     .unwrap();
     assert_eq!(minted, 0, "no guessed Function node for a method callee");
 }
+
+/// A typed call site proves its target even when another site of the name
+/// is untyped (that one keeps the by-name fan-out); a tenant class named as
+/// the receiver types a static call; and a class the tenant does not declare,
+/// named as the receiver, never rules our code out.
+#[tokio::test]
+async fn typed_sites_bind_beside_untyped_ones_and_static_calls_name_their_class() {
+    let store = store().await;
+    ingest_writes(&store).await;
+    let file = "lib/callers/mixed.dart";
+    let mixed = "void mixed(dynamic other) {\n  final b = FirestoreFinanceBatch(db);\n  \
+                 b.set(1);\n  other.set(2);\n}";
+    let statics = "void statics() {\n  FirestoreFinanceTransaction.set(1);\n}";
+    let unknown = "void unknown() {\n  Clock.set(2);\n}";
+    ingest(
+        &store,
+        file,
+        "m1",
+        &[
+            function("mixed", mixed, file, &["FirestoreFinanceBatch", "set"]),
+            function("statics", statics, file, &["set"]),
+            function("unknown", unknown, file, &["set"]),
+        ],
+    )
+    .await;
+    store
+        .resolve_stub_edges(T, &GenerationBranches::unknown())
+        .await
+        .unwrap();
+
+    let sets = |calls: Vec<(String, Option<String>, f64, String)>| -> Vec<_> {
+        calls.into_iter().filter(|c| c.0 == "set").collect()
+    };
+    let mixed = sets(calls_of(&store, "mixed").await);
+    assert_eq!(mixed.len(), 3, "{mixed:?}");
+    assert_eq!(mixed[0].1.as_deref(), Some("FirestoreFinanceBatch"));
+    assert!((mixed[0].2 - 0.97).abs() < 1e-9 && mixed[0].3.contains("\"receiver\""));
+    assert!(mixed[1..]
+        .iter()
+        .all(|c| (c.2 - 1.0 / 3.0).abs() < 1e-9 && c.3.contains("\"ambiguous\"")));
+
+    let statics = sets(calls_of(&store, "statics").await);
+    assert_eq!(statics.len(), 1, "{statics:?}");
+    assert_eq!(statics[0].1.as_deref(), Some("FirestoreFinanceTransaction"));
+    assert!((statics[0].2 - 0.97).abs() < 1e-9);
+
+    let unknown = sets(calls_of(&store, "unknown").await);
+    assert_eq!(unknown.len(), 3, "by-name, not ruled out: {unknown:?}");
+}

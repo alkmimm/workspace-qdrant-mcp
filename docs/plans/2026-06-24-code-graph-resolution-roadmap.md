@@ -94,6 +94,45 @@ metric to prove it, de-noise hotspots. All tree-sitter-only, no new extraction.
 
 ## Status updates
 
+- **2026-10-07 — Receiver hints read the whole definition; static and partial
+  receivers; graph extractor version (graph.db v9).** After #418, Finance still
+  reported 419 test gaps "with ambiguous test callers" (e.g.
+  `InterTenantTransferUseCases.cancel`, 25). Cause: the chunker splits an
+  oversized definition into fragments that share ONE node id, and only
+  fragment 0 carries the call list — so the receiver of a call in fragment 3
+  of a 700-line Dart test `main()` was looked up in fragment 0's text,
+  found no call site, and the name got no hint (`useCases.cancel(…)` sits 100
+  lines below `final useCases = InterTenantTransferUseCases(…)`). The same
+  split left the node row with the LAST fragment's start line (`main` at 311
+  instead of ~20), so the R8.3 backfill asked the server about a line in the
+  middle of the body. A simulation over Finance's Dart tests, per (file,
+  callee name): 851 all-typed names beyond fragment 0, 662 static-only
+  (`CashFlowBackup.fromJson`, `DateTime.now`), 59 mixed typed + untyped, 1109
+  untyped only (`find`, the untyped `tester` closure parameter, providers).
+  Fixes, in `graph::extractor`:
+  1. `fragments.rs`: hints (and class field types) read the definition's
+     whole text, fragments joined in order; the fragments' node rows merge into
+     one spanning the earliest start to the latest end.
+  2. `receivers.rs`: a capitalized receiver no variable declares names its
+     class (`static_receivers`) in Dart/Java/Kotlin/TS/JS/Python/Swift/Scala —
+     not C# (PascalCase properties) nor Go. In the resolver a static class binds
+     its member @0.97 like a declared one, but a class the tenant does not
+     declare never rules our code out (`Utils.format()` may name a namespace):
+     undecided, by-name.
+  3. An untyped site no longer cancels the typed ones: the hint carries
+     `untyped_sites`, and the resolver unions the receiver members (0.97) with
+     the by-name tiers' answer for the untyped sites (higher confidence wins).
+  Re-extraction without a wipe: graph.db **v9** adds
+  `graph_generations.extractor_version`; `GRAPH_EXTRACTOR_VERSION` (now 1) is
+  bumped whenever extraction output changes for unchanged bytes. An older
+  extraction counts as not extracted for the idle backfill and the dedup heal
+  (rebuilt IN PLACE — its old rows keep answering until replaced, unlike the
+  v7/v8 wipes) and stays listed for the orphan sweep. v9 also drops, with
+  the edges into them, the callee nodes the old ingest-time LSP pass guessed
+  in ANOTHER file: stamped into the shared empty generation with a real file
+  path, no rebuild replaced them and the stub sweep (file-less rows only)
+  never took them; same-file guesses go with their generation's rebuild.
+
 - **2026-10-07 — The ingest-time LSP pass locates calls instead of guessing
   callee ids.** Closes the "known gap" of the entry below. The server reports
   a callee's name, file and line, never its kind; the pass built

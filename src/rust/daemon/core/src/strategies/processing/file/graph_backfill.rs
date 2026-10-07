@@ -131,7 +131,8 @@ impl GraphBackfill {
     }
 
     /// Rebuild the pending list: every tracked generation of an enabled watch
-    /// folder with no extraction record. Active projects first.
+    /// folder with no extraction record by the current extractor
+    /// (`GRAPH_EXTRACTOR_VERSION`). Active projects first.
     async fn refresh(&mut self, ctx: &ProcessingContext) {
         self.refreshed_at = Some(Instant::now());
         self.unreachable = 0;
@@ -160,8 +161,13 @@ impl GraphBackfill {
         for r in &rows {
             let tenant_id: String = r.get("tenant_id");
             if !extracted_by_tenant.contains_key(&tenant_id) {
+                // One an older extractor wrote is rebuilt in place.
                 let extracted = match graph.extracted_generations(&tenant_id).await {
-                    Ok(list) => list.into_iter().map(|g| g.generation).collect(),
+                    Ok(list) => list
+                        .into_iter()
+                        .filter(|g| g.current)
+                        .map(|g| g.generation)
+                        .collect(),
                     Err(e) => {
                         warn!(tenant = %tenant_id, error = %e, "graph backfill: listing generations failed");
                         return;
@@ -194,7 +200,7 @@ impl GraphBackfill {
         } else {
             info!(
                 pending = self.pending.len(),
-                "Graph backfill: generations in the index without a graph"
+                "Graph backfill: generations in the index without a current graph"
             );
         }
     }
