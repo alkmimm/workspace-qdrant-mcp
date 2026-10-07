@@ -6,9 +6,11 @@
 //! files sit (live 2026-10-07: every test call to it was "ambiguous", and the
 //! Batch's own `_batch.set(…)` — a Firestore `WriteBatch` — bound to the other
 //! class's `set` in the same file). This reads the receiver back from the
-//! chunk's text. It is deliberately conservative: a name gets a receiver hint
-//! only when EVERY call site of it in the chunk has a receiver whose type is
-//! declared; anything else keeps the plain by-name resolution.
+//! definition's text: a declared or constructed variable's type, or the class
+//! itself for a static call / named constructor (`Backup.fromJson(…)`). A call
+//! site with no typed receiver (bare, chained, untyped) does not cancel what
+//! the typed sites prove: the hint says some sites were untyped, and those
+//! keep the plain by-name resolution.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::LazyLock;
@@ -20,11 +22,22 @@ use crate::graph::{EdgeType, GraphEdge, GraphNode, NodeType};
 /// Declared types of names (locals, parameters, fields), by name.
 pub(super) type TypeMap = HashMap<String, String>;
 
-/// Receiver types of a chunk's calls, by callee name.
-pub(super) type CallHints = HashMap<String, BTreeSet<String>>;
+/// What a definition's call sites say about the receivers of one callee name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct CallHint {
+    /// Types of receivers that are declared or constructed variables.
+    pub types: BTreeSet<String>,
+    /// Classes named as the receiver itself (`Type.member(`).
+    pub static_types: BTreeSet<String>,
+    /// Some call site had no typed receiver.
+    pub untyped_sites: bool,
+}
 
-/// A CALLS edge from `caller` to the name-only stub of `callee`, carrying the
-/// call's receiver types when every call site declared one.
+/// Receiver hints of a definition's calls, by callee name.
+pub(super) type CallHints = HashMap<String, CallHint>;
+
+/// A CALLS edge from `caller` to the name-only stub of `callee`, carrying what
+/// the call sites said about the receiver.
 pub(super) fn calls_edge(
     tenant_id: &str,
     caller: &GraphNode,
@@ -93,6 +106,24 @@ fn name_colon_type(language: &str) -> bool {
     )
 }
 
+/// Languages where a capitalized receiver that no variable declares is a
+/// class (`DateTime.now()`). Not C#, whose properties are PascalCase too, nor
+/// Go, whose exported fields are; Rust and C++ spell static calls `::`.
+fn class_named_receivers(language: &str) -> bool {
+    matches!(
+        language,
+        "dart"
+            | "java"
+            | "kotlin"
+            | "typescript"
+            | "tsx"
+            | "javascript"
+            | "python"
+            | "swift"
+            | "scala"
+    )
+}
+
 /// The types `content` declares for names, by the language's declaration
 /// shapes. A constructor binding wins over a declared type: `I x = A();` calls
 /// `A`'s methods.
@@ -138,57 +169,84 @@ pub(super) fn class_level_text(content: &str) -> String {
     out
 }
 
-/// For each name in `calls`, the receiver types of its call sites in
-/// `content` — present only when EVERY call site has a typed receiver.
+/// For each name in `calls`, what its call sites in `content` say about the
+/// receiver — present when at least one site has a typed receiver.
 ///
-/// `own_symbol` is the chunk's own name: its occurrence in the signature is the
-/// declaration, not a call.
+/// `own_symbol` is the definition's own name: its occurrence in the signature
+/// is the declaration, not a call.
 pub(super) fn receiver_types(
     content: &str,
     calls: &[String],
     types: &TypeMap,
     own_symbol: &str,
-) -> HashMap<String, BTreeSet<String>> {
+    language: &str,
+) -> CallHints {
     let body_start = content
         .find('{')
         .into_iter()
         .chain(content.find("=>"))
         .min()
         .unwrap_or(0);
+    let site = CallSite {
+        content,
+        types,
+        own_symbol,
+        body_start,
+        class_receivers: class_named_receivers(language),
+    };
     let mut hints = HashMap::new();
     for name in calls {
-        if let Some(found) = typed_call_sites(content, name, types, own_symbol, body_start) {
+        if let Some(found) = site.hint_for(name) {
             hints.insert(name.clone(), found);
         }
     }
     hints
 }
 
-fn typed_call_sites(
-    content: &str,
-    name: &str,
-    types: &TypeMap,
-    own_symbol: &str,
+/// The definition text a call name is looked up in.
+struct CallSite<'a> {
+    content: &'a str,
+    types: &'a TypeMap,
+    own_symbol: &'a str,
     body_start: usize,
-) -> Option<BTreeSet<String>> {
-    let bytes = content.as_bytes();
-    let mut found = BTreeSet::new();
-    let mut sites = 0usize;
-    for (at, _) in content.match_indices(name) {
-        let end = at + name.len();
-        if (at > 0 && is_ident(bytes[at - 1])) || (end < bytes.len() && is_ident(bytes[end])) {
-            continue; // part of a longer identifier
+    class_receivers: bool,
+}
+
+impl CallSite<'_> {
+    fn hint_for(&self, name: &str) -> Option<CallHint> {
+        let bytes = self.content.as_bytes();
+        let mut hint = CallHint::default();
+        for (at, _) in self.content.match_indices(name) {
+            let end = at + name.len();
+            if (at > 0 && is_ident(bytes[at - 1])) || (end < bytes.len() && is_ident(bytes[end])) {
+                continue; // part of a longer identifier
+            }
+            if !is_call_after(&self.content[end..]) {
+                continue;
+            }
+            if name == self.own_symbol && at < self.body_start {
+                continue; // the declaration itself
+            }
+            let receiver = receiver_of(self.content, at);
+            match receiver.and_then(|r| self.types.get(r)) {
+                Some(declared) => {
+                    hint.types.insert(declared.clone());
+                }
+                None => match receiver.filter(|r| self.class_receivers && is_class_name(r)) {
+                    Some(class) => {
+                        hint.static_types.insert(class.to_string());
+                    }
+                    None => hint.untyped_sites = true,
+                },
+            }
         }
-        if !is_call_after(&content[end..]) {
-            continue;
-        }
-        if name == own_symbol && at < body_start {
-            continue; // the declaration itself
-        }
-        sites += 1;
-        found.insert(types.get(receiver_of(content, at)?)?.clone());
+        (!hint.types.is_empty() || !hint.static_types.is_empty()).then_some(hint)
     }
-    (sites > 0).then_some(found)
+}
+
+/// `Backup` in `Backup.fromJson(`: a capitalized name, by convention a type.
+fn is_class_name(receiver: &str) -> bool {
+    receiver.chars().next().is_some_and(char::is_uppercase)
 }
 
 /// Whether the text after a name is a call: optional generic arguments, then `(`.
@@ -253,8 +311,8 @@ pub(super) fn field_types<'a>(
     by_class
 }
 
-/// Receiver hints for one callable chunk: its class's fields, overridden by
-/// what the chunk itself declares.
+/// Receiver hints for one callable definition (`content` is its WHOLE text,
+/// every fragment): its class's fields, overridden by what it declares.
 pub(super) fn chunk_hints(
     content: &str,
     language: &str,
@@ -262,18 +320,32 @@ pub(super) fn chunk_hints(
     own_symbol: &str,
     parent: Option<&str>,
     fields: &HashMap<String, TypeMap>,
-) -> HashMap<String, BTreeSet<String>> {
+) -> CallHints {
     let mut types = parent
         .and_then(|p| fields.get(p))
         .cloned()
         .unwrap_or_default();
     types.extend(declared_types(content, language));
-    receiver_types(content, calls, &types, own_symbol)
+    receiver_types(content, calls, &types, own_symbol, language)
 }
 
-/// The CALLS edge metadata carrying a call's receiver types to the resolver.
-pub(super) fn hint_metadata(types: &BTreeSet<String>) -> String {
-    serde_json::json!({ "receiver_types": types }).to_string()
+/// The CALLS edge metadata carrying a call's receiver hint to the resolver
+/// (read back by `sqlite_store::resolution_tiers::receiver_hint`).
+pub(super) fn hint_metadata(hint: &CallHint) -> String {
+    let mut meta = serde_json::Map::new();
+    if !hint.types.is_empty() {
+        meta.insert("receiver_types".into(), serde_json::json!(hint.types));
+    }
+    if !hint.static_types.is_empty() {
+        meta.insert(
+            "static_receivers".into(),
+            serde_json::json!(hint.static_types),
+        );
+    }
+    if hint.untyped_sites {
+        meta.insert("untyped_sites".into(), serde_json::Value::Bool(true));
+    }
+    serde_json::Value::Object(meta).to_string()
 }
 
 #[cfg(test)]
@@ -284,6 +356,18 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A hint whose every call site has a declared receiver of these types.
+    fn declared(names: &[&str]) -> Option<CallHint> {
+        Some(CallHint {
+            types: set(names),
+            ..CallHint::default()
+        })
+    }
+
     /// Finance `finance_revision_test.dart`, lines 31–35.
     #[test]
     fn a_constructed_local_types_its_method_calls() {
@@ -291,10 +375,21 @@ mod tests {
                     batch.set(db.doc('a'), {'price': 10});\n    batch.set(db.doc('b'), {});\n    \
                     await batch.commit();\n  }";
         let types = declared_types(body, "dart");
-        let hints = receiver_types(body, &calls(&["set", "commit", "doc"]), &types, "main");
-        let batch: BTreeSet<String> = ["FirestoreFinanceBatch".to_string()].into();
-        assert_eq!(hints.get("set"), Some(&batch));
-        assert_eq!(hints.get("commit"), Some(&batch));
+        let hints = receiver_types(
+            body,
+            &calls(&["set", "commit", "doc"]),
+            &types,
+            "main",
+            "dart",
+        );
+        assert_eq!(
+            hints.get("set").cloned(),
+            declared(&["FirestoreFinanceBatch"])
+        );
+        assert_eq!(
+            hints.get("commit").cloned(),
+            declared(&["FirestoreFinanceBatch"])
+        );
         assert_eq!(hints.get("doc"), None, "db is not declared here");
     }
 
@@ -312,17 +407,26 @@ mod tests {
                       _touch(document);\n    _batch.set(document, data);\n  }";
         let mut types = fields.clone();
         types.extend(declared_types(method, "dart"));
-        let hints = receiver_types(method, &calls(&["set", "_touch"]), &types, "set");
-        let write_batch: BTreeSet<String> = ["WriteBatch".to_string()].into();
-        assert_eq!(hints.get("set"), Some(&write_batch));
+        let hints = receiver_types(method, &calls(&["set", "_touch"]), &types, "set", "dart");
+        assert_eq!(hints.get("set").cloned(), declared(&["WriteBatch"]));
         assert_eq!(hints.get("_touch"), None, "a bare call has no receiver");
     }
 
+    /// An untyped site (`other.run()`) no longer cancels what the typed one
+    /// proves: the hint keeps `Alpha` and says some site was untyped.
     #[test]
-    fn one_untyped_call_site_withholds_the_hint() {
+    fn an_untyped_call_site_keeps_its_by_name_fallback() {
         let body = "{ final a = Alpha(); a.run(); other.run(); }";
-        let hints = receiver_types(body, &calls(&["run"]), &declared_types(body, "dart"), "f");
-        assert_eq!(hints.get("run"), None);
+        let hints = receiver_types(
+            body,
+            &calls(&["run"]),
+            &declared_types(body, "dart"),
+            "f",
+            "dart",
+        );
+        let run = hints.get("run").expect("a typed site");
+        assert_eq!(run.types, set(&["Alpha"]));
+        assert!(run.untyped_sites);
     }
 
     /// `I x = B();` calls `B`'s methods; a chained receiver is an expression.
@@ -331,8 +435,8 @@ mod tests {
         let body = "{ Runner x = Beta(); x.run(); this.y.go(); a.b.stop(); }";
         let types = declared_types(body, "java");
         assert_eq!(types.get("x").map(String::as_str), Some("Beta"));
-        let hints = receiver_types(body, &calls(&["run", "stop"]), &types, "f");
-        assert_eq!(hints.get("run").map(|s| s.len()), Some(1));
+        let hints = receiver_types(body, &calls(&["run", "stop"]), &types, "f", "java");
+        assert_eq!(hints.get("run").cloned(), declared(&["Beta"]));
         assert_eq!(hints.get("stop"), None);
     }
 
@@ -344,9 +448,48 @@ mod tests {
             &calls(&["save"]),
             &declared_types(body, "typescript"),
             "f",
+            "typescript",
         );
-        let store: BTreeSet<String> = ["OrderStore".to_string()].into();
-        assert_eq!(hints.get("save"), Some(&store));
+        assert_eq!(hints.get("save").cloned(), declared(&["OrderStore"]));
+    }
+
+    /// Finance tests call `CashFlowBackup.fromJson(…)` and `DateTime.now()`:
+    /// the receiver names the class. Not in C#, where `Logger.Log()` reads a
+    /// PascalCase property.
+    #[test]
+    fn a_class_named_as_the_receiver_types_a_static_call() {
+        let body = "{ final b = CashFlowBackup.fromJson(m); DateTime.now(); repo.save(b); }";
+        let hints = receiver_types(
+            body,
+            &calls(&["fromJson", "now", "save"]),
+            &declared_types(body, "dart"),
+            "f",
+            "dart",
+        );
+        let from_json = hints.get("fromJson").expect("static hint");
+        assert_eq!(from_json.static_types, set(&["CashFlowBackup"]));
+        assert!(from_json.types.is_empty() && !from_json.untyped_sites);
+        assert_eq!(hints["now"].static_types, set(&["DateTime"]));
+        assert_eq!(hints.get("save"), None, "repo is untyped");
+
+        let csharp = "{ Logger.Log(x); }";
+        let hints = receiver_types(csharp, &calls(&["Log"]), &TypeMap::new(), "f", "c-sharp");
+        assert_eq!(hints.get("Log"), None);
+    }
+
+    #[test]
+    fn the_metadata_carries_only_what_the_sites_said() {
+        let hint = CallHint {
+            types: set(&["Batch"]),
+            static_types: set(&["Backup"]),
+            untyped_sites: true,
+        };
+        let meta: serde_json::Value = serde_json::from_str(&hint_metadata(&hint)).unwrap();
+        assert_eq!(meta["receiver_types"][0], "Batch");
+        assert_eq!(meta["static_receivers"][0], "Backup");
+        assert_eq!(meta["untyped_sites"], true);
+        let plain = hint_metadata(&declared(&["Batch"]).unwrap());
+        assert_eq!(plain, r#"{"receiver_types":["Batch"]}"#);
     }
 
     /// Live 2026-10-07: Java tests with Portuguese comments panicked the queue
@@ -364,13 +507,20 @@ mod tests {
             receiver_of(body, at("a configuração.set")),
             Some("configuração")
         );
-        let hints = receiver_types(body, &calls(&["set"]), &types, "t");
-        assert_eq!(hints.get("set"), None, "ação has no declared type");
+        let hints = receiver_types(body, &calls(&["set"]), &types, "t", "java");
+        let both = hints.get("set").expect("configuração is typed");
+        assert_eq!(both.types, set(&["Batch"]));
+        assert!(both.untyped_sites, "ação has no declared type");
 
         let typed = "void t() {\n    Batch configuração = new Batch();\n    // ação —\n    \
                      configuração.set(z);\n}";
-        let hints = receiver_types(typed, &calls(&["set"]), &declared_types(typed, "java"), "t");
-        let batch: BTreeSet<String> = ["Batch".to_string()].into();
-        assert_eq!(hints.get("set"), Some(&batch));
+        let hints = receiver_types(
+            typed,
+            &calls(&["set"]),
+            &declared_types(typed, "java"),
+            "t",
+            "java",
+        );
+        assert_eq!(hints.get("set").cloned(), declared(&["Batch"]));
     }
 }

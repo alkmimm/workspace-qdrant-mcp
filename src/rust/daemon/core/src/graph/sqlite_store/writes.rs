@@ -8,6 +8,7 @@ use wqm_common::timestamps::now_utc;
 use super::SqliteGraphStore;
 use crate::graph::{
     EdgeType, ExtractedGeneration, GraphDbError, GraphDbResult, GraphEdge, GraphNode,
+    GRAPH_EXTRACTOR_VERSION,
 };
 
 /// Upsert one node row. A generation-less row (a stub, or a node another file
@@ -142,13 +143,15 @@ impl SqliteGraphStore {
         let own_nodes = nodes.iter().filter(|n| n.generation == generation).count();
         sqlx::query(
             "INSERT INTO graph_generations
-                (tenant_id, generation, file_path, node_count, edge_count, extracted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                (tenant_id, generation, file_path, node_count, edge_count, extracted_at,
+                 extractor_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(tenant_id, generation) DO UPDATE SET
                 file_path = excluded.file_path,
                 node_count = excluded.node_count,
                 edge_count = excluded.edge_count,
-                extracted_at = excluded.extracted_at",
+                extracted_at = excluded.extracted_at,
+                extractor_version = excluded.extractor_version",
         )
         .bind(tenant_id)
         .bind(generation)
@@ -156,6 +159,7 @@ impl SqliteGraphStore {
         .bind(own_nodes as i64)
         .bind(edges.len() as i64)
         .bind(&now)
+        .bind(GRAPH_EXTRACTOR_VERSION)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -208,11 +212,14 @@ impl SqliteGraphStore {
         tenant_id: &str,
         generation: &str,
     ) -> GraphDbResult<bool> {
+        // An extraction by an older extractor is stale: rebuilt, not trusted.
         let row: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM graph_generations WHERE tenant_id = ?1 AND generation = ?2",
+            "SELECT 1 FROM graph_generations
+             WHERE tenant_id = ?1 AND generation = ?2 AND extractor_version >= ?3",
         )
         .bind(tenant_id)
         .bind(generation)
+        .bind(GRAPH_EXTRACTOR_VERSION)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.is_some())
@@ -223,8 +230,8 @@ impl SqliteGraphStore {
         tenant_id: &str,
     ) -> GraphDbResult<Vec<ExtractedGeneration>> {
         let rows = sqlx::query(
-            "SELECT generation, file_path, extracted_at FROM graph_generations
-             WHERE tenant_id = ?1",
+            "SELECT generation, file_path, extracted_at, extractor_version
+             FROM graph_generations WHERE tenant_id = ?1",
         )
         .bind(tenant_id)
         .fetch_all(&self.pool)
@@ -235,6 +242,7 @@ impl SqliteGraphStore {
                 generation: r.get("generation"),
                 file_path: r.get("file_path"),
                 extracted_at: r.get("extracted_at"),
+                current: r.get::<i64, _>("extractor_version") >= GRAPH_EXTRACTOR_VERSION,
             })
             .collect())
     }

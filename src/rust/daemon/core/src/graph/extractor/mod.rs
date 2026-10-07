@@ -3,7 +3,9 @@
 //! Takes tree-sitter `SemanticChunk` output and produces `GraphNode`/`GraphEdge`
 //! pairs for CONTAINS, CALLS, IMPORTS, and USES_TYPE relationships.
 
+mod fragments;
 pub(crate) mod import_parsers;
+mod kinds;
 mod receivers;
 mod reference_analysis;
 mod type_analysis;
@@ -22,6 +24,8 @@ use import_parsers::extract_imports_from_content;
 use reference_analysis::extract_argument_references;
 pub use type_analysis::{extract_type_references, parse_qualified_name};
 
+pub(crate) use kinds::node_type_from_display_name;
+use kinds::{chunk_type_to_node_type, infer_parent_node_type};
 use receivers::{calls_edge, is_container, CallHints};
 
 /// Result of extracting graph relationships from a set of semantic chunks.
@@ -138,14 +142,17 @@ pub fn extract_edges(
         .find(|l| !l.is_empty());
     result.nodes.push(file_node);
 
+    // A definition split into fragments is read whole (see `fragments`).
+    let whole = fragments::whole_texts(chunks.iter().filter_map(fragments::semantic_fragment));
     let fields = receivers::field_types(
         chunks
             .iter()
             .filter(|c| chunk_type_to_node_type(&c.chunk_type).is_some_and(is_container))
+            .filter(|c| !fragments::later_semantic_fragment(c))
             .map(|c| {
                 (
                     c.symbol_name.as_str(),
-                    c.content.as_str(),
+                    fragments::semantic_whole(&whole, c).unwrap_or(&c.content),
                     c.language.as_str(),
                 )
             }),
@@ -186,7 +193,7 @@ pub fn extract_edges(
         result.nodes.push(node.clone());
 
         let hints = receivers::chunk_hints(
-            &chunk.content,
+            fragments::semantic_whole(&whole, chunk).unwrap_or(&chunk.content),
             &chunk.language,
             &chunk.calls,
             &chunk.symbol_name,
@@ -196,6 +203,7 @@ pub fn extract_edges(
         extract_chunk_edges(chunk, &node, tenant_id, file_path, &hints, &mut result);
     }
 
+    result.nodes = fragments::merge_fragment_nodes(std::mem::take(&mut result.nodes));
     result
 }
 
@@ -226,6 +234,8 @@ pub fn extract_edges_from_text_chunks(
     });
     result.nodes.push(file_node);
 
+    // A definition split into fragments is read whole (see `fragments`).
+    let whole = fragments::whole_texts(chunks.iter().filter_map(fragments::text_fragment));
     let fields = receivers::field_types(
         chunks
             .iter()
@@ -234,19 +244,22 @@ pub fn extract_edges_from_text_chunks(
                     .and_then(node_type_from_display_name)
                     .is_some_and(is_container)
             })
+            .filter(|c| !fragments::later_text_fragment(c))
             .filter_map(|c| {
                 Some((
                     meta_str(c, "symbol_name")?,
-                    c.content.as_str(),
+                    fragments::text_whole(&whole, c).unwrap_or(&c.content),
                     meta_str(c, "language").unwrap_or(""),
                 ))
             }),
     );
 
     for chunk in chunks {
-        process_text_chunk(chunk, tenant_id, file_path, &fields, &mut result);
+        let text = fragments::text_whole(&whole, chunk).unwrap_or(&chunk.content);
+        process_text_chunk(chunk, text, tenant_id, file_path, &fields, &mut result);
     }
 
+    result.nodes = fragments::merge_fragment_nodes(std::mem::take(&mut result.nodes));
     result
 }
 
@@ -254,9 +267,12 @@ fn meta_str<'a>(chunk: &'a TextChunk, key: &str) -> Option<&'a str> {
     chunk.metadata.get(key).map(String::as_str)
 }
 
-/// Process a single `TextChunk` into graph nodes and edges.
+/// Process a single `TextChunk` into graph nodes and edges. `definition` is
+/// the text receiver hints are read from: the whole definition when the
+/// chunker split it, else the chunk's own content.
 fn process_text_chunk(
     chunk: &TextChunk,
+    definition: &str,
     tenant_id: &str,
     file_path: &str,
     fields: &HashMap<String, receivers::TypeMap>,
@@ -309,14 +325,7 @@ fn process_text_chunk(
                 .collect()
         })
         .unwrap_or_default();
-    let hints = receivers::chunk_hints(
-        &chunk.content,
-        &language,
-        &calls,
-        symbol_name,
-        parent,
-        fields,
-    );
+    let hints = receivers::chunk_hints(definition, &language, &calls, symbol_name, parent, fields);
     add_calls_edges(&calls, &node, tenant_id, file_path, &hints, result);
     add_uses_type_edges(meta, &node, tenant_id, file_path, &language, result);
 }
@@ -425,68 +434,4 @@ fn is_plain_identifier(seg: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_alphanumeric() || c == '_')
-}
-
-/// Convert a `ChunkType::display_name()` string back to `NodeType`.
-pub(crate) fn node_type_from_display_name(name: &str) -> Option<NodeType> {
-    match name {
-        "function" => Some(NodeType::Function),
-        "async_function" => Some(NodeType::AsyncFunction),
-        "class" => Some(NodeType::Class),
-        "method" => Some(NodeType::Method),
-        "struct" => Some(NodeType::Struct),
-        "trait" => Some(NodeType::Trait),
-        "interface" => Some(NodeType::Interface),
-        "enum" => Some(NodeType::Enum),
-        "impl" => Some(NodeType::Impl),
-        "module" => Some(NodeType::Module),
-        "constant" => Some(NodeType::Constant),
-        "type_alias" => Some(NodeType::TypeAlias),
-        "macro" => Some(NodeType::Macro),
-        "preamble" | "text" => None,
-        _ => None,
-    }
-}
-
-/// Convert ChunkType to NodeType. Returns None for types that don't map
-/// to graph nodes (Preamble, Text).
-fn chunk_type_to_node_type(ct: &ChunkType) -> Option<NodeType> {
-    match ct {
-        ChunkType::Function => Some(NodeType::Function),
-        ChunkType::AsyncFunction => Some(NodeType::AsyncFunction),
-        ChunkType::Class => Some(NodeType::Class),
-        ChunkType::Method => Some(NodeType::Method),
-        ChunkType::Struct => Some(NodeType::Struct),
-        ChunkType::Trait => Some(NodeType::Trait),
-        ChunkType::Interface => Some(NodeType::Interface),
-        ChunkType::Enum => Some(NodeType::Enum),
-        ChunkType::Impl => Some(NodeType::Impl),
-        ChunkType::Module => Some(NodeType::Module),
-        ChunkType::Constant => Some(NodeType::Constant),
-        ChunkType::TypeAlias => Some(NodeType::TypeAlias),
-        ChunkType::Macro => Some(NodeType::Macro),
-        ChunkType::Preamble | ChunkType::Text => None,
-    }
-}
-
-/// Infer parent node type from symbol name and language.
-///
-/// In Rust, a parent is typically an `impl` block or `mod`.
-/// In TypeScript/Python, a parent is typically a `class`.
-fn infer_parent_node_type(parent_symbol: &str, language: &str) -> NodeType {
-    match language {
-        "rust" => {
-            // Rust parent symbols from tree-sitter are typically impl blocks
-            if parent_symbol.starts_with("impl ") || parent_symbol.contains("::") {
-                NodeType::Impl
-            } else {
-                NodeType::Struct
-            }
-        }
-        "python" | "javascript" | "typescript" | "tsx" | "jsx" | "java" | "kotlin" => {
-            NodeType::Class
-        }
-        "go" => NodeType::Struct,
-        _ => NodeType::Module,
-    }
 }
