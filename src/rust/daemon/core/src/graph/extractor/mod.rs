@@ -4,11 +4,14 @@
 //! pairs for CONTAINS, CALLS, IMPORTS, and USES_TYPE relationships.
 
 pub(crate) mod import_parsers;
+mod receivers;
 mod reference_analysis;
 mod type_analysis;
 
 #[cfg(test)]
 mod tests;
+
+use std::collections::HashMap;
 
 use crate::tree_sitter::types::{ChunkType, SemanticChunk};
 use crate::TextChunk;
@@ -18,6 +21,8 @@ use super::{EdgeType, GraphEdge, GraphNode, NodeType};
 use import_parsers::extract_imports_from_content;
 use reference_analysis::extract_argument_references;
 pub use type_analysis::{extract_type_references, parse_qualified_name};
+
+use receivers::{calls_edge, is_container, CallHints};
 
 /// Result of extracting graph relationships from a set of semantic chunks.
 #[derive(Debug, Default)]
@@ -32,6 +37,7 @@ fn extract_chunk_edges(
     node: &GraphNode,
     tenant_id: &str,
     file_path: &str,
+    hints: &CallHints,
     result: &mut ExtractionResult,
 ) {
     if let Some(ref parent) = chunk.parent_symbol {
@@ -56,12 +62,13 @@ fn extract_chunk_edges(
             continue;
         }
         let callee_stub = GraphNode::stub(tenant_id, &callee_name, NodeType::Function);
-        let edge = GraphEdge::new(
+        let edge = calls_edge(
             tenant_id,
-            &node.node_id,
-            &callee_stub.node_id,
-            EdgeType::Calls,
+            node,
+            &callee_stub,
+            &callee_name,
             file_path,
+            hints,
         );
         result.nodes.push(callee_stub);
         result.edges.push(edge);
@@ -131,6 +138,19 @@ pub fn extract_edges(
         .find(|l| !l.is_empty());
     result.nodes.push(file_node);
 
+    let fields = receivers::field_types(
+        chunks
+            .iter()
+            .filter(|c| chunk_type_to_node_type(&c.chunk_type).is_some_and(is_container))
+            .map(|c| {
+                (
+                    c.symbol_name.as_str(),
+                    c.content.as_str(),
+                    c.language.as_str(),
+                )
+            }),
+    );
+
     for chunk in chunks {
         let Some(node_type) = chunk_type_to_node_type(&chunk.chunk_type) else {
             // Preamble and Text chunks don't become nodes, but we still
@@ -147,8 +167,15 @@ pub fn extract_edges(
             continue;
         };
 
-        // Create the node for this chunk
-        let mut node = GraphNode::new(tenant_id, file_path, &chunk.symbol_name, node_type);
+        // Create the node for this chunk. A member is keyed by its container
+        // too: two classes in one file may declare the same method name.
+        let mut node = GraphNode::member(
+            tenant_id,
+            file_path,
+            &chunk.symbol_name,
+            chunk.parent_symbol.as_deref(),
+            node_type,
+        );
         node.start_line = Some(chunk.start_line as u32);
         node.end_line = Some(chunk.end_line as u32);
         node.signature = chunk.signature.clone();
@@ -158,7 +185,15 @@ pub fn extract_edges(
         node.is_test_symbol = chunk.is_test;
         result.nodes.push(node.clone());
 
-        extract_chunk_edges(chunk, &node, tenant_id, file_path, &mut result);
+        let hints = receivers::chunk_hints(
+            &chunk.content,
+            &chunk.language,
+            &chunk.calls,
+            &chunk.symbol_name,
+            chunk.parent_symbol.as_deref(),
+            &fields,
+        );
+        extract_chunk_edges(chunk, &node, tenant_id, file_path, &hints, &mut result);
     }
 
     result
@@ -191,11 +226,32 @@ pub fn extract_edges_from_text_chunks(
     });
     result.nodes.push(file_node);
 
+    let fields = receivers::field_types(
+        chunks
+            .iter()
+            .filter(|c| {
+                meta_str(c, "chunk_type")
+                    .and_then(node_type_from_display_name)
+                    .is_some_and(is_container)
+            })
+            .filter_map(|c| {
+                Some((
+                    meta_str(c, "symbol_name")?,
+                    c.content.as_str(),
+                    meta_str(c, "language").unwrap_or(""),
+                ))
+            }),
+    );
+
     for chunk in chunks {
-        process_text_chunk(chunk, tenant_id, file_path, &mut result);
+        process_text_chunk(chunk, tenant_id, file_path, &fields, &mut result);
     }
 
     result
+}
+
+fn meta_str<'a>(chunk: &'a TextChunk, key: &str) -> Option<&'a str> {
+    chunk.metadata.get(key).map(String::as_str)
 }
 
 /// Process a single `TextChunk` into graph nodes and edges.
@@ -203,6 +259,7 @@ fn process_text_chunk(
     chunk: &TextChunk,
     tenant_id: &str,
     file_path: &str,
+    fields: &HashMap<String, receivers::TypeMap>,
     result: &mut ExtractionResult,
 ) {
     let meta = &chunk.metadata;
@@ -225,7 +282,10 @@ fn process_text_chunk(
     };
     let language = meta.get("language").cloned().unwrap_or_default();
 
-    let mut node = GraphNode::new(tenant_id, file_path, symbol_name, node_type);
+    // Keyed by its container too: two classes in one file may declare the
+    // same method name (see `compute_member_node_id`).
+    let parent = meta.get("parent_symbol").map(String::as_str);
+    let mut node = GraphNode::member(tenant_id, file_path, symbol_name, parent, node_type);
     node.start_line = meta.get("start_line").and_then(|s| s.parse::<u32>().ok());
     node.end_line = meta.get("end_line").and_then(|s| s.parse::<u32>().ok());
     node.signature = meta.get("signature").cloned();
@@ -239,7 +299,25 @@ fn process_text_chunk(
     result.nodes.push(node.clone());
 
     add_contains_edges(meta, &node, tenant_id, file_path, &language, result);
-    add_calls_edges(meta, &node, tenant_id, file_path, result);
+    let calls: Vec<String> = meta
+        .get("calls")
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let hints = receivers::chunk_hints(
+        &chunk.content,
+        &language,
+        &calls,
+        symbol_name,
+        parent,
+        fields,
+    );
+    add_calls_edges(&calls, &node, tenant_id, file_path, &hints, result);
     add_uses_type_edges(meta, &node, tenant_id, file_path, &language, result);
 }
 
@@ -269,35 +347,31 @@ fn add_contains_edges(
 }
 
 fn add_calls_edges(
-    meta: &std::collections::HashMap<String, String>,
+    calls: &[String],
     node: &GraphNode,
     tenant_id: &str,
     file_path: &str,
+    hints: &CallHints,
     result: &mut ExtractionResult,
 ) {
-    if let Some(calls_str) = meta.get("calls") {
-        for call in calls_str.split(',') {
-            let call = call.trim();
-            if call.is_empty() {
-                continue;
-            }
-            let (_qualifier, callee_name) = parse_qualified_name(call);
-            if !is_valid_symbol_name(&callee_name) {
-                // Skip tree-sitter artifacts like `<String` / `_>` that leak from
-                // a turbofish/generic argument list (e.g. `query::<String, _>(...)`).
-                continue;
-            }
-            let callee_stub = GraphNode::stub(tenant_id, &callee_name, NodeType::Function);
-            let edge = GraphEdge::new(
-                tenant_id,
-                &node.node_id,
-                &callee_stub.node_id,
-                EdgeType::Calls,
-                file_path,
-            );
-            result.nodes.push(callee_stub);
-            result.edges.push(edge);
+    for call in calls {
+        let (_qualifier, callee_name) = parse_qualified_name(call);
+        if !is_valid_symbol_name(&callee_name) {
+            // Skip tree-sitter artifacts like `<String` / `_>` that leak from
+            // a turbofish/generic argument list (e.g. `query::<String, _>(...)`).
+            continue;
         }
+        let callee_stub = GraphNode::stub(tenant_id, &callee_name, NodeType::Function);
+        let edge = calls_edge(
+            tenant_id,
+            node,
+            &callee_stub,
+            &callee_name,
+            file_path,
+            hints,
+        );
+        result.nodes.push(callee_stub);
+        result.edges.push(edge);
     }
 }
 

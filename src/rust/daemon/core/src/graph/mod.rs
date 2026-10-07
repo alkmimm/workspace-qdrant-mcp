@@ -27,6 +27,7 @@ pub mod maintenance;
 pub mod migrator;
 mod schema;
 mod schema_v7;
+mod schema_v8;
 mod scope;
 mod shared;
 mod sqlite_store;
@@ -210,6 +211,11 @@ pub struct GraphNode {
     /// extraction only referred to. Stamped by `replace_generation`.
     #[serde(default)]
     pub generation: String,
+    /// The container (class, struct, impl, …) a member is declared in; `None`
+    /// for top-level symbols, files and stubs. Part of the member's identity:
+    /// see [`compute_member_node_id`].
+    #[serde(default)]
+    pub parent_symbol: Option<String>,
 }
 
 impl GraphNode {
@@ -220,10 +226,29 @@ impl GraphNode {
         symbol_name: impl Into<String>,
         symbol_type: NodeType,
     ) -> Self {
+        Self::member(tenant_id, file_path, symbol_name, None, symbol_type)
+    }
+
+    /// Create a node declared inside `parent` (a class member), or a top-level
+    /// one when `parent` is `None` — the identity then matches [`Self::new`].
+    pub fn member(
+        tenant_id: impl Into<String>,
+        file_path: impl Into<String>,
+        symbol_name: impl Into<String>,
+        parent: Option<&str>,
+        symbol_type: NodeType,
+    ) -> Self {
         let tenant_id = tenant_id.into();
         let file_path = file_path.into();
         let symbol_name = symbol_name.into();
-        let node_id = compute_node_id(&tenant_id, &file_path, &symbol_name, symbol_type);
+        let parent_symbol = parent.filter(|p| !p.is_empty()).map(str::to_string);
+        let node_id = compute_member_node_id(
+            &tenant_id,
+            &file_path,
+            parent_symbol.as_deref(),
+            &symbol_name,
+            symbol_type,
+        );
         Self {
             node_id,
             tenant_id,
@@ -236,6 +261,7 @@ impl GraphNode {
             language: None,
             is_test_symbol: false,
             generation: String::new(),
+            parent_symbol,
         }
     }
 
@@ -261,6 +287,7 @@ impl GraphNode {
             language: None,
             is_test_symbol: false,
             generation: String::new(),
+            parent_symbol: None,
         }
     }
 }
@@ -381,6 +408,34 @@ pub fn compute_node_id(
         let _ = write!(out, "{:02x}", b);
     }
     out
+}
+
+/// Node ID of a symbol declared inside `parent` (a class member), or of a
+/// top-level one when `parent` is `None` (then identical to [`compute_node_id`]).
+///
+/// The container is part of the identity. Until graph.db v8 it was not, so two
+/// classes in one file that declared a method of the same name collapsed into
+/// ONE node, and the last written won. Live 2026-10-07: Finance's
+/// `firestore_finance_writes.dart` declares `set`, `update`, `delete` and
+/// `_touch` in both `FirestoreFinanceBatch` and `FirestoreFinanceTransaction`;
+/// the graph held only the Transaction's, so every call to the Batch's `set`
+/// landed on the other class and test_gaps reported it as untested.
+pub fn compute_member_node_id(
+    tenant_id: &str,
+    file_path: &str,
+    parent: Option<&str>,
+    symbol_name: &str,
+    symbol_type: NodeType,
+) -> String {
+    match parent.filter(|p| !p.is_empty()) {
+        Some(parent) => compute_node_id(
+            tenant_id,
+            file_path,
+            &format!("{parent}.{symbol_name}"),
+            symbol_type,
+        ),
+        None => compute_node_id(tenant_id, file_path, symbol_name, symbol_type),
+    }
 }
 
 /// Compute deterministic edge ID from source, target, and type.

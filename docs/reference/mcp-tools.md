@@ -664,7 +664,7 @@ Navigate the **code-relationship graph** the daemon builds from symbol relations
 | `bridges` | Bottleneck symbols on many shortest paths (betweenness) |
 | `modules` | Code clusters (community detection) |
 
-> **Confidence.** Each `relations`/`impact`/`usages` node carries a best-path `confidence`: ~`1.0` precise, `0.7` a tenant-unique name, ~`1/N` (e.g. `0.17`) an ambiguous same-name fan-out. Pass `minConfidence` to filter homonym noise at the daemon (before `topK` and the reported total).
+> **Confidence.** Each `relations`/`impact`/`usages` node carries a best-path `confidence`: ~`1.0` precise, `0.97` a call through a typed variable bound to that type's member (`batch.set` → `FirestoreFinanceBatch.set`), `0.7` a tenant-unique name, ~`1/N` (e.g. `0.17`) an ambiguous same-name fan-out. Pass `minConfidence` to filter homonym noise at the daemon (before `topK` and the reported total).
 
 ### Examples
 

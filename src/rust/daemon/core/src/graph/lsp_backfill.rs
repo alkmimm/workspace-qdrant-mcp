@@ -31,9 +31,12 @@ use crate::lsp::{symbol_column_in_line, LanguageServerManager, ResolvedCall};
 /// A callable definition in the graph (a potential caller with outgoing calls).
 #[derive(Debug, Clone)]
 pub(crate) struct CallerNode {
+    /// The caller's stored id. Read, never recomputed: a member's id includes
+    /// its container (`compute_member_node_id`), which the row's name alone
+    /// does not determine.
+    pub node_id: String,
     pub file_path: String,
     pub symbol_name: String,
-    pub node_type: NodeType,
     pub start_line: u32,
     /// The file version the caller row belongs to (its edges are rewritten there).
     pub generation: String,
@@ -88,7 +91,7 @@ pub(crate) async fn tenant_callers(
         .map(|i| format!("?{}", i + 2))
         .collect();
     let sql = format!(
-        "SELECT file_path, symbol_name, symbol_type, start_line, generation
+        "SELECT node_id, file_path, symbol_name, symbol_type, start_line, generation
          FROM graph_nodes
          WHERE tenant_id = ?1 AND generation <> '' AND start_line IS NOT NULL
            AND symbol_type IN ('function','async_function','method')
@@ -104,10 +107,11 @@ pub(crate) async fn tenant_callers(
         .filter(|r| scope.admits(r.get::<String, _>("generation").as_str()))
         .filter_map(|r| {
             let st: String = r.get("symbol_type");
+            NodeType::from_str(&st)?;
             Some(CallerNode {
+                node_id: r.get("node_id"),
                 file_path: r.get("file_path"),
                 symbol_name: r.get("symbol_name"),
-                node_type: NodeType::from_str(&st)?,
                 start_line: r.get::<i64, _>("start_line") as u32,
                 generation: r.get("generation"),
             })
@@ -256,16 +260,10 @@ pub async fn run_backfill_tenant(
         if names.is_empty() {
             continue;
         }
-        let caller_id = super::compute_node_id(
-            tenant_id,
-            &caller.file_path,
-            &caller.symbol_name,
-            caller.node_type,
-        );
         if let Ok(n) = store
             .make_calls_authoritative(
                 tenant_id,
-                &caller_id,
+                &caller.node_id,
                 &caller.file_path,
                 &caller.generation,
                 &names,

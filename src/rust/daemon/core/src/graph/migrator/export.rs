@@ -19,7 +19,7 @@ pub async fn export_nodes_sqlite(
             sqlx::query(
                 "SELECT node_id, tenant_id, symbol_name, symbol_type,
                         file_path, start_line, end_line, signature, language, is_test_symbol,
-                        generation
+                        generation, parent_symbol
                  FROM graph_nodes WHERE tenant_id = ?1
                  ORDER BY node_id",
             )
@@ -31,7 +31,7 @@ pub async fn export_nodes_sqlite(
             sqlx::query(
                 "SELECT node_id, tenant_id, symbol_name, symbol_type,
                         file_path, start_line, end_line, signature, language, is_test_symbol,
-                        generation
+                        generation, parent_symbol
                  FROM graph_nodes ORDER BY node_id",
             )
             .fetch_all(pool)
@@ -56,6 +56,7 @@ pub async fn export_nodes_sqlite(
                 language: row.get("language"),
                 is_test_symbol: row.get::<i64, _>("is_test_symbol") != 0,
                 generation: row.get("generation"),
+                parent_symbol: row.get("parent_symbol"),
             })
         })
         .collect::<Vec<_>>();
@@ -181,6 +182,8 @@ pub fn export_nodes_ladybug(
             is_test_symbol: false,
             // Nor generations: a LadybugDB graph is one unscoped version.
             generation: String::new(),
+            // Nor containers: the member's identity is already in its node_id.
+            parent_symbol: None,
         });
     }
 

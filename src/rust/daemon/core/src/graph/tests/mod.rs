@@ -9,6 +9,7 @@
 
 mod generation_tests;
 mod id_tests;
+mod member_resolution_tests;
 mod query_tests;
 mod shared_tests;
 mod store_tests;
