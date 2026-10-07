@@ -179,7 +179,7 @@ pub(super) async fn enqueue_worktree_new_on_branch(
     // Enumerate the worktree working tree with the project-cascade ignore only
     // (`None` global — see doc above); the global layer is re-applied below via
     // the main-anchored gate.
-    let walked = match crate::startup::reconciliation::ignore_sync::walk_eligible_files(
+    let walked = match crate::startup::reconciliation::eligible_walk::walk_eligible_files(
         Path::new(wt_root),
         None,
     ) {

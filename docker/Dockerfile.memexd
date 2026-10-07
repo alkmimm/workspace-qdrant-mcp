@@ -771,20 +771,35 @@ you ADDED a test here, bump this count."; exit 1; }
 # the `missing=` number was useless as a drift signal. The predicate is
 # `route_file != Excluded`, never `is_allowed`: a .pdf/.docx in a project
 # folder routes to `libraries`, and calling it ineligible would mark it STALE
-# — a delete. These 18 tests pin both halves. NAMES via module path, exact
-# count asserted.
+# — a delete.
+#
+# The ignore half must agree too, file by file: the reconciler's walk, the
+# folder scan and the dequeue-time gate. Two disagreements survived until
+# 2026-10-07 (#402). The walk read a tracked `.ignore` (ripgrep's convention,
+# listing `storage/` and `backup/` for local search tools) that nothing else
+# honours, so every boot stripped `main` from 22 live source files, Qdrant
+# payload included, until another path re-tagged them. And the dequeue gate's
+# ancestor replay matched a directory against its OWN `.gitignore`, so every
+# Laravel placeholder (`*` + `!.gitignore`) was dropped at dequeue and
+# re-enqueued at the next start. The walk/gate agreement test, the shared
+# project walker, the ignore matcher and the gate are gated together here.
+# NAMES via module path, exact count asserted.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         startup::reconciliation::ignore_sync::tests \
+        startup::reconciliation::eligible_walk::tests \
+        patterns::project_walk::tests patterns::gitignore::tests \
+        patterns::ignore_gate::tests patterns::eligibility_trie::tests \
         --test-threads=4 2>&1 | tee /tmp/ignore-sync.log; \
-    grep -q "^test result: ok\. 18 passed" /tmp/ignore-sync.log \
-    || { echo "GATE: expected exactly 18 ignore_sync tests to run and pass — libtest exits 0 \
-when a positional filter matches nothing, so a module rename would silently un-gate the \
-eligibility rule that keeps the reconciler from re-enqueueing un-indexable files forever (and \
-from deleting library-routed documents). If you ADDED a test here, bump this count."; exit 1; }
+    grep -q "^test result: ok\. 65 passed" /tmp/ignore-sync.log \
+    || { echo "GATE: expected exactly 65 ignore-decision tests (reconciler, eligible walk, \
+project walker, ignore matcher, ignore gate, eligibility trie) to run and pass — libtest exits \
+0 when a positional filter matches nothing, so a module rename would silently un-gate the rules \
+that keep the walk and the ingest from disagreeing at every start. If you ADDED a test here, \
+bump this count."; exit 1; }
 
 # The same rule, everywhere else. A project folder's .pdf/.docx is indexed into
 # the project's `-refs` library, but until 2026-10-05 only the file watcher
