@@ -17,7 +17,9 @@ use super::GraphDbResult;
 ///   one), a class named as the receiver types a static call, an untyped
 ///   site no longer cancels the typed ones; a split definition is one node
 ///   spanning its fragments.
-pub const GRAPH_EXTRACTOR_VERSION: i64 = 1;
+/// - 2: null-aware receivers (`x?.m(`, `x!.m(`), nested generic
+///   declarations, and names bound to a typed name are typed.
+pub const GRAPH_EXTRACTOR_VERSION: i64 = 2;
 
 /// v9: `graph_generations.extractor_version`. Existing extractions get 0, so
 /// every generation is rebuilt once by the current extractor. Also drops the

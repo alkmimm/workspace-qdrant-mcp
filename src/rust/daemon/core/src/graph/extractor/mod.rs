@@ -3,6 +3,7 @@
 //! Takes tree-sitter `SemanticChunk` output and produces `GraphNode`/`GraphEdge`
 //! pairs for CONTAINS, CALLS, IMPORTS, and USES_TYPE relationships.
 
+mod declarations;
 mod fragments;
 pub(crate) mod import_parsers;
 mod kinds;

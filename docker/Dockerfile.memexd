@@ -610,7 +610,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # below its receiver's declaration lost its type (Finance: 851 test call names)
 # and the node kept the last fragment's start line: the suites pin whole-text
 # hints, static and partial receivers, and the extractor version that makes the
-# backfill rebuild a stale extraction in place.
+# backfill rebuild a stale extraction in place. A null-aware call (`x?.m(`) read
+# as untyped and bound by proximity to a same-package homonym: the suites pin
+# null-aware receivers, nested generic declarations and aliases.
 # Gating whole suites is deliberate: none of these ran before, and one of them
 # (`test_pagerank_on_extracted_graph`) had been failing unnoticed since the IDF
 # demotion landed (#164). Exact counts asserted — libtest exits 0 when a filter
@@ -626,8 +628,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         strategies::processing::file::graph_lsp_calls::tests \
         lsp::project_manager::call_hierarchy::tests \
         --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
-    grep -q "^test result: ok\. 280 passed" /tmp/graph-core.log \
-    || { echo "GATE: expected exactly 280 core graph tests (graph::, backfill, ingest, LSP calls, git::tips) \
+    grep -q "^test result: ok\. 284 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 284 core graph tests (graph::, backfill, ingest, LSP calls, git::tips) \
 to run and pass. If you ADDED a test here, bump this count."; exit 1; } \
  && cargo test -p workspace-qdrant-core --no-fail-fast \
         --test graph_algorithm_tests --test graph_extractor_tests \
