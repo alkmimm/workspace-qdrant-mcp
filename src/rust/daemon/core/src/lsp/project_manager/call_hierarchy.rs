@@ -2,15 +2,15 @@
 //!
 //! `textDocument/references` only finds usage *sites*; the call hierarchy
 //! resolves the actual callee *definitions* (name + file + line). That lets the
-//! graph build resolved `CALLS` edges pointing at the real callee node instead
-//! of a name-only stub target (which carries an empty file_path and never
-//! matches the callee's real node_id). This is the community-recommended LSP
-//! method for precise caller/callee relations.
+//! graph bind a `CALLS` stub to the definition at that site instead of every
+//! definition sharing its name. This is the community-recommended LSP method
+//! for precise caller/callee relations.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::{LanguageServerManager, ProjectLspResult};
-use crate::graph::{EdgeType, GraphEdge, GraphNode, NodeType};
+use crate::graph::lsp_sites::LspSite;
 
 /// A resolved call target: the callee symbol with its definition site.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,44 +285,32 @@ fn is_dependency_path(rel: &str) -> bool {
     rel.contains("node_modules/") || rel.contains("site-packages/")
 }
 
-/// Build resolved `CALLS` graph edges from call-hierarchy results.
+/// Where the server says each called name is defined: by callee name, the
+/// project-relative file and line of every in-project definition site. A
+/// name resolved only into stdlib/deps maps to no site — the call is not to
+/// project code.
 ///
-/// Tree-sitter emits CALLS edges to *stub* nodes (empty file_path → a node_id
-/// that never matches the callee's real node). Given LSP-resolved callees, this
-/// produces an edge to the callee's REAL node_id — `compute_node_id(tenant,
-/// relative_callee_file, name, Function)` — exactly matching the node created
-/// when that callee's own file is ingested. Callees outside `project_root`
-/// (stdlib/deps) are skipped.
-///
-/// Pure (no I/O); applied at query-time or by a warm-up backfill pass — not at
-/// ingestion time, where the server is usually not yet indexed (the
-/// community/Aider pattern: tree-sitter for the baseline graph, LSP precision
-/// on demand).
-pub(crate) fn resolved_call_edges(
-    tenant_id: &str,
-    caller_node_id: &str,
-    source_file: &str,
+/// The site, not a node id, is what the graph keeps: the server never says
+/// what KIND of symbol the callee is, and a method's id includes its class.
+/// Guessing `Function` here minted a phantom node for every method callee;
+/// the stub resolver binds each site to the definition that sits there
+/// (`graph::lsp_sites`). Pure (no I/O).
+pub(crate) fn call_sites_by_name(
     project_root: &str,
     calls: &[ResolvedCall],
-) -> (Vec<GraphNode>, Vec<GraphEdge>) {
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
+) -> BTreeMap<String, Vec<LspSite>> {
+    let mut by_name: BTreeMap<String, Vec<LspSite>> = BTreeMap::new();
     for call in calls {
+        let sites = by_name.entry(call.name.clone()).or_default();
         let Some(rel) = relativize_to_project(&call.file, project_root) else {
             continue;
         };
-        let target = GraphNode::new(tenant_id, rel, &call.name, NodeType::Function);
-        let edge = GraphEdge::new(
-            tenant_id,
-            caller_node_id,
-            &target.node_id,
-            EdgeType::Calls,
-            source_file,
-        );
-        nodes.push(target);
-        edges.push(edge);
+        let site = (rel, call.line);
+        if !sites.contains(&site) {
+            sites.push(site);
+        }
     }
-    (nodes, edges)
+    by_name
 }
 
 /// Parse one `CallHierarchyOutgoingCall` (its `to` item) into a `ResolvedCall`.
@@ -411,57 +399,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolved_call_edges_target_real_callee_node() {
-        use crate::graph::{compute_node_id, NodeType};
-
-        let tenant = "t1";
-        let caller_id = "caller-node-id";
-        let calls = vec![ResolvedCall {
-            name: "add".to_string(),
-            file: "/home/u/proj/src/math.rs".to_string(),
-            line: 4,
-        }];
-        let (nodes, edges) =
-            resolved_call_edges(tenant, caller_id, "src/lib.rs", "/home/u/proj", &calls);
-
-        // The resolved target node_id must equal the id of the real callee node
-        // (keyed by project-relative path) — NOT a file-less stub.
-        let expected_target = compute_node_id(tenant, "src/math.rs", "add", NodeType::Function);
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].source_node_id, caller_id);
-        assert_eq!(edges[0].target_node_id, expected_target);
-        assert_eq!(edges[0].edge_type, EdgeType::Calls);
-        assert_eq!(nodes[0].node_id, expected_target);
-        assert_eq!(nodes[0].file_path, "src/math.rs");
+    fn call(name: &str, file: &str, line: u32) -> ResolvedCall {
+        ResolvedCall {
+            name: name.to_string(),
+            file: file.to_string(),
+            line,
+        }
     }
 
     #[test]
-    fn resolved_call_edges_skip_out_of_project_callees() {
-        let calls = vec![ResolvedCall {
-            name: "println".to_string(),
-            file: "/usr/lib/rust/std/macros.rs".to_string(),
-            line: 1,
-        }];
-        let (nodes, edges) =
-            resolved_call_edges("t1", "caller", "src/lib.rs", "/home/u/proj", &calls);
-        assert!(nodes.is_empty());
-        assert!(edges.is_empty());
+    fn call_sites_are_project_relative_and_grouped_by_name() {
+        let calls = vec![
+            call("set", "/home/u/proj/lib/writes.dart", 2),
+            // Two classes' `set` in one file: both sites, one name.
+            call("set", "/home/u/proj/lib/writes.dart", 10),
+            call("set", "/home/u/proj/lib/writes.dart", 10),
+            call("add", "/home/u/proj/src/math.rs", 4),
+        ];
+        let sites = call_sites_by_name("/home/u/proj", &calls);
+        assert_eq!(
+            sites.get("set"),
+            Some(&vec![
+                ("lib/writes.dart".to_string(), 2),
+                ("lib/writes.dart".to_string(), 10)
+            ])
+        );
+        assert_eq!(
+            sites.get("add"),
+            Some(&vec![("src/math.rs".to_string(), 4)])
+        );
     }
 
     #[test]
-    fn resolved_call_edges_skip_node_modules_callees() {
-        // The TS server resolved a call into a bundled type-def under
-        // node_modules, with the '@' percent-encoded — it must NOT become a
-        // graph node or the graph accumulates external-dep cruft (#253).
-        let calls = vec![ResolvedCall {
-            name: "readFileSync".to_string(),
-            file: "/home/u/proj/src/ts/node_modules/%40types/node/fs.d.ts".to_string(),
-            line: 1,
-        }];
-        let (nodes, edges) =
-            resolved_call_edges("t1", "caller", "src/ts/app.ts", "/home/u/proj", &calls);
-        assert!(nodes.is_empty());
-        assert!(edges.is_empty());
+    fn a_name_resolved_only_outside_the_project_has_no_site() {
+        // stdlib, and a bundled type-def under node_modules with the '@'
+        // percent-encoded (#253): not project code, so no site — but the
+        // name stays, so the stub is known not to be ours.
+        let calls = vec![
+            call("println", "/usr/lib/rust/std/macros.rs", 1),
+            call(
+                "readFileSync",
+                "/home/u/proj/src/ts/node_modules/%40types/node/fs.d.ts",
+                1,
+            ),
+        ];
+        let sites = call_sites_by_name("/home/u/proj", &calls);
+        assert_eq!(sites.get("println"), Some(&Vec::new()));
+        assert_eq!(sites.get("readFileSync"), Some(&Vec::new()));
     }
 }

@@ -3,23 +3,18 @@
 //! Non-blocking: graph errors are logged but never fail the ingestion pipeline.
 //!
 //! Tree-sitter is the always-on baseline edge source. When an LSP server is
-//! already warm for the file, an additive precision pass resolves `CALLS` edges
-//! via call hierarchy: tree-sitter emits a name-only stub callee (empty
-//! file_path → an id that never matches the callee's real node), whereas LSP
-//! knows the callee's definition site, so we add an edge to its real node_id.
-//! The pass is gated on server readiness and is a no-op on a cold index, so it
-//! never adds latency to the common path.
+//! already warm for the file, an additive precision pass locates each call's
+//! definition site via call hierarchy (`super::graph_lsp_calls`). The pass is
+//! gated on server readiness and is a no-op on a cold index, so it never adds
+//! latency to the common path.
 
 use std::path::Path;
 
 use tracing::{debug, info, warn};
 
+use super::graph_lsp_calls::resolve_calls_via_lsp;
 use crate::context::ProcessingContext;
-use crate::graph::extractor::{
-    extract_edges_from_text_chunks, node_type_from_display_name, ExtractionResult,
-};
-use crate::graph::{compute_member_node_id, compute_node_id, EdgeType, GraphEdge, NodeType};
-use crate::lsp::{resolved_call_edges, symbol_column_in_line};
+use crate::graph::extractor::{extract_edges_from_text_chunks, ExtractionResult};
 use crate::TextChunk;
 
 /// Extract graph relationships from text chunks and store them atomically as
@@ -102,148 +97,6 @@ pub(super) async fn ingest_graph_edges(
             );
         }
     }
-}
-
-/// LSP precision pass: resolve `CALLS` edges to real callee nodes.
-///
-/// For each function/method chunk, asks the (already-warm) LSP server for the
-/// symbol's outgoing calls and adds an edge to each resolved callee's real
-/// node_id. Gated on `is_server_ready_for_file`, so it is a no-op when no
-/// server is running for the tenant (cold index / LSP disabled). Callee node
-/// type defaults to `Function` (best-effort; free functions are the common
-/// case — a mismatched method target is simply an unmatched extra node, no
-/// worse than the tree-sitter stub it complements).
-async fn resolve_calls_via_lsp(
-    ctx: &ProcessingContext,
-    tenant_id: &str,
-    file_path: &str,
-    abs_file_path: &str,
-    chunks: &[TextChunk],
-    extraction: &mut ExtractionResult,
-) {
-    let Some(ref lsp_arc) = ctx.lsp_manager else {
-        return;
-    };
-    let abs_path = Path::new(abs_file_path);
-    let mgr = lsp_arc.read().await;
-    if !mgr.is_server_ready_for_file(tenant_id, abs_path).await {
-        return; // Server not warm for this file — tree-sitter edges stand.
-    }
-
-    // Derive the project root by removing the relative suffix from the absolute
-    // path; used to relativize LSP-returned callee paths back to graph keys.
-    let norm_abs = abs_file_path.replace('\\', "/");
-    let norm_rel = file_path.replace('\\', "/");
-    let Some(project_root) = norm_abs
-        .strip_suffix(&norm_rel)
-        .map(|r| r.trim_end_matches('/').to_string())
-    else {
-        return; // Can't derive root (path layout unexpected) — skip safely.
-    };
-
-    // Open the file so the server answers call-hierarchy for it (didOpen; most
-    // servers only serve open documents). One open per file, closed after.
-    let _ = mgr.open_document(abs_path).await;
-    // Wait for the server to finish (re)analyzing the just-opened document
-    // instead of a fixed short sleep. Dart's analysis server answers
-    // `callHierarchy/outgoingCalls` with an EMPTY result while a freshly opened
-    // document is still being analyzed, so the old fixed 300ms sleep resolved 0
-    // Dart edges on this incremental ingestion path — the exact gap the backfill
-    // pass already closed with this same wait (see `lsp_backfill.rs`). For
-    // servers whose only progress is background indexing (typescript-language-
-    // server, pyright, rust-analyzer/gopls once indexed) this returns right after
-    // the short settle, so the common path keeps its low latency. Shared-behavior
-    // alignment: the incremental and backfill LSP passes now wait the same way.
-    mgr.wait_for_analysis_idle(abs_path).await;
-
-    for chunk in chunks {
-        let meta = &chunk.metadata;
-        let Some(chunk_type) = meta.get("chunk_type") else {
-            continue;
-        };
-        // Only callable definitions have outgoing calls.
-        let Some(node_type) = node_type_from_display_name(chunk_type) else {
-            continue;
-        };
-        if !matches!(
-            chunk_type.as_str(),
-            "function" | "async_function" | "method"
-        ) {
-            continue;
-        }
-        let Some(symbol) = meta.get("symbol_name").filter(|s| !s.is_empty()) else {
-            continue;
-        };
-        let Some(line) = meta.get("start_line").and_then(|s| s.parse::<u32>().ok()) else {
-            continue;
-        };
-
-        // Column of the symbol on its definition line (UTF-16, LSP encoding).
-        let first_line = chunk.content.lines().next().unwrap_or("");
-        let column = symbol_column_in_line(first_line, symbol);
-
-        // start_line is 1-indexed; LSP positions are 0-indexed.
-        let calls = mgr
-            .resolved_outgoing_calls(abs_path, line.saturating_sub(1), column)
-            .await
-            .unwrap_or_default();
-        if calls.is_empty() {
-            continue;
-        }
-
-        let parent = meta.get("parent_symbol").map(String::as_str);
-        let caller_id = compute_member_node_id(tenant_id, file_path, parent, symbol, node_type);
-        // R8.1 — the LSP is AUTHORITATIVE for the calls it resolved: drop this
-        // caller's tree-sitter fuzzy stub CALLS edges for those callee names so
-        // `resolve_stub_edges` cannot fan them out to every same-named method.
-        // Names the LSP did NOT resolve (stdlib / unresolved) keep their fuzzy
-        // stub as the fallback — precise-where-available, fuzzy-fallback per call.
-        let resolved_names: std::collections::HashSet<&str> =
-            calls.iter().map(|c| c.name.as_str()).collect();
-        suppress_fuzzy_calls(
-            &mut extraction.edges,
-            tenant_id,
-            &caller_id,
-            &resolved_names,
-        );
-        let (nodes, edges) =
-            resolved_call_edges(tenant_id, &caller_id, file_path, &project_root, &calls);
-        debug!(
-            "Graph LSP pass: {} resolved call edge(s) from {}",
-            edges.len(),
-            symbol
-        );
-        extraction.nodes.extend(nodes);
-        extraction.edges.extend(edges);
-    }
-    // Close the document opened above.
-    let _ = mgr.close_document(abs_path).await;
-}
-
-/// R8.1 — make the LSP-resolved calls authoritative for `caller_id`: remove the
-/// tree-sitter fuzzy stub CALLS edges from this caller whose callee NAME the LSP
-/// resolved (a precise edge to the real callee replaces them). Fuzzy stubs for
-/// names the LSP could not resolve stay as the fallback. A name-only callee stub
-/// is keyed `compute_node_id(tenant, "", name, Function)` (see the extractor's
-/// `add_calls_edges`), so the same id reconstructs the edge target to drop.
-fn suppress_fuzzy_calls(
-    edges: &mut Vec<GraphEdge>,
-    tenant_id: &str,
-    caller_id: &str,
-    resolved_names: &std::collections::HashSet<&str>,
-) {
-    if resolved_names.is_empty() {
-        return;
-    }
-    let stub_ids: std::collections::HashSet<String> = resolved_names
-        .iter()
-        .map(|n| compute_node_id(tenant_id, "", n, NodeType::Function))
-        .collect();
-    edges.retain(|e| {
-        !(e.edge_type == EdgeType::Calls
-            && e.source_node_id == caller_id
-            && stub_ids.contains(&e.target_node_id))
-    });
 }
 
 /// Parse `file_path` and store its graph as content `generation` — the path
@@ -398,46 +251,6 @@ pub(super) async fn delete_graph_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
-
-    fn stub_id(t: &str, name: &str) -> String {
-        compute_node_id(t, "", name, NodeType::Function)
-    }
-
-    #[test]
-    fn suppress_fuzzy_calls_drops_only_the_callers_resolved_call_stubs() {
-        let t = "t1";
-        let caller = compute_node_id(t, "a.rs", "caller", NodeType::Function);
-        let other = compute_node_id(t, "a.rs", "other", NodeType::Function);
-        let mut edges = vec![
-            // The caller's fuzzy CALLS stubs — `add`/`build` are LSP-resolved.
-            GraphEdge::new(t, &caller, stub_id(t, "add"), EdgeType::Calls, "a.rs"),
-            GraphEdge::new(t, &caller, stub_id(t, "build"), EdgeType::Calls, "a.rs"),
-            // `localOnly` was NOT resolved by the LSP → keep it (fuzzy fallback).
-            GraphEdge::new(t, &caller, stub_id(t, "localOnly"), EdgeType::Calls, "a.rs"),
-            // A CONTAINS edge (different type) must be untouched.
-            GraphEdge::new(t, &caller, stub_id(t, "add"), EdgeType::Contains, "a.rs"),
-            // Another caller's CALLS to `add` must be untouched.
-            GraphEdge::new(t, &other, stub_id(t, "add"), EdgeType::Calls, "a.rs"),
-        ];
-        let resolved: HashSet<&str> = ["add", "build"].into_iter().collect();
-        suppress_fuzzy_calls(&mut edges, t, &caller, &resolved);
-
-        // The caller's resolved fuzzy CALLS stubs are gone.
-        assert!(!edges.iter().any(|e| e.source_node_id == caller
-            && e.edge_type == EdgeType::Calls
-            && (e.target_node_id == stub_id(t, "add") || e.target_node_id == stub_id(t, "build"))));
-        // The unresolved call keeps its fuzzy stub (fallback).
-        assert!(edges
-            .iter()
-            .any(|e| e.target_node_id == stub_id(t, "localOnly")));
-        // The CONTAINS edge and the OTHER caller's CALLS survive.
-        assert!(edges.iter().any(|e| e.edge_type == EdgeType::Contains));
-        assert!(edges
-            .iter()
-            .any(|e| e.source_node_id == other && e.edge_type == EdgeType::Calls));
-        assert_eq!(edges.len(), 3);
-    }
 
     #[test]
     fn empty_or_grammarless_files_are_recorded_without_parsing() {
@@ -452,20 +265,5 @@ mod tests {
         );
         assert!(nothing_to_extract(&code, false), "no grammar covers it");
         assert!(!nothing_to_extract(&code, true));
-    }
-
-    #[test]
-    fn suppress_fuzzy_calls_is_a_noop_when_nothing_resolved() {
-        let t = "t1";
-        let caller = compute_node_id(t, "a.rs", "caller", NodeType::Function);
-        let mut edges = vec![GraphEdge::new(
-            t,
-            &caller,
-            stub_id(t, "add"),
-            EdgeType::Calls,
-            "a.rs",
-        )];
-        suppress_fuzzy_calls(&mut edges, t, &caller, &HashSet::new());
-        assert_eq!(edges.len(), 1, "empty LSP result must not drop fuzzy edges");
     }
 }

@@ -23,6 +23,7 @@ pub mod branch_scope;
 pub mod extractor;
 pub mod factory;
 pub mod lsp_backfill;
+pub mod lsp_sites;
 pub mod maintenance;
 pub mod migrator;
 mod schema;
