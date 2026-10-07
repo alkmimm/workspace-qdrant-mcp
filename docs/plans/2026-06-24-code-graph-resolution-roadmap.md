@@ -94,6 +94,26 @@ metric to prove it, de-noise hotspots. All tree-sitter-only, no new extraction.
 
 ## Status updates
 
+- **2026-10-07 — Null-aware receivers, nested generics, aliases
+  (`GRAPH_EXTRACTOR_VERSION` 2).** After #423 Finance's ambiguous test gaps
+  fell 419 → 263, but `InterTenantTransferUseCases.cancel` still had callers
+  like `LocalIncomeRepository.watchIncomesInRange` @0.85 — `timer?.cancel()`
+  and `_subscription?.cancel()` bound by PROXIMITY to the same-package
+  `cancel`. Three gaps in receiver typing, none Finance-specific:
+  1. `receiver_of` stripped the `?` of `?.` BEFORE the dot, so it never
+     matched: every null-aware call (725 `x?.m(` + 68 `x!.m(` in Finance, 565 of
+     them `?.copyWith(`) read as untyped. Now `?.`, `!.`, `!!.` in
+     Dart/TS/JS/Kotlin/Swift/C#; not Rust, where `x?.m()` unwraps a wrapper
+     whose declared type is the `Option`/`Result`.
+  2. Declarations with nested generics (`StreamSubscription<List<X>>? s;`,
+     275 in Finance) matched no regex; generics now nest three levels.
+  3. `final previous = _subscription;` — a name bound to a typed name (field
+     included) takes its type.
+  The library types (`Timer`, `StreamSubscription`) then leave those calls
+  unresolved instead of guessing. Declarations moved to
+  `extractor/declarations.rs` (receivers.rs had reached 526 lines). First use of
+  the extractor version: deploy rebuilds every generation in place.
+
 - **2026-10-07 — Receiver hints read the whole definition; static and partial
   receivers; graph extractor version (graph.db v9).** After #418, Finance still
   reported 419 test gaps "with ambiguous test callers" (e.g.

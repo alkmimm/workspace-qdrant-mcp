@@ -13,14 +13,10 @@
 //! keep the plain by-name resolution.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::LazyLock;
 
-use regex::Regex;
-
+use super::declarations::{declared_types, resolve_aliases};
+pub(super) use super::declarations::{field_types, TypeMap};
 use crate::graph::{EdgeType, GraphEdge, GraphNode, NodeType};
-
-/// Declared types of names (locals, parameters, fields), by name.
-pub(super) type TypeMap = HashMap<String, String>;
 
 /// What a definition's call sites say about the receivers of one callee name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -70,39 +66,13 @@ pub(super) fn is_container(node_type: NodeType) -> bool {
     )
 }
 
-/// `name = [new|const] Type(` — a name bound to a constructor call.
-static CONSTRUCTED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"([A-Za-z_]\w*)\s*=\s*(?:new\s+|const\s+)?([A-Z]\w*)\s*(?:<[^<>()=;]*>)?\s*\(")
-        .expect("constructed-binding regex")
-});
-
-/// `Type name` followed by `=`, `;`, `,` or `)` — a C-style typed declaration
-/// or parameter (Dart, Java, C#, C/C++, Vala).
-static TYPE_THEN_NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b([A-Z]\w*)\s*(?:<[^<>()=;]*>)?\??\s+([A-Za-z_]\w*)\s*[=;,)]")
-        .expect("typed-declaration regex")
-});
-
-/// `name: Type` — a typed binding or parameter (TypeScript, Kotlin, Rust,
-/// Python hints, Swift, Scala).
-static NAME_COLON_TYPE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b([A-Za-z_]\w*)\s*:\s*&?(?:mut\s+)?([A-Z]\w*)").expect("colon-typed regex")
-});
-
-/// `name = Type::new(` and friends (Rust).
-static RUST_CONSTRUCTOR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"([a-z_]\w*)\s*=\s*([A-Z]\w*)::(?:new|default|from|with_capacity)\s*\(")
-        .expect("rust-constructor regex")
-});
-
-fn type_then_name(language: &str) -> bool {
-    matches!(language, "dart" | "java" | "c-sharp" | "cpp" | "c" | "vala")
-}
-
-fn name_colon_type(language: &str) -> bool {
+/// Languages where `x?.m(` is a null-aware call and `x!.m(` / `x!!.m(` a
+/// non-null assertion on `x` — both call `x`'s type's member. Not Rust, where
+/// `x?.m(` unwraps a `Result`/`Option` whose declared type is the wrapper.
+fn null_aware_receivers(language: &str) -> bool {
     matches!(
         language,
-        "typescript" | "tsx" | "kotlin" | "rust" | "python" | "swift" | "scala"
+        "dart" | "typescript" | "tsx" | "javascript" | "kotlin" | "swift" | "c-sharp"
     )
 }
 
@@ -122,51 +92,6 @@ fn class_named_receivers(language: &str) -> bool {
             | "swift"
             | "scala"
     )
-}
-
-/// The types `content` declares for names, by the language's declaration
-/// shapes. A constructor binding wins over a declared type: `I x = A();` calls
-/// `A`'s methods.
-pub(super) fn declared_types(content: &str, language: &str) -> TypeMap {
-    let mut types = TypeMap::new();
-    if type_then_name(language) {
-        for c in TYPE_THEN_NAME.captures_iter(content) {
-            types.insert(c[2].to_string(), c[1].to_string());
-        }
-    }
-    if name_colon_type(language) {
-        for c in NAME_COLON_TYPE.captures_iter(content) {
-            types.insert(c[1].to_string(), c[2].to_string());
-        }
-    }
-    if language == "rust" {
-        for c in RUST_CONSTRUCTOR.captures_iter(content) {
-            types.insert(c[1].to_string(), c[2].to_string());
-        }
-    }
-    for c in CONSTRUCTED.captures_iter(content) {
-        types.insert(c[1].to_string(), c[2].to_string());
-    }
-    types
-}
-
-/// The part of a class body outside its members' bodies: what the class
-/// itself declares (fields, constructor parameters), not its methods' locals.
-pub(super) fn class_level_text(content: &str) -> String {
-    if !content.contains('{') {
-        return content.to_string();
-    }
-    let mut out = String::with_capacity(content.len());
-    let mut depth = 0usize;
-    for ch in content.chars() {
-        match ch {
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            _ if depth <= 1 => out.push(ch),
-            _ => {}
-        }
-    }
-    out
 }
 
 /// For each name in `calls`, what its call sites in `content` say about the
@@ -193,6 +118,7 @@ pub(super) fn receiver_types(
         own_symbol,
         body_start,
         class_receivers: class_named_receivers(language),
+        null_aware: null_aware_receivers(language),
     };
     let mut hints = HashMap::new();
     for name in calls {
@@ -210,6 +136,7 @@ struct CallSite<'a> {
     own_symbol: &'a str,
     body_start: usize,
     class_receivers: bool,
+    null_aware: bool,
 }
 
 impl CallSite<'_> {
@@ -227,7 +154,7 @@ impl CallSite<'_> {
             if name == self.own_symbol && at < self.body_start {
                 continue; // the declaration itself
             }
-            let receiver = receiver_of(self.content, at);
+            let receiver = receiver_of(self.content, at, self.null_aware);
             match receiver.and_then(|r| self.types.get(r)) {
                 Some(declared) => {
                     hint.types.insert(declared.clone());
@@ -263,12 +190,20 @@ fn is_call_after(rest: &str) -> bool {
 }
 
 /// The receiver of the call whose name starts at `at`: `x` in `x.name(` or
-/// `this.x.name(` / `self.x.name(`. `None` for a bare call or a receiver that
-/// is itself an expression (`a.b.name(`, `f().name(`).
-fn receiver_of(content: &str, at: usize) -> Option<&str> {
+/// `this.x.name(` / `self.x.name(`, and — where the language has them
+/// (`null_aware`) — in `x?.name(`, `x!.name(`, `x!!.name(`. `None` for a bare
+/// call or a receiver that is itself an expression (`a.b.name(`, `f().name(`).
+fn receiver_of(content: &str, at: usize, null_aware: bool) -> Option<&str> {
     let before = content[..at].trim_end();
-    let before = before.strip_suffix('?').unwrap_or(before);
     let before = before.strip_suffix('.')?.trim_end();
+    // The operator sits between the receiver and the dot. Stripped BEFORE the
+    // dot (the old order), it never matched: every `timer?.cancel()` read as
+    // untyped and fell to a same-package `cancel` by proximity.
+    let before = if null_aware {
+        before.trim_end_matches(['?', '!']).trim_end()
+    } else {
+        before
+    };
     // The identifier starts after the last non-identifier CHARACTER, whose
     // width is not 1 byte in general: `i + 1` split `ç`/`á` in Portuguese
     // comments and panicked the whole queue item (live 2026-10-07). Unicode
@@ -296,23 +231,9 @@ fn is_ident(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// Field types of every container in a file, by container name, from the
-/// container chunks' class-level text. `(name, content, language)` per chunk.
-pub(super) fn field_types<'a>(
-    containers: impl Iterator<Item = (&'a str, &'a str, &'a str)>,
-) -> HashMap<String, TypeMap> {
-    let mut by_class: HashMap<String, TypeMap> = HashMap::new();
-    for (name, content, language) in containers {
-        by_class
-            .entry(name.to_string())
-            .or_default()
-            .extend(declared_types(&class_level_text(content), language));
-    }
-    by_class
-}
-
 /// Receiver hints for one callable definition (`content` is its WHOLE text,
-/// every fragment): its class's fields, overridden by what it declares.
+/// every fragment): its class's fields, overridden by what it declares, then
+/// the names bound to those (`final previous = _subscription;`).
 pub(super) fn chunk_hints(
     content: &str,
     language: &str,
@@ -326,6 +247,7 @@ pub(super) fn chunk_hints(
         .cloned()
         .unwrap_or_default();
     types.extend(declared_types(content, language));
+    resolve_aliases(content, &mut types);
     receiver_types(content, calls, &types, own_symbol, language)
 }
 
@@ -350,6 +272,7 @@ pub(super) fn hint_metadata(hint: &CallHint) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::declarations::class_level_text;
     use super::*;
 
     fn calls(names: &[&str]) -> Vec<String> {
@@ -477,6 +400,48 @@ mod tests {
         assert_eq!(hints.get("Log"), None);
     }
 
+    /// Finance `income_sources_controller.dart` / `local_income_repository.dart`:
+    /// `timer?.cancel()`, `_subscription?.cancel()` and `previous?.cancel()`
+    /// read as untyped and bound to `InterTenantTransferUseCases.cancel` by
+    /// proximity @0.85. Each receiver is typed — by a nullable local, a
+    /// nested-generic field, an alias of it — and both types are library ones.
+    #[test]
+    fn null_aware_calls_read_their_receiver() {
+        let class = "class IncomeSourcesController {\n  \
+                     StreamSubscription<List<IncomeSource>>? _subscription;\n  Item item;\n}";
+        let fields = field_types([("IncomeSourcesController", class, "dart")].into_iter());
+        let body = "Future<void> _subscribe() async {\n  Timer? timer;\n  timer?.cancel();\n  \
+                    final previous = _subscription;\n  await previous?.cancel();\n  \
+                    _subscription?.cancel();\n  item!.save();\n}";
+        let hints = chunk_hints(
+            body,
+            "dart",
+            &calls(&["cancel", "save"]),
+            "_subscribe",
+            Some("IncomeSourcesController"),
+            &fields,
+        );
+        assert_eq!(
+            hints.get("cancel").cloned(),
+            declared(&["StreamSubscription", "Timer"])
+        );
+        assert_eq!(hints.get("save").cloned(), declared(&["Item"]));
+
+        let at = |text: &str, needle: &str| text.find(needle).unwrap() + needle.len() - 1;
+        assert_eq!(receiver_of("a?.b(", at("a?.b(", "?.b"), true), Some("a"));
+        assert_eq!(receiver_of("a!!.b(", at("a!!.b(", "!.b"), true), Some("a"));
+        assert_eq!(receiver_of("f()?.b(", at("f()?.b(", "?.b"), true), None);
+    }
+
+    /// In Rust `x?.m()` unwraps a `Result`/`Option`: the declared type is the
+    /// wrapper, not the receiver's — the call stays untyped.
+    #[test]
+    fn rust_question_mark_is_not_a_null_aware_call() {
+        let body = "fn f(x: Option<Foo>) -> Option<()> { x?.run(); None }";
+        let hints = chunk_hints(body, "rust", &calls(&["run"]), "f", None, &HashMap::new());
+        assert_eq!(hints.get("run"), None);
+    }
+
     #[test]
     fn the_metadata_carries_only_what_the_sites_said() {
         let hint = CallHint {
@@ -502,9 +467,9 @@ mod tests {
         let types = declared_types(body, "java");
         // `configuração.set` ends in `ação.set` too: aim at the bare word.
         let at = |needle: &str| body.find(needle).unwrap() + needle.len() - "set".len();
-        assert_eq!(receiver_of(body, at("— ação.set")), Some("ação"));
+        assert_eq!(receiver_of(body, at("— ação.set"), false), Some("ação"));
         assert_eq!(
-            receiver_of(body, at("a configuração.set")),
+            receiver_of(body, at("a configuração.set"), false),
             Some("configuração")
         );
         let hints = receiver_types(body, &calls(&["set"]), &types, "t", "java");
