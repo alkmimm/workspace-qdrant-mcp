@@ -9,7 +9,7 @@
 //! hung off a phantom. The resolver instead binds the site to the definition
 //! that actually sits there, once every file of the tenant has been parsed.
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// One definition site: project-relative file and 0-indexed line.
 pub type LspSite = (String, u32);
@@ -38,7 +38,7 @@ pub fn with_lsp_sites(metadata: Option<&str>, sites: &[LspSite], lsp_only: bool)
             Value::Object(o) => Some(o),
             _ => None,
         })
-        .unwrap_or_else(Map::new);
+        .unwrap_or_default();
     object.insert(SITES_KEY.to_string(), serde_json::json!(sites));
     if lsp_only {
         object.insert(ONLY_KEY.to_string(), Value::Bool(true));
