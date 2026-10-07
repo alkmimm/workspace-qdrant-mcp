@@ -1032,8 +1032,11 @@ Step 6: Crash Recovery
 **Orphaned in_progress sink recovery (poison-item prevention).** Per-file FTS5
 work is handed to an in-memory mpsc channel (`search_db::batch_writer`); the
 handler commits `search_status = 'in_progress'` to SQLite *before* the batch
-actor flushes and runs the finalize handshake (`update_destination_status(search
-= Done)` + `check_and_finalize`). If the daemon restarts after the FTS5 rows are
+actor flushes and runs the finalize handshake (`resolve_destination(search =
+Done)`: the sink and the item's resolution in ONE transaction, because the actor
+is a second finalizer running concurrently with the processor's success path —
+as two steps, the processor could delete the row between them; a row already
+gone is an outcome, not an error). If the daemon restarts after the FTS5 rows are
 committed but before that handshake, `search_status` is stranded at
 `in_progress` with the work already on disk. On re-lease the file is unchanged
 (hash match) so `prepare_update` returns `Skip`, and `finalize_after_success`

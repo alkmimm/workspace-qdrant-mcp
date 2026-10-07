@@ -7,6 +7,7 @@
 //! Schema versioning is independent from `state.db` -- search.db starts at version 1.
 //! WAL mode is enabled for concurrent read access during writes.
 
+mod batch_finalize;
 pub mod batch_writer;
 pub mod branch_mirror;
 mod code_lines;

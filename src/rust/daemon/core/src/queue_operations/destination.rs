@@ -40,6 +40,18 @@ async fn mark_explicit_destination_results_on(
     Ok(())
 }
 
+/// The `unified_queue` column holding a destination's status.
+fn destination_column(destination: &str) -> QueueResult<&'static str> {
+    match destination {
+        "qdrant" => Ok("qdrant_status"),
+        "search" => Ok("search_status"),
+        _ => Err(QueueError::InvalidOperation(format!(
+            "Unknown destination: {}",
+            destination
+        ))),
+    }
+}
+
 /// Read both destination statuses, resolve the overall [`QueueStatus`], and
 /// persist it (when resolved to `Done`/`Failed`) on the given connection.
 /// Shared by [`QueueManager::check_and_finalize`] and the atomic success-path
@@ -155,6 +167,43 @@ impl QueueManager {
         Ok(overall)
     }
 
+    /// Set one destination's status and resolve the item, in ONE transaction:
+    /// for a finalizer that runs outside the item's handler (the FTS5 batch
+    /// writer), concurrently with the processor's success path.
+    ///
+    /// As two steps (`update_destination_status`, then `check_and_finalize`),
+    /// the processor could see both sinks done between them, delete the row,
+    /// and leave the second step failing on a row it could no longer find.
+    /// In one transaction the processor sees this sink's status only once the
+    /// item is already resolved.
+    ///
+    /// `None`: the row was gone before the update — another path (a cancel,
+    /// a prune) removed the item, and there is nothing left to resolve.
+    pub async fn resolve_destination(
+        &self,
+        queue_id: &str,
+        destination: &str,
+        status: DestinationStatus,
+    ) -> QueueResult<Option<QueueStatus>> {
+        let column = destination_column(destination)?;
+        let mut tx = self.pool.begin().await?;
+        let updated = sqlx::query(&format!(
+            "UPDATE unified_queue SET {column} = ?1, updated_at = ?2 WHERE queue_id = ?3"
+        ))
+        .bind(status.to_string())
+        .bind(timestamps::now_utc())
+        .bind(queue_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if updated == 0 {
+            return Ok(None);
+        }
+        let overall = check_and_finalize_on(&mut tx, queue_id).await?;
+        tx.commit().await.map_err(QueueError::Database)?;
+        Ok(Some(overall))
+    }
+
     /// Read the per-destination statuses for a queue item.
     ///
     /// Returns `(qdrant_status, search_status)` as raw strings (NULL → None).
@@ -185,16 +234,7 @@ impl QueueManager {
         destination: &str,
         status: DestinationStatus,
     ) -> QueueResult<()> {
-        let column = match destination {
-            "qdrant" => "qdrant_status",
-            "search" => "search_status",
-            _ => {
-                return Err(QueueError::InvalidOperation(format!(
-                    "Unknown destination: {}",
-                    destination
-                )))
-            }
-        };
+        let column = destination_column(destination)?;
 
         let now = timestamps::now_utc();
         let status_str = status.to_string();

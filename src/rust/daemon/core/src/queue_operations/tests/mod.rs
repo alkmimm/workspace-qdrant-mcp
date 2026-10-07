@@ -18,6 +18,7 @@ mod delete_completion_tests;
 mod destination_tests;
 mod enqueue_dequeue_tests;
 mod failure_tests;
+mod resolve_destination_tests;
 mod retry_tests;
 mod stats_cleanup_tests;
 mod validation_tests;
