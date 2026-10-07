@@ -94,6 +94,44 @@ metric to prove it, de-noise hotspots. All tree-sitter-only, no new extraction.
 
 ## Status updates
 
+- **2026-10-07 — Member identity (graph.db v8) + R7 receiver tier, first cut.**
+  Field report (Finance, `firestore_finance_writes.dart`): `test_gaps` flagged
+  `FirestoreFinanceBatch.set` as untested with 47 production dependents while a
+  test called it. Two defects, both language-agnostic:
+  1. **Node identity collapsed homonymous members.** The node id hashed
+     `(tenant, file, symbol_name, type)`, so `Batch.set` and `Transaction.set` in
+     one file were ONE node — the last writer kept it, and every caller of the
+     other class's method landed on it. The id is now
+     `compute_member_node_id(tenant, file, parent, name, type)`: a member hashes
+     `Parent.name`, a top-level symbol is unchanged. `graph_nodes.parent_symbol`
+     carries the class. Every producer of a caller id (extractor, ingest, LSP
+     backfill — which now READS the stored `node_id` instead of recomputing it)
+     goes through it. graph.db **v8** adds the column and wipes nodes, edges and
+     generations (the v7 precedent): the idle backfill rebuilds from the index,
+     no reembed.
+  2. **Calls through an instance variable resolved by name.** The extractor now
+     types call receivers from the CST text it already holds (CST-lite, R7): a
+     local constructed (`final b = Foo(...)`, `new Foo(...)`, `Foo::new(...)`), a
+     declared local/parameter/field (`Foo b` for Dart/Java/C#/C/C++/Vala,
+     `b: Foo` for TS/Kotlin/Rust/Python/Swift/Scala), with the constructor
+     winning over a declared interface type. When EVERY call site of a name in
+     the chunk has a typed receiver, the CALLS stub edge carries
+     `metadata_json = {"receiver_types": [...]}`; one untyped site withholds the
+     hint (no partial guessing). `pick_all` applies it BEFORE the own-file tier:
+     members whose `parent_symbol` is a receiver type → `receiver` @0.97 (enters
+     centrality and test_gaps); a receiver type that is no container of this
+     tenant (a library `WriteBatch`, `List`) → leave the stub (external); a
+     tenant type with no such member (inherited method) → fall through to the
+     by-name tiers. Untyped receivers keep the 1/N `ambiguous` fan-out.
+  Tests: `graph/tests/member_resolution_tests.rs` (homonymous members stay two
+  nodes; instance-variable calls from test and production bind to the class and
+  test_gaps stops reporting the gap; interface implementations resolve through
+  the constructed type, untyped keeps 1/3), `extractor/receivers.rs`,
+  `sqlite_store/resolution_tiers.rs`. Known gap: the incremental LSP path
+  (`call_hierarchy.rs` `resolved_call_edges`) still builds target ids with
+  `GraphNode::new(.., Function)` — a method target there gets a phantom node, as
+  before this change.
+
 - **2026-07-01 — Fan-out ceiling shipped (the actual lever for example-monorepo).** After
   R2.5+R4 landed, a fan-out audit on example-monorepo (`685731a5e037`) showed the ~617k
   `ambiguous` edges are the UNTOUCHED cause: **99.7% target `method`** (no

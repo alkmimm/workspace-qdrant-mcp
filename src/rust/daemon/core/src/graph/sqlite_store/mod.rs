@@ -3,9 +3,12 @@
 //! Rows are keyed by content generation (see `graph` module docs):
 //! `writes` replaces and deletes one generation at a time, `traversal`
 //! reads through a branch's [`GraphScope`], and `stub_resolution` repoints
-//! name-only references within the branches that hold the referring file.
+//! name-only references within the branches that hold the referring file, to
+//! the definition(s) `candidate_pick` chooses.
 
+mod candidate_pick;
 mod impact;
+mod resolution_tiers;
 mod stub_resolution;
 mod traversal;
 mod writes;

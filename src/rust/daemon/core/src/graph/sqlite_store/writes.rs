@@ -17,8 +17,8 @@ use crate::graph::{
 /// authoritative and self-healing.
 const UPSERT_NODE_SQL: &str = "INSERT INTO graph_nodes (node_id, generation, tenant_id,
         symbol_name, symbol_type, file_path, start_line, end_line, signature, language,
-        is_test_symbol, created_at, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+        is_test_symbol, created_at, updated_at, parent_symbol)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)
     ON CONFLICT(node_id, generation) DO UPDATE SET
         symbol_name = excluded.symbol_name,
         symbol_type = excluded.symbol_type,
@@ -29,6 +29,7 @@ const UPSERT_NODE_SQL: &str = "INSERT INTO graph_nodes (node_id, generation, ten
         signature = COALESCE(excluded.signature, graph_nodes.signature),
         language = COALESCE(excluded.language, graph_nodes.language),
         is_test_symbol = excluded.is_test_symbol,
+        parent_symbol = COALESCE(excluded.parent_symbol, graph_nodes.parent_symbol),
         updated_at = ?12";
 
 pub(super) const INSERT_EDGE_SQL: &str = "INSERT OR IGNORE INTO graph_edges
@@ -50,6 +51,7 @@ async fn write_node(conn: &mut SqliteConnection, node: &GraphNode, now: &str) ->
         .bind(&node.language)
         .bind(node.is_test_symbol as i64)
         .bind(now)
+        .bind(&node.parent_symbol)
         .execute(conn)
         .await?;
     Ok(())

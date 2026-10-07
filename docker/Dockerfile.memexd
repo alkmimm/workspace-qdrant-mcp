@@ -559,6 +559,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # orphan-generation sweep's guards, the backfill finding a version only where
 # its bytes are — on disk, or at a live branch tip in git when no checkout
 # holds it — and the gRPC answer carrying its branch and coverage.
+# Until graph.db v8 a node was keyed by (file, name, type), so two classes'
+# homonymous methods in one file were ONE node and calls through an instance
+# variable resolved by name alone (Finance 2026-10-07: every call to
+# `FirestoreFinanceBatch.set` landed on `FirestoreFinanceTransaction.set`, and
+# test_gaps reported the tested method as a gap with 47 dependents). The suites
+# pin member identity (`Parent.name`), the receiver-typed hint the extractor
+# emits, and the resolver binding it @0.97 or leaving a library receiver's call
+# unresolved.
 # Gating whole suites is deliberate: none of these ran before, and one of them
 # (`test_pagerank_on_extracted_graph`) had been failing unnoticed since the IDF
 # demotion landed (#164). Exact counts asserted — libtest exits 0 when a filter
@@ -571,8 +579,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         graph:: strategies::processing::file::graph_backfill::tests git::tips::tests \
         strategies::processing::file::graph_ingest::tests \
         --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
-    grep -q "^test result: ok\. 248 passed" /tmp/graph-core.log \
-    || { echo "GATE: expected exactly 248 core graph tests (graph::, backfill, ingest, git::tips) to run and \
+    grep -q "^test result: ok\. 257 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 257 core graph tests (graph::, backfill, ingest, git::tips) to run and \
 pass. If you ADDED a test here, bump this count."; exit 1; } \
  && cargo test -p workspace-qdrant-core --no-fail-fast \
         --test graph_algorithm_tests --test graph_extractor_tests \

@@ -18,7 +18,7 @@ use crate::context::ProcessingContext;
 use crate::graph::extractor::{
     extract_edges_from_text_chunks, node_type_from_display_name, ExtractionResult,
 };
-use crate::graph::{compute_node_id, EdgeType, GraphEdge, NodeType};
+use crate::graph::{compute_member_node_id, compute_node_id, EdgeType, GraphEdge, NodeType};
 use crate::lsp::{resolved_call_edges, symbol_column_in_line};
 use crate::TextChunk;
 
@@ -191,7 +191,8 @@ async fn resolve_calls_via_lsp(
             continue;
         }
 
-        let caller_id = compute_node_id(tenant_id, file_path, symbol, node_type);
+        let parent = meta.get("parent_symbol").map(String::as_str);
+        let caller_id = compute_member_node_id(tenant_id, file_path, parent, symbol, node_type);
         // R8.1 — the LSP is AUTHORITATIVE for the calls it resolved: drop this
         // caller's tree-sitter fuzzy stub CALLS edges for those callee names so
         // `resolve_stub_edges` cannot fan them out to every same-named method.
