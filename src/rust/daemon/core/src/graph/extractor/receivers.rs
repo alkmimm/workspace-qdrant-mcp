@@ -211,9 +211,15 @@ fn receiver_of(content: &str, at: usize) -> Option<&str> {
     let before = content[..at].trim_end();
     let before = before.strip_suffix('?').unwrap_or(before);
     let before = before.strip_suffix('.')?.trim_end();
+    // The identifier starts after the last non-identifier CHARACTER, whose
+    // width is not 1 byte in general: `i + 1` split `ç`/`á` in Portuguese
+    // comments and panicked the whole queue item (live 2026-10-07). Unicode
+    // letters count as identifier characters (Java/Kotlin/Dart allow them).
     let start = before
-        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .map_or(0, |i| i + 1);
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(c.is_alphanumeric() || c == '_'))
+        .map_or(0, |(i, c)| i + c.len_utf8());
     let receiver = &before[start..];
     if receiver.is_empty() {
         return None;
@@ -341,5 +347,30 @@ mod tests {
         );
         let store: BTreeSet<String> = ["OrderStore".to_string()].into();
         assert_eq!(hints.get("save"), Some(&store));
+    }
+
+    /// Live 2026-10-07: Java tests with Portuguese comments panicked the queue
+    /// item — the scan stepped one BYTE past the last non-identifier char,
+    /// which split `ç`/`á`. Accented words are identifier text, `—` is not.
+    #[test]
+    fn multibyte_text_before_a_receiver_never_splits_a_char() {
+        let body = "void t() {\n    // valida a configuração.set(x) — ação.set(y)\n    \
+                    Batch configuração = new Batch();\n    configuração.set(z);\n}";
+        let types = declared_types(body, "java");
+        // `configuração.set` ends in `ação.set` too: aim at the bare word.
+        let at = |needle: &str| body.find(needle).unwrap() + needle.len() - "set".len();
+        assert_eq!(receiver_of(body, at("— ação.set")), Some("ação"));
+        assert_eq!(
+            receiver_of(body, at("a configuração.set")),
+            Some("configuração")
+        );
+        let hints = receiver_types(body, &calls(&["set"]), &types, "t");
+        assert_eq!(hints.get("set"), None, "ação has no declared type");
+
+        let typed = "void t() {\n    Batch configuração = new Batch();\n    // ação —\n    \
+                     configuração.set(z);\n}";
+        let hints = receiver_types(typed, &calls(&["set"]), &declared_types(typed, "java"), "t");
+        let batch: BTreeSet<String> = ["Batch".to_string()].into();
+        assert_eq!(hints.get("set"), Some(&batch));
     }
 }

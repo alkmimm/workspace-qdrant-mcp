@@ -581,8 +581,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         graph:: strategies::processing::file::graph_backfill::tests git::tips::tests \
         strategies::processing::file::graph_ingest::tests \
         --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
-    grep -q "^test result: ok\. 258 passed" /tmp/graph-core.log \
-    || { echo "GATE: expected exactly 258 core graph tests (graph::, backfill, ingest, git::tips) to run and \
+    grep -q "^test result: ok\. 259 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 259 core graph tests (graph::, backfill, ingest, git::tips) to run and \
 pass. If you ADDED a test here, bump this count."; exit 1; } \
  && cargo test -p workspace-qdrant-core --no-fail-fast \
         --test graph_algorithm_tests --test graph_extractor_tests \
