@@ -13,4 +13,6 @@ mod service_impl;
 pub use service_impl::GraphServiceImpl;
 
 #[cfg(test)]
+mod impact_tests;
+#[cfg(test)]
 mod tests;

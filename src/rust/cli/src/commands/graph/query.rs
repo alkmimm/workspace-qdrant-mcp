@@ -70,10 +70,11 @@ pub async fn query_related(
             } else {
                 n.file_path.clone()
             };
-            println!(
-                "  {} {} ({}) [{}]",
-                n.edge_type, n.symbol_name, n.symbol_type, loc
-            );
+            let symbol = match n.parent_symbol.as_deref() {
+                Some(parent) => format!("{parent}.{}", n.symbol_name),
+                None => n.symbol_name.clone(),
+            };
+            println!("  {} {} ({}) [{}]", n.edge_type, symbol, n.symbol_type, loc);
         }
     }
 

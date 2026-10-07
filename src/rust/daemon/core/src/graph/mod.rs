@@ -353,7 +353,16 @@ pub struct TraversalNode {
     /// <0.6 = one of N ambiguous same-name candidates (R1 fan-out). Lets a
     /// caller rank/filter usages by how sure the resolver was.
     pub confidence: f64,
+    /// The class (struct, impl, …) the symbol is a member of, so two
+    /// homonymous methods read as `Batch.set` and `Transaction.set`.
+    #[serde(default)]
+    pub parent_symbol: Option<String>,
 }
+
+/// Reverse-walk depth of `impact` when the caller does not ask for one.
+pub const DEFAULT_IMPACT_HOPS: u32 = 3;
+/// Deepest reverse walk `impact` accepts (the same ceiling as `relations`).
+pub const MAX_IMPACT_HOPS: u32 = 5;
 
 /// Result of an impact analysis query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,6 +370,18 @@ pub struct ImpactReport {
     pub symbol_name: String,
     pub impacted_nodes: Vec<ImpactNode>,
     pub total_impacted: u32,
+    /// Depth the reverse walk went to.
+    #[serde(default)]
+    pub max_hops: u32,
+    /// Callers left out because the only edge reaching them is an ambiguous
+    /// same-name guess (weight below the floor a pinned `file_path` applies).
+    /// Reported because the cut is otherwise invisible: the answer simply
+    /// reads as complete.
+    #[serde(default)]
+    pub dropped_below_floor: u32,
+    /// The walk stopped at its node budget: the blast radius is truncated.
+    #[serde(default)]
+    pub node_budget_reached: bool,
 }
 
 /// A node impacted by a symbol change.
@@ -368,6 +389,9 @@ pub struct ImpactReport {
 pub struct ImpactNode {
     pub node_id: String,
     pub symbol_name: String,
+    /// The class the symbol is a member of (see [`TraversalNode`]).
+    #[serde(default)]
+    pub parent_symbol: Option<String>,
     pub file_path: String,
     pub impact_type: String,
     pub distance: u32,

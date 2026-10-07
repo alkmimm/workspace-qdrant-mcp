@@ -638,9 +638,9 @@ Navigate the **code-relationship graph** the daemon builds from symbol relations
 |-----------|------|----------|---------|-------------|
 | `action` | string | Yes | `stats` | One of `stats`, `relations`, `impact`, `usages`, `hotspots`, `bridges`, `modules` (see below) |
 | `symbol` | string | For `impact`/`relations` | — | Symbol name |
-| `filePath` | string | For `relations` | — | Relative path of the symbol's definition (optional narrowing for `impact`) |
+| `filePath` | string | For `relations` | — | Relative path of the symbol's definition (optional narrowing for `impact`/`usages`; see "Pinned definitions" below) |
 | `symbolType` | string | No | `function` | Symbol kind for `relations` node lookup (`function`, `async_function`, `method`, `struct`, `class`, `enum`, `interface`, `trait`, `type_alias`, `constant`, `module`, `macro`, `impl`). Falls back to name resolution if it doesn't match. |
-| `maxHops` | number | No | `1` | Traversal depth for `relations` (1–5) |
+| `maxHops` | number | No | `1` / `3` | Traversal depth (1–5): `relations` default 1; `impact` default 3, echoed in the response as `max_hops` (above 5 is capped). `usages` is always one hop |
 | `topK` | number | No | `20` / `50` | Max results (top symbols for hotspots/bridges/modules = 20; max nodes for impact/usages/relations = 50; `0` = all, true total still reported) |
 | `minConfidence` | number | No | — | For `relations`/`impact`/`usages`: drop nodes whose best-path `confidence` is below this (0–1). Use ~`0.5` to suppress ambiguous same-name (homonym) fan-out. |
 | `minSize` | number | No | `2` | Minimum community size for `modules` |
@@ -664,7 +664,11 @@ Navigate the **code-relationship graph** the daemon builds from symbol relations
 | `bridges` | Bottleneck symbols on many shortest paths (betweenness) |
 | `modules` | Code clusters (community detection) |
 
-> **Confidence.** Each `relations`/`impact`/`usages` node carries a best-path `confidence`: ~`1.0` precise, `0.97` a call through a typed variable bound to that type's member (`batch.set` → `FirestoreFinanceBatch.set`), `0.7` a tenant-unique name, ~`1/N` (e.g. `0.17`) an ambiguous same-name fan-out. Pass `minConfidence` to filter homonym noise at the daemon (before `topK` and the reported total).
+> **Confidence.** Each `relations`/`impact`/`usages` node carries a best-path `confidence`: ~`1.0` precise, `0.97` a call through a typed variable bound to that type's member (`batch.set` → `FirestoreFinanceBatch.set`), `0.7` a tenant-unique name, ~`1/N` (e.g. `0.17`) an ambiguous same-name fan-out. Pass `minConfidence` to filter homonym noise at the daemon (before `topK` and the reported total). A class member carries `parent_symbol`, so homonymous methods (`Batch.set`, `Transaction.set`) read apart.
+
+> **Pinned definitions.** `impact`/`usages` with `filePath` answer for ONE definition, so they do not follow an ambiguous edge (confidence < 0.6: a call that could resolve to several same-named definitions). The callers that leaves out — those no stronger edge reaches — are counted in `dropped_below_confidence_floor`, and the `hint` says so; omit `filePath` to see them with their confidence. `node_budget_reached: true` means the walk stopped at the daemon's node budget and the blast radius is truncated.
+
+> **test_gaps and ambiguous test calls.** A test call below the 0.6 gate does not count as coverage. Such a gap carries `ambiguous_test_callers > 0` (and `parent_symbol` when it is a method); `gaps_with_ambiguous_test_callers` counts them across all gaps, and the `hint` says how many may well be tested.
 
 ### Examples
 

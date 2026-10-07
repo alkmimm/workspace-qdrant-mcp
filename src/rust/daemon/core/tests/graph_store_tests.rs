@@ -175,6 +175,7 @@ async fn test_impact_analysis_end_to_end() {
             TENANT,
             "process",
             Some("src/processor.rs"),
+            workspace_qdrant_core::graph::DEFAULT_IMPACT_HOPS,
             &GraphScope::all(),
         )
         .await
@@ -205,6 +206,7 @@ async fn test_impact_analysis_isolated_symbol() {
             TENANT,
             "validate",
             Some("src/processor.rs"),
+            workspace_qdrant_core::graph::DEFAULT_IMPACT_HOPS,
             &GraphScope::all(),
         )
         .await

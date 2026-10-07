@@ -53,6 +53,15 @@ pub async fn test_gaps(
     );
     output::kv("Test symbols indexed", resp.test_nodes.to_string());
     output::kv("Gaps", resp.gap_count.to_string());
+    if resp.gaps_with_ambiguous_test_callers > 0 {
+        output::kv(
+            "Gaps a test calls ambiguously",
+            format!(
+                "{} (possibly tested: AMBIG > 0 below)",
+                resp.gaps_with_ambiguous_test_callers
+            ),
+        );
+    }
 
     // Lead with the caveat when the daemon judged the measurement broken — a
     // ranking printed above an unread trailing note reads as authoritative.
@@ -67,16 +76,24 @@ pub async fn test_gaps(
         return Ok(());
     }
 
-    println!("{:<36} {:<10} {:>6}  FILE", "SYMBOL", "TYPE", "DEPS");
+    println!(
+        "{:<36} {:<10} {:>6} {:>5}  FILE",
+        "SYMBOL", "TYPE", "DEPS", "AMBIG"
+    );
     for g in &resp.gaps {
+        let symbol = match g.parent_symbol.as_deref() {
+            Some(parent) => format!("{parent}.{}", g.symbol_name),
+            None => g.symbol_name.clone(),
+        };
         println!(
-            "{:<36} {:<10} {:>6}  {}",
-            g.symbol_name, g.symbol_type, g.production_dependents, g.file_path
+            "{:<36} {:<10} {:>6} {:>5}  {}",
+            symbol, g.symbol_type, g.production_dependents, g.ambiguous_test_callers, g.file_path
         );
     }
 
     println!(
-        "\nShowing {}/{} gaps ({}ms). DEPS = production symbols that depend on it.",
+        "\nShowing {}/{} gaps ({}ms). DEPS = production symbols that depend on it. \
+         AMBIG = tests that call it only through an ambiguous same-name call.",
         resp.gaps.len(),
         resp.gap_count,
         resp.query_time_ms
@@ -85,8 +102,8 @@ pub async fn test_gaps(
         "Note: coverage = call-graph reachability from test code, NOT execution coverage. \
          Tests are detected by file path AND by symbol — Rust INLINE #[cfg(test)] / #[test] \
          unit tests (which share a production file) are counted, so a re-indexed tenant no \
-         longer over-reports gaps. A gap whose only test edge is below the graph's 0.6 \
-         ambiguity gate can still read as untested."
+         longer over-reports gaps. A test call below the graph's 0.6 ambiguity gate does not \
+         count as coverage; AMBIG shows where that happened."
     );
 
     Ok(())

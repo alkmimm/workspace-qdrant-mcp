@@ -778,7 +778,8 @@ message TraversalNodeProto {
     string edge_type = 5;                         // EdgeType as string (e.g., "CALLS")
     uint32 depth = 6;                             // Hops from source node
     string path = 7;                              // [non-path] Traversal path description
-    double confidence = 8;                        // Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.95 scoped, 0.85 proximity, 0.7 unique, <0.6 ambiguous
+    double confidence = 8;                        // Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.97 typed receiver, 0.95 scoped, 0.85 proximity, 0.7 unique, <0.6 ambiguous
+    optional string parent_symbol = 9;            // The class (struct, impl, ...) the symbol is a member of; absent for a top-level symbol
 }
 
 // ImpactAnalysis Request
@@ -789,6 +790,7 @@ message ImpactAnalysisRequest {
     optional uint32 top_k = 4;                    // Max impacted nodes returned, nearest-first (0/absent = all)
     optional double min_confidence = 5;           // Drop impacted nodes whose best-path confidence < this (0/absent = all; >1.0 rejected as INVALID_ARGUMENT)
     optional string branch = 6;                 // Branch to answer for (absent = the branch the project's main folder has checked out; "*" = every branch)
+    optional uint32 max_hops = 7;                 // Depth of the reverse walk, 1-5 (0/absent = 3; above 5 is capped at 5, and the response's max_hops says so)
 }
 
 // ImpactAnalysis Response
@@ -800,6 +802,12 @@ message ImpactAnalysisResponse {
     // threshold that drops nothing is otherwise byte-identical to passing none.
     uint32 filtered_by_min_confidence = 4;
     GraphScopeProto scope = 5;                  // Which branch this describes and how much of it the graph has extracted
+    uint32 max_hops = 6;                          // Depth the reverse walk went to (the request's, defaulted and capped)
+    // Callers left out because a pinned file_path drops ambiguous same-name
+    // edges (weight < 0.6) and no stronger edge reaches them. Without this count
+    // the cut is invisible and the answer reads as complete.
+    uint32 dropped_below_confidence_floor = 7;
+    bool node_budget_reached = 8;                 // The walk stopped at its node budget: the blast radius is truncated
 }
 
 // A node impacted by a symbol change
@@ -809,7 +817,8 @@ message ImpactNodeProto {
     string file_path = 3;                             // [relative] Relative to project root
     string impact_type = 4;                       // "direct_caller", "indirect_caller", etc.
     uint32 distance = 5;                          // Hops from changed symbol
-    double confidence = 6;                        // Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.95 scoped, 0.85 proximity, 0.7 unique, <0.6 ambiguous
+    double confidence = 6;                        // Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.97 typed receiver, 0.95 scoped, 0.85 proximity, 0.7 unique, <0.6 ambiguous
+    optional string parent_symbol = 7;            // The class (struct, impl, ...) the symbol is a member of; absent for a top-level symbol
 }
 
 // GraphStats Request
@@ -987,6 +996,7 @@ message TestGapsResponse {
     uint32 excluded_non_production = 8;           // Candidates dropped from the denominator as TOOLING (scripts/), reported so a moved denominator is visible
     repeated LanguageCoverageProto coverage_by_language = 9; // Coverage split by extension, largest first — a global ratio hides a per-language extraction failure
     GraphScopeProto scope = 10;                  // Which branch this describes and how much of it the graph has extracted
+    uint32 gaps_with_ambiguous_test_callers = 11; // Of gap_count, gaps a test calls only through an ambiguous same-name edge (below the 0.6 gate): possibly tested, not counted as covered
 }
 
 // Per-language slice of the coverage summary.
@@ -1004,6 +1014,8 @@ message TestGapProto {
     string symbol_type = 3;
     string file_path = 4;                             // [relative] Relative to project root
     uint32 production_dependents = 5;                 // Non-test nodes that depend on this symbol
+    uint32 ambiguous_test_callers = 6;                // Test nodes calling this symbol only through an ambiguous same-name edge: non-zero = possibly tested
+    optional string parent_symbol = 7;                // The class (struct, impl, ...) the symbol is a member of; absent for a top-level symbol
 }
 
 // Graph Migration Request

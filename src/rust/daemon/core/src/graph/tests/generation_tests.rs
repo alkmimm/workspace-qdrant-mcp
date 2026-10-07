@@ -127,14 +127,26 @@ async fn a_symbol_the_branch_does_not_define_is_not_reported() {
 async fn impact_counts_callers_from_the_branch_only() {
     let (store, _) = two_branch_store().await;
     let on_dev = store
-        .impact_analysis(TENANT, "listCommands", None, &scope(&[DEV, "legacy-dev"]))
+        .impact_analysis(
+            TENANT,
+            "listCommands",
+            None,
+            DEFAULT_IMPACT_HOPS,
+            &scope(&[DEV, "legacy-dev"]),
+        )
         .await
         .unwrap();
     assert_eq!(on_dev.total_impacted, 1, "develop's page.render calls it");
 
     // fase-5 holds neither legacy.ts nor develop's page.tsx.
     let on_f5 = store
-        .impact_analysis(TENANT, "listCommands", None, &scope(&[F5, "actions-f5"]))
+        .impact_analysis(
+            TENANT,
+            "listCommands",
+            None,
+            DEFAULT_IMPACT_HOPS,
+            &scope(&[F5, "actions-f5"]),
+        )
         .await
         .unwrap();
     assert_eq!(on_f5.total_impacted, 0);

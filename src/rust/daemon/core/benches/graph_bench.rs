@@ -261,6 +261,7 @@ fn bench_impact_analysis(c: &mut Criterion) {
                     black_box(tenant),
                     black_box(target),
                     None,
+                    workspace_qdrant_core::graph::DEFAULT_IMPACT_HOPS,
                     &workspace_qdrant_core::graph::GraphScope::all(),
                 ))
                 .unwrap();

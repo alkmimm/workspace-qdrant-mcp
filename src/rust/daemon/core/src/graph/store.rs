@@ -110,12 +110,14 @@ pub trait GraphStore: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Find all nodes in `scope` that would be affected by changing a symbol.
+    /// Find all nodes in `scope` that would be affected by changing a symbol,
+    /// walking callers back up to `max_hops` hops.
     async fn impact_analysis(
         &self,
         tenant_id: &str,
         symbol_name: &str,
         file_path: Option<&str>,
+        max_hops: u32,
         scope: &GraphScope,
     ) -> GraphDbResult<ImpactReport>;
 
