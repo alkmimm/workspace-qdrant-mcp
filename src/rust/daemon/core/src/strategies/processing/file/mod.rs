@@ -23,6 +23,7 @@ mod fts5_index;
 mod grammar;
 mod graph_backfill;
 mod graph_ingest;
+mod graph_lsp_calls;
 mod ingest;
 mod item_metadata;
 mod keyword_extract;

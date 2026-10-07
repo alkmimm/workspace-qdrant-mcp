@@ -94,6 +94,25 @@ metric to prove it, de-noise hotspots. All tree-sitter-only, no new extraction.
 
 ## Status updates
 
+- **2026-10-07 — The ingest-time LSP pass locates calls instead of guessing
+  callee ids.** Closes the "known gap" of the entry below. The server reports
+  a callee's name, file and line, never its kind; the pass built
+  `GraphNode::new(file, name, Function)` for every callee, so a METHOD target
+  (whose id hashes its class) got a phantom `Function` node — 18 in the live
+  graph (workspace-qdrant-mcp, bws), each also a spurious by-name candidate,
+  since a phantom has a real `file_path`. Now the pass writes the definition
+  sites onto the caller's CALLS stub (`{"lsp_sites": [[file, line0], ...]}`,
+  `graph::lsp_sites`) and mints no node; `pick_all` binds each site to the
+  candidate in that file whose start line is nearest (`lsp` @1.0), before the
+  receiver tier. Semantics kept from the old pass: a name the server resolved
+  only into a dependency carries no site and binds to nothing of ours (the old
+  pass dropped that stub). New: a site whose file has no node yet (ingest order)
+  falls back to the by-name tiers; a call only the server saw (a constructor it
+  names `__init__`) gets its own stub marked `lsp_only` and stays unresolved if
+  its site binds nothing. The R8.3 backfill already looked callees up by
+  `(file, name, nearest line)` and is unchanged. The pass moved to
+  `strategies/processing/file/graph_lsp_calls.rs`.
+
 - **2026-10-07 — Member identity (graph.db v8) + R7 receiver tier, first cut.**
   Field report (Finance, `firestore_finance_writes.dart`): `test_gaps` flagged
   `FirestoreFinanceBatch.set` as untested with 47 production dependents while a

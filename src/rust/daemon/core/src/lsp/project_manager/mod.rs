@@ -50,7 +50,7 @@ use crate::config::LspSettings;
 pub use call_hierarchy::ResolvedCall;
 pub use metrics::ProjectLspStats;
 // Crate-internal helpers reused by the ingestion graph pass.
-pub(crate) use call_hierarchy::resolved_call_edges;
+pub(crate) use call_hierarchy::call_sites_by_name;
 pub(crate) use enrichment::symbol_column_in_line;
 
 // NOTE: StateManager and persistence removed as part of 3-table SQLite compliance.

@@ -9,6 +9,7 @@ use super::candidate_pick::{CandidateIndex, StubRef};
 use super::resolution_tiers::{receiver_types, resolution_metadata};
 use super::writes::INSERT_EDGE_SQL;
 use super::SqliteGraphStore;
+use crate::graph::lsp_sites::lsp_sites;
 use crate::graph::{compute_edge_id, EdgeType, GenerationBranches, GraphDbResult};
 
 impl SqliteGraphStore {
@@ -132,8 +133,10 @@ async fn repoint_target_stubs(
         let source_file: String = d.get("source_file");
         let source_node_id: String = d.get("source_node_id");
         let generation: String = d.get("generation");
-        let receiver = receiver_types(d.get::<Option<String>, _>("metadata_json").as_deref());
-        let candidates = index.pick_all(&StubRef {
+        let metadata = d.get::<Option<String>, _>("metadata_json");
+        let receiver = receiver_types(metadata.as_deref());
+        let lsp = lsp_sites(metadata.as_deref());
+        let picked = index.pick_all(&StubRef {
             name: &peer_name,
             own_file: &source_file,
             generation: &generation,
@@ -141,7 +144,9 @@ async fn repoint_target_stubs(
             caller_lang: index.language_of(&source_node_id),
             container_only: false,
             receiver: receiver.as_deref(),
+            lsp: lsp.as_ref(),
         });
+        let candidates = picked.targets;
         if candidates.is_empty() {
             continue; // external/stdlib or unresolved — leave it a stub.
         }
@@ -163,7 +168,11 @@ async fn repoint_target_stubs(
                 .bind(edge_type.as_str())
                 .bind(&source_file)
                 .bind(*confidence)
-                .bind(resolution_metadata(*confidence, candidates.len()))
+                .bind(resolution_metadata(
+                    *confidence,
+                    candidates.len(),
+                    picked.located,
+                ))
                 .bind(now)
                 .execute(&mut **tx)
                 .await?;
@@ -204,7 +213,9 @@ async fn repoint_source_stubs(
                 caller_lang: index.language_of(&target_node_id),
                 container_only: true,
                 receiver: None,
+                lsp: None,
             })
+            .targets
             .into_iter()
             .find(|(_, c)| *c >= 0.7)
             .map(|(nid, _)| nid)

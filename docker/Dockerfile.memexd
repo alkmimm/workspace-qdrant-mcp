@@ -602,6 +602,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # unresolved. The same report found `impact` ignoring `maxHops` (always 3 hops)
 # and a pinned `filePath` dropping ambiguous callers in silence: the GraphService
 # suite pins the depth walked (and echoed) and the dropped-caller count.
+# The ingest-time LSP pass guessed every callee's id as a `Function`, minting a
+# phantom node for each method callee: the pass and the call-site grouping
+# (`graph_lsp_calls`, `call_hierarchy`) are pinned with the resolver binding the
+# server's site to the definition sitting there.
 # Gating whole suites is deliberate: none of these ran before, and one of them
 # (`test_pagerank_on_extracted_graph`) had been failing unnoticed since the IDF
 # demotion landed (#164). Exact counts asserted — libtest exits 0 when a filter
@@ -614,10 +618,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- \
         graph:: strategies::processing::file::graph_backfill::tests git::tips::tests \
         strategies::processing::file::graph_ingest::tests \
+        strategies::processing::file::graph_lsp_calls::tests \
+        lsp::project_manager::call_hierarchy::tests \
         --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
-    grep -q "^test result: ok\. 259 passed" /tmp/graph-core.log \
-    || { echo "GATE: expected exactly 259 core graph tests (graph::, backfill, ingest, git::tips) to run and \
-pass. If you ADDED a test here, bump this count."; exit 1; } \
+    grep -q "^test result: ok\. 272 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 272 core graph tests (graph::, backfill, ingest, LSP calls, git::tips) \
+to run and pass. If you ADDED a test here, bump this count."; exit 1; } \
  && cargo test -p workspace-qdrant-core --no-fail-fast \
         --test graph_algorithm_tests --test graph_extractor_tests \
         --test graph_migration_tests --test graph_store_tests \

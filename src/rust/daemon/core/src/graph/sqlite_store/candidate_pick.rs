@@ -4,6 +4,7 @@
 //!
 //! | tier                          | result                 |
 //! |-------------------------------|------------------------|
+//! | language-server site (R8)     | `[(node, 1.0)]` each   |
 //! | receiver-typed member (R7)    | `[(member, 0.97)]` each |
 //! | own-file definition           | `[(node, 1.0)]`        |
 //! | caller's class (R2 scope)     | `[(node, 0.95)]`       |
@@ -13,6 +14,7 @@
 //! | ambiguous (2..=ceiling)       | `[(c, 1/N)]` KEEP ALL  |
 //! | hyper-ambiguous (N > ceiling) | `[]` unresolved        |
 //! | library receiver / no match   | `[]` leave it a stub   |
+//! | server: into a dependency     | `[]` leave it a stub   |
 //!
 //! The pool holds only definitions that share a branch with the referring file
 //! version: a name defined once per branch is unique on each branch, not
@@ -23,8 +25,9 @@ use std::collections::{HashMap, HashSet};
 
 use sqlx::{Row, SqlitePool};
 
-use super::resolution_tiers::RECEIVER_CONFIDENCE;
+use super::resolution_tiers::{LSP_CONFIDENCE, RECEIVER_CONFIDENCE};
 use super::SqliteGraphStore;
+use crate::graph::lsp_sites::{LspSite, LspSites};
 use crate::graph::{GenerationBranches, GraphDbResult};
 
 /// One real definition a stub name can resolve to. A node unchanged across
@@ -36,7 +39,18 @@ struct Candidate {
     symbol_type: String,
     /// The class (struct, impl, …) the definition is a member of.
     parent_symbol: Option<String>,
-    generations: Vec<String>,
+    /// Each defining generation with the definition's 1-indexed start line
+    /// in that version.
+    versions: Vec<(String, Option<u32>)>,
+}
+
+/// What a stub resolved to.
+#[derive(Debug, Default)]
+pub(super) struct Picked {
+    /// Each target with the confidence of the tier that chose it.
+    pub targets: Vec<(String, f64)>,
+    /// The language server located the call (see `graph::lsp_sites`).
+    pub located: bool,
 }
 
 /// The stub reference being resolved.
@@ -53,6 +67,8 @@ pub(super) struct StubRef<'q> {
     pub container_only: bool,
     /// Declared types of the call's receiver, as the extractor read them.
     pub receiver: Option<&'q [String]>,
+    /// Where the language server said the callee is defined.
+    pub lsp: Option<&'q LspSites>,
 }
 
 /// Everything the pick consults, loaded once per resolution pass.
@@ -107,19 +123,78 @@ impl<'m> CandidateIndex<'m> {
     }
 
     /// Resolve a stub to real definition node(s), each with its confidence.
-    pub(super) fn pick_all(&self, stub: &StubRef) -> Vec<(String, f64)> {
+    pub(super) fn pick_all(&self, stub: &StubRef) -> Picked {
         let in_pool = self.pool_for(stub);
+        if let Some(hint) = stub.lsp {
+            let located = self.by_lsp_site(stub, &in_pool, &hint.sites);
+            // The server's answer decides — no site means it resolved the
+            // name into a dependency, nothing of ours — except a site that
+            // binds nothing (a file not graphed yet): a call tree-sitter also
+            // saw then falls to the tiers below, as if the server had not
+            // answered; a call only the server saw has no other evidence.
+            if !located.is_empty() || hint.sites.is_empty() || hint.lsp_only {
+                return Picked {
+                    targets: located,
+                    located: true,
+                };
+            }
+        }
         if in_pool.is_empty() {
-            return Vec::new();
+            return Picked::default();
         }
-        if let Some(decided) = stub.receiver.and_then(|t| self.by_receiver(&in_pool, t)) {
-            return decided;
+        let targets = match stub.receiver.and_then(|t| self.by_receiver(&in_pool, t)) {
+            Some(decided) => decided,
+            None => {
+                let pool: Vec<(&str, &str)> = in_pool
+                    .iter()
+                    .map(|c| (c.node_id.as_str(), c.file_path.as_str()))
+                    .collect();
+                self.by_name_tiers(stub, &pool)
+            }
+        };
+        Picked {
+            targets,
+            located: false,
         }
-        let pool: Vec<(&str, &str)> = in_pool
+    }
+
+    /// The definitions sitting where the language server said the callee is:
+    /// per site, the candidate in that file whose start line (in a version
+    /// the reference can see) is nearest the site — a name can repeat in one
+    /// file (two classes' `set`, an overload).
+    fn by_lsp_site(
+        &self,
+        stub: &StubRef,
+        pool: &[&Candidate],
+        sites: &[LspSite],
+    ) -> Vec<(String, f64)> {
+        let mut located: Vec<(String, f64)> = Vec::new();
+        for (file, line) in sites {
+            let nearest = pool
+                .iter()
+                .filter(|c| &c.file_path == file)
+                .min_by_key(|c| self.site_distance(stub, c, *line))
+                .map(|c| c.node_id.clone());
+            if let Some(node_id) = nearest {
+                if !located.iter().any(|(n, _)| *n == node_id) {
+                    located.push((node_id, LSP_CONFIDENCE));
+                }
+            }
+        }
+        located
+    }
+
+    /// Lines between a candidate's start (1-indexed) and a site's 0-indexed
+    /// line, over the versions the reference can see.
+    fn site_distance(&self, stub: &StubRef, candidate: &Candidate, line: u32) -> u64 {
+        let site = i64::from(line) + 1;
+        candidate
+            .versions
             .iter()
-            .map(|c| (c.node_id.as_str(), c.file_path.as_str()))
-            .collect();
-        self.by_name_tiers(stub, &pool)
+            .filter(|(g, _)| self.membership.co_visible(stub.generation, g))
+            .map(|(_, start)| start.map_or(u64::MAX, |s| (i64::from(s) - site).unsigned_abs()))
+            .min()
+            .unwrap_or(u64::MAX)
     }
 
     /// Definitions of the stub's name the referring version can see, in its
@@ -134,9 +209,9 @@ impl<'m> CandidateIndex<'m> {
                 !stub.container_only || SqliteGraphStore::is_container_node_type(&c.symbol_type)
             })
             .filter(|c| {
-                c.generations
+                c.versions
                     .iter()
-                    .any(|g| self.membership.co_visible(stub.generation, g))
+                    .any(|(g, _)| self.membership.co_visible(stub.generation, g))
             })
             .filter(|c| match (stub.caller_lang, self.language_of(&c.node_id)) {
                 (Some(cl), Some(tl)) => cl == tl,
@@ -264,7 +339,7 @@ type CandidateMaps = (
 async fn load_candidates(pool: &SqlitePool, tenant_id: &str) -> GraphDbResult<CandidateMaps> {
     let rows = sqlx::query(
         "SELECT node_id, generation, symbol_name, file_path, symbol_type, language,
-                parent_symbol
+                parent_symbol, start_line
          FROM graph_nodes
          WHERE tenant_id = ?1 AND file_path <> '' AND symbol_type <> 'file'",
     )
@@ -287,16 +362,20 @@ async fn load_candidates(pool: &SqlitePool, tenant_id: &str) -> GraphDbResult<Ca
         if SqliteGraphStore::is_container_node_type(&symbol_type) {
             container_names.insert(name.clone());
         }
-        let generation: String = r.get("generation");
+        let version = (
+            r.get::<String, _>("generation"),
+            r.get::<Option<i64>, _>("start_line")
+                .and_then(|l| u32::try_from(l).ok()),
+        );
         let entries = by_name.entry(name).or_default();
         match entries.iter_mut().find(|c| c.node_id == nid) {
-            Some(c) => c.generations.push(generation),
+            Some(c) => c.versions.push(version),
             None => entries.push(Candidate {
                 node_id: nid,
                 file_path: r.get("file_path"),
                 symbol_type,
                 parent_symbol: r.get("parent_symbol"),
-                generations: vec![generation],
+                versions: vec![version],
             }),
         }
     }

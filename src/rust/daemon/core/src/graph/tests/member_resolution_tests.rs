@@ -336,3 +336,81 @@ async fn interface_implementations_resolve_through_the_constructed_type() {
         .iter()
         .all(|c| (c.2 - 1.0 / 3.0).abs() < 1e-9 && c.3.contains("\"ambiguous\"")));
 }
+
+/// Ingest `caller` (an untyped `set` call — ambiguous by name) with the
+/// language server's answer for that call written on its stub, as the
+/// ingest-time LSP pass writes it.
+async fn ingest_located(
+    store: &SharedGraphStore<SqliteGraphStore>,
+    caller: &str,
+    sites: &[(&str, u32)],
+    lsp_only: bool,
+) {
+    let file = format!("lib/callers/{caller}.dart");
+    let body = format!("void {caller}(dynamic w) {{\n  w.set(1);\n}}");
+    let mut extracted =
+        extractor::extract_edges(&[function(caller, &body, &file, &["set"])], T, &file);
+    let stub = GraphNode::stub(T, "set", NodeType::Function).node_id;
+    let sites: Vec<_> = sites.iter().map(|(f, l)| (f.to_string(), *l)).collect();
+    let edge = extracted
+        .edges
+        .iter_mut()
+        .find(|e| e.edge_type == EdgeType::Calls && e.target_node_id == stub)
+        .expect("tree-sitter's stub for the call");
+    edge.metadata_json = Some(lsp_sites::with_lsp_sites(
+        edge.metadata_json.as_deref(),
+        &sites,
+        lsp_only,
+    ));
+    store
+        .reingest_file(T, &file, caller, &extracted.nodes, &extracted.edges)
+        .await
+        .unwrap();
+}
+
+/// The language server's site binds the call to the definition sitting
+/// there — the second of two homonymous methods in one file — at full
+/// confidence, where by name it is a three-way guess. A call it resolved
+/// into a dependency binds to nothing of ours; a site in a file not graphed
+/// yet leaves the call to the by-name tiers, unless only the server saw it.
+#[tokio::test]
+async fn a_language_server_site_binds_the_definition_sitting_there() {
+    let store = store().await;
+    ingest_writes(&store).await;
+    // 0-indexed line 10 = FirestoreFinanceTransaction.set (lines 11-15).
+    ingest_located(&store, "located", &[(WRITES, 10)], false).await;
+    ingest_located(&store, "external", &[], false).await;
+    ingest_located(&store, "pending", &[("lib/not_graphed.dart", 3)], false).await;
+    ingest_located(&store, "only", &[("lib/not_graphed.dart", 3)], true).await;
+    store
+        .resolve_stub_edges(T, &GenerationBranches::unknown())
+        .await
+        .unwrap();
+
+    let located = calls_of(&store, "located").await;
+    assert_eq!(located.len(), 1, "{located:?}");
+    assert_eq!(located[0].1.as_deref(), Some("FirestoreFinanceTransaction"));
+    assert!((located[0].2 - 1.0).abs() < 1e-9, "{located:?}");
+    assert!(located[0].3.contains("\"lsp\""), "{located:?}");
+
+    assert!(
+        calls_of(&store, "external").await.is_empty(),
+        "a call into a dependency must not bind to our same-named methods"
+    );
+    let pending = calls_of(&store, "pending").await;
+    assert_eq!(pending.len(), 3, "by-name fallback: {pending:?}");
+    assert!(pending.iter().all(|c| c.3.contains("\"ambiguous\"")));
+    assert!(calls_of(&store, "only").await.is_empty());
+
+    let guard = store.read().await;
+    let minted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM graph_nodes
+         WHERE tenant_id = ?1 AND symbol_name = 'set' AND symbol_type = 'function'
+           AND file_path <> ''",
+    )
+    .bind(T)
+    .fetch_one(guard.pool())
+    .await
+    .unwrap();
+    assert_eq!(minted, 0, "no guessed Function node for a method callee");
+}

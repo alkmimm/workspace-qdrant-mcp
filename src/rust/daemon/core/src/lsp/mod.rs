@@ -72,7 +72,7 @@ pub use project_manager::{
     ResolvedCall, ResolvedImport, TypeInfo,
 };
 // Crate-internal helpers for the ingestion-time LSP call-resolution pass.
-pub(crate) use project_manager::{resolved_call_edges, symbol_column_in_line};
+pub(crate) use project_manager::{call_sites_by_name, symbol_column_in_line};
 
 /// Main errors that can occur in the LSP subsystem
 #[derive(Error, Debug)]
