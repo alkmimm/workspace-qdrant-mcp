@@ -103,6 +103,21 @@ ENV ORT_LIB_LOCATION=/opt/onnxruntime/lib
 
 WORKDIR /build
 
+# Every RUN that mounts the shared /build/target cache first makes source
+# mtimes follow CONTENT (see the script): cargo judges freshness by mtime, so
+# two trees built in turn (main and a worktree) otherwise reuse each other's
+# outputs. The self-test pins that case: unchanged bytes keep their recorded
+# mtime, changed bytes checked out long ago still move past every output.
+COPY docker/content-mtimes.sh /usr/local/bin/content-mtimes
+RUN set -eu; chmod +x /usr/local/bin/content-mtimes; \
+    d=$(mktemp -d); mkdir "$d/src"; echo a > "$d/src/x"; echo b > "$d/src/y"; \
+    content-mtimes "$d/rec" "$d/src"; t=$(stat -c %Y "$d/src/x"); \
+    echo c > "$d/src/y"; touch -d @1000 "$d/src/x" "$d/src/y"; sleep 1; \
+    content-mtimes "$d/rec" "$d/src"; \
+    [ "$(stat -c %Y "$d/src/x")" = "$t" ] && [ "$(stat -c %Y "$d/src/y")" -gt "$t" ] \
+    || { echo "GATE: content-mtimes must restore unchanged files' mtimes and move changed ones forward"; exit 1; }; \
+    rm -rf "$d"
+
 # ── Dependency pre-fetch layer ──
 # Copy only the workspace manifest files first.  This layer is cached as long as
 # Cargo.toml / Cargo.lock do not change, even when application source changes.
@@ -183,6 +198,7 @@ RUN if [ ! -d .git ] && [ ! -f .git ]; then \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo build --release --package memexd --package wqm-cli
 
@@ -235,6 +251,7 @@ COPY assets/ /assets/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo clippy --lib --bins --tests -- -D warnings
 
@@ -247,6 +264,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib schema_version -- --test-threads=4
 
@@ -257,6 +275,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         restamp shadowed_strip branch_opt holding_branch other_generation \
@@ -278,6 +297,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         reingest_keeps_content_verbatim reingest_with_desynced_old_content \
@@ -307,6 +327,7 @@ filter matches nothing (the v48 lesson, 30 lines above)"; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-grpc --lib reembed -- --test-threads=4 \
         2>&1 | tee /tmp/reembed.log; \
@@ -325,6 +346,7 @@ module would silently un-gate the search.db clear"; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib remote_monitor -- --test-threads=4
 
@@ -336,6 +358,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib text_search::escaping -- --test-threads=4
 
@@ -353,6 +376,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib text_search::dedup \
         -- --test-threads=4 2>&1 | tee /tmp/hit-dedup.log; \
@@ -375,6 +399,7 @@ this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         text_search::path_exclude:: \
@@ -388,6 +413,7 @@ exact + 1 regex + 1 grep-scan). If you ADDED a test here, bump this count."; exi
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-grpc --lib text_search_service \
         -- --test-threads=4 2>&1 | tee /tmp/text-search-service.log; \
@@ -410,6 +436,7 @@ this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib git::branch_lifecycle \
         -- --test-threads=4 2>&1 | tee /tmp/branch-lifecycle.log; \
@@ -441,6 +468,7 @@ a test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         git::checkouts::tests \
@@ -473,6 +501,7 @@ bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
         strategies::processing::file::item_metadata \
@@ -493,6 +522,7 @@ a test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib storage::collections::multi_tenant \
         -- --test-threads=4 2>&1 | tee /tmp/payload-index.log; \
@@ -513,6 +543,7 @@ bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         branch_mirror branch_reconcile add_branch_to_file_metadata_by_file_ids branch_bulk \
@@ -527,6 +558,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib busy_timeout -- --test-threads=4
 
@@ -540,6 +572,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib db_retry -- --test-threads=4
 
@@ -576,6 +609,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         graph:: strategies::processing::file::graph_backfill::tests git::tips::tests \
@@ -622,6 +656,7 @@ test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib graph::algorithms::test_gaps \
         -- --test-threads=4 2>&1 | tee /tmp/test-gaps-guard.log; \
@@ -642,6 +677,7 @@ matches nothing (the v48 lesson). If you ADDED a test here, bump this count."; e
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib file_classification \
         -- --test-threads=4 2>&1 | tee /tmp/file-classification.log; \
@@ -667,6 +703,7 @@ here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-grpc --lib -- \
         query_related_cap_keeps_strongest_not_arbitrary \
@@ -693,6 +730,7 @@ test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         betweenness_sampled_sources_are_sorted_and_repeats_are_bit_identical \
@@ -724,6 +762,7 @@ ADDED a test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         test_content_hash_reusing_mtime_skips_read_when_mtime_matches \
@@ -751,6 +790,7 @@ here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         registry_extensions_are_all_allowlisted \
@@ -787,6 +827,7 @@ you ADDED a test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         startup::reconciliation::ignore_sync::tests \
@@ -814,6 +855,7 @@ bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         queue_operations::file_routing \
@@ -837,6 +879,7 @@ here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         keyword_extraction::canonical_tags \
@@ -860,6 +903,7 @@ count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         strategies::processing::file::delete::tests \
@@ -878,6 +922,7 @@ If you ADDED a test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         startup::reconciliation::branch_prune \
@@ -907,6 +952,7 @@ If you ADDED a test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         patterns::exclusion::tests \
@@ -929,6 +975,7 @@ reachable by the scan and the watcher. If you ADDED a test here, bump this count
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         watching_queue::throttle::tests \
@@ -953,6 +1000,7 @@ this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         document_processor::redaction::tests \
@@ -984,6 +1032,7 @@ here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib graph::algorithms::cycles \
         -- --test-threads=4 2>&1 | tee /tmp/cycles-precision.log; \
@@ -1007,6 +1056,7 @@ ADDED a test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-grpc --lib retain_min_confidence \
         -- --test-threads=4 2>&1 | tee /tmp/min-confidence.log; \
@@ -1039,6 +1089,7 @@ exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         health_probe_sends_only_a_side_effect_free_ping \
@@ -1065,6 +1116,7 @@ view of them. If you ADDED a test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         lsp_os_processes_exposed_beside_the_registry_count \
@@ -1078,6 +1130,7 @@ a test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p memexd --bin memexd -- \
         pressure_metrics:: \
@@ -1110,6 +1163,7 @@ this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         graph::extractor::reference_analysis \
@@ -1137,6 +1191,7 @@ edge table. If you ADDED a test here, bump this count."; exit 1; }
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         test_semantic_patterns_present_for_extractors \
@@ -1180,6 +1235,7 @@ ENV WQM_TEST_GRAMMAR_CACHE=/opt/wqm-test-grammars
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib \
         tree_sitter::chunker::generic_extractor::tests \
@@ -1197,6 +1253,7 @@ gate below cannot run deterministically."; tail -40 /tmp/grammar-warm.log; exit 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     WQM_TEST_GRAMMAR_NO_DOWNLOAD=1 \
     cargo test -p workspace-qdrant-core --lib \
