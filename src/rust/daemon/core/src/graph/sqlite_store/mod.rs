@@ -241,9 +241,11 @@ impl GraphStore for SqliteGraphStore {
         tenant_id: &str,
         symbol_name: &str,
         file_path: Option<&str>,
+        max_hops: u32,
         scope: &GraphScope,
     ) -> GraphDbResult<ImpactReport> {
-        self.impact(tenant_id, symbol_name, file_path, scope).await
+        self.impact(tenant_id, symbol_name, file_path, max_hops, scope)
+            .await
     }
 
     async fn stats(

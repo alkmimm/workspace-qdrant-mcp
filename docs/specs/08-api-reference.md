@@ -362,10 +362,10 @@ Navigate the code-relationship graph (calls, contains, uses-type, imports) built
 graph({
     action: "stats" | "relations" | "impact" | "usages" | "hotspots" | "bridges" | "modules", // default: "stats"
     symbol?: string,                    // Required for "impact" and "relations"
-    filePath?: string,                  // Required for "relations"; optional narrowing for "impact"
+    filePath?: string,                  // Required for "relations"; optional narrowing for "impact"/"usages" (ambiguous callers it drops are counted)
     symbolType?: string,                // Node kind for "relations" lookup (default: "function")
     edgeTypes?: string[],               // Filter: ["CALLS","IMPORTS","CONTAINS","USES_TYPE"] (default: all)
-    maxHops?: number,                   // Traversal depth for "relations" (1-5, default: 1)
+    maxHops?: number,                   // Depth 1-5: "relations" default 1, "impact" default 3 (echoed as max_hops); "usages" is always 1
     topK?: number,                      // Top results for "hotspots"/"bridges" (default: 20)
     minConfidence?: number,             // "relations"/"impact"/"usages": drop nodes below this best-path confidence (0-1; 0/omit = all; >1 rejected)
     maxSamples?: number,                // "bridges": sample N sources on large graphs (0 = exact)
@@ -834,7 +834,9 @@ extracted (fewer while the idle backfill is still rebuilding them).
 **ImpactAnalysis:**
 - Finds all nodes that would be affected by modifying a symbol
 - Searches by `symbol_name` with optional `file_path` to narrow scope
-- Returns nodes grouped by distance (direct callers at distance 1, indirect at 2+)
+- Walks callers back `max_hops` hops (1-5; absent/0 = 3, above 5 capped) and echoes the depth walked in the response's `max_hops`
+- Returns nodes grouped by distance (direct callers at distance 1, indirect at 2+); a class member carries `parent_symbol`
+- With `file_path`, edges below 0.6 (one of N same-name candidates) are not followed; `dropped_below_confidence_floor` counts the callers that left out (those no stronger edge reaches), and `node_budget_reached` says when the walk hit its node budget
 
 **ComputePageRank:**
 - Configurable damping factor (default 0.85), max iterations (default 100), convergence tolerance (default 1e-6)

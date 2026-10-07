@@ -6,7 +6,7 @@
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 use workspace_qdrant_core::graph::branch_scope::ALL_BRANCHES;
-use workspace_qdrant_core::graph::{EdgeType, GraphScope};
+use workspace_qdrant_core::graph::{EdgeType, GraphScope, DEFAULT_IMPACT_HOPS, MAX_IMPACT_HOPS};
 
 use crate::proto::{
     graph_service_server::GraphService, BetweennessRequest, BetweennessResponse, CommunityRequest,
@@ -175,6 +175,7 @@ impl GraphService for GraphServiceImpl {
                 depth: n.depth,
                 path: n.path,
                 confidence: n.confidence,
+                parent_symbol: n.parent_symbol,
             })
             .collect();
 
@@ -220,10 +221,17 @@ impl GraphService for GraphServiceImpl {
         // depth, so this keeps the nearest callers). 0/absent = all, so
         // `wqm graph impact` (CLI) is unchanged; total_impacted stays the TRUE count.
         let top_k = req.top_k.filter(|&v| v > 0).map(|v| v as usize);
+        // The walk depth: absent/0 = the default, above the ceiling = the
+        // ceiling. Echoed in the response, so a capped request is visible.
+        let max_hops = req
+            .max_hops
+            .filter(|&h| h > 0)
+            .unwrap_or(DEFAULT_IMPACT_HOPS)
+            .min(MAX_IMPACT_HOPS);
 
         debug!(
-            "GraphService.ImpactAnalysis: tenant={} symbol={} file={:?}",
-            req.tenant_id, req.symbol_name, validated_file_path
+            "GraphService.ImpactAnalysis: tenant={} symbol={} file={:?} hops={}",
+            req.tenant_id, req.symbol_name, validated_file_path, max_hops
         );
 
         let (scope, scope_info) = self
@@ -237,6 +245,7 @@ impl GraphService for GraphServiceImpl {
                 &req.tenant_id,
                 &req.symbol_name,
                 validated_file_path.as_deref(),
+                max_hops,
                 &scope,
             )
             .await;
@@ -289,6 +298,7 @@ impl GraphService for GraphServiceImpl {
                         impact_type: n.impact_type,
                         distance: n.distance,
                         confidence: n.confidence,
+                        parent_symbol: n.parent_symbol,
                     })
                     .collect();
 
@@ -298,6 +308,9 @@ impl GraphService for GraphServiceImpl {
                     total_impacted,
                     query_time_ms,
                     filtered_by_min_confidence,
+                    max_hops: report.max_hops,
+                    dropped_below_confidence_floor: report.dropped_below_floor,
+                    node_budget_reached: report.node_budget_reached,
                 }))
             }
             Err(e) => {

@@ -36,7 +36,6 @@ import {
 } from './branch-scope.js';
 import { projectEcho } from './project-echo.js';
 import type {
-  ImpactAnalysisRequest,
   PageRankRequest,
   CommunityRequest,
   BetweennessRequest,
@@ -45,45 +44,8 @@ import type {
   QueryRelatedRequest,
   GraphScopeProto,
 } from '../clients/grpc-types.js';
-
-type JsonObject = Record<string, unknown>;
-
-function str(args: JsonObject, key: string): string | undefined {
-  const v = args[key];
-  return typeof v === 'string' && v.trim().length > 0 ? v : undefined;
-}
-
-function num(args: JsonObject, key: string): number | undefined {
-  const v = args[key];
-  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
-}
-
-/**
- * Extract and validate `minConfidence` (shared by relations/impact/usages).
- * Confidence is a best-path edge-weight product in [0,1] — NOT a percentage; a
- * threshold above 1.0 would silently filter out every node (all confidences are
- * <= 1.0), indistinguishable from "no relations exist", so out-of-range values
- * are rejected loudly here before any daemon call.
- */
-function minConfidenceArg(args: JsonObject): number | undefined {
-  const v = num(args, 'minConfidence');
-  if (v !== undefined && (v < 0 || v > 1)) {
-    throw new Error(
-      `\`minConfidence\` must be within [0, 1], got ${v} — confidence is a best-path ` +
-        'edge-weight product (e.g. 0.5), not a percentage.'
-    );
-  }
-  return v;
-}
-
-function strArray(args: JsonObject, key: string): string[] | undefined {
-  const v = args[key];
-  if (Array.isArray(v)) {
-    const out = v.filter((x): x is string => typeof x === 'string');
-    return out.length > 0 ? out : undefined;
-  }
-  return undefined;
-}
+import { minConfidenceArg, num, str, strArray, type JsonObject } from './graph-args.js';
+import { graphNoEdgesHint, runImpactAction } from './graph-impact.js';
 
 /**
  * Default edge types for `relations` — every dependency edge EXCEPT `CONTAINS`.
@@ -201,21 +163,6 @@ export function graphCoverageHint(scope: GraphScopeProto | undefined): string | 
   );
 }
 
-function graphNoEdgesHint(kind: 'usages' | 'impact' | 'relations'): string {
-  const what =
-    kind === 'relations'
-      ? 'no outgoing dependency edges'
-      : kind === 'usages'
-        ? 'no direct references'
-        : 'no dependents';
-  return (
-    `Graph shows ${what} here, but it only has CALL / USES_TYPE / IMPORTS / inheritance edges over ` +
-    `callable symbols. Field/property/provider access, dynamic dispatch, string-keyed DI, and ` +
-    `generated-code references are NOT edges — this 0 does NOT prove the symbol is unused. Confirm ` +
-    `with the grep tool before concluding "no callers/usages".`
-  );
-}
-
 /**
  * Strip proto-loader's synthetic oneof markers from a decoded daemon response.
  *
@@ -243,39 +190,6 @@ function stripOneofMarkers<T>(value: T): T {
     out[key] = stripOneofMarkers(v);
   }
   return out as T;
-}
-
-/**
- * How many times the symbol appears in the text index, or `undefined` when the
- * probe could not run.
- *
- * Called only on the `usages` zero-result path, which by definition has nothing
- * to show — so one extra query buys the difference between "no edge models this"
- * and "nothing references this". `textSearchCount` returns a count without
- * transferring any match bodies.
- *
- * Every failure mode is swallowed on purpose. This is a courtesy on an already
- * empty answer; it must never turn a valid empty result into an error.
- */
-async function countTextOccurrences(
-  daemonClient: DaemonClient | undefined,
-  symbol: string,
-  tenantId: string | undefined
-): Promise<number | undefined> {
-  if (!daemonClient) return undefined;
-  try {
-    const response = await daemonClient.textSearchCount({
-      pattern: symbol,
-      regex: false,
-      case_sensitive: true,
-      context_lines: 0,
-      max_results: 1,
-      ...(tenantId ? { tenant_id: tenantId } : {}),
-    });
-    return response?.count;
-  } catch {
-    return undefined;
-  }
 }
 
 export async function handleGraph(
@@ -348,140 +262,8 @@ async function dispatchGraphAction(
     }
 
     case 'impact':
-    case 'usages': {
-      // Both wrap ImpactAnalysis (reverse reachability over the graph), but differ
-      // in DEPTH:
-      //   impact → transitive blast-radius (depth<3): all that breaks if you
-      //            change X, direct AND indirect.
-      //   usages → DIRECT references only (distance===1): "who references X" (the
-      //            IDE find-references), filtered from the same response below.
-      // Precision improves once the LSP call-hierarchy pass resolves CALLS edges.
-      const symbol = str(args, 'symbol');
-      if (!symbol) throw new Error(`graph action '${action}' requires \`symbol\``);
-      const filePath = str(args, 'filePath');
-      // Precision filter: drop nodes below this best-path confidence at the
-      // daemon (before top_k + total_impacted). Omitted = all. See tool desc.
-      const minConfidence = minConfidenceArg(args);
-      // Bound the impacted-node list: the daemon caps to top_k (nearest-by-depth
-      // first) and still returns the true total_impacted. topK<=0 = all.
-      const topK = num(args, 'topK') ?? 50;
-      const req: ImpactAnalysisRequest = {
-        tenant_id: tenant,
-        ...onBranch,
-        symbol_name: symbol,
-        top_k: topK,
-        ...(filePath ? { file_path: filePath } : {}),
-        ...(minConfidence !== undefined ? { min_confidence: minConfidence } : {}),
-      };
-      const r = await daemonClient.impactAnalysis(req);
-      // The daemon caps at top_k AFTER ordering nearest-first, so a page that came
-      // back full may have cut nodes that did not fit. Only an unsaturated page
-      // proves the list is complete. Presenting a capped page as the whole answer
-      // is what let `usages` return a different arbitrary subset on every call and
-      // still read as authoritative (issue #367).
-      const returnedCount = (r.impacted_nodes ?? []).length;
-      const truncated = topK > 0 && returnedCount >= topK;
-      const raiseTopK =
-        `Truncated at topK=${topK}: more nodes exist beyond the cap. Re-run with a ` +
-        `larger topK (topK:0 removes the cap) before treating this list as complete.`;
-      if (action === 'usages') {
-        // Keep only direct references (1-hop). The daemon tags each node's
-        // distance; distance===1 is a direct caller / reference / type-use. This
-        // is what makes `usages` distinct from the transitive `impact`.
-        const direct = (r.impacted_nodes ?? []).filter((n) => n.distance === 1);
-        // Both caveats can hold at once — a full page of distance>1 nodes yields
-        // zero direct references AND hides the rest — so collect them instead of
-        // letting one `hint` key silently overwrite the other.
-        const hints: string[] = [];
-        // A threshold that removed nothing produces a response byte-identical to
-        // omitting it, so the caller cannot tell "my filter ran and kept
-        // everything" from "my filter did nothing" (#383). On a real result the
-        // confidences cluster at 1.00 / 0.95 / 0.85, which makes 0.5 — the
-        // natural "medium confidence" choice — a no-op. Say so, and name where
-        // the cut points actually are.
-        if (minConfidence !== undefined && (r.filtered_by_min_confidence ?? 0) === 0) {
-          hints.push(
-            `minConfidence:${minConfidence} removed nothing — this result is identical to ` +
-              `omitting it. Reported confidences are the best-path edge-weight product and ` +
-              `in practice cluster at 1.00 (precise), 0.95, 0.85, with 0.7 for a ` +
-              `tenant-unique name; a same-name fan-out scores ~1/N. Useful cut points start ` +
-              `around 0.85, not 0.5.`
-          );
-        }
-        // `usages` needs its OWN wording. The cap applies to the TRANSITIVE page
-        // the daemon returns, and only afterwards does the distance===1 filter
-        // run here — so a reader sees a count well below topK next to
-        // `truncated: true` and reasonably concludes the flag is wrong. Field
-        // report: 22 nodes returned with topK 40, flagged truncated, no
-        // explanation of the gap. Name both numbers so the arithmetic is visible.
-        if (truncated) {
-          hints.push(
-            `Truncated: the daemon returned the first ${topK} impacted nodes across ALL ` +
-              `depths (nearest first), and ${direct.length} of those are DIRECT references. ` +
-              `Further direct references may sit beyond that cap — re-run with a larger ` +
-              `topK (topK:0 removes it) before treating this list as complete.`
-          );
-        }
-        // A zero here is the trap this tool is repeatedly reported for. The
-        // graph only models CALLS / USES_TYPE / IMPORTS, so an idiom that
-        // REFERENCES a symbol without invoking it produces no edge at all:
-        // `ref.watch(someProvider)` passes the symbol as an argument, and
-        // Flutter's `find.byType(Widget)` asserts on a type without
-        // constructing it. Measured on DOC-V2: `activeContextProvider` existed
-        // as a node with ZERO incoming edges against 71 references on disk, and
-        // 505 of 506 Dart constants were in the same position.
-        //
-        // Telling the caller "0" and leaving them to run grep is how "not used"
-        // gets concluded from "not modelled". Counting the text index here costs
-        // one extra query on a path that already has nothing to show, and turns
-        // an ambiguous zero into a specific statement.
-        let textOccurrences: number | undefined;
-        if (direct.length === 0) {
-          textOccurrences = await countTextOccurrences(daemonClient, symbol, tenant);
-          hints.push(graphNoEdgesHint('usages'));
-          if (textOccurrences !== undefined && textOccurrences > 0) {
-            hints.push(
-              `The text index holds ${textOccurrences} occurrence(s) of "${symbol}", so this 0 ` +
-                `means NOT MODELLED rather than unused. A symbol passed by reference is modelled ` +
-                `for Dart lower-camel identifiers (REFERENCES edges), but NOT for other ` +
-                `languages, and not for type-shaped names such as find.byType(X) in any ` +
-                `language. Existing data also needs a graph rebuild before those edges appear. ` +
-                `Use grep for the sites.`
-            );
-          }
-        }
-        return {
-          success: true,
-          action,
-          tenant_id: tenant,
-          symbol,
-          ...r,
-          impacted_nodes: direct,
-          // The count of what is actually returned. When the page was truncated
-          // this is a FLOOR, not a total; `truncated` says so rather than letting
-          // the number pass for a complete answer.
-          total_impacted: direct.length,
-          truncated,
-          ...(truncated ? { total_impacted_all_depths: r.total_impacted } : {}),
-          ...(textOccurrences !== undefined ? { text_occurrences: textOccurrences } : {}),
-          ...(hints.length > 0 ? { hint: hints.join(' ') } : {}),
-        };
-      }
-      const impactHints: string[] = [];
-      if (truncated) impactHints.push(raiseTopK);
-      if ((r.total_impacted ?? returnedCount) === 0) {
-        impactHints.push(graphNoEdgesHint('impact'));
-      }
-      return {
-        success: true,
-        action,
-        tenant_id: tenant,
-        symbol,
-        ...r,
-        truncated,
-        ...(impactHints.length > 0 ? { hint: impactHints.join(' ') } : {}),
-      };
-    }
+    case 'usages':
+      return runImpactAction(action, args, tenant, branch, daemonClient);
 
     case 'hotspots': {
       const req: PageRankRequest = {
@@ -585,11 +367,27 @@ async function dispatchGraphAction(
       // would otherwise act on. Field feedback: a 0.6% report was taken as a
       // finding and its top entries were demonstrably tested functions.
       const { reliability_warning: warning, ...rest } = r;
+      // A test call that matched several same-named definitions is below the
+      // 0.6 gate and does not count as coverage — Finance 2026-10-07: a tested
+      // method read as the top gap with 47 dependents. Say how many gaps that
+      // describes, so "untested" and "tested through an unpinned call" stay apart.
+      const ambiguous = r.gaps_with_ambiguous_test_callers ?? 0;
+      const hints = [
+        ...(warning !== undefined && warning !== '' ? [warning] : []),
+        ...(ambiguous > 0
+          ? [
+              `${ambiguous} gap(s) are called by a test through an ambiguous same-name call ` +
+                `(confidence < 0.6: the call could resolve to several definitions named the ` +
+                `same), which does not count as coverage. Those gaps carry ` +
+                `ambiguous_test_callers > 0 — they may well be tested; check before writing a test.`,
+            ]
+          : []),
+      ];
       return {
         success: true,
         action,
         tenant_id: tenant,
-        ...(warning !== undefined && warning !== '' ? { hint: warning } : {}),
+        ...(hints.length > 0 ? { hint: hints.join(' ') } : {}),
         ...rest,
       };
     }

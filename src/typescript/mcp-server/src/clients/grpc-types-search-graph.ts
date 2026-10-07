@@ -108,8 +108,10 @@ export interface TraversalNodeProto {
   edge_type: string;
   depth: number;
   path: string;
-  /** Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.95 scoped, 0.85 same-package, 0.7 tenant-unique, <0.6 ambiguous name-collision. */
+  /** Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.97 typed receiver, 0.95 scoped, 0.85 same-package, 0.7 tenant-unique, <0.6 ambiguous name-collision. */
   confidence: number;
+  /** The class the symbol is a member of; absent for a top-level symbol. */
+  parent_symbol?: string;
 }
 
 export interface ImpactAnalysisRequest {
@@ -123,6 +125,8 @@ export interface ImpactAnalysisRequest {
   /** Branch to answer for (absent = the branch the project's main folder has
    *  checked out; "*" = every branch). */
   branch?: string;
+  /** Depth of the reverse walk, 1-5 (0/absent = 3; above 5 is capped). */
+  max_hops?: number;
 }
 
 export interface ImpactAnalysisResponse {
@@ -137,6 +141,14 @@ export interface ImpactAnalysisResponse {
   /** Which branch this describes and how much of it the graph has extracted.
    *  Absent from a daemon that predates branch-aware graphs. */
   scope?: GraphScopeProto;
+  /** Depth the reverse walk went to. Absent from a daemon that predates it
+   *  (which always walked 3). */
+  max_hops?: number;
+  /** Callers left out because a pinned file_path drops ambiguous same-name
+   *  edges (weight < 0.6) and no stronger edge reaches them. */
+  dropped_below_confidence_floor?: number;
+  /** The walk stopped at its node budget: the blast radius is truncated. */
+  node_budget_reached?: boolean;
 }
 
 export interface ImpactNodeProto {
@@ -145,8 +157,10 @@ export interface ImpactNodeProto {
   file_path: string;
   impact_type: string;
   distance: number;
-  /** Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.95 scoped, 0.85 same-package, 0.7 tenant-unique, <0.6 ambiguous name-collision. */
+  /** Edge-weight product along the BFS shortest path (same-depth ties keep the strongest edge; a longer stronger path never overrides a shorter weaker one). [0,1] certainty: 1.0 precise, 0.97 typed receiver, 0.95 scoped, 0.85 same-package, 0.7 tenant-unique, <0.6 ambiguous name-collision. */
   confidence: number;
+  /** The class the symbol is a member of; absent for a top-level symbol. */
+  parent_symbol?: string;
 }
 
 export interface PageRankRequest {
@@ -333,6 +347,11 @@ export interface TestGapProto {
   file_path: string;
   /** Non-test nodes that depend on this symbol (drives the ranking). */
   production_dependents: number;
+  /** Test nodes calling this symbol only through an ambiguous same-name edge
+   *  (below the 0.6 gate): non-zero = possibly tested. */
+  ambiguous_test_callers?: number;
+  /** The class the symbol is a member of; absent for a top-level symbol. */
+  parent_symbol?: string;
 }
 
 export interface TestGapsResponse {
@@ -360,6 +379,9 @@ export interface TestGapsResponse {
   /** Which branch this describes and how much of it the graph has extracted.
    *  Absent from a daemon that predates branch-aware graphs. */
   scope?: GraphScopeProto;
+  /** Of gap_count, gaps a test calls only through an ambiguous same-name edge
+   *  (below the 0.6 gate): possibly tested, not counted as covered. */
+  gaps_with_ambiguous_test_callers?: number;
 }
 
 /** Per-language slice of the test-gap coverage summary. */

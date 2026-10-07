@@ -353,6 +353,7 @@ impl GraphStore for LadybugGraphStore {
                     path: String::new(),
                     // LadybugDB has no R1 weight model; report full confidence.
                     confidence: 1.0,
+                    parent_symbol: None,
                 });
             }
         }
@@ -365,6 +366,7 @@ impl GraphStore for LadybugGraphStore {
         tenant_id: &str,
         symbol_name: &str,
         file_path: Option<&str>,
+        max_hops: u32,
         _scope: &GraphScope,
     ) -> GraphDbResult<ImpactReport> {
         let conn = self.connect()?;
@@ -374,10 +376,11 @@ impl GraphStore for LadybugGraphStore {
         };
 
         let cypher = format!(
-            "MATCH (start:GraphNode {{symbol_name: '{}'}})<-[r:CALLS*1..3]-(caller:GraphNode) \
+            "MATCH (start:GraphNode {{symbol_name: '{}'}})<-[r:CALLS*1..{}]-(caller:GraphNode) \
              WHERE start.tenant_id = '{}'{} \
              RETURN caller.node_id, caller.symbol_name, caller.file_path",
             escape_cypher(symbol_name),
+            max_hops,
             escape_cypher(tenant_id),
             file_filter,
         );
@@ -392,6 +395,7 @@ impl GraphStore for LadybugGraphStore {
                 impacted.push(ImpactNode {
                     node_id: value_to_string(&row[0]),
                     symbol_name: value_to_string(&row[1]),
+                    parent_symbol: None,
                     file_path: value_to_string(&row[2]),
                     impact_type: "caller".to_string(),
                     distance: 1,
@@ -405,6 +409,10 @@ impl GraphStore for LadybugGraphStore {
             symbol_name: symbol_name.to_string(),
             total_impacted: impacted.len() as u32,
             impacted_nodes: impacted,
+            max_hops,
+            // No weight model, so no floor to report; Cypher has no budget.
+            dropped_below_floor: 0,
+            node_budget_reached: false,
         })
     }
 

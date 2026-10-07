@@ -429,6 +429,8 @@ impl GraphServiceImpl {
                         symbol_type: g.symbol_type,
                         file_path: g.file_path,
                         production_dependents: g.production_dependents,
+                        ambiguous_test_callers: g.ambiguous_test_callers,
+                        parent_symbol: g.parent_symbol,
                     })
                     .collect();
 
@@ -456,6 +458,7 @@ impl GraphServiceImpl {
                     reliability_warning: report.reliability_warning,
                     excluded_non_production: report.excluded_non_production,
                     coverage_by_language,
+                    gaps_with_ambiguous_test_callers: report.gaps_with_ambiguous_test_callers,
                 }))
             }
             Err(e) => {

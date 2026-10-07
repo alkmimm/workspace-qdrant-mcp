@@ -66,6 +66,7 @@ mod path_validation {
             top_k: None,
             min_confidence: None,
             branch: None,
+            max_hops: None,
         });
 
         let result = service.impact_analysis(request).await;
@@ -90,6 +91,7 @@ mod path_validation {
             top_k: None,
             min_confidence: None,
             branch: None,
+            max_hops: None,
         });
 
         let result = service.impact_analysis(request).await;
@@ -111,6 +113,7 @@ mod path_validation {
             top_k: None,
             min_confidence: None,
             branch: None,
+            max_hops: None,
         });
 
         // Empty string is filtered to None by the handler.
@@ -129,6 +132,7 @@ mod path_validation {
             top_k: None,
             min_confidence: None,
             branch: None,
+            max_hops: None,
         });
 
         // Valid relative path should pass validation (query may return empty).
@@ -244,6 +248,7 @@ mod min_confidence_filter {
             top_k,
             min_confidence,
             branch: None,
+            max_hops: None,
         })
     }
 
@@ -504,6 +509,7 @@ mod branch_scoping {
             top_k: None,
             min_confidence: None,
             branch: Some(branch.into()),
+            max_hops: None,
         })
     }
 

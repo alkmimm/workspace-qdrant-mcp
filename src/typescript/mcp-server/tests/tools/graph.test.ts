@@ -118,6 +118,8 @@ describe('handleGraph', () => {
       tenant_id: 't1',
       symbol_name: 'parse',
       top_k: 50,
+      // usages is one hop by definition: the daemon walks no further.
+      max_hops: 1,
     });
     expect(result['action']).toBe('usages');
   });
@@ -227,6 +229,7 @@ describe('handleGraph', () => {
       tenant_id: 't1',
       symbol_name: 'parse',
       top_k: 0,
+      max_hops: 1,
     });
     // relations is capped too (default maxHops 1).
     await handleGraph(

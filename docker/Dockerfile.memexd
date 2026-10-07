@@ -566,7 +566,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # test_gaps reported the tested method as a gap with 47 dependents). The suites
 # pin member identity (`Parent.name`), the receiver-typed hint the extractor
 # emits, and the resolver binding it @0.97 or leaving a library receiver's call
-# unresolved.
+# unresolved. The same report found `impact` ignoring `maxHops` (always 3 hops)
+# and a pinned `filePath` dropping ambiguous callers in silence: the GraphService
+# suite pins the depth walked (and echoed) and the dropped-caller count.
 # Gating whole suites is deliberate: none of these ran before, and one of them
 # (`test_pagerank_on_extracted_graph`) had been failing unnoticed since the IDF
 # demotion landed (#164). Exact counts asserted — libtest exits 0 when a filter
@@ -579,8 +581,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         graph:: strategies::processing::file::graph_backfill::tests git::tips::tests \
         strategies::processing::file::graph_ingest::tests \
         --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
-    grep -q "^test result: ok\. 257 passed" /tmp/graph-core.log \
-    || { echo "GATE: expected exactly 257 core graph tests (graph::, backfill, ingest, git::tips) to run and \
+    grep -q "^test result: ok\. 258 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 258 core graph tests (graph::, backfill, ingest, git::tips) to run and \
 pass. If you ADDED a test here, bump this count."; exit 1; } \
  && cargo test -p workspace-qdrant-core --no-fail-fast \
         --test graph_algorithm_tests --test graph_extractor_tests \
@@ -593,8 +595,8 @@ pass. If you ADDED a test here, bump this count."; exit 1; } \
 (4 algorithm + 2 extractor + 5 migration + 14 store). If you ADDED a test, bump this."; exit 1; } \
  && cargo test -p workspace-qdrant-grpc --lib graph_service \
         -- --test-threads=4 2>&1 | tee /tmp/graph-grpc.log; \
-    grep -q "^test result: ok\. 21 passed" /tmp/graph-grpc.log \
-    || { echo "GATE: expected exactly 21 GraphService tests to run and pass. If you ADDED a \
+    grep -q "^test result: ok\. 24 passed" /tmp/graph-grpc.log \
+    || { echo "GATE: expected exactly 24 GraphService tests to run and pass. If you ADDED a \
 test here, bump this count."; exit 1; }
 
 # test_gaps reliability guard runs here: hermetic (in-memory SQLite), and it
@@ -608,7 +610,10 @@ test here, bump this count."; exit 1; }
 # fires on (tests indexed + near-zero reach = broken measurement), the two
 # cases it must stay SILENT for (no test code at all; plausible coverage), and
 # the inclusive 5% boundary — plus the four pre-existing module tests, which the
-# module-path filter picks up for free.
+# module-path filter picks up for free. It also pins the other side of the same
+# honesty (Finance 2026-10-07): a test call below the 0.6 gate is NOT coverage,
+# but the gap must say a test calls it (`ambiguous_test_callers`) — a tested
+# method otherwise ranked as the top gap with 47 dependents.
 #
 # The filter is the MODULE PATH alone, deliberately. Naming the four tests after
 # a `--` as well does not narrow anything: libtest unions positional filters, so
@@ -620,8 +625,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib graph::algorithms::test_gaps \
         -- --test-threads=4 2>&1 | tee /tmp/test-gaps-guard.log; \
-    grep -q "^test result: ok\. 18 passed" /tmp/test-gaps-guard.log \
-    || { echo "GATE: expected exactly 18 tests in graph::algorithms::test_gaps to run and \
+    grep -q "^test result: ok\. 19 passed" /tmp/test-gaps-guard.log \
+    || { echo "GATE: expected exactly 19 tests in graph::algorithms::test_gaps to run and \
 pass — a rename silently empties a positional filter and libtest exits 0 when a filter \
 matches nothing (the v48 lesson). If you ADDED a test here, bump this count."; exit 1; }
 

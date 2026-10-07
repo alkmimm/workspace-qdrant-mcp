@@ -107,6 +107,10 @@ enum GraphCommand {
         /// Drop impacted nodes whose best-path confidence is below this (0-1; omit = all)
         #[arg(long, value_parser = parse_confidence)]
         min_confidence: Option<f64>,
+
+        /// How many hops of callers to walk back (1-5; omit = 3)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=5))]
+        max_hops: Option<u32>,
     },
 
     /// Graph statistics (node/edge counts)
@@ -256,7 +260,10 @@ pub async fn execute(args: GraphArgs) -> Result<()> {
             tenant,
             file,
             min_confidence,
-        } => impact::impact_analysis(&symbol, &tenant, file, min_confidence, branch).await,
+            max_hops,
+        } => {
+            impact::impact_analysis(&symbol, &tenant, file, min_confidence, max_hops, branch).await
+        }
         GraphCommand::Stats { tenant } => stats::graph_stats(tenant, branch).await,
         GraphCommand::Pagerank {
             tenant,

@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::grpc::client::workspace_daemon::ImpactAnalysisRequest;
+use crate::grpc::client::workspace_daemon::{ImpactAnalysisRequest, ImpactNodeProto};
 use crate::grpc::client::DaemonClient;
 use crate::output;
 
@@ -11,6 +11,7 @@ pub async fn impact_analysis(
     tenant_id: &str,
     file_path: Option<String>,
     min_confidence: Option<f64>,
+    max_hops: Option<u32>,
     branch: Option<String>,
 ) -> Result<()> {
     output::section("Impact Analysis");
@@ -38,15 +39,16 @@ pub async fn impact_analysis(
             top_k: None,
             min_confidence,
             branch,
+            max_hops,
         })
         .await
         .context("ImpactAnalysis RPC failed")?
         .into_inner();
     super::print_scope(resp.scope.as_ref());
+    output::kv("Depth", format!("{} hops", resp.max_hops));
 
     if resp.impacted_nodes.is_empty() {
         println!("No impacted nodes found.");
-        return Ok(());
     }
 
     // Group by impact type
@@ -64,7 +66,7 @@ pub async fn impact_analysis(
     if !direct.is_empty() {
         println!("\nDirect callers ({}):", direct.len());
         for n in &direct {
-            println!("  {} ({})", n.symbol_name, n.file_path);
+            println!("  {} ({})", qualified(n), n.file_path);
         }
     }
 
@@ -73,7 +75,9 @@ pub async fn impact_analysis(
         for n in &indirect {
             println!(
                 "  {} ({}) [distance: {}]",
-                n.symbol_name, n.file_path, n.distance
+                qualified(n),
+                n.file_path,
+                n.distance
             );
         }
     }
@@ -82,6 +86,25 @@ pub async fn impact_analysis(
         "\nTotal impacted: {} nodes ({}ms)",
         resp.total_impacted, resp.query_time_ms
     );
+    if resp.dropped_below_confidence_floor > 0 {
+        output::warning(format!(
+            "{} caller(s) reach this definition only through an ambiguous same-name call \
+             (confidence < 0.6) and were left out because --file pins one definition; \
+             omit --file to include them",
+            resp.dropped_below_confidence_floor
+        ));
+    }
+    if resp.node_budget_reached {
+        output::warning("The walk hit its node budget: the blast radius above is truncated");
+    }
 
     Ok(())
+}
+
+/// `Class.method` for a member, the bare name otherwise.
+fn qualified(node: &ImpactNodeProto) -> String {
+    match node.parent_symbol.as_deref() {
+        Some(parent) => format!("{parent}.{}", node.symbol_name),
+        None => node.symbol_name.clone(),
+    }
 }

@@ -1001,7 +1001,9 @@ Query the code relationship graph built from Tree-sitter analysis. All subcomman
 |------|-------------|
 | `--symbol <NAME>` | Symbol name to analyze (required) |
 | `--tenant <ID>` | Project tenant ID (required) |
-| `--file <PATH>` | Narrow to a specific file path |
+| `--file <PATH>` | Narrow to a specific file path. Callers that reach that definition only through an ambiguous same-name call (confidence < 0.6) are left out, and a warning says how many |
+| `--min-confidence <F>` | Drop impacted nodes whose best-path confidence is below this (0-1) |
+| `--max-hops <N>` | How many hops of callers to walk back, 1-5 (default: `3`); the output prints the depth walked |
 
 **`wqm graph stats`**
 

@@ -86,11 +86,12 @@ impl<S: GraphStore> SharedGraphStore<S> {
         tenant_id: &str,
         symbol_name: &str,
         file_path: Option<&str>,
+        max_hops: u32,
         scope: &GraphScope,
     ) -> GraphDbResult<ImpactReport> {
         let guard = self.inner.read().await;
         guard
-            .impact_analysis(tenant_id, symbol_name, file_path, scope)
+            .impact_analysis(tenant_id, symbol_name, file_path, max_hops, scope)
             .await
     }
 

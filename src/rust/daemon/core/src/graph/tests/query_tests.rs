@@ -227,7 +227,13 @@ async fn test_impact_same_depth_keeps_strongest_caller_confidence() {
     store.insert_edges(&[weak, strong]).await.unwrap();
 
     let report = store
-        .impact_analysis(TENANT, "target", None, &GraphScope::all())
+        .impact_analysis(
+            TENANT,
+            "target",
+            None,
+            DEFAULT_IMPACT_HOPS,
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
     assert_eq!(report.total_impacted, 1);
@@ -314,7 +320,13 @@ async fn test_impact_analysis_direct_callers() {
     store.insert_edges(&edges).await.unwrap();
 
     let report = store
-        .impact_analysis(TENANT, "target_fn", Some("lib.rs"), &GraphScope::all())
+        .impact_analysis(
+            TENANT,
+            "target_fn",
+            Some("lib.rs"),
+            DEFAULT_IMPACT_HOPS,
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
 
@@ -365,7 +377,13 @@ async fn test_impact_strict_filepath_drops_ambiguous_fanout() {
 
     // Strict: file_path anchors the target → the 0.3 fan-out edge is dropped.
     let strict = store
-        .impact_analysis(TENANT, "remove", Some("lib.rs"), &GraphScope::all())
+        .impact_analysis(
+            TENANT,
+            "remove",
+            Some("lib.rs"),
+            DEFAULT_IMPACT_HOPS,
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -382,7 +400,13 @@ async fn test_impact_strict_filepath_drops_ambiguous_fanout() {
 
     // Broad: no file_path → unchanged, both callers returned.
     let broad = store
-        .impact_analysis(TENANT, "remove", None, &GraphScope::all())
+        .impact_analysis(
+            TENANT,
+            "remove",
+            None,
+            DEFAULT_IMPACT_HOPS,
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -423,7 +447,13 @@ async fn test_impact_analysis_transitive() {
     store.insert_edges(&edges).await.unwrap();
 
     let report = store
-        .impact_analysis(TENANT, "target", Some("c.rs"), &GraphScope::all())
+        .impact_analysis(
+            TENANT,
+            "target",
+            Some("c.rs"),
+            DEFAULT_IMPACT_HOPS,
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
 
@@ -448,7 +478,13 @@ async fn test_impact_analysis_symbol_not_found() {
     let store = test_store().await;
 
     let report = store
-        .impact_analysis(TENANT, "nonexistent", None, &GraphScope::all())
+        .impact_analysis(
+            TENANT,
+            "nonexistent",
+            None,
+            DEFAULT_IMPACT_HOPS,
+            &GraphScope::all(),
+        )
         .await
         .unwrap();
 

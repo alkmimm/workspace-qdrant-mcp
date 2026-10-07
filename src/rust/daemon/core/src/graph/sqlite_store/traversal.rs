@@ -23,6 +23,7 @@ pub(super) struct NodeMeta {
     pub symbol_name: String,
     pub symbol_type: String,
     pub file_path: String,
+    pub parent_symbol: Option<String>,
 }
 
 /// An edge row of one BFS hop, before scoping.
@@ -85,7 +86,7 @@ impl SqliteGraphStore {
         }
         let ph: Vec<String> = (0..ids.len()).map(|i| format!("?{}", i + 2)).collect();
         let query = format!(
-            "SELECT node_id, generation, symbol_name, symbol_type, file_path \
+            "SELECT node_id, generation, symbol_name, symbol_type, file_path, parent_symbol \
              FROM graph_nodes WHERE tenant_id = ?1 AND node_id IN ({})",
             ph.join(", ")
         );
@@ -114,6 +115,7 @@ impl SqliteGraphStore {
                         symbol_name: r.get("symbol_name"),
                         symbol_type: r.get("symbol_type"),
                         file_path: r.get("file_path"),
+                        parent_symbol: r.get("parent_symbol"),
                     },
                 ),
             );
@@ -248,6 +250,7 @@ impl SqliteGraphStore {
                     depth,
                     path,
                     confidence,
+                    parent_symbol: m.parent_symbol.clone(),
                 })
             })
             .collect();
