@@ -78,6 +78,13 @@ NOT reached, which is why it needs `make validate`; do not assume a green
 When using a positional libtest filter, assert the expected test count — an
 empty filter matches nothing and libtest still exits 0.
 
+Every `RUN` that mounts the shared `/build/target` cache and runs cargo starts
+with `content-mtimes /build/target/.content-mtimes /build /assets /patterns &&`
+(`docker/content-mtimes.sh`). Cargo judges freshness by mtime, and the cache is
+shared by the main checkout and every worktree: without it, building two trees
+in turn reuses one tree's outputs (codegen included) for the other's different
+bytes. A new cargo `RUN` must call it too.
+
 Use the Makefile that matches your shell:
 
 - **Linux / WSL** → `make <target>` (top-level `Makefile`, bash + docker compose)
