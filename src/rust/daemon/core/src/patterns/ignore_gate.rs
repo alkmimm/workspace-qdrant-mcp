@@ -103,10 +103,19 @@ impl IgnoreGate {
     /// `matched_path_or_any_parents`; the replay is what extends the same
     /// guarantee to the project layer's plain `matched` semantics.
     pub fn is_ignored_with_ancestors(&self, root: &Path, abs_file: &Path) -> bool {
-        if self.is_ignored(abs_file, false) {
-            return true;
-        }
-        let mut current = abs_file.parent();
+        self.is_ignored(abs_file, false)
+            || abs_file
+                .parent()
+                .is_some_and(|dir| self.is_dir_ignored_with_ancestors(root, dir))
+    }
+
+    /// Directory form of [`IgnoreGate::is_ignored_with_ancestors`], for a
+    /// directory reached directly — a folder-scan item queued before a rule
+    /// excluded its subtree. `abs_dir` itself is tested AS a directory (a
+    /// `vendor/`-style rule must match it), then each ancestor up to (but not
+    /// including) `root`; `root` itself is never ignored.
+    pub fn is_dir_ignored_with_ancestors(&self, root: &Path, abs_dir: &Path) -> bool {
+        let mut current = Some(abs_dir);
         while let Some(dir) = current {
             if dir == root || !dir.starts_with(root) {
                 break;
@@ -318,6 +327,40 @@ mod tests {
             dequeue(&root.join("vendor/pkg/.gitignore")),
             "excluded parent"
         );
+    }
+
+    /// A directory reached directly (a folder scan queued before the rule
+    /// existed) on the tecsul shape (2026-10-07): everything at the root
+    /// excluded but `src/`, plus a directory-only rule inside the kept tree.
+    /// The directory itself is tested AS a directory — the file form misses a
+    /// `vendor/`-style rule on it — then its ancestors; the root never is.
+    #[test]
+    fn a_directory_under_an_ignored_ancestor_is_ignored() {
+        let proj = tempfile::tempdir().unwrap();
+        let root = proj.path();
+        write(root, ".wqmignore", "/*\n!/src/\n/src/vendor/\n");
+        let gate = |dir: &Path| IgnoreGate::for_dir(dir, Some(root), None);
+        for (rel, ignored) in [
+            ("lib", true),
+            ("lib/deep/er", true),
+            ("src/vendor", true),
+            ("src/vendor/pkg", true),
+            ("src", false),
+            ("src/app/core", false),
+        ] {
+            let dir = root.join(rel);
+            assert_eq!(
+                gate(&dir).is_dir_ignored_with_ancestors(root, &dir),
+                ignored,
+                "{rel}"
+            );
+        }
+        let vendor = root.join("src/vendor");
+        assert!(
+            !gate(&vendor).is_ignored_with_ancestors(root, &vendor),
+            "the file form does not see a directory-only rule on the path itself"
+        );
+        assert!(!gate(root).is_dir_ignored_with_ancestors(root, root));
     }
 
     #[test]
