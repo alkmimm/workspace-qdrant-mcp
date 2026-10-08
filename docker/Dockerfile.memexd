@@ -891,7 +891,9 @@ bump this count."; exit 1; }
 # enqueued it under `projects`, where the ingest guard drops an add and a delete
 # hits the wrong Qdrant collection. Routing now happens where every File item
 # enters the queue; eligibility is `is_indexable`. `.key` is never routed: in a
-# source repository it is a PEM private key (bws-engineer holds three).
+# source repository it is a PEM private key (bws-engineer holds three). And
+# JavaServer Pages (`.jsp`/`.jspf`/`.jspx`) are project source: until 2026-10-08
+# no JSP extension was allowlisted, so a Java web app's views were skipped.
 # Hermetic: in-memory SQLite + tempdirs. Module paths, exact count asserted.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -903,8 +905,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         allowed_extensions::routing \
         strategies::processing::folder::file_entry \
         --test-threads=4 2>&1 | tee /tmp/library-routing.log; \
-    grep -q "^test result: ok\. 8 passed" /tmp/library-routing.log \
-    || { echo "GATE: expected exactly 8 library-routing tests to run and pass — libtest exits 0 \
+    grep -q "^test result: ok\. 9 passed" /tmp/library-routing.log \
+    || { echo "GATE: expected exactly 9 library-routing tests to run and pass — libtest exits 0 \
 when a positional filter matches nothing, so a module rename would silently un-gate the rule \
 that sends a project's documents to its library from every producer. If you ADDED a test \
 here, bump this count."; exit 1; }
