@@ -227,6 +227,11 @@ web_technologies:
     lsp_id: "mustache"
     category: "template"
 
+  jsp:
+    extensions: [".jsp", ".jspf", ".jspx"]
+    lsp_id: "jsp"
+    category: "template"
+
   # Vue/Angular
   vue:
     extensions: [".vue"]
@@ -552,6 +557,9 @@ extensions_to_languages:
   ".hbs": "handlebars"
   ".handlebars": "handlebars"
   ".mustache": "mustache"
+  ".jsp": "jsp"
+  ".jspf": "jsp"
+  ".jspx": "jsp"
   ".vue": "vue"
 
   # Markup & Documentation

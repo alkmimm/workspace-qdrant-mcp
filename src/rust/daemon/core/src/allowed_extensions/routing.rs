@@ -12,7 +12,7 @@ use std::path::Path;
 
 use wqm_common::constants::COLLECTION_LIBRARIES;
 
-use super::extensions::AllowedExtensions;
+use super::matcher::AllowedExtensions;
 use super::types::FileRoute;
 
 /// Extensions for binary/reference formats that route to the `libraries` collection
@@ -168,5 +168,28 @@ mod tests {
         );
         // A folder registered as a library keeps Keynote decks.
         assert!(ae.is_indexable("talk.key", COLLECTION_LIBRARIES));
+    }
+
+    /// JavaServer Pages are a Java web app's views (tecsul's
+    /// `site-tecsul/src/main/webapp/WEB-INF/views/jsp/`): source the project
+    /// indexes, not a document its library takes. Until 2026-10-08 the
+    /// allowlist had no JSP extension, so every view was silently skipped.
+    #[test]
+    fn java_server_pages_index_into_the_project() {
+        let ae = AllowedExtensions::default();
+        for view in [
+            "src/main/webapp/WEB-INF/views/jsp/home.jsp",
+            "src/main/webapp/WEB-INF/jspf/header.jspf",
+            "src/main/webapp/views/page.jspx",
+            "WEB-INF/views/Legacy.JSP",
+        ] {
+            assert!(ae.is_allowed(view, COLLECTION_PROJECTS), "{view}");
+            assert!(!is_library_routed(view), "{view}");
+            assert_eq!(
+                ae.route_file(view, COLLECTION_PROJECTS, "t"),
+                FileRoute::ProjectCollection,
+                "{view}"
+            );
+        }
     }
 }
