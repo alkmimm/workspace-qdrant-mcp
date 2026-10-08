@@ -576,6 +576,29 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib db_retry -- --test-threads=4
 
+# Queue finalization runs here, same rationale: hermetic (tempdir SQLite). The
+# FTS5 batch writer is a SECOND finalizer, running concurrently with the
+# processor's success path; until 2026-10-07 it recorded its sink and resolved
+# the item in two steps, and the processor could delete the row between them
+# (memexd logged "check_and_finalize failed … Queue item not found"). These pin
+# the one-transaction resolve, both finalize orders, and the destination state
+# machine the two share — whose tests ran in no gate before. Exact count
+# asserted: libtest exits 0 when a positional filter matches nothing.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        queue_operations::tests::destination_tests \
+        queue_operations::tests::resolve_destination_tests \
+        search_db::batch_finalize::tests \
+        --test-threads=4 2>&1 | tee /tmp/queue-finalize.log; \
+    grep -q "^test result: ok\. 25 passed" /tmp/queue-finalize.log \
+    || { echo "GATE: expected exactly 25 queue finalization tests (destination state machine, \
+resolve_destination, FTS5 batch finalize) to run and pass. If you ADDED a test here, bump this \
+count."; exit 1; }
+
 # Branch-aware graph runs here — the WHOLE graph suites, not a sample: the
 # core `graph::` module, the four graph integration binaries and the gRPC
 # GraphService tests. Hermetic (in-memory / tempdir SQLite, no embeddings, no

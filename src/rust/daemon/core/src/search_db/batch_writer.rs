@@ -15,9 +15,9 @@
 //! the throughput is bounded by FTS5 work itself, not lock contention.
 //!
 //! The actor takes responsibility for the full post-batch handshake:
-//! upserting `indexed_content` cache rows, flipping `search_status` to
-//! `done` / `failed`, and calling `check_and_finalize` so completed
-//! items leave `unified_queue` without waiting for the next dequeue.
+//! upserting `indexed_content` cache rows, then recording `search_status`
+//! and resolving each item (`batch_finalize`) so completed items leave
+//! `unified_queue` without waiting for the next dequeue.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,28 +25,15 @@ use std::time::Duration;
 use once_cell::sync::OnceCell;
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::fts_batch_processor::{FileChange, FtsBatchConfig, FtsBatchProcessor};
 use crate::indexed_content_schema;
 use crate::queue_operations::QueueManager;
-use crate::unified_queue_schema::{DestinationStatus, QueueStatus};
+use crate::unified_queue_schema::DestinationStatus;
 
+use super::batch_finalize::resolve_search;
 use super::SearchDbManager;
-
-/// Error message recorded when an FTS5 batch reports a per-item failure.
-///
-/// The `[transient_fts5]` prefix is load-bearing: it makes the item eligible
-/// for the idle resurrection pass (`QueueManager::resurrect_failed_transient`,
-/// which selects `WHERE error_message LIKE '[transient_%'`). FTS5 batch
-/// failures are typically transient — historically `SQLITE_BUSY` write-lock
-/// contention (see the module doc), or a poisoned sibling in the same batch.
-/// Resurrection bounds retries via `max_resurrections`, then promotes the row
-/// to `[permanent_exhausted]`. WITHOUT the prefix the item is neither
-/// resurrected nor triaged and sits in `failed` forever.
-fn fts5_failure_message(queue_id: &str) -> String {
-    format!("[transient_fts5] FTS5 batch reported search_status=failed for queue_id={queue_id}")
-}
 
 /// Global sender installed by the daemon's `UnifiedQueueProcessor::with_search_db`.
 ///
@@ -227,7 +214,7 @@ impl Fts5BatchWriter {
                     "FTS5 batch failed ({} items): {} — marking search_status=failed and letting unified_queue retry",
                     n, e
                 );
-                self.finalize_failure(&items, &e.to_string()).await;
+                self.finalize_failure(&items).await;
             }
         }
 
@@ -238,8 +225,8 @@ impl Fts5BatchWriter {
         );
     }
 
-    /// Post-commit work: update `indexed_content` cache, mark search=done,
-    /// finalize each queue item.
+    /// Post-commit work: update `indexed_content` cache, then record
+    /// search=done and resolve each queue item.
     async fn finalize_success(&self, items: &[Fts5WorkItem]) {
         for item in items {
             // Best-effort indexed_content cache update. Failures here are
@@ -259,116 +246,20 @@ impl Fts5BatchWriter {
                 );
             }
 
-            if let Err(e) = self
-                .queue_manager
-                .update_destination_status(&item.queue_id, "search", DestinationStatus::Done)
-                .await
-            {
-                error!(
-                    "update_destination_status(search=Done) failed for queue_id={}: {}",
-                    item.queue_id, e
-                );
-                continue;
-            }
-
-            self.finalize_one(&item.queue_id).await;
+            resolve_search(&self.queue_manager, &item.queue_id, DestinationStatus::Done).await;
         }
     }
 
-    async fn finalize_failure(&self, items: &[Fts5WorkItem], batch_err: &str) {
+    /// The batch error itself is logged by `flush`; each item's retry path
+    /// records the transient message (`batch_finalize::fts5_failure_message`).
+    async fn finalize_failure(&self, items: &[Fts5WorkItem]) {
         for item in items {
-            if let Err(e) = self
-                .queue_manager
-                .update_destination_status(&item.queue_id, "search", DestinationStatus::Failed)
-                .await
-            {
-                error!(
-                    "update_destination_status(search=Failed) failed for queue_id={}: {}",
-                    item.queue_id, e
-                );
-                continue;
-            }
-
-            self.finalize_one(&item.queue_id).await;
-            // No need to call mark_unified_failed explicitly — `finalize_one`
-            // routes through `check_and_finalize`, which returns Failed when
-            // either destination reports failed, and the caller (this loop)
-            // already logged the batch error context.
-            let _ = batch_err; // currently unused; reserved for richer error_message
+            resolve_search(
+                &self.queue_manager,
+                &item.queue_id,
+                DestinationStatus::Failed,
+            )
+            .await;
         }
-    }
-
-    /// Resolve a single queue item's overall status now that we've updated
-    /// `search_status`. Mirrors `handle_item_success` in batch_processing.rs:
-    /// delete on Done, mark_unified_failed on Failed, leave alone otherwise.
-    async fn finalize_one(&self, queue_id: &str) {
-        let overall = match self.queue_manager.check_and_finalize(queue_id).await {
-            Ok(s) => s,
-            Err(e) => {
-                error!(
-                    "check_and_finalize failed for queue_id={}: {} — item left in current state",
-                    queue_id, e
-                );
-                return;
-            }
-        };
-        match overall {
-            QueueStatus::Done => {
-                if let Err(e) = self.queue_manager.delete_unified_item(queue_id).await {
-                    error!(
-                        "delete_unified_item failed for queue_id={}: {}",
-                        queue_id, e
-                    );
-                }
-            }
-            QueueStatus::Failed => {
-                // mark_unified_failed handles retry vs permanent. max_retries is
-                // hardcoded to 3 here because the actor doesn't carry the
-                // processor config; the wider queue cfg uses the same default
-                // (see UnifiedProcessorConfig).
-                let err_msg = fts5_failure_message(queue_id);
-                if let Err(e) = self
-                    .queue_manager
-                    .mark_unified_failed(queue_id, &err_msg, false, 3)
-                    .await
-                {
-                    error!(
-                        "mark_unified_failed for {} after FTS5 batch error: {}",
-                        queue_id, e
-                    );
-                }
-            }
-            QueueStatus::InProgress | QueueStatus::Pending => {
-                // qdrant_status isn't done yet — leave the item in queue,
-                // the qdrant worker will finalize when it completes.
-                debug!(
-                    "queue_id={} still in_progress after FTS5 batch (qdrant pending)",
-                    queue_id
-                );
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::fts5_failure_message;
-
-    /// The FTS5 failure message MUST carry a `[transient_` prefix so the
-    /// idle resurrection pass (`resurrect_failed_transient`, which matches
-    /// `error_message LIKE '[transient_%'`) re-queues it. Regression guard:
-    /// dropping the prefix would silently strand failed items in `failed`
-    /// forever (the bug that left 346 SQLITE_BUSY items dead).
-    #[test]
-    fn fts5_failure_message_is_classified_transient() {
-        let msg = fts5_failure_message("abc123");
-        assert!(
-            msg.starts_with("[transient_"),
-            "must match resurrection's LIKE '[transient_%' pattern, got: {msg}"
-        );
-        assert!(
-            msg.contains("abc123"),
-            "must embed the queue_id, got: {msg}"
-        );
     }
 }
