@@ -51,17 +51,9 @@ pub(crate) async fn scan_directory_single_level(
     let mut errors = 0u64;
 
     let baseline: Option<SystemTime> = last_scan.and_then(parse_iso8601_to_system_time);
-    // One gate for the project `.gitignore`/`.wqmignore` cascade AND the
-    // daemon-wide `global.wqmignore`. The watch-folder root makes ignore rules
-    // cascade from ancestor dirs (issue #49) — passing `None` used only the
-    // scanned subdirectory's own files, so a project-root `.wqmignore` was
-    // missed when scanning a subdirectory. `IgnoreGate` is the same decision the
-    // reconciler uses, so the two walk paths can never disagree on eligibility.
-    let gate = IgnoreGate::for_dir(
-        dir_path,
-        Some(Path::new(watch_folder_root.as_str())),
-        global_ignore::resolve_global_ignore_path().as_deref(),
-    );
+    let Some(gate) = scan_gate(dir_path, Path::new(watch_folder_root.as_str())) else {
+        return Ok((0, 0, 1, 0));
+    };
 
     let entries = std::fs::read_dir(dir_path).map_err(|e| {
         UnifiedProcessorError::ProcessingFailed(format!(
@@ -72,24 +64,10 @@ pub(crate) async fn scan_directory_single_level(
     })?;
 
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("Failed to read dir entry in {}: {}", dir_path.display(), e);
-                errors += 1;
-                continue;
-            }
+        let Some((entry, file_type)) = readable_entry(entry, dir_path, &mut errors) else {
+            continue;
         };
-
         let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(e) => {
-                warn!("Failed to get file type for {}: {}", path.display(), e);
-                errors += 1;
-                continue;
-            }
-        };
 
         if file_type.is_dir() {
             if gate.is_ignored(&path, true) {
@@ -129,6 +107,68 @@ pub(crate) async fn scan_directory_single_level(
     }
 
     Ok((files_queued, dirs_queued, files_excluded, errors))
+}
+
+/// A readable directory entry with its type, or `None` — counted in `errors`
+/// — when the entry or its type cannot be read.
+fn readable_entry(
+    entry: std::io::Result<std::fs::DirEntry>,
+    dir_path: &Path,
+    errors: &mut u64,
+) -> Option<(std::fs::DirEntry, std::fs::FileType)> {
+    let entry = match entry {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("Failed to read dir entry in {}: {}", dir_path.display(), e);
+            *errors += 1;
+            return None;
+        }
+    };
+    match entry.file_type() {
+        Ok(file_type) => Some((entry, file_type)),
+        Err(e) => {
+            warn!(
+                "Failed to get file type for {}: {}",
+                entry.path().display(),
+                e
+            );
+            *errors += 1;
+            None
+        }
+    }
+}
+
+/// The ignore gate for scanning `dir_path`, or `None` when the directory
+/// itself lies under an ignored directory.
+///
+/// One gate for the project `.gitignore`/`.wqmignore` cascade AND the
+/// daemon-wide `global.wqmignore`. The watch-folder root makes ignore rules
+/// cascade from ancestor dirs (issue #49) — passing `None` used only the
+/// scanned subdirectory's own files, so a project-root `.wqmignore` was missed
+/// when scanning a subdirectory. `IgnoreGate` is the same decision the
+/// reconciler uses, so the two walk paths can never disagree on eligibility.
+///
+/// A scan queued before its directory became ignored — a `.wqmignore` added
+/// while a project's first scan was still descending — must not keep crawling
+/// the excluded subtree. The per-entry checks only see the directory's
+/// children, so a rule on an ANCESTOR (`/*` at the root) never reached them:
+/// every file was enqueued and then dropped by the dequeue gate, and every
+/// subdirectory spawned another scan (tecsul 2026-10-07: ~230 queued FreeRTOS
+/// scans kept crawling an excluded `c/`).
+fn scan_gate(dir_path: &Path, root: &Path) -> Option<IgnoreGate> {
+    let gate = IgnoreGate::for_dir(
+        dir_path,
+        Some(root),
+        global_ignore::resolve_global_ignore_path().as_deref(),
+    );
+    if gate.is_dir_ignored_with_ancestors(root, dir_path) {
+        debug!(
+            "Folder scan skipped: {} lies under an ignored directory",
+            dir_path.display()
+        );
+        return None;
+    }
+    Some(gate)
 }
 
 /// Parse an ISO 8601 / RFC 3339 timestamp string into a `SystemTime`.
@@ -377,5 +417,47 @@ pub(super) mod tests {
         assert_eq!(row.1, "dev-clean");
         assert!(row.2.contains(r#""folder_path":"child""#));
         assert!(row.2.contains(r#""uplift":true"#));
+    }
+
+    /// tecsul 2026-10-07: a `.wqmignore` added while the first scan was still
+    /// descending left ~230 queued scans inside the newly excluded `c/`; each
+    /// enqueued its files (dropped at dequeue) and its subdirectories (more
+    /// scans). A scan under an ignored ancestor now enqueues nothing, while a
+    /// scan in the kept tree still descends. (Only the subdirectory count is
+    /// compared for the kept tree: the file exclusion gate matches components
+    /// of the absolute path, and a tempdir's `.tmpXXXX` would exclude files.)
+    #[tokio::test]
+    async fn a_scan_under_an_ignored_ancestor_enqueues_nothing() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join(".wqmignore"), "/*\n!/src/\n").unwrap();
+        for dir in ["c/rtos/port", "src/app"] {
+            let dir = project.path().join(dir);
+            std::fs::create_dir_all(dir.join("sub")).unwrap();
+            std::fs::write(dir.join("main.c"), "int main(void) { return 0; }\n").unwrap();
+        }
+        let root = CanonicalPath::from_user_input(&project.path().to_string_lossy()).unwrap();
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let qm = Arc::new(QueueManager::new(pool.clone()));
+        qm.init_unified_queue().await.unwrap();
+        let ext = Arc::new(AllowedExtensions::default());
+        let item = scan_item("t-ignored-ancestor");
+
+        let ignored = project.path().join("c/rtos/port");
+        let outcome = scan_directory_single_level(&ignored, &root, &item, &qm, &ext, None, false)
+            .await
+            .unwrap();
+        assert_eq!(outcome, (0, 0, 1, 0));
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM unified_queue")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(queued, 0, "nothing under an ignored ancestor is enqueued");
+
+        let kept = project.path().join("src/app");
+        let (_, dirs, _, errors) =
+            scan_directory_single_level(&kept, &root, &item, &qm, &ext, None, false)
+                .await
+                .unwrap();
+        assert_eq!((dirs, errors), (1, 0), "the kept tree still descends");
     }
 }

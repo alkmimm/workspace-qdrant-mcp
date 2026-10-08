@@ -885,7 +885,11 @@ When a new project is registered via `RegisterProject` gRPC:
      - Directories: check exclusion → enqueue (Folder, Scan)
      - Excluded dirs (.git, node_modules, target) are skipped
 4. Queue processor handles each (Folder, Scan):
-   - Repeat step 3 for each subdirectory (single level)
+   - First, if the directory itself or any ancestor below the root is now
+     ignored (an ignore rule added after the scan was queued), skip it — the
+     per-entry checks only see this directory's children, never an
+     ancestor's rule
+   - Otherwise repeat step 3 for each subdirectory (single level)
 5. Queue processor handles each (File, Add):
    - Ingest with LSP/tree-sitter metadata
    - Record in tracked_files + qdrant_chunks
