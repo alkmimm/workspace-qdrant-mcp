@@ -404,12 +404,14 @@ pub fn redact_for_path(path: &Path, text: String) -> (String, usize) {
     }
 }
 
-/// Read a file the way the text index must see it: EOL-normalised (the
-/// `base_point` identity is CRLF-agnostic) and credential-redacted. The one
-/// disk reader for `code_lines`; see [`redact_for_path`].
+/// Read a file the way the text index must see it: decoded as the chunker
+/// decodes it (a Latin-1 or UTF-16 file is text, not an error — see
+/// `extraction::text::decode_text`), EOL-normalised (the `base_point`
+/// identity is CRLF-agnostic) and credential-redacted. The one disk reader
+/// for `code_lines`; see [`redact_for_path`]. Binary content is `InvalidData`.
 pub async fn read_for_index(read_path: impl AsRef<Path>) -> std::io::Result<(String, usize)> {
     let read_path = read_path.as_ref();
-    let raw = tokio::fs::read_to_string(read_path).await?;
+    let raw = super::extraction::text::read_text(read_path).await?;
     let normalised = wqm_common::hashing::normalize_line_endings(&raw).into_owned();
     Ok(redact_for_path(read_path, normalised))
 }
