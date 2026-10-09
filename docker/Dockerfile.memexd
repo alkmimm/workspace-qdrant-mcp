@@ -1039,6 +1039,9 @@ this count."; exit 1; }
 # (`read_for_index`) returns byte-for-byte the chunker's view — one
 # pipeline test proves the value reaches neither raw_text nor a chunk, and one
 # allowlist test proves `.env*` stays out while the template names get in.
+# The chunker and the FTS5 reader must also decode the same way: until
+# 2026-10-08 `read_for_index` required UTF-8, so every ISO-8859-1 / UTF-16 file
+# was in semantic search and missing from grep (5 of 5 such files, 4 tenants).
 # Hermetic: strings and a tempdir. NAMES only, exact count asserted.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -1049,9 +1052,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         document_processor::redaction::tests \
         application_properties_secret_never_reaches_raw_text_or_chunks \
         config_formats_admitted_env_files_still_rejected \
+        document_processor::extraction::text::tests \
         --test-threads=4 2>&1 | tee /tmp/redaction.log; \
-    grep -q "^test result: ok\. 11 passed" /tmp/redaction.log \
-    || { echo "GATE: expected exactly 11 credential-redaction tests to run and pass — libtest \
+    grep -q "^test result: ok\. 16 passed" /tmp/redaction.log \
+    || { echo "GATE: expected exactly 16 credential-redaction and text-decoding tests to run and pass — libtest \
 exits 0 when a positional filter matches nothing, so a rename would silently un-gate the \
 masking that is the only reason configuration files are indexed at all. If you ADDED a test \
 here, bump this count."; exit 1; }

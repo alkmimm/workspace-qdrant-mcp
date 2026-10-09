@@ -34,6 +34,19 @@ pub(super) enum Fts5Outcome {
     Skipped,
 }
 
+/// Log why a file's text was not read for the FTS5 index. Binary content
+/// (`InvalidData` from `read_for_index`) is expected and stays at debug; any
+/// other failure is a real read error and is a warning, because the file
+/// then stays out of `grep` while its chunks are in search. Until 2026-10-08
+/// every non-UTF-8 text file failed here, at debug, unnoticed.
+pub(super) fn log_index_read_skip(context: &str, path: &str, e: &std::io::Error) {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        debug!("{context}: binary content, not indexed for FTS5: {path}");
+    } else {
+        warn!("{context}: cannot read {path} for FTS5 — it stays out of grep: {e}");
+    }
+}
+
 /// Hand the FTS5 work off to the global batch writer when one is installed;
 /// otherwise fall back to the legacy inline path.
 ///
@@ -90,10 +103,7 @@ pub(super) async fn update_fts5_for_file_or_enqueue(
     let new_content = match redaction::read_for_index(read_path).await {
         Ok((c, _redacted_lines)) => c,
         Err(e) => {
-            debug!(
-                "FTS5: cannot read file for indexing (may be binary): {}: {}",
-                read_path, e
-            );
+            log_index_read_skip("FTS5", read_path, &e);
             return Ok(Fts5Outcome::Skipped);
         }
     };
@@ -193,10 +203,7 @@ pub(super) async fn update_fts5_for_file(
     let new_content = match redaction::read_for_index(read_path).await {
         Ok((content, _redacted_lines)) => content,
         Err(e) => {
-            debug!(
-                "FTS5: cannot read file for indexing (may be binary): {}: {}",
-                read_path, e
-            );
+            log_index_read_skip("FTS5", read_path, &e);
             return Ok(false);
         }
     };
