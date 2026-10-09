@@ -442,8 +442,13 @@ async fn test_check_and_finalize_nonexistent_item() {
     let manager = QueueManager::new(pool);
     manager.init_unified_queue().await.unwrap();
 
+    // Typed NotFound: the processor reads it as "already resolved elsewhere"
+    // and any other error as a real failure that keeps the item.
     let err = manager.check_and_finalize("nonexistent-id").await;
-    assert!(err.is_err());
+    assert!(
+        matches!(err, Err(QueueError::NotFound(ref id)) if id == "nonexistent-id"),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

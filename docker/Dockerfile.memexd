@@ -599,6 +599,28 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 resolve_destination, FTS5 batch finalize) to run and pass. If you ADDED a test here, bump this \
 count."; exit 1; }
 
+# Failure classification runs here, same rationale: hermetic (no I/O). Until
+# 2026-10-08 every document-extraction failure became `ProcessingFailed`, which
+# classifies as transient: a CSV with invalid UTF-8 or a binary `.doc` was
+# retried three times and resurrected, failing identically each time. And the
+# processor read ANY error from `finalize_after_success` as Done and deleted
+# the item, so a real database failure dropped a retry it was owed. These pin
+# both, plus the classifier's existing cases, which ran in no gate before.
+# Exact count asserted: libtest exits 0 when a filter matches nothing.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        unified_queue_processor::error::tests \
+        unified_queue_processor::processing_loop::batch_processing::tests \
+        unified_queue_processor::tests::tests::test_classify_error \
+        --test-threads=4 2>&1 | tee /tmp/failure-classification.log; \
+    grep -q "^test result: ok\. 8 passed" /tmp/failure-classification.log \
+    || { echo "GATE: expected exactly 8 failure-classification tests (document errors, finalize \
+outcome, classify_error) to run and pass. If you ADDED a test here, bump this count."; exit 1; }
+
 # Branch-aware graph runs here — the WHOLE graph suites, not a sample: the
 # core `graph::` module, the four graph integration binaries and the gRPC
 # GraphService tests. Hermetic (in-memory / tempdir SQLite, no embeddings, no

@@ -66,11 +66,10 @@ async fn check_and_finalize_on(
             .fetch_optional(&mut *conn)
             .await?;
 
+    // Typed, so a caller can tell "another path already resolved the item"
+    // from a real database failure (see `batch_processing::finalize_outcome`).
     let Some(row) = row else {
-        return Err(QueueError::InvalidOperation(format!(
-            "Queue item not found: {}",
-            queue_id
-        )));
+        return Err(QueueError::NotFound(queue_id.to_string()));
     };
 
     let qs_str: String = row
