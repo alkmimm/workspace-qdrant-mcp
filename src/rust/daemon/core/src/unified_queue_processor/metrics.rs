@@ -38,7 +38,8 @@ impl UnifiedQueueProcessor {
     }
 
     /// Classify a processing error into one of 6 categories:
-    /// - `permanent_data`: invalid payload, unsupported format -- no retry, no resurrection
+    /// - `permanent_data`: invalid payload, unsupported format, content that can
+    ///   never be extracted -- no retry, no resurrection
     /// - `permanent_gone`: file deleted, permission denied -- silently dequeue
     /// - `transient_infrastructure`: Qdrant down, network error -- retry with standard backoff
     /// - `transient_resource`: OOM, embedding inference failure -- retry with longer backoff
@@ -50,6 +51,8 @@ impl UnifiedQueueProcessor {
             UnifiedProcessorError::FileNotFound(_) => "permanent_gone",
             // Malformed payload -- retrying won't fix the data
             UnifiedProcessorError::InvalidPayload(_) => "permanent_data",
+            // The file's bytes cannot be extracted -- the same bytes fail again
+            UnifiedProcessorError::UnreadableContent(_) => "permanent_data",
             // Queue operation errors -- check message
             UnifiedProcessorError::QueueOperation(msg) => {
                 let lower = msg.to_lowercase();
