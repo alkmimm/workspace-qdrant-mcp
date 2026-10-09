@@ -119,6 +119,8 @@ Priority is **calculated at query time**, not stored in the queue:
 
 The asymmetric sizes (10:3) ensure ~77% of processing capacity goes to active projects while still preventing starvation. Equal batch sizes would neutralize priority advantages when library files are significantly larger than source code files.
 
+**Refilling free slots:** a batch's items run up to `max_concurrent_items` at a time. Once all of them are dispatched and longer ones still run, the free slots are refilled from the same scheduler, for at most 5 minutes per batch, never under memory pressure, and not while the Qdrant circuit breaker is open. After that the batch drains and the processor's between-batch control plane runs: the circuit breaker, adaptive scaling, queue metrics and tenant activity. Until 2026-10-08 a batch waited for its slowest item before the next dequeue. One 5-minute PDF then held every other slot idle and stopped the queue for every tenant.
+
 #### Project Activity Tracking
 
 The `watch_folders` table tracks activity state:

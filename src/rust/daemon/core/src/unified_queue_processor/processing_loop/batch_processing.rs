@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 use crate::adaptive_resources::ResourceProfile;
 use crate::allowed_extensions::AllowedExtensions;
 use crate::config::IngestionLimitsConfig;
+use crate::fairness_scheduler::FairnessScheduler;
 use crate::lexicon::LexiconManager;
 use crate::lsp::LanguageServerManager;
 use crate::monitoring::metrics_core::METRICS;
@@ -75,6 +76,7 @@ struct ItemDeps {
 pub(super) async fn process_batch(
     items: Vec<UnifiedQueueItem>,
     config: &UnifiedProcessorConfig,
+    fairness_scheduler: &Arc<FairnessScheduler>,
     queue_manager: &QueueManager,
     document_processor: &Arc<DocumentProcessor>,
     embedding_generator: &Arc<EmbeddingGenerator>,
@@ -132,6 +134,7 @@ pub(super) async fn process_batch(
         || async {
             apply_inter_dispatch_delay(config, warmup_state, resource_profile_rx).await;
         },
+        refill_from(fairness_scheduler, storage_client),
         config.max_memory_percent,
     )
     .await;
@@ -146,6 +149,48 @@ pub(super) async fn process_batch(
     // try_unwrap (which would always fall through to the lock path anyway).
     let drained = processed_tenants.lock().await.clone();
     Ok(drained)
+}
+
+/// How long one batch keeps refilling free slots before it drains and hands
+/// control back to the outer loop, whose control plane (circuit breaker,
+/// adaptive scaling, queue metrics, tenant activity) runs between batches.
+const REFILL_WINDOW: Duration = Duration::from_secs(300);
+
+/// The refill for one batch (see `run_dispatch_loop`): items from the
+/// fairness scheduler for the free slots, while the refill window is open and
+/// Qdrant is available. A dequeue error ends the refilling; the batch drains.
+fn refill_from(
+    fairness_scheduler: &Arc<FairnessScheduler>,
+    storage_client: &Arc<StorageClient>,
+) -> impl FnMut(usize) -> futures::future::BoxFuture<'static, Vec<UnifiedQueueItem>> {
+    let deadline = std::time::Instant::now() + REFILL_WINDOW;
+    let scheduler = Arc::clone(fairness_scheduler);
+    let storage = Arc::clone(storage_client);
+    move |free_slots| {
+        let scheduler = Arc::clone(&scheduler);
+        let storage = Arc::clone(&storage);
+        Box::pin(async move {
+            if std::time::Instant::now() >= deadline || !storage.is_qdrant_available() {
+                return Vec::new();
+            }
+            let wanted = i32::try_from(free_slots).unwrap_or(i32::MAX);
+            match scheduler.dequeue_next_batch(wanted).await {
+                Ok(items) => {
+                    if !items.is_empty() {
+                        debug!(
+                            "Refilled {} free slot(s) while longer items run",
+                            items.len()
+                        );
+                    }
+                    items
+                }
+                Err(e) => {
+                    warn!("Refill dequeue failed, the batch drains instead: {e}");
+                    Vec::new()
+                }
+            }
+        })
+    }
 }
 
 /// Drive a single queue item through dispatch and finalize success/failure.
