@@ -58,6 +58,31 @@ pub enum DocumentProcessorError {
     TaskError(String),
 }
 
+impl DocumentProcessorError {
+    /// Whether the failure is a property of the file's bytes: the same bytes
+    /// fail the same way on every attempt (a CSV with invalid UTF-8, a binary
+    /// `.doc`, a corrupt PDF, an unsupported format). Retrying such a file
+    /// only burns its retry budget and the resurrection pass. I/O errors,
+    /// OCR (an external tool) and task failures can heal and are not.
+    pub fn is_deterministic(&self) -> bool {
+        matches!(
+            self,
+            Self::PdfExtraction(_)
+                | Self::EpubExtraction(_)
+                | Self::DocxExtraction(_)
+                | Self::EncodingError(_)
+                | Self::SpreadsheetExtraction(_)
+                | Self::CsvExtraction(_)
+                | Self::JupyterExtraction(_)
+                | Self::MobiExtraction(_)
+                | Self::ChmExtraction(_)
+                | Self::EmptyFile(_)
+                | Self::BinaryFile(_)
+                | Self::UnsupportedFormat(_)
+        )
+    }
+}
+
 /// Result type for document processing operations
 pub type DocumentProcessorResult<T> = Result<T, DocumentProcessorError>;
 

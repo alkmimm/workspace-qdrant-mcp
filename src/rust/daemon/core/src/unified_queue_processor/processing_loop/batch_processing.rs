@@ -21,7 +21,7 @@ use crate::lexicon::LexiconManager;
 use crate::lsp::LanguageServerManager;
 use crate::monitoring::metrics_core::METRICS;
 use crate::queue_health::QueueProcessorHealth;
-use crate::queue_operations::QueueManager;
+use crate::queue_operations::{QueueError, QueueManager, QueueResult};
 use crate::search_db::SearchDbManager;
 use crate::storage::StorageClient;
 use crate::tree_sitter::GrammarManager;
@@ -216,6 +216,27 @@ async fn apply_inter_dispatch_delay(
     }
 }
 
+/// The overall status to act on after `finalize_after_success`.
+///
+/// A row that is gone was already resolved by another finalizer (the FTS5
+/// batch writer) or removed by a cancel: Done, and the delete is a no-op. Any
+/// OTHER error is a real database failure. Until 2026-10-08 it was read as
+/// Done too, and the item was deleted with its retry, even when a sink had
+/// failed. Now it stays in the queue: its lease expires and the processor
+/// runs it again.
+fn finalize_outcome(queue_id: &str, result: QueueResult<QueueStatus>) -> QueueStatus {
+    match result {
+        Ok(status) => status,
+        Err(QueueError::NotFound(_)) => QueueStatus::Done,
+        Err(e) => {
+            error!(
+                "finalize_after_success failed for {queue_id}: {e} — keeping the item for its lease to expire and retry"
+            );
+            QueueStatus::InProgress
+        }
+    }
+}
+
 /// Handles the success outcome of a single processed item.
 async fn handle_item_success(
     item: &UnifiedQueueItem,
@@ -240,11 +261,12 @@ async fn handle_item_success(
     // still keep pending sinks pending (decision_json IS NOT NULL), so the
     // helper returns InProgress and the item remains in the queue for the next
     // lease cycle.
-    let overall = deps
-        .queue_manager
-        .finalize_after_success(&item.queue_id)
-        .await
-        .unwrap_or(QueueStatus::Done);
+    let overall = finalize_outcome(
+        &item.queue_id,
+        deps.queue_manager
+            .finalize_after_success(&item.queue_id)
+            .await,
+    );
     match overall {
         QueueStatus::Done => {
             if let Err(e) = deps.queue_manager.delete_unified_item(&item.queue_id).await {
@@ -413,5 +435,37 @@ pub(super) async fn update_tenant_activity(
         {
             debug!("Failed to update activity for tenant {}: {}", tenant_id, e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_resolved_status_is_acted_on_as_is() {
+        for status in [
+            QueueStatus::Done,
+            QueueStatus::Failed,
+            QueueStatus::InProgress,
+        ] {
+            assert_eq!(finalize_outcome("q", Ok(status)), status);
+        }
+    }
+
+    /// The row is gone: another finalizer (the FTS5 batch writer) or a cancel
+    /// already resolved the item.
+    #[test]
+    fn a_row_already_gone_counts_as_done() {
+        let gone = QueueError::NotFound("q".to_string());
+        assert_eq!(finalize_outcome("q", Err(gone)), QueueStatus::Done);
+    }
+
+    /// A real database failure keeps the item for a retry. It used to be read
+    /// as Done, and the item was deleted.
+    #[test]
+    fn a_database_failure_keeps_the_item_for_a_retry() {
+        let busy = QueueError::Database(sqlx::Error::PoolTimedOut);
+        assert_eq!(finalize_outcome("q", Err(busy)), QueueStatus::InProgress);
     }
 }

@@ -478,7 +478,7 @@ async fn parse_document(
         .document_processor
         .process_file_content_with_provider(file_path, &item.collection, provider)
         .await
-        .map_err(|e| UnifiedProcessorError::ProcessingFailed(e.to_string()))?;
+        .map_err(UnifiedProcessorError::from_document)?;
     timings.push(PhaseTiming {
         phase: "parse",
         duration_ms: t0.elapsed().as_millis() as u64,
