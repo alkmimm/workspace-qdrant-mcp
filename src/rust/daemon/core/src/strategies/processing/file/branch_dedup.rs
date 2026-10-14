@@ -26,7 +26,7 @@
 use std::path::Path;
 
 use sqlx::SqlitePool;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::context::ProcessingContext;
 use crate::fts_batch_processor::FileChange;
@@ -265,10 +265,7 @@ pub(super) async fn try_branch_dedup(
             Err(e) => {
                 // Binary or unreadable — skip search but qdrant work still
                 // counts as done.
-                debug!(
-                    "branch_dedup: skipping FTS5 for {} ({}): {}",
-                    relative_path, abs_file_path, e
-                );
+                super::fts5_index::log_index_read_skip("branch_dedup", abs_file_path, &e);
                 let _ = ctx
                     .queue_manager
                     .update_destination_status(&item.queue_id, "search", DestinationStatus::Done)
