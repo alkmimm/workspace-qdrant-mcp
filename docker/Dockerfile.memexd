@@ -576,6 +576,26 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib db_retry -- --test-threads=4
 
+# The item dispatch driver runs here, same rationale: hermetic (tempdir SQLite,
+# stub spawns). Until 2026-10-08 a batch waited for its slowest item before the
+# next dequeue: one 5-minute PDF held every other slot idle and stopped the
+# queue for every tenant (tecsul: 6 minutes, 1 item in flight, 537 pending).
+# Free slots are now refilled while longer items run. These pin the refill
+# (and that it never pulls work under memory pressure or once the source runs
+# dry) plus the driver's semaphore, cancellation and pressure behaviour, whose
+# tests ran in no gate before. Exact count asserted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        unified_queue_processor::processing_loop::concurrent_dispatch::tests \
+        --test-threads=4 2>&1 | tee /tmp/dispatch.log; \
+    grep -q "^test result: ok\. 7 passed" /tmp/dispatch.log \
+    || { echo "GATE: expected exactly 7 dispatch-driver tests (refill, semaphore, cancellation, \
+memory pressure) to run and pass. If you ADDED a test here, bump this count."; exit 1; }
+
 # Queue finalization runs here, same rationale: hermetic (tempdir SQLite). The
 # FTS5 batch writer is a SECOND finalizer, running concurrently with the
 # processor's success path; until 2026-10-07 it recorded its sink and resolved

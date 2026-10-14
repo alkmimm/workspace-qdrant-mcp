@@ -329,6 +329,7 @@ impl UnifiedQueueProcessor {
                     items,
                     state,
                     config,
+                    fairness_scheduler,
                     queue_manager,
                     cancellation_token,
                     document_processor,
@@ -385,6 +386,7 @@ impl UnifiedQueueProcessor {
         items: Vec<crate::unified_queue_schema::UnifiedQueueItem>,
         state: &mut LoopState,
         config: &UnifiedProcessorConfig,
+        fairness_scheduler: &Arc<FairnessScheduler>,
         queue_manager: &QueueManager,
         cancellation_token: &CancellationToken,
         document_processor: &Arc<DocumentProcessor>,
@@ -417,6 +419,7 @@ impl UnifiedQueueProcessor {
         match process_batch(
             items,
             config,
+            fairness_scheduler,
             queue_manager,
             document_processor,
             embedding_generator,

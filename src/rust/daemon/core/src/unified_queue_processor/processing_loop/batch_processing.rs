@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 use crate::adaptive_resources::ResourceProfile;
 use crate::allowed_extensions::AllowedExtensions;
 use crate::config::IngestionLimitsConfig;
+use crate::fairness_scheduler::FairnessScheduler;
 use crate::lexicon::LexiconManager;
 use crate::lsp::LanguageServerManager;
 use crate::monitoring::metrics_core::METRICS;
@@ -34,6 +35,7 @@ use crate::unified_queue_schema::{ItemType, QueueOperation, QueueStatus, Unified
 use crate::{DocumentProcessor, EmbeddingGenerator};
 
 use super::concurrent_dispatch::run_dispatch_loop;
+use super::refill::refill_from;
 
 /// Owned dependency bundle for a single spawned item future.
 ///
@@ -75,6 +77,7 @@ struct ItemDeps {
 pub(super) async fn process_batch(
     items: Vec<UnifiedQueueItem>,
     config: &UnifiedProcessorConfig,
+    fairness_scheduler: &Arc<FairnessScheduler>,
     queue_manager: &QueueManager,
     document_processor: &Arc<DocumentProcessor>,
     embedding_generator: &Arc<EmbeddingGenerator>,
@@ -132,6 +135,7 @@ pub(super) async fn process_batch(
         || async {
             apply_inter_dispatch_delay(config, warmup_state, resource_profile_rx).await;
         },
+        refill_from(fairness_scheduler, storage_client),
         config.max_memory_percent,
     )
     .await;
