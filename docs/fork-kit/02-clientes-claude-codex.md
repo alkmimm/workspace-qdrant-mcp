@@ -65,6 +65,19 @@ Esse é o perfil padrão do fork para o stack Docker. Só troque para `http://lo
 
 Depois de alterar, reinicie o Claude Desktop.
 
+### Cliente no Windows não conecta (timeout no handshake)
+
+Sintoma: o cliente no Windows estoura o tempo de conexão (`CONNECT_TIMEOUT`, `mcp-remote` parado em "Connecting to remote server"), mas o mesmo endereço funciona de dentro do WSL. A causa observada é um antivírus que inspeciona o tráfego HTTP de caminhos terminados em `/mcp` (Norton, 2026-09/10). Ele corrompe respostas que trazem `Content-Length`: remove o cabeçalho e declara `Transfer-Encoding: chunked` sem reformatar o corpo.
+
+O servidor envia toda resposta do MCP em `chunked`, formato que esse filtro deixa passar. Para confirmar o diagnóstico, rode no Windows e no WSL:
+
+```bash
+curl -s -o /dev/null -w "%{http_code} exit=%{exitcode}\n" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -H "Authorization: Bearer <token>" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' http://localhost:6335/mcp
+```
+
+- `exit=56` só no Windows significa que a resposta foi corrompida no caminho.
+- Se o problema persistir com um servidor atualizado, crie no antivírus uma exceção para `localhost:6335`.
+
 ## Codex
 
 Codex usa `config.toml`. Exemplo:

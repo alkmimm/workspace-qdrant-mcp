@@ -290,6 +290,7 @@ async function handleRequest(
   }
 
   const urlPath = (req.url ?? '').split('?')[0] ?? '';
+  if (urlPath === mcpPath) forceChunkedFraming(res);
 
   // Admin UI static assets (HTML/JS/CSS) are served WITHOUT the Bearer
   // auth middleware. Browsers cannot inject the `Authorization` header
@@ -416,24 +417,73 @@ function writeJsonRpcError(
 }
 
 /**
+ * `res.writeHead` seen as a plain argument forwarder. The method is overloaded
+ * (writeHead(code), writeHead(code, headers), writeHead(code, message),
+ * writeHead(code, message, headers)), so the wrappers below pass the caller's
+ * arguments through unchanged rather than re-declaring every overload.
+ */
+type WriteHeadForwarder = (...args: unknown[]) => ServerResponse;
+
+/**
+ * Send every MCP-path response with chunked framing: strip any `Content-Length`
+ * before the header block is written, so Node chunks the body.
+ *
+ * The SDK transport runs through `@hono/node-server`, which buffers a body that
+ * completes within its first few reads (every single-message SSE reply) and
+ * stamps `Content-Length` on it. A Windows-side HTTP interceptor (Norton,
+ * observed 2026-09/10) rewrites exactly those responses on a path ending in
+ * `/mcp`: it drops the header and declares `Transfer-Encoding: chunked`
+ * without re-framing the body, so every Windows MCP client hangs on the
+ * handshake. Responses that are already chunked pass through it intact, and
+ * chunked framing is valid for any HTTP/1.1 client.
+ */
+function forceChunkedFraming(res: ServerResponse): void {
+  const originalWriteHead = res.writeHead.bind(res) as WriteHeadForwarder;
+  res.writeHead = ((...args: unknown[]): ServerResponse => {
+    if (!res.headersSent) res.removeHeader('content-length');
+    const last = args.length - 1;
+    if (last > 0) args[last] = withoutContentLength(args[last]);
+    return originalWriteHead(...args);
+  }) as typeof res.writeHead;
+}
+
+/**
+ * Copy of a `writeHead` header argument without its `Content-Length` entries
+ * (any case). Handles the object and the flat `[name, value, …]` array forms;
+ * anything else (a status message) is returned unchanged.
+ *
+ * Exported for unit testing.
+ */
+export function withoutContentLength(headers: unknown): unknown {
+  const isLength = (name: unknown): boolean =>
+    typeof name === 'string' && name.toLowerCase() === 'content-length';
+  if (Array.isArray(headers)) {
+    const kept: unknown[] = [];
+    for (let i = 0; i + 1 < headers.length; i += 2) {
+      if (!isLength(headers[i])) kept.push(headers[i], headers[i + 1]);
+    }
+    return kept;
+  }
+  if (headers !== null && typeof headers === 'object') {
+    return Object.fromEntries(Object.entries(headers).filter(([name]) => !isLength(name)));
+  }
+  return headers;
+}
+
+/**
  * Wrap `res.writeHead` so the first status-bearing call records a Prometheus
  * counter sample. Repeated calls (e.g. the SDK re-setting headers on stream
  * continuations) are ignored — the first response line is what clients see.
  */
 function instrumentHttpResponse(req: IncomingMessage, res: ServerResponse): void {
   let recorded = false;
-  const originalWriteHead = res.writeHead.bind(res);
+  const originalWriteHead = res.writeHead.bind(res) as WriteHeadForwarder;
   res.writeHead = ((...args: unknown[]): ServerResponse => {
     const statusCode = typeof args[0] === 'number' ? args[0] : res.statusCode;
     if (!recorded) {
       recorded = true;
       recordHttpRequest(req.url, statusCode);
     }
-    // Delegate to the original implementation with the original arguments.
-    // The signature is overloaded (writeHead(code), writeHead(code, headers),
-    // writeHead(code, message), writeHead(code, message, headers)), so cast
-    // through `any` rather than re-declaring every overload.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (originalWriteHead as any)(...args);
+    return originalWriteHead(...args);
   }) as typeof res.writeHead;
 }

@@ -10,6 +10,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { request, type IncomingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AddressInfo } from 'node:net';
@@ -74,6 +75,52 @@ function createTestConfig(tempDir: string): ServerConfig {
 }
 
 const TEST_TOKEN = 'a'.repeat(32);
+
+interface RawResponse {
+  status: number;
+  headers: IncomingHttpHeaders;
+  body: string;
+}
+
+/** POST through `node:http` so the test sees the response framing headers
+ *  (`content-length` / `transfer-encoding`) exactly as they went on the wire. */
+function postRaw(
+  port: number,
+  path: string,
+  payload: unknown,
+  extraHeaders: Record<string, string> = {}
+): Promise<RawResponse> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          Authorization: `Bearer ${TEST_TOKEN}`,
+          ...extraHeaders,
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString('utf8'),
+          })
+        );
+        res.on('error', reject);
+      }
+    );
+    req.on('error', reject);
+    req.end(JSON.stringify(payload));
+  });
+}
 
 describe('MCP HTTP transport', () => {
   let tempDir: string;
@@ -150,6 +197,62 @@ describe('MCP HTTP transport', () => {
     expect(initRes.headers.get('mcp-session-id')).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
     );
+  });
+
+  // A Windows-side HTTP interceptor (observed: Norton) rewrites responses on a
+  // path ending in `/mcp` that carry `Content-Length` — it strips the header and
+  // declares `Transfer-Encoding: chunked` without re-framing the body, so every
+  // Windows MCP client hangs. Responses already sent chunked pass intact.
+  it('should frame every MCP response as chunked, never with Content-Length', async () => {
+    server = new WorkspaceQdrantMcpServer({
+      config,
+      mode: 'http',
+      http: { host: '127.0.0.1', port: 0, path: '/mcp' },
+      auth: { token: TEST_TOKEN, rateLimitPerMin: 1000, corsOrigins: [] },
+    });
+    await server.start();
+
+    const httpServer = (
+      server as unknown as {
+        httpHandle: { httpServer: { address(): AddressInfo | string | null } };
+      }
+    ).httpHandle.httpServer;
+    const { port } = httpServer.address() as AddressInfo;
+
+    const init = await postRaw(port, '/mcp', {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'test-client', version: '0.0.0' },
+      },
+    });
+    const sessionId = init.headers['mcp-session-id'] as string;
+    const session = { 'Mcp-Session-Id': sessionId, 'Mcp-Protocol-Version': '2025-06-18' };
+
+    const initialized = await postRaw(
+      port,
+      '/mcp',
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      session
+    );
+    const toolsList = await postRaw(
+      port,
+      '/mcp',
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      session
+    );
+
+    expect([init.status, initialized.status, toolsList.status]).toEqual([200, 202, 200]);
+    for (const res of [init, initialized, toolsList]) {
+      expect(res.headers['content-length']).toBeUndefined();
+      expect(res.headers['transfer-encoding']).toBe('chunked');
+    }
+    // The chunked bodies still decode to the complete JSON-RPC replies.
+    expect(init.body).toContain('"protocolVersion":"2025-06-18"');
+    expect(toolsList.body).toContain('"tools":[');
   });
 
   it('should return 404 for unknown paths (authed)', async () => {
