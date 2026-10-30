@@ -32,6 +32,11 @@ The system uses a two-layer watching approach based on whether the project is gi
 - For non-tracked projects: this is the sole watcher, branch = `"default"`
 - For git-tracked projects: handles real-time dirty-state changes between git operations (modified files that haven't been committed)
 - Exclusion patterns apply: `.git/`, `target/`, `node_modules/`, etc. (`.git/` directory is excluded from Layer 1)
+- **Watch registration (`watching_queue::dir_watches`):** the watcher registers one *non-recursive* watch per directory the project walk keeps, never a recursive watch on the root.
+  - The walk honours the same sources as the ignore gate: the project walker, `.wqmignore` and `global.wqmignore`.
+  - `.git/` and linked worktree checkouts (a `.git` gitlink file into `.git/worktrees/`) are skipped. The worktree discovery follows those by git state. Submodules stay watched.
+  - A directory created or renamed inside the tree is followed. A `.gitignore`/`.wqmignore` change re-syncs the whole set.
+  - **Why:** a recursive watch spends one inotify watch on every directory, ignored ones included. On 2026-10-30 memexd held 348,580 watches for ten projects, while a project with 400k directories, 388k of them in agent worktrees, could never start its watcher ("OS file watch limit reached").
 - See [Folder Move Detection Strategy](#folder-move-detection-strategy) for rename handling
 - **Queue-depth throttle defers, never drops** (`watching_queue/throttle.rs`): above 1 000 pending items every other event is held back, above 5 000 three in four; held events wait in a per-path buffer (last event for a path wins) and the 500 ms watcher tick releases them — all of them once the load is Normal again, a bounded trickle (25 / 5 per tick) while it is High / Critical. Only an overflow of the 250 000-path cap loses an event, and that raises the F-045 flag and a warning. Before 2026-09-19 the held events were discarded and the flag had no consumer: every restart (the worktree re-enqueue) and every tenant re-embed silently lost half to three quarters of the live edits made in any project until the next startup reconciliation
 

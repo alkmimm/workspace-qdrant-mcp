@@ -3,13 +3,15 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use notify::{Event, EventKind, RecursiveMode, Watcher as NotifyWatcher};
+use notify::{Event, RecursiveMode, Watcher as NotifyWatcher};
 use tokio::sync::{mpsc, Mutex, RwLock};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::allowed_extensions::AllowedExtensions;
+use crate::patterns::global_ignore::resolve_global_ignore_path;
 use crate::queue_operations::QueueManager;
 
+use super::dir_watches::{can_change_content, dir_changes, DirChange, DirWatches};
 use super::error_state::{WatchErrorState, WatchErrorTracker};
 use super::error_types::WatchHealthStatus;
 use super::throttle::{QueueThrottleState, QueueThrottleSummary};
@@ -17,6 +19,30 @@ use super::types::{
     CompiledPatterns, EventDebouncer, FileEvent, WatchConfig, WatchingQueueError,
     WatchingQueueResult, WatchingQueueStats,
 };
+
+type WatcherSlot = Option<Box<dyn NotifyWatcher + Send + Sync>>;
+
+/// Apply one batch of directory changes; `false` once the watcher is gone. An
+/// ignore-file change re-syncs the whole set, which subsumes the rest.
+fn apply_dir_changes(
+    mut watcher: tokio::sync::OwnedMutexGuard<WatcherSlot>,
+    mut dirs: tokio::sync::OwnedMutexGuard<DirWatches>,
+    batch: &[DirChange],
+) -> bool {
+    let Some(w) = watcher.as_mut() else {
+        return false;
+    };
+    let w: &mut dyn NotifyWatcher = w.as_mut();
+    let result = if batch.contains(&DirChange::IgnoreRulesChanged) {
+        dirs.sync(w)
+    } else {
+        batch.iter().try_for_each(|change| dirs.apply(w, change))
+    };
+    if let Err(e) = result {
+        warn!("File watcher could not follow a directory change: {}", e);
+    }
+    true
+}
 
 /// Main file watcher with queue integration
 pub struct FileWatcherQueue {
@@ -26,6 +52,10 @@ pub struct FileWatcherQueue {
     pub(super) allowed_extensions: Arc<AllowedExtensions>,
     pub(super) debouncer: Arc<Mutex<EventDebouncer>>,
     pub(super) watcher: Arc<Mutex<Option<Box<dyn NotifyWatcher + Send + Sync>>>>,
+    /// The directories `watcher` registered, one non-recursive watch each.
+    pub(super) dir_watches: Arc<Mutex<DirWatches>>,
+    /// Follows directories created, renamed or re-included after start.
+    pub(super) dir_follower: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub(super) event_receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<FileEvent>>>>,
     pub(super) processor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 
@@ -54,6 +84,7 @@ impl FileWatcherQueue {
         let debouncer = EventDebouncer::new(config.debounce_ms);
         let error_tracker = WatchErrorTracker::new();
         let throttle_state = QueueThrottleState::new();
+        let dir_watches = DirWatches::new(config.path.clone(), resolve_global_ignore_path());
 
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
@@ -62,6 +93,8 @@ impl FileWatcherQueue {
             allowed_extensions,
             debouncer: Arc::new(Mutex::new(debouncer)),
             watcher: Arc::new(Mutex::new(None)),
+            dir_watches: Arc::new(Mutex::new(dir_watches)),
+            dir_follower: Arc::new(Mutex::new(None)),
             event_receiver: Arc::new(Mutex::new(None)),
             processor_handle: Arc::new(Mutex::new(None)),
             error_tracker: Arc::new(error_tracker),
@@ -88,30 +121,45 @@ impl FileWatcherQueue {
         // Create file system watcher
         let (tx, rx) = mpsc::unbounded_channel();
         let tx_clone = tx.clone();
+        let (dir_tx, dir_rx) = mpsc::unbounded_channel();
+        let follow_dirs = config.recursive;
 
         let watcher: Box<dyn NotifyWatcher + Send + Sync> =
             Box::new(notify::RecommendedWatcher::new(
                 move |result| {
                     if let Ok(event) = result {
+                        if follow_dirs {
+                            for change in dir_changes(&event) {
+                                let _ = dir_tx.send(change);
+                            }
+                        }
                         Self::handle_notify_event(event, &tx_clone);
                     }
                 },
                 notify::Config::default(),
             )?);
 
-        // Add path to watcher
-        let recursive_mode = if config.recursive {
-            RecursiveMode::Recursive
-        } else {
-            RecursiveMode::NonRecursive
-        };
-
-        {
+        // Register the watches: recursive mode watches each directory the
+        // project walk keeps, one non-recursive watch apiece (see `dir_watches`);
+        // a single non-recursive watch on the root otherwise.
+        let watched_dirs = {
             let mut watcher_lock = self.watcher.lock().await;
-            *watcher_lock = Some(watcher);
-            if let Some(ref mut w) = *watcher_lock {
-                w.watch(&config.path, recursive_mode)?;
-            }
+            let mut w = watcher;
+            let registered = if config.recursive {
+                let mut dirs = self.dir_watches.lock().await;
+                dirs.sync(w.as_mut()).map(|()| dirs.len())
+            } else {
+                w.watch(&config.path, RecursiveMode::NonRecursive)
+                    .map(|()| 1)
+            };
+            // On failure `w` is dropped here, which releases every watch it
+            // registered before the refusal.
+            let count = registered?;
+            *watcher_lock = Some(w);
+            count
+        };
+        if config.recursive {
+            self.start_dir_follower(dir_rx).await;
         }
 
         // Store receiver
@@ -124,12 +172,41 @@ impl FileWatcherQueue {
         self.start_event_processor().await?;
 
         info!(
-            "Started file watcher: {} (recursive: {})",
+            "Started file watcher: {} (recursive: {}, {} director{} watched)",
             config.path.display(),
-            config.recursive
+            config.recursive,
+            watched_dirs,
+            if watched_dirs == 1 { "y" } else { "ies" }
         );
 
         Ok(())
+    }
+
+    /// Follow directory changes reported by the notify callback: watch what
+    /// appears, forget what goes, re-sync the whole set when an ignore file
+    /// changes. Each batch runs off the async workers: registering a large new
+    /// subtree is a blocking walk plus one syscall per directory.
+    async fn start_dir_follower(&self, mut changes: mpsc::UnboundedReceiver<DirChange>) {
+        let watcher = Arc::clone(&self.watcher);
+        let dir_watches = Arc::clone(&self.dir_watches);
+        let handle = tokio::spawn(async move {
+            while let Some(first) = changes.recv().await {
+                let mut batch = vec![first];
+                while let Ok(more) = changes.try_recv() {
+                    batch.push(more);
+                }
+                let watcher_guard = Arc::clone(&watcher).lock_owned().await;
+                let dirs_guard = Arc::clone(&dir_watches).lock_owned().await;
+                let applied = tokio::task::spawn_blocking(move || {
+                    apply_dir_changes(watcher_guard, dirs_guard, &batch)
+                })
+                .await;
+                if !matches!(applied, Ok(true)) {
+                    break; // watcher stopped
+                }
+            }
+        });
+        *self.dir_follower.lock().await = Some(handle);
     }
 
     /// Stop watching
@@ -142,11 +219,18 @@ impl FileWatcherQueue {
             }
         }
 
-        // Clear watcher
+        // Stop following directories, then drop the watcher (and its watches)
+        {
+            let mut follower_lock = self.dir_follower.lock().await;
+            if let Some(handle) = follower_lock.take() {
+                handle.abort();
+            }
+        }
         {
             let mut watcher_lock = self.watcher.lock().await;
             *watcher_lock = None;
         }
+        self.dir_watches.lock().await.clear();
 
         // Clear receiver
         {
@@ -167,11 +251,7 @@ impl FileWatcherQueue {
         // with an endless stream of hash-skip `File/Update` no-ops that kept the
         // index from ever settling. Real edits arrive as Create / Remove /
         // Modify(Data) / Modify(Name) / Modify(Any), which all pass through.
-        use notify::event::ModifyKind;
-        if matches!(
-            event.kind,
-            EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(_))
-        ) {
+        if !can_change_content(&event.kind) {
             tracing::debug!(
                 "Ignoring non-content notify event kind={:?} paths={:?}",
                 event.kind,

@@ -925,6 +925,31 @@ project walker, ignore matcher, ignore gate, eligibility trie, folder scan) to r
 that keep the walk and the ingest from disagreeing at every start. If you ADDED a test here, \
 bump this count."; exit 1; }
 
+# The file watcher's directory set. It registered one RECURSIVE inotify watch
+# per project, i.e. one watch per directory, ignored ones included: on
+# 2026-10-30 memexd held 348,580 watches (exactly the directory count of the ten
+# roots it managed to watch; in Finance 33k of 35k directories were
+# node_modules/build/.dart_tool), and tecsul (400k directories, 388k of them
+# agent worktrees under .claude/) never started its watcher — "OS file watch
+# limit reached", retried every ~8 min. It now watches, non-recursively, only
+# the directories the project walk keeps (no .git, no linked worktree
+# checkouts) and follows directories created, renamed or re-included later.
+# The live tests drive a real inotify watcher over a tempdir. Reading an ignore
+# file is not a rule change: the resync walk reads them all, so counting reads
+# made each resync trigger the next (the first gate run of this block hung on it).
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- watching_queue::dir_watches::tests \
+        --test-threads=4 2>&1 | tee /tmp/dir-watches.log; \
+    grep -q "^test result: ok\. 6 passed" /tmp/dir-watches.log \
+    || { echo "GATE: expected exactly 6 watcher directory-set tests to run and pass — libtest \
+exits 0 when a positional filter matches nothing, so a module rename would silently un-gate \
+the rule that keeps ignored trees out of the inotify budget. If you ADDED a test here, bump \
+this count."; exit 1; }
+
 # The same rule, everywhere else. A project folder's .pdf/.docx is indexed into
 # the project's `-refs` library, but until 2026-10-05 only the file watcher
 # routed it there: the folder scan, the exclusion cleanup, worktree membership

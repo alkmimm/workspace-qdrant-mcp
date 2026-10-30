@@ -4,6 +4,7 @@
 //! unified_queue SQLite table per docs/specs/04-write-path.md specification.
 
 mod coordinator;
+mod dir_watches;
 mod error_state;
 mod error_types;
 mod file_watcher;
