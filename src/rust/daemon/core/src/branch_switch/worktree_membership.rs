@@ -28,13 +28,15 @@
 //!
 //! Three candidate sets per worktree branch, kept mutually disjoint:
 //!
-//! - **Shared baseline** (B1) — paths the main folder tracks that also exist in
-//!   the worktree tree AND are byte-identical to main (not in the divergent
-//!   set), read from the MAIN tree (cross-branch dedup merges — no new vectors).
-//! - **New-on-branch** (B1.1) — files that exist ONLY on the worktree branch (no
-//!   `tracked_files` row under the main folder), read from the WORKTREE tree via
-//!   a `read_root` on the item. Their bytes have no main-tree copy, so the
-//!   baseline path cannot reach them.
+//! - **Shared baseline** (B1) — paths the main folder tracks that exist in BOTH
+//!   the main and the worktree tree AND are byte-identical to main (not in the
+//!   divergent set), read from the MAIN tree (cross-branch dedup merges — no new
+//!   vectors).
+//! - **New-on-branch** (B1.1) — files the baseline cannot read from the main
+//!   tree, read from the WORKTREE tree via a `read_root` on the item: content
+//!   with no `tracked_files` row under the main folder, and content tracked only
+//!   through OTHER worktree branches (rows keyed to the main folder, but no copy
+//!   in the main tree).
 //! - **Divergent** (B2) — shared files whose content DIFFERS on the branch (git
 //!   reports them `Modified` between the main HEAD and the branch tip), read from
 //!   the WORKTREE tree via `read_root`. The ingest writes a new content-row
@@ -43,8 +45,9 @@
 //!   main would tag the branch with main's bytes and collide on the shared
 //!   `(path, branch)` idempotency key).
 //!
-//! Disjointness: baseline = shared ∧ identical; divergent = shared ∧ Modified;
-//! new-on-branch = untracked (git `Added`). Only *committed* divergence is
+//! Disjointness: baseline = shared ∧ in the main tree ∧ identical; divergent =
+//! shared ∧ Modified; new-on-branch = untracked, or tracked but absent from the
+//! main tree (git `Added` relative to main). Only *committed* divergence is
 //! captured (commit-to-commit diff); the live file-watcher covers an *active*
 //! worktree session's uncommitted edits.
 //!
@@ -76,7 +79,11 @@ use super::db::fetch_paths_missing_branch;
 /// `worktree_membership` flag stops the process-time restamp from rewriting the
 /// branch. Files absent from the worktree working tree are skipped — never
 /// enqueued — so this never resurrects a path deleted on the worktree branch.
+/// Files absent from the MAIN tree are skipped too: the read would find nothing,
+/// the tag would never land, and every reconcile would enqueue them again —
+/// [`enqueue_worktree_new_on_branch`] reads those from the worktree instead.
 /// Returns the number of files enqueued.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn enqueue_worktree_membership(
     pool: &SqlitePool,
     queue_manager: &QueueManager,
@@ -84,6 +91,7 @@ pub(super) async fn enqueue_worktree_membership(
     tenant_id: &str,
     collection: &str,
     wt_root: &str,
+    main_project_root: &str,
     branch: &str,
     divergent: &HashSet<String>,
 ) -> usize {
@@ -102,6 +110,7 @@ pub(super) async fn enqueue_worktree_membership(
     }
 
     let wt = Path::new(wt_root);
+    let main_root = Path::new(main_project_root);
     let mut enqueued = 0usize;
     for rel_str in candidates {
         // Divergent files are handled by `enqueue_worktree_divergent` (read from
@@ -113,15 +122,14 @@ pub(super) async fn enqueue_worktree_membership(
         if !wt.join(&rel_str).exists() {
             continue;
         }
-        let rel = match RelativePath::from_user_input(&rel_str) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(
-                    "worktree membership: skipping invalid relative path {:?}: {}",
-                    rel_str, e
-                );
-                continue;
-            }
+        // Tracked only through other worktree branches: no main-tree copy to
+        // read (live 2026-10-30: 1,012 such files re-enqueued on every commit of
+        // one tecsul worktree, never tagged).
+        if !main_root.join(&rel_str).exists() {
+            continue;
+        }
+        let Some(rel) = parse_relative(&rel_str) else {
+            continue;
         };
         // Shared baseline reads from the MAIN tree → no `read_root`.
         match enqueue_worktree_file(queue_manager, tenant_id, collection, &rel, branch, None).await
@@ -136,19 +144,22 @@ pub(super) async fn enqueue_worktree_membership(
     enqueued
 }
 
-/// Enqueue files that exist ONLY on the worktree branch — no `tracked_files`
-/// row under the main folder — reading their bytes from the worktree tree.
+/// Enqueue files the shared baseline cannot read from the main tree, reading
+/// their bytes from the worktree tree: files with no `tracked_files` row under
+/// the main folder, and files tracked only through OTHER worktree branches.
 ///
-/// The shared-baseline reconcile ([`enqueue_worktree_membership`]) can only tag
-/// paths the main folder already tracks, because it reads from the main tree;
-/// a file added on the worktree branch has no main-tree copy, so its content
-/// must come from the worktree. Discovery enumerates the worktree working tree
+/// The shared-baseline reconcile ([`enqueue_worktree_membership`]) reads from
+/// the main tree, so it can only tag paths the main tree has; a file added on
+/// the worktree branch has no main-tree copy, so its content must come from the
+/// worktree — whether or not another worktree branch already indexed it (its
+/// rows are keyed to the main folder too, which is why "tracked" alone does not
+/// mean "readable from main"). Discovery enumerates the worktree working tree
 /// with the project `.gitignore`/`.wqmignore` cascade only — passing `None`
 /// global to the walk, because `global.wqmignore`'s `.claude/worktrees/` rule
 /// matches absolute paths and their parents and would self-exclude the whole
-/// worktree even rooted inside it. It then subtracts every path already tracked
-/// under the main folder and applies the MAIN folder's full eligibility to each
-/// survivor: the ignore gate (project cascade + `global.wqmignore`) anchored at
+/// worktree even rooted inside it. It then keeps the paths [`OwedPaths`] says
+/// the worktree must supply and applies the MAIN folder's full eligibility to
+/// each survivor: the ignore gate (project cascade + `global.wqmignore`) anchored at
 /// the main root — which re-adds the global layer the walk had to drop, so a
 /// worktree branch never indexes generated / globally-excluded files the main
 /// scan omits, while the main anchor (`main_root/rel`, never `worktree_root/rel`)
@@ -159,12 +170,12 @@ pub(super) async fn enqueue_worktree_membership(
 /// the worktree tree while storage stays keyed to the main watch_folder
 /// (cross-branch dedup + branch-scoped idempotency unchanged).
 ///
-/// Subtracting the full `tracked_files` set keeps this disjoint from the
+/// Keeping only paths the main tree cannot supply keeps this disjoint from the
 /// baseline path: a shared file (baseline, read from main) and a branch-only
 /// file (read from the worktree) never contend for the same `(path, branch)`
-/// idempotency key. Once tagged, a branch-only file gains a `tracked_files` row
-/// and drops out of the candidate set — idempotent across scans. Returns the
-/// number of files enqueued.
+/// idempotency key. Once tagged with `branch`, a file drops out of the
+/// candidate set — idempotent across scans. Returns the number of files
+/// enqueued.
 pub(super) async fn enqueue_worktree_new_on_branch(
     pool: &SqlitePool,
     queue_manager: &QueueManager,
@@ -196,24 +207,16 @@ pub(super) async fn enqueue_worktree_new_on_branch(
         return 0;
     }
 
-    let tracked = match super::db::fetch_all_tracked_paths(pool, main_watch_folder_id).await {
-        Ok(set) => set,
-        Err(e) => {
-            warn!(
-                "worktree membership: fetch tracked paths failed for branch '{}': {}",
-                branch, e
-            );
-            return 0;
-        }
+    let Some(owed) = OwedPaths::fetch(pool, main_watch_folder_id, branch).await else {
+        return 0;
     };
 
     let gate = main_eligibility_gate(main_project_root);
+    let main_root = Path::new(main_project_root);
 
     let mut enqueued = 0usize;
     for rel_str in walked {
-        // Skip anything the main folder already tracks (shared baseline or a
-        // path tagged on another branch) — not a branch-only candidate.
-        if tracked.contains(&rel_str) {
+        if !owed.needs_worktree_read(&rel_str, main_root) {
             continue;
         }
         // Mirror the main scan's eligibility (ignore gate + extension allowlist)
@@ -228,15 +231,8 @@ pub(super) async fn enqueue_worktree_new_on_branch(
         ) {
             continue;
         }
-        let rel = match RelativePath::from_user_input(&rel_str) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(
-                    "worktree membership: skipping invalid relative path {:?}: {}",
-                    rel_str, e
-                );
-                continue;
-            }
+        let Some(rel) = parse_relative(&rel_str) else {
+            continue;
         };
         // Branch-only content reads from the WORKTREE tree → carry `read_root`.
         match enqueue_worktree_file(
@@ -310,15 +306,8 @@ pub(super) async fn enqueue_worktree_divergent(
         ) {
             continue;
         }
-        let rel = match RelativePath::from_user_input(rel_str) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(
-                    "worktree membership: skipping invalid relative path {:?}: {}",
-                    rel_str, e
-                );
-                continue;
-            }
+        let Some(rel) = parse_relative(rel_str) else {
+            continue;
         };
         // Divergent content reads from the WORKTREE tree → carry `read_root`.
         match enqueue_worktree_file(
@@ -339,6 +328,59 @@ pub(super) async fn enqueue_worktree_divergent(
         }
     }
     enqueued
+}
+
+/// What the main folder's index holds for a branch, for
+/// [`enqueue_worktree_new_on_branch`]: every path the main folder tracks, and
+/// the ones `branch` holds no version of yet.
+struct OwedPaths {
+    tracked: HashSet<String>,
+    missing: HashSet<String>,
+}
+
+impl OwedPaths {
+    async fn fetch(pool: &SqlitePool, main_watch_folder_id: &str, branch: &str) -> Option<Self> {
+        let tracked = super::db::fetch_all_tracked_paths(pool, main_watch_folder_id).await;
+        let missing = fetch_paths_missing_branch(pool, main_watch_folder_id, branch).await;
+        match (tracked, missing) {
+            (Ok(tracked), Ok(missing)) => Some(Self {
+                tracked,
+                missing: missing.into_iter().collect(),
+            }),
+            (Err(e), _) | (_, Err(e)) => {
+                warn!(
+                    "worktree membership: fetch tracked paths failed for branch '{}': {}",
+                    branch, e
+                );
+                None
+            }
+        }
+    }
+
+    /// Whether the worktree must supply `rel` for the branch: the main folder
+    /// tracks no version of it (branch-only content), or the branch holds none
+    /// of its versions and the main tree has no copy for the baseline to read
+    /// (content that exists only on worktree branches).
+    fn needs_worktree_read(&self, rel: &str, main_root: &Path) -> bool {
+        if !self.tracked.contains(rel) {
+            return true;
+        }
+        self.missing.contains(rel) && !main_root.join(rel).exists()
+    }
+}
+
+/// `rel` as a [`RelativePath`], or `None` (logged) when it is not a valid one.
+fn parse_relative(rel: &str) -> Option<RelativePath> {
+    match RelativePath::from_user_input(rel) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            warn!(
+                "worktree membership: skipping invalid relative path {:?}: {}",
+                rel, e
+            );
+            None
+        }
+    }
 }
 
 /// The MAIN folder's eligibility gate (project `.gitignore`/`.wqmignore` cascade
