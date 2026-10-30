@@ -496,8 +496,11 @@ bump this count."; exit 1; }
 # rows held versions its tip no longer had), plus the item-metadata flags the
 # processor reads for those items, and library-format documents following their
 # branches (the one row the follower left stale was a `.docx`: every path here
-# judged it ineligible and enqueued it under `projects`). Hermetic: in-memory
-# SQLite + tempdir git repos.
+# judged it ineligible and enqueued it under `projects`). And a worktree
+# baseline that never settled: files only other worktree branches had indexed
+# were read from the main tree, which has no copy, so their tag never landed
+# (tecsul, 2026-10-30: 1,012 files re-enqueued on every commit of one
+# worktree). Hermetic: in-memory SQLite + tempdir git repos.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
@@ -506,8 +509,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
         strategies::processing::file::item_metadata \
         --test-threads=4 2>&1 | tee /tmp/branch-switch.log; \
-    grep -q "^test result: ok\. 33 passed" /tmp/branch-switch.log \
-    || { echo "GATE: expected exactly 33 branch_switch + item_metadata tests to run and pass — \
+    grep -q "^test result: ok\. 34 passed" /tmp/branch-switch.log \
+    || { echo "GATE: expected exactly 34 branch_switch + item_metadata tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the membership reconcile, worktree discovery and the branch tip follower. If you ADDED \
 a test here, bump this count."; exit 1; }

@@ -29,6 +29,8 @@ mod library_routing_tests;
 mod membership_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod worktree_reconcile_tests;
 
 pub use branch_tips::BranchTipFollower;
 pub use handlers::{handle_git_event, reconcile_branch_membership};

@@ -69,15 +69,15 @@ pub async fn reconcile_worktree_branches(
 /// HEAD (without the flag, every worktree file re-stamps to main and the tag
 /// never lands):
 ///
-/// 1. **Shared baseline** — paths the main folder tracks that also exist in the
-///    worktree tree AND are byte-identical to main (not in the divergent set),
-///    read from the SHARED main tree (storage stays keyed to the main
-///    watch_folder, so cross-branch dedup merges identical content — no
-///    duplicate point).
-/// 2. **New-on-branch** — files with no `tracked_files` row under the main
-///    folder (content that exists only on the worktree branch), read from the
-///    worktree tree via a `read_root` on the item; storage is still keyed to
-///    the main watch_folder.
+/// 1. **Shared baseline** — paths the main folder tracks that exist in both the
+///    main and the worktree tree AND are byte-identical to main (not in the
+///    divergent set), read from the SHARED main tree (storage stays keyed to
+///    the main watch_folder, so cross-branch dedup merges identical content —
+///    no duplicate point).
+/// 2. **New-on-branch** — files the main tree has no copy of: no
+///    `tracked_files` row under the main folder, or rows only through other
+///    worktree branches. Read from the worktree tree via a `read_root` on the
+///    item; storage is still keyed to the main watch_folder.
 /// 3. **Divergent** — shared files whose content DIFFERS on the branch (git
 ///    `Modified` between the main HEAD and the branch tip), read from the
 ///    worktree tree via `read_root` so the branch is indexed with its OWN bytes
@@ -100,7 +100,71 @@ pub(super) async fn reconcile_linked_worktree(
     let Some(branch) = wt.branch.as_deref() else {
         return 0; // detached HEAD: no branch to tag
     };
+    let Some(wt_root) = readable_worktree_root(wt, main_project_root, branch) else {
+        return 0;
+    };
 
+    // Committed divergence: paths git reports as Modified between the main
+    // HEAD and this branch's tip. The baseline SKIPS these (reading them from
+    // the main tree would tag the branch with main's bytes); (c) below reads
+    // them from the worktree so the branch is indexed with its OWN content.
+    let divergent = crate::git::modified_paths_head_vs_branch(Path::new(main_project_root), branch);
+
+    // 1. Shared baseline, read from the MAIN tree (dedup merges, no new vectors).
+    let n_base = enqueue_worktree_membership(
+        pool,
+        queue_manager,
+        main_watch_folder_id,
+        tenant_id,
+        collection,
+        &wt_root,
+        main_project_root,
+        branch,
+        &divergent,
+    )
+    .await;
+    record_enqueued(WorktreeSet::Baseline, n_base, tenant_id, branch, &wt_root);
+
+    // 2. New-on-branch: what the main tree has no copy of, read from the worktree.
+    let n_new = enqueue_worktree_new_on_branch(
+        pool,
+        queue_manager,
+        main_watch_folder_id,
+        tenant_id,
+        collection,
+        &wt_root,
+        main_project_root,
+        branch,
+        allowed_extensions,
+    )
+    .await;
+    record_enqueued(WorktreeSet::NewOnBranch, n_new, tenant_id, branch, &wt_root);
+
+    // 3. Divergent: the branch's own bytes, a new content-generation (#151).
+    let n_div = enqueue_worktree_divergent(
+        queue_manager,
+        tenant_id,
+        collection,
+        &wt_root,
+        main_project_root,
+        branch,
+        &divergent,
+        allowed_extensions,
+    )
+    .await;
+    record_enqueued(WorktreeSet::Divergent, n_div, tenant_id, branch, &wt_root);
+
+    n_base + n_new + n_div
+}
+
+/// The worktree's root as the daemon reads it, or `None` when there is nothing
+/// to reconcile there: the main tree itself, a tree the daemon cannot read, or
+/// a directory that is not a leaf worktree checkout.
+fn readable_worktree_root(
+    wt: &LinkedWorktree,
+    main_project_root: &str,
+    branch: &str,
+) -> Option<String> {
     // Fold the git-recorded path (possibly a `\\wsl.localhost\...` UNC form
     // from a Windows-host `git worktree add`) to the daemon's native view.
     // CATEGORY-B: used only for the process-local `is_dir()`/existence check;
@@ -109,7 +173,7 @@ pub(super) async fn reconcile_linked_worktree(
 
     // Defensive: the main tree is reconciled by its own caller; skip it.
     if wt_root == main_project_root {
-        return 0;
+        return None;
     }
 
     // The daemon must be able to read the worktree tree to check per-file
@@ -120,7 +184,7 @@ pub(super) async fn reconcile_linked_worktree(
             "worktree membership: tree {} for branch '{}' not readable by the daemon; skipping",
             wt_root, branch
         );
-        return 0;
+        return None;
     }
 
     // Guard: the root must be a genuine linked-worktree *checkout*, not a
@@ -141,97 +205,44 @@ pub(super) async fn reconcile_linked_worktree(
              (no `.git` gitlink file); skipping to avoid a container-wide phantom walk",
             wt_root, branch
         );
-        return 0;
+        return None;
     }
+    Some(wt_root)
+}
 
-    // Committed divergence: paths git reports as Modified between the main
-    // HEAD and this branch's tip. The baseline SKIPS these (reading them from
-    // the main tree would tag the branch with main's bytes); (c) below reads
-    // them from the worktree so the branch is indexed with its OWN content.
-    let divergent = crate::git::modified_paths_head_vs_branch(Path::new(main_project_root), branch);
+/// One of a worktree reconcile's three candidate sets, for its log line and
+/// metric.
+#[derive(Clone, Copy)]
+enum WorktreeSet {
+    Baseline,
+    NewOnBranch,
+    Divergent,
+}
 
-    // (a) Shared baseline: paths the main folder already tracks that also
-    // exist in the worktree tree AND are byte-identical to main (not in
-    // `divergent`), read from the MAIN tree (dedup merges — no new vectors).
-    let n_baseline = enqueue_worktree_membership(
-        pool,
-        queue_manager,
-        main_watch_folder_id,
-        tenant_id,
-        collection,
-        &wt_root,
-        branch,
-        &divergent,
-    )
-    .await;
-    if n_baseline > 0 {
-        info!(
-            "worktree membership: enqueued {} baseline file(s) under branch '{}' (worktree {})",
-            n_baseline, branch, wt_root
-        );
-        crate::monitoring::metrics_core::METRICS
-            .worktree_membership_enqueued_total
-            .with_label_values(&[tenant_id, branch])
-            .inc_by(n_baseline as u64);
+/// Log and count what one candidate set enqueued (nothing when it is 0).
+fn record_enqueued(set: WorktreeSet, n: usize, tenant_id: &str, branch: &str, wt_root: &str) {
+    if n == 0 {
+        return;
     }
-
-    // (b) New-on-branch: files that exist ONLY on the worktree branch (no
-    // tracked_files row under the main folder). Their bytes live solely in
-    // the worktree tree, so these items carry a `read_root` and the
-    // processor reads from the worktree (storage still keyed to the main
-    // folder). This is what the shared-baseline path cannot do — reading
-    // from the main tree would resolve to a missing file.
-    let n_new = enqueue_worktree_new_on_branch(
-        pool,
-        queue_manager,
-        main_watch_folder_id,
-        tenant_id,
-        collection,
-        &wt_root,
-        main_project_root,
-        branch,
-        allowed_extensions,
-    )
-    .await;
-    if n_new > 0 {
-        info!(
-            "worktree membership: enqueued {} new-on-branch file(s) under branch '{}' (worktree {})",
-            n_new, branch, wt_root
-        );
-        crate::monitoring::metrics_core::METRICS
-            .worktree_membership_new_on_branch_enqueued_total
-            .with_label_values(&[tenant_id, branch])
-            .inc_by(n_new as u64);
-    }
-
-    // (c) Divergent: shared files whose content DIFFERS on the worktree
-    // branch (the `divergent` set), read from the worktree tree so the branch
-    // is indexed with its own bytes instead of inheriting main's (baseline
-    // inheritance / #151 auto-widen). Creates a new content-generation tagged
-    // with the branch; the main generation (a different hash) is untouched.
-    let n_div = enqueue_worktree_divergent(
-        queue_manager,
-        tenant_id,
-        collection,
-        &wt_root,
-        main_project_root,
-        branch,
-        &divergent,
-        allowed_extensions,
-    )
-    .await;
-    if n_div > 0 {
-        info!(
-            "worktree membership: enqueued {} divergent file(s) under branch '{}' (worktree {})",
-            n_div, branch, wt_root
-        );
-        crate::monitoring::metrics_core::METRICS
-            .worktree_membership_divergent_enqueued_total
-            .with_label_values(&[tenant_id, branch])
-            .inc_by(n_div as u64);
-    }
-
-    n_baseline + n_new + n_div
+    let metrics = &crate::monitoring::metrics_core::METRICS;
+    let (label, counter) = match set {
+        WorktreeSet::Baseline => ("baseline", &metrics.worktree_membership_enqueued_total),
+        WorktreeSet::NewOnBranch => (
+            "new-on-branch",
+            &metrics.worktree_membership_new_on_branch_enqueued_total,
+        ),
+        WorktreeSet::Divergent => (
+            "divergent",
+            &metrics.worktree_membership_divergent_enqueued_total,
+        ),
+    };
+    info!(
+        "worktree membership: enqueued {} {} file(s) under branch '{}' (worktree {})",
+        n, label, branch, wt_root
+    );
+    counter
+        .with_label_values(&[tenant_id, branch])
+        .inc_by(n as u64);
 }
 
 /// A worktree's indexable state: where it is, which branch it has checked out,
