@@ -1000,8 +1000,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         queue_operations::tests::cascade_priority_tests \
         queue_operations::tests::concurrency_tests \
         --test-threads=4 2>&1 | tee /tmp/dequeue.log; \
-    grep -q "^test result: ok\. 29 passed" /tmp/dequeue.log \
-    || { echo "GATE: expected exactly 29 dequeue tests (ranking query, candidate-list \
+    grep -q "^test result: ok\. 30 passed" /tmp/dequeue.log \
+    || { echo "GATE: expected exactly 30 dequeue tests (ranking query + its plan, candidate-list \
 equivalence, lock-free selection + claim, enqueue/dequeue, cascade priority, concurrency) to \
 run and pass. If you ADDED a test here, bump this count."; exit 1; }
 

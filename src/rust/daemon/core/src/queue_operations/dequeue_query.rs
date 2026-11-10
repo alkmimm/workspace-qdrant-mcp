@@ -126,10 +126,17 @@ pub(super) fn build_dequeue_query(
             (None, Some(_)) => ("AND q.item_type = ?2", "?3", "?4", "?5", "?6"),
             (None, None) => ("", "?2", "?3", "?4", "?5"),
         };
+    // The candidate list DRIVES the query: `CROSS JOIN` makes SQLite iterate
+    // `json_each` as the outer loop and fetch each row by primary key. Written
+    // as `q.queue_id IN (SELECT value FROM json_each(..))` instead, the planner
+    // chose a MULTI-INDEX OR over the `status` indexes, walked every pending
+    // row and applied the list as a filter: 0.4-1.6 s per dequeue on 632k rows
+    // (live, 2026-11-10), against 0.13 ms this way.
     format!(
         r#"
         SELECT q.queue_id
-        FROM unified_queue q
+        FROM json_each({candidates_param}) AS c
+        CROSS JOIN unified_queue q ON q.queue_id = c.value
         LEFT JOIN watch_folders w
             ON q.tenant_id = w.tenant_id
             AND q.collection = '{coll_projects}'
@@ -138,7 +145,6 @@ pub(super) fn build_dequeue_query(
             (q.status = 'pending' AND (q.lease_until IS NULL OR q.lease_until < ?1))
             OR (q.status = 'in_progress' AND q.lease_until < ?1)
         )
-        AND q.queue_id IN (SELECT value FROM json_each({candidates_param}))
         {tenant_filter}
         ORDER BY
             CASE WHEN q.op = 'delete' THEN 1
