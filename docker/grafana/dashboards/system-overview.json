@@ -3025,7 +3025,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum by (tenant_id, status) (memexd_unified_queue_depth_by_tenant) > 0) * on (tenant_id) group_left(name) (label_replace(max by (tenant_id, path) (memexd_indexed_project_tracked_files), \"name\", \"$1\", \"path\", \".*/([^/]+)/?$\") * 0 + 1)",
+          "expr": "(sum by (tenant_id, status) (memexd_unified_queue_depth_by_tenant) > 0) * on (tenant_id) group_left(name) (label_replace(max by (tenant_id, path) (memexd_indexed_project_tracked_files{is_worktree!=\"true\"}), \"name\", \"$1\", \"path\", \".*/([^/]+)/?$\") * 0 + 1)",
           "legendFormat": "{{name}} / {{status}}",
           "refId": "A"
         }
