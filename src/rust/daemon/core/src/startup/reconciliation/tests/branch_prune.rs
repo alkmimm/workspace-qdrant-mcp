@@ -334,3 +334,151 @@ async fn skips_non_git_path_without_pruning() {
     assert_eq!(stats.branches_pruned, 0, "non-git path must be skipped");
     assert_eq!(file_delete_count(&pool).await, 0, "nothing enqueued");
 }
+
+// ── Queued work of dead branches (branch_prune_queue) ──────────────────────
+
+/// Insert one queue row with full control over the fields the purge filters on.
+#[allow(clippy::too_many_arguments)]
+async fn insert_queue_row(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+    tenant: &str,
+    branch: &str,
+    op: &str,
+    status: &str,
+    created_at: &str,
+) {
+    sqlx::query(
+        "INSERT INTO unified_queue (queue_id, item_type, op, tenant_id, collection, status, \
+         created_at, branch, file_path, idempotency_key) \
+         VALUES (?1, 'file', ?2, ?3, 'projects', ?4, ?5, ?6, ?7, ?1)",
+    )
+    .bind(id)
+    .bind(op)
+    .bind(tenant)
+    .bind(status)
+    .bind(created_at)
+    .bind(branch)
+    .bind(format!("src/{id}.rs"))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn queue_ids(pool: &sqlx::SqlitePool) -> Vec<String> {
+    sqlx::query_scalar("SELECT queue_id FROM unified_queue ORDER BY queue_id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+const OLD: &str = "2020-01-01T00:00:00.000Z";
+
+/// Pending adds/updates/uplifts of a branch git no longer has are dropped —
+/// even when the branch never reached `tracked_files` (its adds never ran).
+/// Everything that must survive does: the dead branch's deletes (they clean
+/// the index), work a worker already holds, work created after the live set
+/// was read, live branches, default names, and other tenants.
+#[tokio::test]
+async fn drops_pending_indexing_work_of_dead_branches_only() {
+    let pool = create_test_pool().await;
+    setup_schema(&pool).await;
+    let qm = Arc::new(QueueManager::new(pool.clone()));
+
+    let repo_dir = TempDir::new().unwrap();
+    init_repo(repo_dir.path(), &["keep-a"]);
+    insert_watch_folder(&pool, "w1", "t1", repo_dir.path().to_str().unwrap()).await;
+    insert_tracked_file(&pool, "w1", "keep-a", "src/a.rs").await;
+
+    // Dead branch, no tracked rows: the pending indexing work goes.
+    insert_queue_row(&pool, "d-add", "t1", "codex/gone", "add", "pending", OLD).await;
+    insert_queue_row(
+        &pool,
+        "d-update",
+        "t1",
+        "codex/gone",
+        "update",
+        "pending",
+        OLD,
+    )
+    .await;
+    insert_queue_row(
+        &pool,
+        "d-uplift",
+        "t1",
+        "codex/gone",
+        "uplift",
+        "pending",
+        OLD,
+    )
+    .await;
+    // Dead branch, but must stay.
+    insert_queue_row(
+        &pool,
+        "k-delete",
+        "t1",
+        "codex/gone",
+        "delete",
+        "pending",
+        OLD,
+    )
+    .await;
+    insert_queue_row(
+        &pool,
+        "k-held",
+        "t1",
+        "codex/gone",
+        "add",
+        "in_progress",
+        OLD,
+    )
+    .await;
+    let after_cutoff = "2999-01-01T00:00:00.000Z";
+    insert_queue_row(
+        &pool,
+        "k-new",
+        "t1",
+        "codex/gone",
+        "add",
+        "pending",
+        after_cutoff,
+    )
+    .await;
+    // Live branch, a default name git does not list, and another tenant.
+    insert_queue_row(&pool, "k-live", "t1", "keep-a", "add", "pending", OLD).await;
+    insert_queue_row(&pool, "k-main", "t1", "main", "add", "pending", OLD).await;
+    insert_queue_row(&pool, "k-other", "t2", "codex/gone", "add", "pending", OLD).await;
+
+    let stats = prune_orphaned_branches(&pool, &qm).await.expect("prune");
+
+    assert_eq!(stats.queue_items_purged, 3);
+    assert!(stats.has_changes());
+    assert_eq!(
+        queue_ids(&pool).await,
+        vec!["k-delete", "k-held", "k-live", "k-main", "k-new", "k-other"]
+    );
+}
+
+/// The corpus branch keeps its queued work even when git does not list it —
+/// the same guard that keeps the index prune off a mislabeled corpus.
+#[tokio::test]
+async fn keeps_pending_work_of_the_corpus_branch() {
+    let pool = create_test_pool().await;
+    setup_schema(&pool).await;
+    let qm = Arc::new(QueueManager::new(pool.clone()));
+
+    let repo_dir = TempDir::new().unwrap();
+    init_repo(repo_dir.path(), &["keep-a"]);
+    insert_watch_folder(&pool, "w1", "t1", repo_dir.path().to_str().unwrap()).await;
+    // "legacy" is absent from git but holds the most files → the corpus.
+    insert_tracked_file(&pool, "w1", "legacy", "src/a.rs").await;
+    insert_tracked_file(&pool, "w1", "legacy", "src/b.rs").await;
+    insert_tracked_file(&pool, "w1", "legacy", "src/c.rs").await;
+    insert_tracked_file(&pool, "w1", "keep-a", "src/a.rs").await;
+    insert_queue_row(&pool, "k-corpus", "t1", "legacy", "add", "pending", OLD).await;
+
+    let stats = prune_orphaned_branches(&pool, &qm).await.expect("prune");
+
+    assert_eq!(stats.queue_items_purged, 0);
+    assert!(queue_ids(&pool).await.contains(&"k-corpus".to_string()));
+}

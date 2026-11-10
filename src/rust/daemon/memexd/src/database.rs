@@ -247,9 +247,10 @@ async fn run_branch_prune(
     )
     .await
     {
-        Ok(s) if s.branches_pruned > 0 => info!(
-            "{} Branch prune complete: {} orphaned branch(es), {} file delete(s) enqueued",
-            label, s.branches_pruned, s.files_enqueued
+        Ok(s) if s.has_changes() => info!(
+            "{} Branch prune complete: {} orphaned branch(es), {} file delete(s) enqueued, \
+             {} pending indexing item(s) of dead branches dropped",
+            label, s.branches_pruned, s.files_enqueued, s.queue_items_purged
         ),
         Ok(_) => {}
         Err(e) => warn!("{} Branch prune failed: {}", label, e),

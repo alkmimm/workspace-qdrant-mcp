@@ -76,13 +76,12 @@
 use std::collections::{HashMap, HashSet};
 
 use sqlx::SqlitePool;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use super::branch_prune_policy::elect_primary;
-use crate::git::BranchLifecycleDetector;
+use super::branch_prune_policy::{elect_primary, trusted_live_branches};
+use super::branch_prune_queue::purge_dead_branch_work;
 use crate::queue_operations::QueueManager;
 use crate::unified_queue_schema::{FilePayload, ItemType, QueueOperation};
-use crate::watching_queue::WatchManager;
 use wqm_common::paths::RelativePath;
 
 /// The `reason` token carried in the `metadata` of every `file|delete` enqueued
@@ -130,12 +129,15 @@ pub struct BranchPruneStats {
     /// Covered candidates NOT enqueued because the per-run cap was reached
     /// (`WQM_BRANCH_PRUNE_COVERED_CAP`). They are picked up by the next cycle.
     pub files_deferred: u64,
+    /// Pending `add`/`update`/`uplift` queue items dropped because their branch
+    /// is gone from git (see `branch_prune_queue`).
+    pub queue_items_purged: u64,
 }
 
 impl BranchPruneStats {
-    /// Returns true if any branch was pruned.
+    /// Returns true if any branch was pruned or any dead-branch work dropped.
     pub fn has_changes(&self) -> bool {
-        self.branches_pruned > 0 || self.files_enqueued > 0
+        self.branches_pruned > 0 || self.files_enqueued > 0 || self.queue_items_purged > 0
     }
 }
 
@@ -254,6 +256,7 @@ pub async fn prune_orphaned_branches(
                 totals.branches_pruned += stats.branches_pruned;
                 totals.files_enqueued += stats.files_enqueued;
                 totals.files_covered += stats.files_covered;
+                totals.queue_items_purged += stats.queue_items_purged;
             }
             Err(e) => warn!("[branch_prune] reconciliation failed for {tenant_id}: {e}"),
         }
@@ -262,11 +265,13 @@ pub async fn prune_orphaned_branches(
 
     if totals.has_changes() {
         info!(
-            "[branch_prune] Pruned {} orphaned branch(es), enqueued {} file delete(s) \
+            "[branch_prune] Pruned {} orphaned branch(es), enqueued {} file delete(s), \
+             dropped {} pending indexing item(s) of dead branches \
              ({} covered by a live generation — stage 3 candidates, policy={}, capped={}, \
              deferred_to_next_cycle={})",
             totals.branches_pruned,
             totals.files_enqueued,
+            totals.queue_items_purged,
             totals.files_covered,
             std::env::var("WQM_BRANCH_PRUNE_COVERED_DELETE").unwrap_or_else(|_| "dry".into()),
             totals.files_deferred > 0,
@@ -285,45 +290,12 @@ async fn prune_project_branches(
     project_root: &str,
     budget: &mut CoveredBudget,
 ) -> Result<BranchPruneStats, String> {
-    let root = WatchManager::resolve_local_watch_path(project_root);
-    if !root.is_dir() {
-        debug!("[branch_prune] Skipping {tenant_id} — path not a directory");
+    // Taken BEFORE the live set is read: queued work created after it may be
+    // for a branch the listing below does not know yet, so it is never purged.
+    let cutoff = wqm_common::timestamps::now_utc();
+    let Some((live, head)) = trusted_live_branches(project_root, tenant_id) else {
         return Ok(BranchPruneStats::default());
-    }
-
-    // Ground truth: the repo's live local branches. On ANY error (not a repo,
-    // unreadable, etc.) skip — pruning without a confirmed live set could wipe a
-    // project's entire index.
-    let detector = BranchLifecycleDetector::with_defaults(root.clone());
-    let live: HashSet<String> = match detector.list_all_branches() {
-        Ok(branches) => branches.into_iter().map(|(name, _, _)| name).collect(),
-        Err(e) => {
-            debug!("[branch_prune] Skipping {tenant_id} — cannot list git branches: {e}");
-            return Ok(BranchPruneStats::default());
-        }
     };
-    if live.is_empty() {
-        // Defensive: an empty live set would mark every tracked branch orphaned.
-        debug!("[branch_prune] Skipping {tenant_id} — git reported zero local branches");
-        return Ok(BranchPruneStats::default());
-    }
-
-    // Consistency proof. The repo's current HEAD branch MUST appear in the live
-    // set. `get_current_branch` falls back to "main" when the repo can't be read
-    // or HEAD can't be resolved — the exact failure that, at index time, labels a
-    // project's corpus under a non-existent branch (observed: example-service's and
-    // example-tool's content was indexed under a bogus "main" while git only had
-    // master/dev-clean). If HEAD isn't in `live`, the stored branch labels are not
-    // trustworthy ground truth for this repo — skip rather than risk deleting the
-    // real index.
-    let head = crate::watching_queue::get_current_branch(&root);
-    if !live.contains(&head) {
-        debug!(
-            "[branch_prune] Skipping {tenant_id} — HEAD '{head}' not among live branches; \
-             branch labels not trustworthy"
-        );
-        return Ok(BranchPruneStats::default());
-    }
 
     // Per-branch corpus size, counted in FILES (distinct paths) — never in rows.
     // The branch covering the most files is the project's corpus; a genuinely-
@@ -356,6 +328,15 @@ async fn prune_project_branches(
     let live_generations = live_generations_by_path(pool, watch_id, &live).await?;
 
     let mut stats = BranchPruneStats::default();
+    // Queued indexing work for dead branches goes first: a dead branch with
+    // pending adds may have no tracked rows yet, so the loop below never sees
+    // it. Same guards as the index prune (default names, the corpus branch).
+    let protected: Vec<&str> = ["main", "master"].into_iter().chain(primary).collect();
+    match purge_dead_branch_work(pool, tenant_id, &live, &protected, &cutoff).await {
+        Ok(n) => stats.queue_items_purged = n,
+        Err(e) => warn!("[branch_prune] {tenant_id} — queue purge failed (prune continues): {e}"),
+    }
+
     for (branch, _count) in &counts {
         if live.contains(branch) {
             continue; // still a real git branch

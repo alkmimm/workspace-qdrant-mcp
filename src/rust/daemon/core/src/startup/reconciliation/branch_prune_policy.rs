@@ -1,7 +1,14 @@
-//! Branch-prune policy: which tracked branch is the project's corpus (guard 3),
-//! and how often the prune runs.
+//! Branch-prune policy: when a repo's branch labels can be trusted (guards 1-2),
+//! which tracked branch is the project's corpus (guard 3), and how often the
+//! prune runs.
 
+use std::collections::HashSet;
 use std::time::Duration;
+
+use tracing::debug;
+
+use crate::git::BranchLifecycleDetector;
+use crate::watching_queue::WatchManager;
 
 /// Elect the project's corpus branch from per-branch distinct-file counts: the
 /// elected branch is never pruned (guard 3).
@@ -38,6 +45,54 @@ pub(crate) fn elect_primary<'a>(counts: &'a [(String, i64)], head: &str) -> Opti
         .collect();
     tied.sort_unstable();
     tied.into_iter().next()
+}
+
+/// The repo's live local branches and its HEAD branch, or `None` when they
+/// cannot be trusted as ground truth for pruning (the project is then skipped).
+pub(crate) fn trusted_live_branches(
+    project_root: &str,
+    tenant_id: &str,
+) -> Option<(HashSet<String>, String)> {
+    let root = WatchManager::resolve_local_watch_path(project_root);
+    if !root.is_dir() {
+        debug!("[branch_prune] Skipping {tenant_id} — path not a directory");
+        return None;
+    }
+
+    // Ground truth: the repo's live local branches. On ANY error (not a repo,
+    // unreadable, etc.) skip — pruning without a confirmed live set could wipe a
+    // project's entire index.
+    let detector = BranchLifecycleDetector::with_defaults(root.clone());
+    let live: HashSet<String> = match detector.list_all_branches() {
+        Ok(branches) => branches.into_iter().map(|(name, _, _)| name).collect(),
+        Err(e) => {
+            debug!("[branch_prune] Skipping {tenant_id} — cannot list git branches: {e}");
+            return None;
+        }
+    };
+    if live.is_empty() {
+        // Defensive: an empty live set would mark every tracked branch orphaned.
+        debug!("[branch_prune] Skipping {tenant_id} — git reported zero local branches");
+        return None;
+    }
+
+    // Consistency proof. The repo's current HEAD branch MUST appear in the live
+    // set. `get_current_branch` falls back to "main" when the repo can't be read
+    // or HEAD can't be resolved — the exact failure that, at index time, labels a
+    // project's corpus under a non-existent branch (observed: example-service's and
+    // example-tool's content was indexed under a bogus "main" while git only had
+    // master/dev-clean). If HEAD isn't in `live`, the stored branch labels are not
+    // trustworthy ground truth for this repo — skip rather than risk deleting the
+    // real index.
+    let head = crate::watching_queue::get_current_branch(&root);
+    if !live.contains(&head) {
+        debug!(
+            "[branch_prune] Skipping {tenant_id} — HEAD '{head}' not among live branches; \
+             branch labels not trustworthy"
+        );
+        return None;
+    }
+    Some((live, head))
 }
 
 /// Time between prune cycles after the start-up one; `None` = start-up only.
