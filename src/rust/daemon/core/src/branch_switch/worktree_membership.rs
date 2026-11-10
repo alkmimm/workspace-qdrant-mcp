@@ -70,6 +70,18 @@ use crate::queue_operations::QueueManager;
 use crate::unified_queue_schema::{FilePayload, ItemType, QueueOperation};
 
 use super::db::fetch_paths_missing_branch;
+use super::worktree_eligibility::{main_eligibility_gate, worktree_path_eligible};
+
+/// One linked worktree being reconciled: its branch, where its tree is, and
+/// the main folder its content is stored under.
+pub(super) struct WorktreeRef<'a> {
+    pub(super) main_watch_folder_id: &'a str,
+    pub(super) tenant_id: &'a str,
+    pub(super) collection: &'a str,
+    pub(super) wt_root: &'a str,
+    pub(super) main_project_root: &'a str,
+    pub(super) branch: &'a str,
+}
 
 /// Enqueue the worktree's working-tree files missing `branch` as `File/Add`
 /// items keyed to the MAIN watch_folder, flagged `worktree_membership`.
@@ -82,19 +94,22 @@ use super::db::fetch_paths_missing_branch;
 /// Files absent from the MAIN tree are skipped too: the read would find nothing,
 /// the tag would never land, and every reconcile would enqueue them again —
 /// [`enqueue_worktree_new_on_branch`] reads those from the worktree instead.
-/// Returns the number of files enqueued.
-#[allow(clippy::too_many_arguments)]
+/// `skip` holds paths another set owns: the divergent files, and the files the
+/// hash-matched bulk already tags. Returns the number of files enqueued.
 pub(super) async fn enqueue_worktree_membership(
     pool: &SqlitePool,
     queue_manager: &QueueManager,
-    main_watch_folder_id: &str,
-    tenant_id: &str,
-    collection: &str,
-    wt_root: &str,
-    main_project_root: &str,
-    branch: &str,
-    divergent: &HashSet<String>,
+    target: &WorktreeRef<'_>,
+    skip: &HashSet<String>,
 ) -> usize {
+    let WorktreeRef {
+        main_watch_folder_id,
+        tenant_id,
+        collection,
+        wt_root,
+        main_project_root,
+        branch,
+    } = *target;
     let candidates = match fetch_paths_missing_branch(pool, main_watch_folder_id, branch).await {
         Ok(v) => v,
         Err(e) => {
@@ -116,7 +131,8 @@ pub(super) async fn enqueue_worktree_membership(
         // Divergent files are handled by `enqueue_worktree_divergent` (read from
         // the worktree); reading them from main here would tag the branch with
         // main's bytes and collide on the shared `(path, branch)` idempotency key.
-        if divergent.contains(&rel_str) {
+        // Hash-matched files are already tagged by the bulk op.
+        if skip.contains(&rel_str) {
             continue;
         }
         if !wt.join(&rel_str).exists() {
@@ -174,19 +190,24 @@ pub(super) async fn enqueue_worktree_membership(
 /// baseline path: a shared file (baseline, read from main) and a branch-only
 /// file (read from the worktree) never contend for the same `(path, branch)`
 /// idempotency key. Once tagged with `branch`, a file drops out of the
-/// candidate set — idempotent across scans. Returns the number of files
+/// candidate set — idempotent across scans. Paths in `skip` (already tagged by
+/// the hash-matched bulk op) are left out. Returns the number of files
 /// enqueued.
 pub(super) async fn enqueue_worktree_new_on_branch(
     pool: &SqlitePool,
     queue_manager: &QueueManager,
-    main_watch_folder_id: &str,
-    tenant_id: &str,
-    collection: &str,
-    wt_root: &str,
-    main_project_root: &str,
-    branch: &str,
+    target: &WorktreeRef<'_>,
     allowed_extensions: &AllowedExtensions,
+    skip: &HashSet<String>,
 ) -> usize {
+    let WorktreeRef {
+        main_watch_folder_id,
+        tenant_id,
+        collection,
+        wt_root,
+        main_project_root,
+        branch,
+    } = *target;
     // Enumerate the worktree working tree with the project-cascade ignore only
     // (`None` global — see doc above); the global layer is re-applied below via
     // the main-anchored gate.
@@ -216,7 +237,7 @@ pub(super) async fn enqueue_worktree_new_on_branch(
 
     let mut enqueued = 0usize;
     for rel_str in walked {
-        if !owed.needs_worktree_read(&rel_str, main_root) {
+        if skip.contains(&rel_str) || !owed.needs_worktree_read(&rel_str, main_root) {
             continue;
         }
         // Mirror the main scan's eligibility (ignore gate + extension allowlist)
@@ -272,18 +293,24 @@ pub(super) async fn enqueue_worktree_new_on_branch(
 /// branch-scoped, reference-counted delete never GCs content another branch still
 /// holds — see `update_preamble`). Each candidate is filtered through the main
 /// folder's eligibility (gate + allowlist), so a modified generated / disallowed
-/// file the diff surfaces is not indexed. Returns the number of files enqueued.
-#[allow(clippy::too_many_arguments)]
+/// file the diff surfaces is not indexed. Paths in `skip` (already tagged by the
+/// hash-matched bulk op: the branch's bytes are content some other branch
+/// indexed first) are left out. Returns the number of files enqueued.
 pub(super) async fn enqueue_worktree_divergent(
     queue_manager: &QueueManager,
-    tenant_id: &str,
-    collection: &str,
-    wt_root: &str,
-    main_project_root: &str,
-    branch: &str,
+    target: &WorktreeRef<'_>,
     divergent: &HashSet<String>,
     allowed_extensions: &AllowedExtensions,
+    skip: &HashSet<String>,
 ) -> usize {
+    let WorktreeRef {
+        tenant_id,
+        collection,
+        wt_root,
+        main_project_root,
+        branch,
+        ..
+    } = *target;
     if divergent.is_empty() {
         return 0;
     }
@@ -292,7 +319,7 @@ pub(super) async fn enqueue_worktree_divergent(
     let mut enqueued = 0usize;
     for rel_str in divergent {
         // A `Modified` delta is present in the worktree tree, but stay defensive.
-        if !wt.join(rel_str).exists() {
+        if skip.contains(rel_str) || !wt.join(rel_str).exists() {
             continue;
         }
         // Mirror the main scan's eligibility so a modified generated / disallowed
@@ -381,47 +408,6 @@ fn parse_relative(rel: &str) -> Option<RelativePath> {
             None
         }
     }
-}
-
-/// The MAIN folder's eligibility gate (project `.gitignore`/`.wqmignore` cascade
-/// + `global.wqmignore`), anchored at the main root.
-///
-/// Worktree-read items (new-on-branch, divergent) test each candidate as
-/// `main_root/rel` so every global rule applies to the rel path exactly as the
-/// main scan would — dropping generated / globally-excluded files — WITHOUT the
-/// `.claude/worktrees/` self-exclusion a worktree-anchored test would trigger
-/// (that rule matches absolute paths and their parents, so anchoring inside the
-/// worktree does not save it). Build once per worktree; reuse across candidates.
-pub(super) fn main_eligibility_gate(
-    main_project_root: &str,
-) -> crate::patterns::ignore_gate::IgnoreGate {
-    let main_root = Path::new(main_project_root);
-    let global = crate::patterns::global_ignore::resolve_global_ignore_path();
-    crate::patterns::ignore_gate::IgnoreGate::for_dir(main_root, Some(main_root), global.as_deref())
-}
-
-/// Whether `rel` passes the MAIN folder's full eligibility — the ignore `gate`
-/// (from [`main_eligibility_gate`]) plus [`AllowedExtensions::is_indexable`] —
-/// the exact filter the folder scan applies. Worktree-read items run every
-/// candidate through this so a worktree branch never indexes files the main scan
-/// omits, and disallowed types are dropped at discovery instead of enqueued only
-/// to be skipped at the ingest guard and re-churned every scan.
-///
-/// `is_indexable`, not `is_allowed`: a library-format document (`.docx`, `.pdf`)
-/// is indexed into the project's library, and the queue routes the item there.
-/// With `is_allowed` such a file was never eligible here, so worktree branches
-/// and branches with no checkout never followed it (bws-engineer `master`, a
-/// `.docx` left on a version its tip no longer had, 2026-10-05).
-pub(super) fn worktree_path_eligible(
-    main_project_root: &str,
-    gate: &crate::patterns::ignore_gate::IgnoreGate,
-    allowed_extensions: &AllowedExtensions,
-    collection: &str,
-    rel: &str,
-) -> bool {
-    let main_root = Path::new(main_project_root);
-    !gate.is_ignored_with_ancestors(main_root, &main_root.join(rel))
-        && allowed_extensions.is_indexable(rel, collection)
 }
 
 /// Enqueue a single `File/Add` for a worktree file, flagged

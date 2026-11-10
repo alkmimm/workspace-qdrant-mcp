@@ -15,7 +15,7 @@ use super::branch_tips_tests::{commit, h};
 use super::handlers::enqueue_unchanged_files;
 use super::tests::{create_test_pool, insert_tracked_file, insert_watch_folder, setup_tables};
 use super::types::BranchSwitchStats;
-use super::worktree_membership::{main_eligibility_gate, worktree_path_eligible};
+use super::worktree_eligibility::{main_eligibility_gate, worktree_path_eligible};
 use super::BranchTipFollower;
 
 #[test]

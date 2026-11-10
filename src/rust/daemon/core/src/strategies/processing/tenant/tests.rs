@@ -320,7 +320,7 @@ async fn insert_parent_watch_folder(pool: &SqlitePool, path: &str, tenant_id: &s
 /// committing progress. Pure state.db path (no Qdrant / no search.db).
 #[tokio::test]
 async fn test_branch_bulk_persist_checkpoints_and_resumes() {
-    use super::project::{persist_branch_tag_for_base_points, select_branch_bulk_candidates};
+    use super::branch_bulk::{persist_branch_tag_for_base_points, select_branch_bulk_candidates};
     use crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL;
     use sqlx::sqlite::SqlitePoolOptions;
 
@@ -432,7 +432,7 @@ async fn test_branch_bulk_persist_checkpoints_and_resumes() {
 /// checkpoint test passes `None` and never exercises the mirror write).
 #[tokio::test]
 async fn test_branch_bulk_search_db_mirror_scopes_to_watch_folder() {
-    use super::project::persist_branch_tag_for_base_points;
+    use super::branch_bulk::persist_branch_tag_for_base_points;
     use crate::search_db::SearchDbManager;
     use crate::tracked_files_schema::CREATE_TRACKED_FILES_V41_SQL;
     use sqlx::sqlite::SqlitePoolOptions;

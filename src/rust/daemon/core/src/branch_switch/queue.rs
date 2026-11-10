@@ -238,35 +238,76 @@ pub async fn enqueue_branch_membership_bulk(
     }
     let total = paths.len();
     for chunk in paths.chunks(BRANCH_BULK_CHUNK) {
-        let payload = ProjectPayload {
-            project_root: project_root.to_string(),
-            git_remote: None,
-            project_type: None,
-            old_tenant_id: None,
-            is_active: None,
-            branch_membership: Some(BranchMembershipBulk {
-                watch_folder_id: watch_folder_id.to_string(),
-                branch: branch.to_string(),
-                paths: chunk.to_vec(),
-                from_branch: Some(from_branch.to_string()),
-            }),
+        let spec = BranchMembershipBulk {
+            watch_folder_id: watch_folder_id.to_string(),
+            branch: branch.to_string(),
+            paths: chunk.to_vec(),
+            from_branch: Some(from_branch.to_string()),
+            hashes: None,
         };
-        let payload_json = serde_json::to_string(&payload)
-            .map_err(|e| format!("serialize branch bulk payload: {}", e))?;
-        queue_manager
-            .enqueue_unified(
-                ItemType::Tenant,
-                QueueOperation::Scan,
-                tenant_id,
-                collection,
-                &payload_json,
-                Some(branch),
-                None,
-            )
-            .await
-            .map_err(|e| format!("enqueue branch bulk op: {}", e))?;
+        enqueue_bulk_op(queue_manager, tenant_id, collection, project_root, spec).await?;
     }
     Ok(total)
+}
+
+/// Enqueue the hash-certified branch re-key of a worktree as bulk ops: each
+/// `(path, content hash)` in `entries` names the indexed generation that IS the
+/// branch's content for that path (see `BranchMembershipBulk::hashes`).
+/// Returns the total number of paths enqueued.
+pub(super) async fn enqueue_branch_membership_bulk_by_hash(
+    queue_manager: &QueueManager,
+    tenant_id: &str,
+    collection: &str,
+    watch_folder_id: &str,
+    project_root: &str,
+    branch: &str,
+    entries: &[(String, String)],
+) -> Result<usize, String> {
+    for chunk in entries.chunks(BRANCH_BULK_CHUNK) {
+        let spec = BranchMembershipBulk {
+            watch_folder_id: watch_folder_id.to_string(),
+            branch: branch.to_string(),
+            paths: chunk.iter().map(|(p, _)| p.clone()).collect(),
+            from_branch: None,
+            hashes: Some(chunk.iter().map(|(_, h)| h.clone()).collect()),
+        };
+        enqueue_bulk_op(queue_manager, tenant_id, collection, project_root, spec).await?;
+    }
+    Ok(entries.len())
+}
+
+/// Enqueue one bulk branch-membership `(Tenant, Scan)` op on the spec's branch.
+async fn enqueue_bulk_op(
+    queue_manager: &QueueManager,
+    tenant_id: &str,
+    collection: &str,
+    project_root: &str,
+    spec: BranchMembershipBulk,
+) -> Result<(), String> {
+    let branch = spec.branch.clone();
+    let payload = ProjectPayload {
+        project_root: project_root.to_string(),
+        git_remote: None,
+        project_type: None,
+        old_tenant_id: None,
+        is_active: None,
+        branch_membership: Some(spec),
+    };
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|e| format!("serialize branch bulk payload: {}", e))?;
+    queue_manager
+        .enqueue_unified(
+            ItemType::Tenant,
+            QueueOperation::Scan,
+            tenant_id,
+            collection,
+            &payload_json,
+            Some(&branch),
+            None,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("enqueue branch bulk op: {}", e))
 }
 
 /// Enqueue a full tenant scan (used for reset events).

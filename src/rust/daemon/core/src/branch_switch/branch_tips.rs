@@ -39,7 +39,7 @@ use crate::unified_queue_schema::{FilePayload, ItemType, QueueOperation};
 
 use super::db;
 use super::tip_stage::{stage_dir, stage_file, sweep_stage};
-use super::worktree_membership::{main_eligibility_gate, worktree_path_eligible};
+use super::worktree_eligibility::{main_eligibility_gate, worktree_path_eligible};
 
 /// What one branch's tip asks of the index.
 #[derive(Debug, Default, PartialEq, Eq)]
