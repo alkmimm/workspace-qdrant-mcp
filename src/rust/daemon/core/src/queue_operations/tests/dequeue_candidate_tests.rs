@@ -264,3 +264,50 @@ async fn dequeue_unified_claims_in_rank_order() {
         .iter()
         .all(|i| i.status == QueueStatus::InProgress && i.worker_id.as_deref() == Some("w1")));
 }
+
+/// The ranking must be DRIVEN by the candidate list: iterate it, fetch each
+/// row by primary key. Written as an `IN (json_each)` filter, SQLite chose a
+/// MULTI-INDEX OR over the `status` indexes and walked every pending row —
+/// 0.4-1.6 s per dequeue on the live 632k queue, which the equivalence test
+/// above cannot see (same answer, different cost).
+#[tokio::test]
+async fn ranking_query_is_driven_by_the_candidate_list() {
+    use crate::queue_operations::dequeue_query::build_dequeue_query;
+    use sqlx::Row;
+
+    let (pool, _manager, _dir) = setup().await;
+    seed(&pool).await;
+    let now = wqm_common::timestamps::now_utc();
+    let sql = format!(
+        "EXPLAIN QUERY PLAN {}",
+        build_dequeue_query(None, None, "DESC", "DESC", "ASC")
+    );
+    let plan: Vec<String> = sqlx::query(&sql)
+        .bind(&now)
+        .bind(300_i64)
+        .bind(900_i64)
+        .bind(3_i32)
+        .bind(r#"["00000000000000000000000000000001"]"#)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get::<String, _>("detail"))
+        .collect();
+    let joined = plan.join(" | ");
+    assert!(
+        // `c` is the `json_each` alias; the plan names the virtual table by it.
+        plan.first()
+            .is_some_and(|d| d.starts_with("SCAN c ") && d.contains("VIRTUAL TABLE")),
+        "the candidate list must be the outer loop: {joined}"
+    );
+    assert!(
+        plan.iter()
+            .any(|d| d.contains("SEARCH q USING") && d.contains("(queue_id=?)")),
+        "each candidate must be fetched by primary key: {joined}"
+    );
+    assert!(
+        !joined.contains("MULTI-INDEX OR") && !joined.contains("(status=?)"),
+        "the ranking must never walk the queue by status: {joined}"
+    );
+}

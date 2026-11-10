@@ -77,7 +77,7 @@ fn test_build_dequeue_query_ranks_only_candidates() {
         let q = build_dequeue_query(tenant, itype, "DESC", "DESC", "ASC");
         assert!(
             q.contains(&format!(
-                "q.queue_id IN (SELECT value FROM json_each({}))",
+                "FROM json_each({}) AS c\n        CROSS JOIN unified_queue q ON q.queue_id = c.value",
                 param
             )),
             "candidate filter must bind {} for tenant={:?} item_type={:?}",
