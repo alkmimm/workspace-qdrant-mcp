@@ -1041,11 +1041,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         startup::reconciliation::branch_prune \
         startup::reconciliation::tests::branch_prune:: \
         --test-threads=4 2>&1 | tee /tmp/branch-prune.log; \
-    grep -q "^test result: ok\. 18 passed" /tmp/branch-prune.log \
-    || { echo "GATE: expected exactly 18 branch-prune tests to run and pass (4 payload/count + \
-6 policy + 8 integration) — libtest exits 0 when a positional filter matches nothing, so a \
-module rename would silently un-gate the guards that decide which branch's index is deleted. \
-If you ADDED a test here, bump this count."; exit 1; }
+    grep -q "^test result: ok\. 20 passed" /tmp/branch-prune.log \
+    || { echo "GATE: expected exactly 20 branch-prune tests to run and pass (4 payload/count + \
+6 policy + 10 integration, 2 of them on dropping a dead branch's queued work) — libtest exits \
+0 when a positional filter matches nothing, so a module rename would silently un-gate the \
+guards that decide which branch's index is deleted. If you ADDED a test here, bump this \
+count."; exit 1; }
 
 # The exclusion engine — the gate every folder scan and watcher event passes
 # through — must honour the ingestion allowlist's exact file names. Until
