@@ -20,6 +20,7 @@ mod tip_stage;
 mod types;
 mod worktree_discovery;
 mod worktree_membership;
+mod worktree_queue_purge;
 
 #[cfg(test)]
 mod branch_tips_tests;
@@ -29,6 +30,8 @@ mod library_routing_tests;
 mod membership_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod worktree_queue_purge_tests;
 #[cfg(test)]
 mod worktree_reconcile_tests;
 
