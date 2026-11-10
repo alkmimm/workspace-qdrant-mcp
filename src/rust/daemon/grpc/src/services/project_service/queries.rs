@@ -3,7 +3,6 @@
 //! Handles read-only project operations: status lookup, listing, and heartbeat.
 
 use chrono::Utc;
-use sqlx::SqlitePool;
 use tonic::Status;
 use tracing::{debug, error};
 
