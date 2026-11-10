@@ -26,6 +26,7 @@ use crate::queue_operations::QueueManager;
 use super::worktree_membership::{
     enqueue_worktree_divergent, enqueue_worktree_membership, enqueue_worktree_new_on_branch,
 };
+use super::worktree_queue_purge::{checked_out_branches, CheckoutlessPurge, PurgeTarget};
 
 /// Reconcile branch membership for every linked worktree of a main repository.
 ///
@@ -294,10 +295,12 @@ impl ProjectWorktrees {
 }
 
 /// Reconciles a linked worktree as soon as it appears or moves, instead of at
-/// the next tenant scan. Holds the last observation per main watch folder.
+/// the next tenant scan, and drops the queued work of one that is gone. Holds
+/// the last observation per main watch folder.
 #[derive(Debug, Default)]
 pub struct WorktreeDiscovery {
     projects: HashMap<String, ProjectWorktrees>,
+    purge: CheckoutlessPurge,
 }
 
 impl WorktreeDiscovery {
@@ -320,7 +323,17 @@ impl WorktreeDiscovery {
         let mut live = HashSet::new();
         for (watch_id, root, tenant_id) in projects {
             live.insert(watch_id.clone());
+            // Taken BEFORE the worktrees are listed: work queued after it may be
+            // for a worktree this listing does not show yet, so it is never purged.
+            let cutoff = wqm_common::timestamps::now_utc();
             let worktrees = crate::git::list_linked_worktrees(Path::new(&root));
+            let target = PurgeTarget {
+                watch_id: &watch_id,
+                tenant_id: &tenant_id,
+                root: &root,
+            };
+            let checkouts = checked_out_branches(Path::new(&root), &worktrees);
+            self.purge.run(pool, &target, checkouts, &cutoff).await;
             let states = observe(&root, &worktrees);
             let current: HashSet<WorktreeState> = states.iter().map(|(s, _)| s.clone()).collect();
             let due = match self.projects.get_mut(&watch_id) {
@@ -352,6 +365,7 @@ impl WorktreeDiscovery {
             }
         }
         self.projects.retain(|watch_id, _| live.contains(watch_id));
+        self.purge.retain(&live);
         total
     }
 }

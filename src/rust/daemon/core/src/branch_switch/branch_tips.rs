@@ -430,9 +430,8 @@ fn local_branch_tips(root: &Path) -> Option<HashMap<String, git2::Oid>> {
 /// The branches some checkout has: the main folder's HEAD and every linked
 /// worktree's. Those are followed through their checkout.
 fn checked_out_branches(root: &Path) -> HashSet<String> {
-    crate::git::list_linked_worktrees(root)
-        .into_iter()
-        .filter_map(|wt| wt.branch)
-        .chain(crate::git::head_branch(root))
-        .collect()
+    super::worktree_queue_purge::checked_out_branches(
+        root,
+        &crate::git::list_linked_worktrees(root),
+    )
 }

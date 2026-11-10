@@ -500,7 +500,10 @@ bump this count."; exit 1; }
 # baseline that never settled: files only other worktree branches had indexed
 # were read from the main tree, which has no copy, so their tag never landed
 # (tecsul, 2026-10-30: 1,012 files re-enqueued on every commit of one
-# worktree). Hermetic: in-memory SQLite + tempdir git repos.
+# worktree). And the queued work of removed worktrees: agents remove a worktree
+# but keep its branch, so its ~4–6k per-file items stayed queued (2026-11-10:
+# 195k of 278k pending adds, 64 tecsul branches with no checkout).
+# Hermetic: in-memory SQLite + tempdir git repos.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
@@ -509,8 +512,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
         strategies::processing::file::item_metadata \
         --test-threads=4 2>&1 | tee /tmp/branch-switch.log; \
-    grep -q "^test result: ok\. 34 passed" /tmp/branch-switch.log \
-    || { echo "GATE: expected exactly 34 branch_switch + item_metadata tests to run and pass — \
+    grep -q "^test result: ok\. 37 passed" /tmp/branch-switch.log \
+    || { echo "GATE: expected exactly 37 branch_switch + item_metadata tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the membership reconcile, worktree discovery and the branch tip follower. If you ADDED \
 a test here, bump this count."; exit 1; }
