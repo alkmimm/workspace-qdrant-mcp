@@ -64,7 +64,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (tenant_id, language) (memexd_graph_nodes_by_language) * on (tenant_id) group_left(name) (label_replace(max by (tenant_id, path) (memexd_indexed_project_tracked_files), \"name\", \"$1\", \"path\", \".*/([^/]+)/?$\") * 0 + 1)",
+          "expr": "sum by (tenant_id, language) (memexd_graph_nodes_by_language) * on (tenant_id) group_left(name) (label_replace(max by (tenant_id, path) (memexd_indexed_project_tracked_files{is_worktree!=\"true\"}), \"name\", \"$1\", \"path\", \".*/([^/]+)/?$\") * 0 + 1)",
           "format": "table",
           "instant": true,
           "refId": "A"
@@ -93,7 +93,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (tenant_id, language) (memexd_graph_nodes_by_language) * on (tenant_id) group_left(name) (label_replace(max by (tenant_id, path) (memexd_indexed_project_tracked_files), \"name\", \"$1\", \"path\", \".*/([^/]+)/?$\") * 0 + 1)",
+          "expr": "sum by (tenant_id, language) (memexd_graph_nodes_by_language) * on (tenant_id) group_left(name) (label_replace(max by (tenant_id, path) (memexd_indexed_project_tracked_files{is_worktree!=\"true\"}), \"name\", \"$1\", \"path\", \".*/([^/]+)/?$\") * 0 + 1)",
           "format": "table",
           "instant": true,
           "refId": "A"
