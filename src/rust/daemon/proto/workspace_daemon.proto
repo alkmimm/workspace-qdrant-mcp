@@ -521,6 +521,10 @@ message GetProjectStatusResponse {
     // (< 60s of data) or when the rate is 0 with pending > 0 — callers
     // must render "warming up" / "unknown" instead of fabricating a value.
     optional int64 eta_seconds = 18;
+    // Seconds the tenant's oldest pending/in-progress queue item has waited;
+    // unset when nothing is in flight. The stall signal: counts and ETA can
+    // look plausible while none of this project's items is being processed.
+    optional int64 oldest_pending_age_seconds = 19;
 }
 
 // ListProjects Request/Response

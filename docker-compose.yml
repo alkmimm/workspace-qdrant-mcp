@@ -447,6 +447,11 @@ services:
       # drop), this only reorders. Read per-call; change ⇒ --force-recreate mcp.
       WQM_SEARCH_DERANK: ${WQM_SEARCH_DERANK:-}
       WQM_SEARCH_DERANK_PENALTY: ${WQM_SEARCH_DERANK_PENALTY:-}
+      # Stale-index warning on search/grep responses: when the project's oldest
+      # queued change has waited this many seconds, responses carry
+      # `index_stale` asking the agent to tell the user the queue may be stuck.
+      # Empty = default 21600 (6 h); 0 = off. Read per call.
+      WQM_INDEX_STALE_WARN_SECONDS: ${WQM_INDEX_STALE_WARN_SECONDS:-}
       # Query translation (PT->EN) — see docs/plans/2026-08-11-query-translation-plan.md.
       # Endpoint of the llm-gpu sidecar; empty (default) disables translation
       # entirely, so the search path is byte-identical to today.

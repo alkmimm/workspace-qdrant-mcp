@@ -11,6 +11,7 @@
 //!   - Respects deactivation_delay_secs config before stopping
 
 mod deactivation;
+mod indexing_progress;
 pub(crate) mod lsp_lifecycle;
 mod mutations;
 mod queries;
