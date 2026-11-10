@@ -15,6 +15,7 @@
  * not reaching the index.
  */
 
+import { recordCacheLookup } from '../telemetry/metrics.js';
 import type { IndexingProgress } from './search-types.js';
 
 /** Default age past which the index is reported stale: 6 hours. Long enough
@@ -101,7 +102,9 @@ export async function fetchIndexStaleWarning(
 ): Promise<IndexStaleWarning | undefined> {
   const now = Date.now();
   const cached = stalenessCache.get(tenantId);
-  if (cached && now - cached.fetchedAt < STALENESS_CACHE_TTL_MS) return cached.value;
+  const hit = cached !== undefined && now - cached.fetchedAt < STALENESS_CACHE_TTL_MS;
+  recordCacheLookup('index_staleness', hit);
+  if (hit) return cached.value;
   const value = indexStaleWarning(await probe(tenantId));
   stalenessCache.set(tenantId, { value, fetchedAt: now });
   return value;

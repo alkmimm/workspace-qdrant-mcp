@@ -31,7 +31,7 @@ import {
   rerankEnabledByDefault,
   resolveDerankConfig,
 } from './search-types.js';
-import { recordMulticloneSearch } from '../telemetry/metrics.js';
+import { recordCacheLookup, recordMulticloneSearch } from '../telemetry/metrics.js';
 import { buildFilter } from './search-filters.js';
 import { dedupeIdenticalBodies } from './search-shaping.js';
 import { filterResultsByPathExclude, applyPathDerank } from './search-path-filters.js';
@@ -125,9 +125,9 @@ export async function fetchIndexingProgress(
 ): Promise<IndexingProgress | null> {
   const now = Date.now();
   const cached = indexingProgressCache.get(projectId);
-  if (cached && now - cached.fetchedAt < INDEXING_PROGRESS_CACHE_TTL_MS) {
-    return cached.value;
-  }
+  const hit = cached !== undefined && now - cached.fetchedAt < INDEXING_PROGRESS_CACHE_TTL_MS;
+  recordCacheLookup('indexing_progress', hit);
+  if (hit) return cached.value;
   try {
     const status = await daemonClient.getProjectStatus({ project_id: projectId });
     if (!status.found) {

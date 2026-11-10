@@ -17,6 +17,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { recordCacheLookup, type CacheName } from '../telemetry/metrics.js';
 
 /** How long an answer (or a failure) is reused: one agent turn, not a session. */
 const BRANCH_DIFF_TTL_MS = 30_000;
@@ -55,13 +56,16 @@ export function clearBranchDiffCache(): void {
 
 /** Reuse a live cached promise for `key`, else start `compute` and cache it. */
 function cached<T>(
+  name: CacheName,
   cache: Map<string, Cached<T>>,
   key: string,
   now: () => number,
   compute: () => Promise<T>
 ): Promise<T> {
   const hit = cache.get(key);
-  if (hit && hit.expiresAt > now()) return hit.value;
+  const fresh = hit !== undefined && hit.expiresAt > now();
+  recordCacheLookup(name, fresh);
+  if (fresh) return hit.value;
   const value = compute();
   cache.set(key, { value, expiresAt: now() + BRANCH_DIFF_TTL_MS });
   return value;
@@ -88,7 +92,7 @@ export function getPathsChangedBetweenWith(
   run: GitRunner,
   now: () => number
 ): Promise<ReadonlySet<string> | null> {
-  return cached(diffCache, `${repoRoot}\0${base}\0${branch}`, now, () =>
+  return cached('branch_diff', diffCache, `${repoRoot}\0${base}\0${branch}`, now, () =>
     computeChangedPaths(repoRoot, base, branch, run)
   );
 }
@@ -128,10 +132,7 @@ async function existingRefs(
   names: readonly string[],
   run: GitRunner
 ): Promise<ReadonlySet<string> | null> {
-  const candidates = names.flatMap((name) => [
-    `refs/heads/${name}`,
-    `refs/remotes/origin/${name}`,
-  ]);
+  const candidates = names.flatMap((name) => [`refs/heads/${name}`, `refs/remotes/origin/${name}`]);
   const out = await run(repoRoot, ['for-each-ref', '--format=%(refname)', ...candidates]);
   if (out === null) return null;
   return new Set(
@@ -191,7 +192,7 @@ export function countFilesAtBranchTipWith(
   run: GitRunner,
   now: () => number
 ): Promise<number | null> {
-  return cached(tipCountCache, `${repoRoot}\0${branch}`, now, async () => {
+  return cached('branch_tip_count', tipCountCache, `${repoRoot}\0${branch}`, now, async () => {
     const present = await existingRefs(repoRoot, [branch], run);
     const ref = present ? pickRef(present, branch) : undefined;
     if (!ref) return null;

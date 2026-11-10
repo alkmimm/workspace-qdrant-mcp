@@ -13,6 +13,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { recordCacheLookup } from '../telemetry/metrics.js';
 
 /**
  * Check if a path is a git repository.
@@ -196,7 +197,9 @@ export function getDefaultBranchWith(
   now: () => number
 ): string | null {
   const cached = defaultBranchCache.get(repoRoot);
-  if (cached && cached.expiresAt > now()) return cached.value;
+  const hit = cached !== undefined && cached.expiresAt > now();
+  recordCacheLookup('default_branch', hit);
+  if (hit) return cached.value;
   const output = run(repoRoot);
   const value = output === null ? null : parseDefaultBranch(output);
   defaultBranchCache.set(repoRoot, {

@@ -60,26 +60,49 @@ export const daemonFallback = new Counter({
 });
 
 /**
- * Cache hits by cache type.
- * Defined for future use — no in-process cache exists at v0.1.3.
+ * The server's in-process caches, one label value each. Every TTL cache in
+ * the server records its lookups through {@link recordCacheLookup}; a new
+ * cache adds its name here.
  */
+export const CACHE_NAMES = [
+  'indexing_progress', // GetProjectStatus per tenant, 1.5 s (search-helpers)
+  'index_staleness', // stale-index verdict per tenant, 60 s (index-staleness)
+  'project_detector', // cwd → project id, 5 min (project-detector)
+  'branch_diff', // paths changed between two branch tips, 30 s (git-branch-diff)
+  'branch_tip_count', // commits on a branch tip, 30 s (git-branch-diff)
+  'default_branch', // repo trunk name, until restart (git-utils)
+  'daemon_check', // daemon availability before writes, 5 s / 1 s (daemon-check)
+] as const;
+export type CacheName = (typeof CACHE_NAMES)[number];
+
+/** Cache hits by cache name (see {@link CACHE_NAMES}). */
 export const cacheHits = new Counter({
   name: 'wqm_mcp_cache_hits_total',
-  help: 'Cache hits by cache name (defined for future use; no cache layer at v0.1.3)',
+  help: 'In-process cache lookups answered from the cache, by cache name',
   labelNames: ['cache'] as const,
   registers: [register],
 });
 
-/**
- * Cache misses by cache type.
- * Defined for future use — no in-process cache exists at v0.1.3.
- */
+/** Cache misses by cache name (see {@link CACHE_NAMES}). */
 export const cacheMisses = new Counter({
   name: 'wqm_mcp_cache_misses_total',
-  help: 'Cache misses by cache name (defined for future use; no cache layer at v0.1.3)',
+  help: 'In-process cache lookups that had to compute the value, by cache name',
   labelNames: ['cache'] as const,
   registers: [register],
 });
+
+// Export every cache at 0 from start-up, so the hit-ratio panel reads 0 for
+// an idle cache instead of "No data" (which is how this panel looked for its
+// whole life: the counters were declared and never incremented).
+for (const name of CACHE_NAMES) {
+  cacheHits.labels(name).inc(0);
+  cacheMisses.labels(name).inc(0);
+}
+
+/** Count one lookup of `cache`: a hit when the cached value was served. */
+export function recordCacheLookup(cache: CacheName, hit: boolean): void {
+  (hit ? cacheHits : cacheMisses).labels(cache).inc();
+}
 
 // ── Search instance-isolation (F-014) metrics ─────────────────────────────
 
@@ -273,7 +296,8 @@ export function recordTranslationOutcome(outcome: string, durationSeconds?: numb
 /** Record how many returned hits the translated leg put there. */
 export function recordTranslatedLegHits(bothLegs: number, translatedOnly: number): void {
   if (bothLegs > 0) translatedLegHits.labels({ agreement: 'both_legs' }).inc(bothLegs);
-  if (translatedOnly > 0) translatedLegHits.labels({ agreement: 'translated_only' }).inc(translatedOnly);
+  if (translatedOnly > 0)
+    translatedLegHits.labels({ agreement: 'translated_only' }).inc(translatedOnly);
 }
 
 // ── HTTP transport metrics (MCP_SERVER_MODE=http) ──────────────────────────
@@ -362,9 +386,7 @@ export function startGitHookTimer(
   return (result) => {
     const seconds = Number(process.hrtime.bigint() - startNs) / 1e9;
     gitHookDuration.labels({ hook, result }).observe(seconds);
-    gitHookInvocations
-      .labels({ hook, result, is_worktree: isWorktree ? 'true' : 'false' })
-      .inc();
+    gitHookInvocations.labels({ hook, result, is_worktree: isWorktree ? 'true' : 'false' }).inc();
   };
 }
 
