@@ -6,6 +6,7 @@
  */
 
 import type { DaemonClient } from '../clients/daemon-client.js';
+import { recordCacheLookup } from '../telemetry/metrics.js';
 
 let lastCheck: { available: boolean; timestamp: number } | null = null;
 const POSITIVE_TTL_MS = 5000;
@@ -22,8 +23,10 @@ export async function ensureDaemonAvailable(client: DaemonClient | null): Promis
     throw new Error('Daemon unavailable. Cannot process write operation.');
   }
   const now = Date.now();
-  const ttl = lastCheck?.available ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
-  if (lastCheck && now - lastCheck.timestamp < ttl) {
+  const ttl = lastCheck?.available === true ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
+  const hit = lastCheck !== null && now - lastCheck.timestamp < ttl;
+  recordCacheLookup('daemon_check', hit);
+  if (lastCheck && hit) {
     if (!lastCheck.available) {
       throw new Error('Daemon unavailable. Cannot process write operation.');
     }

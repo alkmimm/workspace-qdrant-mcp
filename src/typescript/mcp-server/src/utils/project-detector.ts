@@ -11,6 +11,7 @@ import { dirname, posix, resolve } from 'node:path';
 import { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import { canonicalizeHostPath } from '../clients/project-queries.js';
 import { getEffectiveCwd } from './request-context.js';
+import { recordCacheLookup } from '../telemetry/metrics.js';
 
 // Project signature files/directories
 const PROJECT_MARKERS = [
@@ -206,7 +207,9 @@ export class ProjectDetector {
 
     // Check cache first
     const cached = this.cache.get(normalizedPath);
-    if (cached && Date.now() - cached.timestamp < this.cacheTtlMs) {
+    const hit = cached !== undefined && Date.now() - cached.timestamp < this.cacheTtlMs;
+    recordCacheLookup('project_detector', hit);
+    if (hit) {
       if (cached.projectId === null) {
         return null;
       }
