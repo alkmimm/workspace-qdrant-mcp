@@ -953,6 +953,33 @@ exits 0 when a positional filter matches nothing, so a module rename would silen
 the rule that keeps ignored trees out of the inotify budget. If you ADDED a test here, bump \
 this count."; exit 1; }
 
+# Dequeue runs here, same rationale: hermetic (tempdir SQLite). Until 2026-11-10
+# every dequeue ranked the WHOLE queue inside BEGIN IMMEDIATE — 0.9 s of CPU at
+# 663k pending rows, with every other writer waiting behind it (a primary-key
+# UPDATE took p50 3 s), so the queue drained ~4k items/h and grew faster than
+# that. It now ranks each (tenant, collection, op, item_type) group's head,
+# collected by index (schema v50), outside the write lock, and claims under the
+# lock with the claimability re-checked. These pin that the candidate ranking
+# equals whole-queue ranking on both fairness passes and every filter shape,
+# that a row claimed between selection and claim is never stolen, and the
+# pre-existing dequeue priority/concurrency behaviour.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        queue_operations::dequeue_query::tests \
+        queue_operations::tests::dequeue_candidate_tests \
+        queue_operations::tests::enqueue_dequeue_tests \
+        queue_operations::tests::cascade_priority_tests \
+        queue_operations::tests::concurrency_tests \
+        --test-threads=4 2>&1 | tee /tmp/dequeue.log; \
+    grep -q "^test result: ok\. 29 passed" /tmp/dequeue.log \
+    || { echo "GATE: expected exactly 29 dequeue tests (ranking query, candidate-list \
+equivalence, lock-free selection + claim, enqueue/dequeue, cascade priority, concurrency) to \
+run and pass. If you ADDED a test here, bump this count."; exit 1; }
+
 # The same rule, everywhere else. A project folder's .pdf/.docx is indexed into
 # the project's `-refs` library, but until 2026-10-05 only the file watcher
 # routed it there: the folder scan, the exclusion cleanup, worktree membership
