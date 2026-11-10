@@ -135,14 +135,32 @@ impl QueueManager {
         &self,
         tenant_id: &str,
     ) -> QueueResult<(i64, i64, i64)> {
+        let s = self.get_in_flight_summary_by_tenant(tenant_id).await?;
+        Ok((s.pending, s.in_progress, s.failed))
+    }
+
+    /// [`Self::get_in_flight_counts_by_tenant`] plus the `created_at` of the
+    /// tenant's oldest pending or in-progress item, in the same single pass.
+    ///
+    /// The oldest item's age is how long a change to this project has waited
+    /// to reach the index. Counts alone cannot show a stalled queue: on
+    /// 2026-11-10 tecsul showed 353k pending (a big but plausible number) while
+    /// its oldest item had waited 4 days, because the queue was draining only
+    /// deletes for other tenants.
+    pub async fn get_in_flight_summary_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> QueueResult<InFlightSummary> {
         let row = sqlx::query(
             r#"
             SELECT
                 SUM(CASE WHEN status = 'pending'     THEN 1 ELSE 0 END) AS pending,
                 SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
-                SUM(CASE WHEN status = 'failed'      THEN 1 ELSE 0 END) AS failed
+                SUM(CASE WHEN status = 'failed'      THEN 1 ELSE 0 END) AS failed,
+                MIN(CASE WHEN status IN ('pending', 'in_progress')
+                         THEN created_at END) AS oldest_in_flight
             FROM unified_queue
-            WHERE tenant_id = ?1
+            WHERE status IN ('pending', 'in_progress', 'failed') AND tenant_id = ?1
             "#,
         )
         .bind(tenant_id)
@@ -152,11 +170,12 @@ impl QueueManager {
         let pending: Option<i64> = row.try_get("pending")?;
         let in_progress: Option<i64> = row.try_get("in_progress")?;
         let failed: Option<i64> = row.try_get("failed")?;
-        Ok((
-            pending.unwrap_or(0),
-            in_progress.unwrap_or(0),
-            failed.unwrap_or(0),
-        ))
+        Ok(InFlightSummary {
+            pending: pending.unwrap_or(0),
+            in_progress: in_progress.unwrap_or(0),
+            failed: failed.unwrap_or(0),
+            oldest_in_flight_created_at: row.try_get("oldest_in_flight")?,
+        })
     }
 
     /// Per-tenant queue depth grouped by status (pending / in_progress / failed).
@@ -308,4 +327,16 @@ impl QueueManager {
 
         Ok(deleted)
     }
+}
+
+/// One tenant's in-flight queue state (see
+/// [`QueueManager::get_in_flight_summary_by_tenant`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InFlightSummary {
+    pub pending: i64,
+    pub in_progress: i64,
+    pub failed: i64,
+    /// `created_at` of the oldest `pending`/`in_progress` item, `None` when
+    /// the tenant has nothing in flight.
+    pub oldest_in_flight_created_at: Option<String>,
 }

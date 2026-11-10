@@ -62,12 +62,15 @@ function optionalInt64ToNumber(value: unknown): number | undefined {
  * untouched. Without this the ETA never renders (its `typeof === 'number'`
  * guard rejects the string) and count arithmetic concatenates.
  */
-function normalizeProjectStatusCounts(resp: GetProjectStatusResponse): GetProjectStatusResponse {
-  // Drop eta_seconds from the spread so we never assign it `undefined`
-  // explicitly — `exactOptionalPropertyTypes` forbids that for an optional
-  // field; absence must omit the key entirely.
-  const { eta_seconds, ...rest } = resp;
+export function normalizeProjectStatusCounts(
+  resp: GetProjectStatusResponse
+): GetProjectStatusResponse {
+  // Drop the optional int64 fields from the spread so we never assign them
+  // `undefined` explicitly — `exactOptionalPropertyTypes` forbids that for an
+  // optional field; absence must omit the key entirely.
+  const { eta_seconds, oldest_pending_age_seconds, ...rest } = resp;
   const eta = optionalInt64ToNumber(eta_seconds);
+  const oldestAge = optionalInt64ToNumber(oldest_pending_age_seconds);
   const normalized: GetProjectStatusResponse = {
     ...rest,
     pending_count: int64ToNumber(resp.pending_count),
@@ -78,6 +81,7 @@ function normalizeProjectStatusCounts(resp: GetProjectStatusResponse): GetProjec
     percent_complete: int64ToNumber(resp.percent_complete, 100),
   };
   if (eta !== undefined) normalized.eta_seconds = eta;
+  if (oldestAge !== undefined) normalized.oldest_pending_age_seconds = oldestAge;
   return normalized;
 }
 

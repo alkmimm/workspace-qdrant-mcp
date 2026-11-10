@@ -122,3 +122,60 @@ async fn depth_by_tenant_status_excludes_done_and_groups_correctly() {
     // indexing block both treat `unified_queue` as in-flight only).
     assert!(!lookup.contains_key(&("tenant_x".into(), "done".into())));
 }
+
+/// The stall signal: the oldest PENDING or IN-PROGRESS item of the tenant.
+/// Failed and done rows are history, not waiting work, and another tenant's
+/// older items must not leak in.
+#[tokio::test]
+async fn in_flight_summary_reports_the_tenants_oldest_waiting_item() {
+    let pool = build_pool().await;
+    let manager = QueueManager::new(pool.clone());
+
+    insert_row(&pool, "tenant_a", "pending", "a/new.rs").await;
+    insert_row(&pool, "tenant_a", "in_progress", "a/held.rs").await;
+    insert_row(&pool, "tenant_a", "failed", "a/failed.rs").await;
+    insert_row(&pool, "tenant_a", "done", "a/done.rs").await;
+    insert_row(&pool, "tenant_b", "pending", "b/older.rs").await;
+    let stamp = |path: &str, at: &str| {
+        sqlx::query("UPDATE unified_queue SET created_at = ?2 WHERE file_path = ?1")
+            .bind(path.to_string())
+            .bind(at.to_string())
+    };
+    stamp("a/new.rs", "2026-11-09T10:00:00.000Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+    stamp("a/held.rs", "2026-11-08T10:00:00.000Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+    stamp("a/failed.rs", "2026-11-01T10:00:00.000Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+    stamp("a/done.rs", "2026-11-01T10:00:00.000Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+    stamp("b/older.rs", "2026-10-01T10:00:00.000Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let a = manager
+        .get_in_flight_summary_by_tenant("tenant_a")
+        .await
+        .expect("summary tenant_a");
+    assert_eq!((a.pending, a.in_progress, a.failed), (1, 1, 1));
+    assert_eq!(
+        a.oldest_in_flight_created_at.as_deref(),
+        Some("2026-11-08T10:00:00.000Z"),
+        "the held item is the oldest WAITING one; failed/done and tenant_b do not count"
+    );
+
+    let none = manager
+        .get_in_flight_summary_by_tenant("nonexistent")
+        .await
+        .expect("summary nonexistent");
+    assert_eq!(none.oldest_in_flight_created_at, None);
+}

@@ -11,6 +11,8 @@ mod enqueue;
 mod file_routing;
 mod query;
 mod triage;
+
+pub use query::InFlightSummary;
 mod update;
 mod validation;
 

@@ -47,6 +47,7 @@ import {
 import { whitespaceSensitivityHint } from './exact-hints.js';
 import { lookupTestFlags } from './test-flag.js';
 import { fetchIndexingProgress } from './search-helpers.js';
+import { fetchIndexStaleWarning, type IndexStaleWarning } from './index-staleness.js';
 import { worktreeReadNote } from './worktree-note.js';
 import { projectEcho, type ProjectEcho, type ProjectSource } from './project-echo.js';
 
@@ -227,6 +228,9 @@ export interface GrepResponse {
    *  filters — to fetch the next page starting at the first unreturned
    *  match. Absent when the page reached the end of the match list. */
   next_offset?: number;
+  /** Attached only when the project's oldest queued change has waited past
+   *  the stale threshold: matches may miss recent changes, tell the user. */
+  index_stale?: IndexStaleWarning;
 }
 
 /** Build the text search request object for the daemon. */
@@ -846,6 +850,11 @@ export class GrepTool {
         eventId,
         shaped.matches.map((m) => m.file)
       );
+      // A stalled queue makes every grep answer from an index that no longer
+      // matches the code; say so in-band (project scope, cached per minute).
+      const indexStale = tenantId
+        ? await fetchIndexStaleWarning(tenantId, (t) => fetchIndexingProgress(this.daemonClient, t))
+        : undefined;
       const latencyMs = Date.now() - startTime;
       finishToolEvent(this.daemonClient, eventId, {
         resultCount: shaped.matches.length,
@@ -911,6 +920,7 @@ export class GrepTool {
           truncated,
           latency_ms: latencyMs,
           ...(message ? { message } : {}),
+          ...(indexStale ? { index_stale: indexStale } : {}),
         };
       }
       return {
@@ -924,6 +934,7 @@ export class GrepTool {
         truncated,
         latency_ms: latencyMs,
         ...(message ? { message } : {}),
+        ...(indexStale ? { index_stale: indexStale } : {}),
         ...(shaped.dropped > 0 ? { budget_truncated: { dropped: shaped.dropped } } : {}),
         ...(shaped.matches.length > 0 && moreRemain
           ? { next_offset: offset + shaped.matches.length }

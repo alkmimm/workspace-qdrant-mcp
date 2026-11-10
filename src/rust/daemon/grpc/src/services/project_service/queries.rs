@@ -5,11 +5,7 @@
 use chrono::Utc;
 use sqlx::SqlitePool;
 use tonic::Status;
-use tracing::{debug, error, warn};
-use workspace_qdrant_core::indexing_progress::{
-    estimate_eta_seconds, global_rate_files_per_sec, rate_files_per_sec,
-};
-use workspace_qdrant_core::queue_operations::QueueManager;
+use tracing::{debug, error};
 
 use crate::proto::{
     FailedQueueItem, GetProjectStatusRequest, GetProjectStatusResponse, HeartbeatRequest,
@@ -19,6 +15,7 @@ use crate::proto::{
 
 use wqm_common::constants::COLLECTION_PROJECTS;
 
+use super::indexing_progress::fetch_indexing_progress;
 use super::ProjectServiceImpl;
 
 /// Heartbeat deadline window in seconds — how long a client has to send its
@@ -32,103 +29,6 @@ fn heartbeat_timeout_secs() -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(90)
-}
-
-/// Per-tenant indexing-progress counts attached to `GetProjectStatusResponse`.
-///
-/// `pending`, `in_progress`, `failed` come from `unified_queue` (in-flight),
-/// while `done` is the durable count from `tracked_files`. The queue rows
-/// for completed work are deleted after retention, so we cannot derive
-/// `done` from the queue alone.
-///
-/// `eta_seconds` is `Some` only when we have at least
-/// [`MIN_RATE_WINDOW_SECONDS`] of recent indexing activity AND a positive
-/// rate — callers must render "warming up" / "unknown" when it's `None`.
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct IndexingProgress {
-    pub pending: i64,
-    pub in_progress: i64,
-    pub failed: i64,
-    pub done: i64,
-    pub eta_seconds: Option<i64>,
-}
-
-impl IndexingProgress {
-    fn total(&self) -> i64 {
-        self.pending + self.in_progress + self.failed + self.done
-    }
-
-    fn percent_complete(&self) -> f64 {
-        let total = self.total();
-        if total == 0 {
-            100.0
-        } else {
-            (self.done as f64) / (total as f64) * 100.0
-        }
-    }
-}
-
-/// Fetch per-tenant indexing progress. Returns zeros on any DB error so the
-/// caller can still return the rest of the project status; the gRPC contract
-/// has the indexing block as best-effort enrichment.
-pub(crate) async fn fetch_indexing_progress(
-    pool: &SqlitePool,
-    tenant_id: &str,
-) -> IndexingProgress {
-    let manager = QueueManager::new(pool.clone());
-    let (pending, in_progress, failed) =
-        match manager.get_in_flight_counts_by_tenant(tenant_id).await {
-            Ok(counts) => counts,
-            Err(e) => {
-                warn!(
-                    tenant_id = %tenant_id,
-                    error = %e,
-                    "Failed to fetch in-flight queue counts for indexing progress"
-                );
-                (0, 0, 0)
-            }
-        };
-
-    let done: i64 = match sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)
-        FROM tracked_files tf
-        JOIN watch_folders wf ON tf.watch_folder_id = wf.watch_id
-        WHERE wf.tenant_id = ?1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(count) => count,
-        Err(e) => {
-            warn!(
-                tenant_id = %tenant_id,
-                error = %e,
-                "Failed to count tracked_files for indexing progress"
-            );
-            0
-        }
-    };
-
-    // Prefer this tenant's own recent rate; fall back to the daemon-wide rate
-    // when the tenant is idle (waiting its turn in the unified queue, which
-    // processes ~one tenant at a time). Without the fallback an idle tenant's
-    // window goes cold and the ETA is a perpetual "warming up".
-    let rate = match rate_files_per_sec(pool, tenant_id).await {
-        Some(r) => Some(r),
-        None => global_rate_files_per_sec(pool).await,
-    };
-    let eta_seconds = estimate_eta_seconds(pending, in_progress, rate);
-
-    IndexingProgress {
-        pending,
-        in_progress,
-        failed,
-        done,
-        eta_seconds,
-    }
 }
 
 impl ProjectServiceImpl {
@@ -174,6 +74,7 @@ impl ProjectServiceImpl {
             response.total_count = progress.total();
             response.percent_complete = progress.percent_complete();
             response.eta_seconds = progress.eta_seconds;
+            response.oldest_pending_age_seconds = progress.oldest_pending_age_seconds;
             Ok(response)
         } else {
             Ok(GetProjectStatusResponse {
@@ -195,6 +96,7 @@ impl ProjectServiceImpl {
                 total_count: 0,
                 percent_complete: 0.0,
                 eta_seconds: None,
+                oldest_pending_age_seconds: None,
             })
         }
     }
@@ -261,6 +163,7 @@ impl ProjectServiceImpl {
             total_count: 0,
             percent_complete: 0.0,
             eta_seconds: None,
+            oldest_pending_age_seconds: None,
         })
     }
 

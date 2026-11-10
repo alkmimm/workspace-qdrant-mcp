@@ -102,6 +102,10 @@ export interface GetProjectStatusResponse {
   // pending > 0 — callers must render "warming up" / "unknown" instead
   // of fabricating a value.
   eta_seconds?: number;
+  // Seconds the project's oldest pending/in-progress queue item has waited.
+  // Absent when nothing is in flight. The stall signal: counts and ETA can
+  // look plausible while none of this project's items is being processed.
+  oldest_pending_age_seconds?: number;
 }
 
 export interface ListProjectsRequest {

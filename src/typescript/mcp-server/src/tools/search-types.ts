@@ -11,6 +11,7 @@ import {
 import type { WorktreeReadNote } from './worktree-note.js';
 import type { ProjectSource } from './project-echo.js';
 import type { FallbackGuard } from './fallback-guard.js';
+import type { IndexStaleWarning } from './index-staleness.js';
 export const PROJECTS_COLLECTION = COLLECTION_PROJECTS;
 export const LIBRARIES_COLLECTION = COLLECTION_LIBRARIES;
 export const SCRATCHPAD_COLLECTION = COLLECTION_SCRATCHPAD;
@@ -278,6 +279,9 @@ export interface IndexingProgress {
    *  estimate honestly (cold-start) or when the rate is zero with
    *  pending > 0. UIs should render "warming up" in those cases. */
   eta_seconds?: number;
+  /** Seconds the tenant's oldest pending/in-progress item has waited.
+   *  Absent when nothing is in flight or the daemon predates the field. */
+  oldest_pending_age_seconds?: number;
 }
 
 /** How the query-translation leg ended (see search-translated-leg.ts). */
@@ -336,6 +340,10 @@ export interface SearchResponse {
   /** Attached only when `scope === 'project'` and the daemon queue
    *  still has work for the current tenant. Absent otherwise. */
   indexing?: IndexingProgress;
+  /** Attached only when the project's oldest queued change has waited past
+   *  the stale threshold (`WQM_INDEX_STALE_WARN_SECONDS`, default 6 h): the
+   *  results may miss recent changes and the user should be told. */
+  index_stale?: IndexStaleWarning;
   /** Attached only when the caller's cwd is inside a linked worktree and there
    *  are results: result `file_path`s are MAIN-anchored, so this tells the caller
    *  how to Read the worktree's own copy. Absent otherwise. */

@@ -54,6 +54,7 @@ import {
   resolveProjectIdentity,
 } from './branch-scope.js';
 import { admitFallbackEntries } from './fallback-guard.js';
+import { indexStaleWarning } from './index-staleness.js';
 import { FIELD_BASE_POINT, FIELD_BRANCH, FIELD_TENANT_ID } from '../common/native-bridge.js';
 
 /**
@@ -146,6 +147,9 @@ export async function fetchIndexingProgress(
     if (typeof status.eta_seconds === 'number') {
       value.eta_seconds = status.eta_seconds;
     }
+    if (typeof status.oldest_pending_age_seconds === 'number') {
+      value.oldest_pending_age_seconds = status.oldest_pending_age_seconds;
+    }
     indexingProgressCache.set(projectId, { value, fetchedAt: now });
     return value;
   } catch (err) {
@@ -159,7 +163,9 @@ export async function fetchIndexingProgress(
 }
 
 /** Attach the indexing block to a SearchResponse when scope=project and we
- *  have a tenant. No-op otherwise. Safe to call on every exit path. */
+ *  have a tenant, plus the stale-index warning when the project's oldest
+ *  queued change has waited past the threshold (no extra daemon call: it
+ *  reads the same progress). No-op otherwise. Safe to call on every exit path. */
 export async function attachIndexingProgress(
   response: SearchResponse,
   daemonClient: DaemonClient,
@@ -169,6 +175,8 @@ export async function attachIndexingProgress(
   if (scope !== 'project' || !projectId) return;
   const progress = await fetchIndexingProgress(daemonClient, projectId);
   if (progress) response.indexing = progress;
+  const stale = indexStaleWarning(progress);
+  if (stale) response.index_stale = stale;
 }
 
 /** Resolution outcome for project-scoped search context.

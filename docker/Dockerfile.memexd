@@ -622,6 +622,31 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 resolve_destination, FTS5 batch finalize) to run and pass. If you ADDED a test here, bump this \
 count."; exit 1; }
 
+# Index staleness runs here, same rationale: hermetic (in-memory SQLite, no
+# I/O). On 2026-11-10 the queue had been stuck for 4 days and nobody knew: the
+# QueueStuck alert has no dispatcher in this stack. GetProjectStatus now reports
+# the age of the tenant's oldest pending/in-progress item, and the MCP server
+# turns it into an `index_stale` warning on search/grep responses (its vitest
+# suite gates that half in the root Dockerfile). These pin the age source: the
+# per-tenant MIN over waiting items only (not failed/done, not other tenants)
+# and the stamp-to-seconds conversion.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --test queue_indexing_progress \
+        -- --test-threads=4 2>&1 | tee /tmp/index-stale-core.log; \
+    grep -q "^test result: ok\. 3 passed" /tmp/index-stale-core.log \
+    || { echo "GATE: expected exactly 3 queue_indexing_progress tests (in-flight counts, depth \
+by tenant, oldest waiting item) to run and pass. If you ADDED a test here, bump this \
+count."; exit 1; } \
+    && cargo test -p workspace-qdrant-grpc --lib -- services::project_service::indexing_progress:: \
+        --test-threads=4 2>&1 | tee /tmp/index-stale-grpc.log; \
+    grep -q "^test result: ok\. 1 passed" /tmp/index-stale-grpc.log \
+    || { echo "GATE: expected exactly 1 GetProjectStatus age test to run and pass — libtest exits \
+0 when a positional filter matches nothing. If you ADDED a test here, bump this count."; exit 1; }
+
 # Failure classification runs here, same rationale: hermetic (no I/O). Until
 # 2026-10-08 every document-extraction failure became `ProcessingFailed`, which
 # classifies as transient: a CSV with invalid UTF-8 or a binary `.doc` was
