@@ -19,7 +19,8 @@ const OLD: &str = "2020-01-01T00:00:00.000Z";
 const CUTOFF: &str = "2026-01-01T00:00:00.000Z";
 const BASELINE: &str = r#"{"worktree_membership":true}"#;
 const WT_READ: &str = r#"{"worktree_membership":true,"read_root":"/repo/.claude/worktrees/x"}"#;
-const STAGED: &str = r#"{"worktree_membership":true,"read_root":"/stage/t/b/tip","git_stage":true}"#;
+const STAGED: &str =
+    r#"{"worktree_membership":true,"read_root":"/stage/t/b/tip","git_stage":true}"#;
 
 /// One queue row with the fields the purge filters on.
 struct Row<'a> {
@@ -184,7 +185,10 @@ async fn purges_once_per_checkout_set() {
     let mut purge = CheckoutlessPurge::default();
 
     Row::add("a", "agent/gone").insert(&pool).await;
-    assert_eq!(purge.run(&pool, &target, set(&["agent/a"]), CUTOFF).await, 1);
+    assert_eq!(
+        purge.run(&pool, &target, set(&["agent/a"]), CUTOFF).await,
+        1
+    );
 
     Row::add("b", "agent/gone").insert(&pool).await;
     assert_eq!(

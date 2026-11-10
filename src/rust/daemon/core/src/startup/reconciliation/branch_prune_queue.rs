@@ -64,7 +64,10 @@ pub(crate) async fn purge_dead_branch_work(
 /// Reads the `(tenant_id, branch, …)` prefix of the per-file uniqueness index,
 /// so it never touches the table rows, even with hundreds of thousands queued.
 /// Shared with the worktree purge (`branch_switch::worktree_queue_purge`).
-pub(crate) async fn queued_branches(pool: &SqlitePool, tenant_id: &str) -> Result<Vec<String>, String> {
+pub(crate) async fn queued_branches(
+    pool: &SqlitePool,
+    tenant_id: &str,
+) -> Result<Vec<String>, String> {
     sqlx::query_scalar(
         "SELECT DISTINCT branch FROM unified_queue \
          WHERE tenant_id = ?1 AND file_path IS NOT NULL AND branch IS NOT NULL",

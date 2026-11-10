@@ -76,8 +76,7 @@ impl CheckoutlessPurge {
             return 0;
         }
         let root = Path::new(t.root);
-        match purge_checkoutless_worktree_work(pool, t.tenant_id, root, &checkouts, cutoff).await
-        {
+        match purge_checkoutless_worktree_work(pool, t.tenant_id, root, &checkouts, cutoff).await {
             Ok(n) => {
                 self.last.insert(t.watch_id.to_string(), checkouts);
                 n
