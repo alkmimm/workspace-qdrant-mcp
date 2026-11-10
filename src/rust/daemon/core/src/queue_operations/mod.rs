@@ -6,6 +6,8 @@
 mod advanced;
 mod delete_completion;
 mod dequeue;
+mod dequeue_candidates;
+mod dequeue_query;
 mod destination;
 mod enqueue;
 mod file_routing;

@@ -4,7 +4,6 @@ use chrono::Duration as ChronoDuration;
 use chrono::Utc;
 use sqlx::{Row, SqliteConnection};
 use tracing::{debug, info, warn};
-use wqm_common::constants::{COLLECTION_LIBRARIES, COLLECTION_PROJECTS, COLLECTION_RULES};
 use wqm_common::timestamps;
 
 use crate::monitoring::metrics_core::METRICS;
@@ -12,7 +11,14 @@ use crate::unified_queue_schema::{
     DestinationStatus, ItemType, QueueOperation as UnifiedOp, QueueStatus, UnifiedQueueItem,
 };
 
+use super::dequeue_candidates::collect_candidates;
+use super::dequeue_query::{rank_candidates, DequeueParams};
 use super::{QueueError, QueueManager, QueueResult};
+
+/// How many select→claim rounds one dequeue tries when every selected row was
+/// claimed by a concurrent worker between the (lock-free) selection and the
+/// claim.
+const MAX_CLAIM_ATTEMPTS: usize = 3;
 
 impl QueueManager {
     /// Dequeue a batch of items from the unified queue with lease-based locking
@@ -66,129 +72,118 @@ impl QueueManager {
         let lease_until_str = timestamps::format_utc(&lease_until);
         let now_str = timestamps::now_utc();
 
-        // Task 21: Priority direction for anti-starvation alternation
-        let is_descending = priority_descending.unwrap_or(true);
-        let priority_order = if is_descending { "DESC" } else { "ASC" };
-
-        // Task 9: FIFO/LIFO alternation for idle processing
-        let created_at_order = if is_descending { "ASC" } else { "DESC" };
-
-        // Op-order is always DESC: delete always takes precedence over all other operations
-        // regardless of which priority pass is running. Delete is a correctness concern
-        // (stale data removal), not just a performance preference.
-        let op_order = "DESC";
-
         // Age-based promotion thresholds (Unit 3: prevent tenant starvation under
         // fairness scheduler). Items pending longer than `warning_seconds` get +1
         // in the age-promotion CASE; items pending longer than `critical_seconds`
         // get +2. This is applied AFTER delete/tenant-add precedence but BEFORE
         // the project-active priority, so old low-weight scans eventually outrank
         // fresh high-weight adds from other tenants.
-        let age_warning_seconds = age_promotion_warning_seconds.unwrap_or(300);
-        let age_critical_seconds = age_promotion_critical_seconds.unwrap_or(900);
+        let params = DequeueParams {
+            now_str: &now_str,
+            tenant_id,
+            item_type,
+            // Task 21: priority direction for anti-starvation alternation
+            // (Task 9: FIFO on the normal pass, LIFO on the flip).
+            descending: priority_descending.unwrap_or(true),
+            batch_size,
+            age_warning_seconds: age_promotion_warning_seconds.unwrap_or(300) as i64,
+            age_critical_seconds: age_promotion_critical_seconds.unwrap_or(900) as i64,
+        };
 
-        // Wrap SELECT→UPDATE→SELECT in a single transaction to reduce lock churn.
-        //
-        // Use BEGIN IMMEDIATE (not sqlx's default deferred BEGIN): this transaction
-        // READS first (`select_queue_ids`) and only then WRITES (`lease_items`). A
-        // deferred BEGIN takes a read snapshot on the first SELECT and must upgrade
-        // to the write lock at the UPDATE; if another writer committed in between,
-        // SQLite fails the upgrade with SQLITE_BUSY (5) / SQLITE_BUSY_SNAPSHOT (517)
-        // *immediately*, WITHOUT invoking the busy handler — so `busy_timeout` does
-        // not cover it and the whole dequeue transaction is lost, surfacing as a
-        // "database is locked" that the processing loop retries wholesale. Taking the
-        // write lock up front (covered by `busy_timeout` + jittered retry) turns that
-        // collide-and-retry into a brief wait-and-proceed, and makes the row claim
-        // atomic against the concurrent item-processing writers (finalize, keyword
-        // persist, tracked-files updates) and enqueue paths. See `db_retry` and the
-        // search.db conversion in PRs #329/#330.
+        for attempt in 1..=MAX_CLAIM_ATTEMPTS {
+            let queue_ids = self.select_dequeue_ids(&params).await?;
+            if queue_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let items = self
+                .claim_selected(&queue_ids, worker_id, &now_str, &lease_until_str)
+                .await?;
+            if !items.is_empty() {
+                return Ok(items);
+            }
+            debug!(
+                attempt,
+                worker_id, "Every selected queue item was claimed concurrently; reselecting"
+            );
+        }
+        Ok(Vec::new())
+    }
+
+    /// Choose the queue ids to claim — WITHOUT holding the write lock.
+    ///
+    /// A deferred (read) transaction gives the candidate walk and the ranking
+    /// one WAL snapshot; it never upgrades to a writer, so it neither blocks
+    /// the item-processing writers nor hits `SQLITE_BUSY_SNAPSHOT`. The rows it
+    /// returns may be claimed by another worker before `claim_selected` runs;
+    /// the claim re-checks claimability and skips those.
+    pub(super) async fn select_dequeue_ids(
+        &self,
+        params: &DequeueParams<'_>,
+    ) -> QueueResult<Vec<String>> {
+        let mut read = self.pool.begin().await.map_err(QueueError::Database)?;
+        let candidates = collect_candidates(&mut read, params).await?;
+        let queue_ids = rank_candidates(&mut read, params, &candidates).await?;
+        let _ = read.rollback().await;
+        Ok(queue_ids)
+    }
+
+    /// Lease `queue_ids` to `worker_id` and return the claimed items in
+    /// `queue_ids` order. Rows no longer claimable are skipped.
+    ///
+    /// Uses BEGIN IMMEDIATE (not sqlx's default deferred BEGIN): this
+    /// transaction READS (`select_in_progress_subset`) before it WRITES. A
+    /// deferred BEGIN takes a read snapshot on the first SELECT and must upgrade
+    /// to the write lock at the UPDATE; if another writer committed in between,
+    /// SQLite fails the upgrade with SQLITE_BUSY (5) / SQLITE_BUSY_SNAPSHOT
+    /// (517) *immediately*, WITHOUT invoking the busy handler — so
+    /// `busy_timeout` does not cover it. Taking the write lock up front
+    /// (covered by `busy_timeout` + jittered retry) turns that into a brief
+    /// wait-and-proceed. The lock is held only for these few primary-key
+    /// statements — the ranking already happened in `select_dequeue_ids`. See
+    /// `db_retry` and PRs #329/#330.
+    pub(super) async fn claim_selected(
+        &self,
+        queue_ids: &[String],
+        worker_id: &str,
+        now_str: &str,
+        lease_until_str: &str,
+    ) -> QueueResult<Vec<UnifiedQueueItem>> {
         let mut tx = crate::db_retry::begin_immediate(&self.pool)
             .await
             .map_err(QueueError::Database)?;
 
-        // Select queue_ids with calculated priority (Task 20)
-        let queue_ids = select_queue_ids(
-            &mut tx,
-            &now_str,
-            tenant_id,
-            item_type,
-            priority_order,
-            op_order,
-            created_at_order,
-            batch_size,
-            age_warning_seconds as i64,
-            age_critical_seconds as i64,
-        )
-        .await?;
-
-        if queue_ids.is_empty() {
-            // No items — commit (no-op) to release the transaction cleanly
+        // Capture which selected rows are ALREADY `in_progress` with an expired
+        // lease — those are RE-LEASES (an op that exceeded `lease_duration` without
+        // completing), not fresh dequeues. `claim_items` below overwrites their
+        // lease, so snapshot it now: re-leases are otherwise SILENT (no recovery
+        // log) and are the only fingerprint of a lease-loop.
+        let re_leased = select_in_progress_subset(&mut tx, queue_ids).await?;
+        let claimed = claim_items(&mut tx, queue_ids, worker_id, now_str, lease_until_str).await?;
+        if claimed.is_empty() {
             let _ = tx.commit().await;
             return Ok(Vec::new());
         }
-
-        // Capture which selected rows are ALREADY `in_progress` with an expired
-        // lease — those are RE-LEASES (an op that exceeded `lease_duration` without
-        // completing), not fresh dequeues. `lease_items` below overwrites their
-        // lease, so snapshot it now: re-leases are otherwise SILENT (no recovery
-        // log) and are the only fingerprint of a lease-loop.
-        let re_leased = select_in_progress_subset(&mut tx, &queue_ids).await?;
-
-        // Update the selected items to in_progress
-        lease_items(&mut tx, &queue_ids, worker_id, &lease_until_str).await?;
-
-        // Fetch the updated items
-        let mut items = fetch_items(&mut tx, &queue_ids).await?;
-
+        let mut items = fetch_items(&mut tx, &claimed).await?;
         tx.commit().await.map_err(QueueError::Database)?;
 
-        // Preserve the ordering from the initial SELECT
-        {
-            let id_positions: std::collections::HashMap<&str, usize> = queue_ids
-                .iter()
-                .enumerate()
-                .map(|(i, id)| (id.as_str(), i))
-                .collect();
-            items.sort_by_key(|item| {
-                *id_positions
-                    .get(item.queue_id.as_str())
-                    .unwrap_or(&usize::MAX)
-            });
-        }
+        // Preserve the ranking order.
+        let id_positions: std::collections::HashMap<&str, usize> = queue_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        items.sort_by_key(|item| {
+            *id_positions
+                .get(item.queue_id.as_str())
+                .unwrap_or(&usize::MAX)
+        });
 
         debug!(
             "Dequeued {} unified items for worker {}",
             items.len(),
             worker_id
         );
-
-        for item in &items {
-            let item_type_s = item.item_type.to_string();
-            METRICS.unified_queue_dequeued(&item_type_s);
-            // A row that was still `in_progress` when re-selected had its lease
-            // expire before the worker finished. Surface it: a repeated re-lease of
-            // the same queue_id (visible by grepping this queue_id or via the
-            // `memexd_unified_queue_releases_total` counter on the dashboard) is the
-            // signature of a lease-loop — an op that never completes within
-            // `lease_duration` and silently restarts every expiry.
-            if let Some(expired_lease) = re_leased.get(&item.queue_id) {
-                let op_s = item.op.to_string();
-                METRICS.unified_queue_released(&item_type_s, &op_s);
-                warn!(
-                    queue_id = %item.queue_id,
-                    item_type = %item_type_s,
-                    op = %op_s,
-                    tenant_id = %item.tenant_id,
-                    retry_count = item.retry_count,
-                    expired_lease_until = expired_lease.as_deref().unwrap_or("<none>"),
-                    worker_id = %worker_id,
-                    "Re-leasing in_progress unified queue item whose lease expired \
-                     before completion (op exceeded lease_duration); repeated \
-                     re-leases of the same queue_id indicate a lease-loop"
-                );
-            }
-        }
-
+        record_dequeued(&items, &re_leased, worker_id);
         Ok(items)
     }
 
@@ -296,49 +291,54 @@ impl QueueManager {
     }
 }
 
-/// Select queue item IDs for dequeuing with dynamic priority ordering.
-#[allow(clippy::too_many_arguments)]
-async fn select_queue_ids(
-    conn: &mut SqliteConnection,
-    now_str: &str,
-    tenant_id: Option<&str>,
-    item_type: Option<ItemType>,
-    priority_order: &str,
-    op_order: &str,
-    created_at_order: &str,
-    batch_size: i32,
-    age_warning_seconds: i64,
-    age_critical_seconds: i64,
-) -> QueueResult<Vec<String>> {
-    let query = build_dequeue_query(
-        tenant_id,
-        item_type,
-        priority_order,
-        op_order,
-        created_at_order,
-    );
-    execute_dequeue_query(
-        conn,
-        &query,
-        now_str,
-        tenant_id,
-        item_type,
-        batch_size,
-        age_warning_seconds,
-        age_critical_seconds,
-    )
-    .await
+/// Meter every dequeued item and surface re-leases.
+fn record_dequeued(
+    items: &[UnifiedQueueItem],
+    re_leased: &std::collections::HashMap<String, Option<String>>,
+    worker_id: &str,
+) {
+    for item in items {
+        let item_type_s = item.item_type.to_string();
+        METRICS.unified_queue_dequeued(&item_type_s);
+        // A row that was still `in_progress` when re-selected had its lease
+        // expire before the worker finished. Surface it: a repeated re-lease of
+        // the same queue_id (visible by grepping this queue_id or via the
+        // `memexd_unified_queue_releases_total` counter on the dashboard) is the
+        // signature of a lease-loop — an op that never completes within
+        // `lease_duration` and silently restarts every expiry.
+        if let Some(expired_lease) = re_leased.get(&item.queue_id) {
+            let op_s = item.op.to_string();
+            METRICS.unified_queue_released(&item_type_s, &op_s);
+            warn!(
+                queue_id = %item.queue_id,
+                item_type = %item_type_s,
+                op = %op_s,
+                tenant_id = %item.tenant_id,
+                retry_count = item.retry_count,
+                expired_lease_until = expired_lease.as_deref().unwrap_or("<none>"),
+                worker_id = %worker_id,
+                "Re-leasing in_progress unified queue item whose lease expired \
+                 before completion (op exceeded lease_duration); repeated \
+                 re-leases of the same queue_id indicate a lease-loop"
+            );
+        }
+    }
 }
 
-/// Update selected items to in_progress with a lease.
-async fn lease_items(
+/// Lease the still-claimable rows of `queue_ids` and return their ids.
+///
+/// The claimability guard is the dequeue WHERE clause again: selection ran
+/// outside the write lock, so a row may have been claimed (fresh lease) or
+/// finished since. Those are left alone — never stolen from a live worker.
+async fn claim_items(
     conn: &mut SqliteConnection,
     queue_ids: &[String],
     worker_id: &str,
+    now_str: &str,
     lease_until_str: &str,
-) -> QueueResult<()> {
+) -> QueueResult<Vec<String>> {
     let placeholders: Vec<String> = (1..=queue_ids.len())
-        .map(|i| format!("?{}", i + 2))
+        .map(|i| format!("?{}", i + 3))
         .collect();
     let update_query = format!(
         r#"
@@ -348,20 +348,25 @@ async fn lease_items(
             lease_until = ?2,
             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
         WHERE queue_id IN ({})
+          AND (
+            (status = 'pending' AND (lease_until IS NULL OR lease_until < ?3))
+            OR (status = 'in_progress' AND lease_until < ?3)
+          )
+        RETURNING queue_id
         "#,
         placeholders.join(", ")
     );
 
-    let mut update_builder = sqlx::query(&update_query)
+    let mut update_builder = sqlx::query_scalar::<_, String>(&update_query)
         .bind(worker_id)
-        .bind(lease_until_str);
+        .bind(lease_until_str)
+        .bind(now_str);
 
     for queue_id in queue_ids {
         update_builder = update_builder.bind(queue_id);
     }
 
-    update_builder.execute(&mut *conn).await?;
-    Ok(())
+    Ok(update_builder.fetch_all(&mut *conn).await?)
 }
 
 /// Snapshot which of `queue_ids` are currently `in_progress`, with their
@@ -460,315 +465,4 @@ async fn fetch_items(
     }
 
     Ok(items)
-}
-
-/// Build the dequeue SELECT query with filters substituted in.
-///
-/// Parameter binding order (positional):
-/// - `?1`           = `now_str` (lease expiry comparison)
-/// - tenant filter  = `?2` (tenant_id) and/or `?3` (item_type), see match below
-/// - age thresholds = next two positions (warning, critical) — bound BEFORE the limit
-/// - limit          = last position
-///
-/// The age-promotion CASE is placed AFTER the delete-first and tenant/add priority
-/// rows but BEFORE the project-active priority. This ensures:
-/// - delete/reset still take precedence (correctness)
-/// - tenant registrations still jump the line (UX)
-/// - old items DO override the active-vs-inactive ranking once they cross the
-///   warning/critical thresholds — preventing tenants whose pending items have
-///   low op-weight (e.g. folder/scan) from being starved indefinitely when other
-///   tenants have larger queues with higher-weight ops.
-///
-/// The age-promotion CASE uses `{priority_order}` so the DESC/ASC fairness flip
-/// still inverts the ranking on the anti-starvation pass.
-fn build_dequeue_query(
-    tenant_id: Option<&str>,
-    item_type: Option<ItemType>,
-    priority_order: &str,
-    op_order: &str,
-    created_at_order: &str,
-) -> String {
-    let (tenant_filter, age_warning_param, age_critical_param, limit_param) =
-        match (tenant_id, item_type) {
-            (Some(_), Some(_)) => (
-                "AND q.tenant_id = ?2 AND q.item_type = ?3",
-                "?4",
-                "?5",
-                "?6",
-            ),
-            (Some(_), None) => ("AND q.tenant_id = ?2", "?3", "?4", "?5"),
-            (None, Some(_)) => ("AND q.item_type = ?2", "?3", "?4", "?5"),
-            (None, None) => ("", "?2", "?3", "?4"),
-        };
-    format!(
-        r#"
-        SELECT q.queue_id
-        FROM unified_queue q
-        LEFT JOIN watch_folders w
-            ON q.tenant_id = w.tenant_id
-            AND q.collection = '{coll_projects}'
-            AND w.parent_watch_id IS NULL
-        WHERE (
-            (q.status = 'pending' AND (q.lease_until IS NULL OR q.lease_until < ?1))
-            OR (q.status = 'in_progress' AND q.lease_until < ?1)
-        )
-        {tenant_filter}
-        ORDER BY
-            CASE WHEN q.op = 'delete' THEN 1
-                 WHEN q.op = 'reset' THEN 1
-                 ELSE 0
-            END DESC,
-            -- Project registrations jump the line so `wqm project register`
-            -- materialises in `wqm project list` even when the queue is
-            -- backlogged with file ingestion (issue #70).
-            CASE WHEN q.item_type = 'tenant' AND q.op = 'add' THEN 1 ELSE 0 END DESC,
-            -- Age-based promotion (Unit 3 of audit issue #8): prevent starvation
-            -- of tenants whose pending items have low op-weight by promoting
-            -- old items above the project-active ranking.
-            -- +1 once age >= warning threshold, +2 once age >= critical threshold.
-            -- Uses {priority_order} so anti-starvation flip still inverts ranking.
-            CASE
-                WHEN (strftime('%s','now') - strftime('%s', q.created_at))
-                     >= {age_critical_param} THEN 2
-                WHEN (strftime('%s','now') - strftime('%s', q.created_at))
-                     >= {age_warning_param} THEN 1
-                ELSE 0
-            END {priority_order},
-            CASE
-                WHEN q.collection = '{coll_memory}' THEN 1
-                WHEN q.collection = '{coll_libraries}' THEN 0
-                WHEN w.is_active > 0 THEN 1
-                ELSE 0
-            END {priority_order},
-            CASE WHEN q.op = 'delete' THEN 10
-                 WHEN q.op = 'reset' THEN 8
-                 WHEN q.op = 'add' THEN 5
-                 WHEN q.op = 'update' THEN 4
-                 WHEN q.op = 'rename' THEN 3
-                 WHEN q.op = 'uplift' THEN 2
-                 WHEN q.op = 'scan' THEN 1
-                 ELSE 1
-            END {op_order},
-            q.created_at {created_at_order}
-        LIMIT {limit_param}
-        "#,
-        coll_projects = COLLECTION_PROJECTS,
-        coll_libraries = COLLECTION_LIBRARIES,
-        coll_memory = COLLECTION_RULES,
-        tenant_filter = tenant_filter,
-        priority_order = priority_order,
-        op_order = op_order,
-        created_at_order = created_at_order,
-        age_warning_param = age_warning_param,
-        age_critical_param = age_critical_param,
-        limit_param = limit_param,
-    )
-}
-
-/// Execute the dequeue query with the appropriate bound parameters.
-///
-/// Binding order matches the placeholder layout produced by `build_dequeue_query`:
-/// `now_str`, optional tenant_id, optional item_type, `age_warning_seconds`,
-/// `age_critical_seconds`, `batch_size`.
-#[allow(clippy::too_many_arguments)]
-async fn execute_dequeue_query(
-    conn: &mut SqliteConnection,
-    query: &str,
-    now_str: &str,
-    tenant_id: Option<&str>,
-    item_type: Option<ItemType>,
-    batch_size: i32,
-    age_warning_seconds: i64,
-    age_critical_seconds: i64,
-) -> QueueResult<Vec<String>> {
-    let result = match (tenant_id, item_type) {
-        (Some(tid), Some(itype)) => {
-            sqlx::query_scalar::<_, String>(query)
-                .bind(now_str)
-                .bind(tid)
-                .bind(itype.to_string())
-                .bind(age_warning_seconds)
-                .bind(age_critical_seconds)
-                .bind(batch_size)
-                .fetch_all(&mut *conn)
-                .await?
-        }
-        (Some(tid), None) => {
-            sqlx::query_scalar::<_, String>(query)
-                .bind(now_str)
-                .bind(tid)
-                .bind(age_warning_seconds)
-                .bind(age_critical_seconds)
-                .bind(batch_size)
-                .fetch_all(&mut *conn)
-                .await?
-        }
-        (None, Some(itype)) => {
-            sqlx::query_scalar::<_, String>(query)
-                .bind(now_str)
-                .bind(itype.to_string())
-                .bind(age_warning_seconds)
-                .bind(age_critical_seconds)
-                .bind(batch_size)
-                .fetch_all(&mut *conn)
-                .await?
-        }
-        (None, None) => {
-            sqlx::query_scalar::<_, String>(query)
-                .bind(now_str)
-                .bind(age_warning_seconds)
-                .bind(age_critical_seconds)
-                .bind(batch_size)
-                .fetch_all(&mut *conn)
-                .await?
-        }
-    };
-    Ok(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_build_dequeue_query_high_priority_pass_has_op_desc() {
-        // High-priority pass: op=DESC means delete(10) > add(5) > scan(1)
-        let q = build_dequeue_query(None, None, "DESC", "DESC", "ASC");
-        assert!(
-            q.contains("END DESC"),
-            "high-priority pass should have op_order=DESC"
-        );
-        assert!(
-            q.contains("q.created_at ASC"),
-            "high-priority pass should have FIFO created_at order"
-        );
-    }
-
-    #[test]
-    fn test_build_dequeue_query_low_priority_pass_has_op_desc() {
-        // Low-priority pass: op=DESC even on the anti-starvation pass because delete
-        // must always take precedence regardless of which priority direction is active.
-        let q = build_dequeue_query(None, None, "ASC", "DESC", "DESC");
-        assert!(
-            q.contains("END DESC"),
-            "low-priority pass should still have op_order=DESC (delete always first)"
-        );
-        assert!(
-            q.contains("q.created_at DESC"),
-            "low-priority pass should have LIFO created_at order"
-        );
-    }
-
-    #[test]
-    fn test_build_dequeue_query_tenant_filter() {
-        let q = build_dequeue_query(Some("t1"), None, "DESC", "DESC", "ASC");
-        assert!(q.contains("tenant_id = ?2"), "should include tenant filter");
-    }
-
-    #[test]
-    fn test_build_dequeue_query_item_type_filter() {
-        let q = build_dequeue_query(None, Some(ItemType::File), "DESC", "DESC", "ASC");
-        assert!(
-            q.contains("item_type = ?2"),
-            "should include item_type filter"
-        );
-    }
-
-    #[test]
-    fn test_build_dequeue_query_both_filters() {
-        let q = build_dequeue_query(Some("t1"), Some(ItemType::Folder), "DESC", "DESC", "ASC");
-        assert!(q.contains("tenant_id = ?2"), "should include tenant filter");
-        assert!(
-            q.contains("item_type = ?3"),
-            "should include item_type filter"
-        );
-        // With age-promotion thresholds added: ?4 = warning, ?5 = critical, ?6 = limit
-        assert!(
-            q.contains("LIMIT ?6"),
-            "limit should be ?6 with both filters + age thresholds"
-        );
-    }
-
-    #[test]
-    fn test_build_dequeue_query_includes_age_promotion_case() {
-        // The age-promotion CASE must appear in the ORDER BY and must reference
-        // both threshold placeholders.
-        let q = build_dequeue_query(None, None, "DESC", "DESC", "ASC");
-        assert!(
-            q.contains("strftime('%s','now')"),
-            "should compute item age in seconds"
-        );
-        assert!(
-            q.contains("strftime('%s', q.created_at)"),
-            "should subtract created_at to get age"
-        );
-        // No filters → warning=?2, critical=?3, limit=?4
-        assert!(
-            q.contains(">= ?3 THEN 2"),
-            "critical threshold (?3) bumps priority to +2"
-        );
-        assert!(
-            q.contains(">= ?2 THEN 1"),
-            "warning threshold (?2) bumps priority to +1"
-        );
-    }
-
-    #[test]
-    fn test_build_dequeue_query_age_promotion_respects_priority_order_flip() {
-        // The age-promotion CASE must use {priority_order} like the active CASE,
-        // so the DESC/ASC fairness flip inverts both consistently.
-        let q_desc = build_dequeue_query(None, None, "DESC", "DESC", "ASC");
-        let q_asc = build_dequeue_query(None, None, "ASC", "DESC", "DESC");
-
-        // DESC pass: age-promotion ends with DESC (older = higher rank)
-        let desc_age_section = q_desc
-            .split(">= ?2 THEN 1")
-            .nth(1)
-            .expect("split should yield section after warning case");
-        assert!(
-            desc_age_section.trim_start().starts_with("ELSE 0\n"),
-            "DESC pass: age CASE should be followed by ELSE 0 then END DESC"
-        );
-
-        let asc_age_section = q_asc
-            .split(">= ?2 THEN 1")
-            .nth(1)
-            .expect("split should yield section after warning case");
-        assert!(
-            asc_age_section.trim_start().starts_with("ELSE 0\n"),
-            "ASC pass: age CASE should be followed by ELSE 0 then END ASC"
-        );
-
-        // Sanity: priority_order shows up multiple times (active CASE + age CASE).
-        assert!(
-            q_desc.matches("END DESC").count() >= 3,
-            "DESC pass should have at least 3 END DESC (delete, tenant/add, active CASE, age CASE, op CASE)"
-        );
-    }
-
-    #[test]
-    fn test_build_dequeue_query_age_case_placed_before_active_case() {
-        // The age-promotion CASE must appear BEFORE the active-vs-inactive CASE
-        // so that age can override the active ranking once thresholds are crossed.
-        let q = build_dequeue_query(None, None, "DESC", "DESC", "ASC");
-        let age_idx = q
-            .find(">= ?3 THEN 2")
-            .expect("age-promotion CASE should be present");
-        let active_idx = q
-            .find("w.is_active > 0")
-            .expect("active CASE should be present");
-        assert!(
-            age_idx < active_idx,
-            "age-promotion CASE must come before active-vs-inactive CASE"
-        );
-
-        // And both must come AFTER the delete CASE.
-        let delete_idx = q
-            .find("WHEN q.op = 'delete' THEN 1")
-            .expect("delete CASE should be present");
-        assert!(
-            delete_idx < age_idx,
-            "delete CASE must take precedence over age promotion"
-        );
-    }
 }

@@ -75,7 +75,17 @@ pub const CREATE_UNIFIED_QUEUE_INDEXES_SQL: &[&str] = &[
     r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_unified_queue_file_path_composite
        ON unified_queue(tenant_id, branch, collection, item_type, op, file_path)
        WHERE file_path IS NOT NULL"#,
+    CREATE_STATUS_GROUP_INDEX_SQL,
 ];
+
+/// Dequeue candidate index (schema v50): `status` leads so every dequeue
+/// candidate query (group enumeration and per-group head) has an equality
+/// prefix and the planner picks it over `idx_unified_queue_dequeue`. NOT
+/// partial: a `WHERE status = 'pending'` partial index lost to the
+/// `(status, created_at)` index on the loose-scan seek (1.8 s vs 0.9 ms on 667k
+/// rows). See `queue_operations/dequeue_candidates.rs`.
+pub const CREATE_STATUS_GROUP_INDEX_SQL: &str = r#"CREATE INDEX IF NOT EXISTS idx_unified_queue_status_group
+       ON unified_queue(status, tenant_id, collection, op, item_type, created_at)"#;
 
 // ---------------------------------------------------------------------------
 // Migration SQL — v20: qdrant_status, search_status, decision_json columns
