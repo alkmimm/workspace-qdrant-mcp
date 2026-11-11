@@ -13,7 +13,7 @@
 # Trip conditions (any one), polled every INTERVAL_SECS, and only after
 # CONSECUTIVE_BREACHES polls in a row (one bogus interop reading must not
 # stop a healthy stack — it did, on 2026-09-18):
-#   host charge for the VM  > VM_GUARD_STOP_GB        (default 70)
+#   host charge for the VM  > VM_GUARD_STOP_GB        (default 80)
 #       vmmemWSL working set when the host can be asked, else the guest's
 #       MemTotal − MemFree (≈ charge − 3–7 GB) — see scripts/wsl-memory-lib.sh
 #   Windows host free memory < HOST_GUARD_MIN_FREE_GB   (default 16)
@@ -31,13 +31,21 @@
 # On trip: `docker compose stop` for this project (manual stop wins over
 # `restart: always`, so nothing comes back on its own), one line in the log,
 # then exit 3. Runs in the foreground; `make stack-guard` backgrounds it.
+#
+# The charge line was 70 GB until 2026-11-11, when it stopped the stack four
+# times in one day. Each time the host still had 44–47 GB free. The last trip
+# came while the indexer drained a backlog: the guest dropped its cache, but
+# the host charge stayed at 71 GB. WSL hands freed pages back to Windows only
+# once the VM idles, which a busy indexer never does. On a 127 GB host with a
+# 96 GB WSL cap, 80 GB still leaves Windows its share. HOST_GUARD_MIN_FREE_GB
+# is unchanged, and it is the line that protects the host directly.
 set -uo pipefail
 # shellcheck source=scripts/wsl-memory-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/wsl-memory-lib.sh"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INTERVAL_SECS="${INTERVAL_SECS:-20}"
-VM_GUARD_STOP_GB="${VM_GUARD_STOP_GB:-70}"
+VM_GUARD_STOP_GB="${VM_GUARD_STOP_GB:-80}"
 HOST_GUARD_MIN_FREE_GB="${HOST_GUARD_MIN_FREE_GB:-16}"
 CONSECUTIVE_BREACHES="${CONSECUTIVE_BREACHES:-2}"
 GUARD_DROP_MIN_CACHE_GB="${GUARD_DROP_MIN_CACHE_GB:-8}"

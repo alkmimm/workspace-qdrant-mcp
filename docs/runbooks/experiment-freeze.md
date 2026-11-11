@@ -207,11 +207,11 @@ it back. Per-container `mem_limit` is deliberately not the tool (see the note
 on `memexd` in `docker-compose.yml`); these are:
 
 - `make preflight` — refuses to start when the Windows host has < 24 GB free,
-  the host is charged > 60 GB for the VM (the `vmmemWSL` working set — guest
+  the host is charged > 70 GB for the VM (the `vmmemWSL` working set — guest
   page cache included until the guest idles long enough for
   `autoMemoryReclaim` to return it; measured ≈ guest `MemTotal−MemFree` + 3–7
   GB), or the guest's PSI `full avg60` is > 10 %. Without a host view it falls
-  back to the guest footprint (> 60 GB) and page cache (> 40 GB). Swap in use
+  back to the guest footprint (> 70 GB) and page cache (> 40 GB). Swap in use
   is printed but never fails the check: `autoMemoryReclaim` swaps idle pages
   out on purpose (8.8 GB after an idle night at PSI 0.06 %). All thresholds
   are env-tunable; `PREFLIGHT_SOFT=1` turns every refusal into a warning (a
@@ -219,10 +219,16 @@ on `memexd` in `docker-compose.yml`); these are:
   operator can recognise as residue). `stack-up` and `redeploy` run it first.
 - `make stack-guard` — background watchdog; stops **this** compose project
   (never the others) when the host charge for the VM passes
-  `VM_GUARD_STOP_GB` (70; guest footprint when the host cannot be asked) or
+  `VM_GUARD_STOP_GB` (80; guest footprint when the host cannot be asked) or
   host free memory drops below `HOST_GUARD_MIN_FREE_GB` (16), for 2 polls in
   a row. Log: `.wqm-fork/logs/memory-guard.log`. `make stack-guard-stop` ends
   it. Restart it after editing the scripts — it keeps the old code in memory.
+  Both charge lines moved up 10 GB on 2026-11-11 (preflight 60→70, guard
+  70→80). At 70 the guard stopped the stack four times in one day while the
+  host still had 44–47 GB free. In one of them the guest's cache drop could
+  not lower the host charge, because WSL returns freed pages only when the VM
+  idles. Pair it with `autoMemoryReclaim=dropcache` in `.wslconfig`, which
+  hands cache back at once instead of gradually.
 - `redeploy` no longer streams the databases through the cache unless it
   must: the snapshot copy drops its pages as it goes (#393) and the migration
   rehearsal first probes the new binary's schema targets on an empty
