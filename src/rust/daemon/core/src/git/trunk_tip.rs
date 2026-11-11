@@ -252,12 +252,9 @@ mod tests {
         let co = BranchCheckouts::discover(&root(&f));
         assert_eq!(co.root_for("main"), None);
         assert_eq!(co.presence("main", "a.rs"), CheckoutPresence::NoCheckout);
-        assert_eq!(
-            co.root_for("feat")
-                .map(std::fs::canonicalize)
-                .transpose()
-                .unwrap(),
-            Some(std::fs::canonicalize(&wt_feat).unwrap())
-        );
+        // CATEGORY-B: test-only — both sides resolved the same way so a
+        // symlinked tempdir still compares equal; never stored.
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(co.root_for("feat").map(real), Some(real(wt_feat.as_path())));
     }
 }
