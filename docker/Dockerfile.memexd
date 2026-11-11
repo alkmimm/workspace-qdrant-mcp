@@ -502,7 +502,9 @@ bump this count."; exit 1; }
 # (tecsul, 2026-10-30: 1,012 files re-enqueued on every commit of one
 # worktree). And the queued work of removed worktrees: agents remove a worktree
 # but keep its branch, so its ~4–6k per-file items stayed queued (2026-11-10:
-# 195k of 278k pending adds, 64 tecsul branches with no checkout).
+# 195k of 278k pending adds, 64 tecsul branches with no checkout). And the
+# hash-matched bulk tag of a new worktree: content some branch already indexed
+# costs one bulk op per 25 paths instead of one per-file item each.
 # Hermetic: in-memory SQLite + tempdir git repos.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -512,8 +514,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
         strategies::processing::file::item_metadata \
         --test-threads=4 2>&1 | tee /tmp/branch-switch.log; \
-    grep -q "^test result: ok\. 37 passed" /tmp/branch-switch.log \
-    || { echo "GATE: expected exactly 37 branch_switch + item_metadata tests to run and pass — \
+    grep -q "^test result: ok\. 38 passed" /tmp/branch-switch.log \
+    || { echo "GATE: expected exactly 38 branch_switch + item_metadata tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the membership reconcile, worktree discovery and the branch tip follower. If you ADDED \
 a test here, bump this count."; exit 1; }
@@ -553,7 +555,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         branch_mirror branch_reconcile add_branch_to_file_metadata_by_file_ids branch_bulk \
-        --test-threads=4
+        --test-threads=4 2>&1 | tee /tmp/branch-mirror.log; \
+    grep -q "^test result: ok\. 21 passed" /tmp/branch-mirror.log \
+    || { echo "GATE: expected exactly 21 branch-mirror + bulk branch-membership tests (incl. \
+the hash-certified worktree bulk) to run and pass — this gate counted nothing until 2026-11-10, \
+so a rename silently emptied it. If you ADDED a test here, bump this count."; exit 1; }
 
 # search.db pool per-connection PRAGMA test runs here, same rationale: hermetic
 # (tempdir SQLite, no FTS5 trigram or timing dependence). Guards the field-

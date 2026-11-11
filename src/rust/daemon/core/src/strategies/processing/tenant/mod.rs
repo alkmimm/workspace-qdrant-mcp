@@ -10,6 +10,7 @@
 //! - `cleanup`: post-scan exclusion file cleanup
 //! - `delete`: surgical tenant deletion cascade, document deletion, rename
 
+mod branch_bulk;
 pub(crate) mod cleanup;
 mod delete;
 mod delete_doc;

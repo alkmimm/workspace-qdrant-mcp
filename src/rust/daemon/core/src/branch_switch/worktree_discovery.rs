@@ -23,8 +23,10 @@ use crate::allowed_extensions::AllowedExtensions;
 use crate::git::{canonicalize_host_path, is_leaf_worktree_root, LinkedWorktree};
 use crate::queue_operations::QueueManager;
 
+use super::worktree_bulk::enqueue_worktree_bulk;
 use super::worktree_membership::{
     enqueue_worktree_divergent, enqueue_worktree_membership, enqueue_worktree_new_on_branch,
+    WorktreeRef,
 };
 use super::worktree_queue_purge::{checked_out_branches, CheckoutlessPurge, PurgeTarget};
 
@@ -110,52 +112,42 @@ pub(super) async fn reconcile_linked_worktree(
     // the main tree would tag the branch with main's bytes); (c) below reads
     // them from the worktree so the branch is indexed with its OWN content.
     let divergent = crate::git::modified_paths_head_vs_branch(Path::new(main_project_root), branch);
-
-    // 1. Shared baseline, read from the MAIN tree (dedup merges, no new vectors).
-    let n_base = enqueue_worktree_membership(
-        pool,
-        queue_manager,
+    let target = WorktreeRef {
         main_watch_folder_id,
         tenant_id,
         collection,
-        &wt_root,
+        wt_root: &wt_root,
         main_project_root,
         branch,
-        &divergent,
-    )
-    .await;
+    };
+
+    // 0. Content the index already holds, matched by hash and tagged in bulk
+    //    (no read, no embed). The per-file sets below skip these paths.
+    let bulk = enqueue_worktree_bulk(pool, queue_manager, &target, allowed_extensions).await;
+
+    // 1. Shared baseline, read from the MAIN tree (dedup merges, no new vectors).
+    let base_skip: HashSet<String> = divergent.union(&bulk).cloned().collect();
+    let n_base = enqueue_worktree_membership(pool, queue_manager, &target, &base_skip).await;
     record_enqueued(WorktreeSet::Baseline, n_base, tenant_id, branch, &wt_root);
 
     // 2. New-on-branch: what the main tree has no copy of, read from the worktree.
-    let n_new = enqueue_worktree_new_on_branch(
-        pool,
-        queue_manager,
-        main_watch_folder_id,
-        tenant_id,
-        collection,
-        &wt_root,
-        main_project_root,
-        branch,
-        allowed_extensions,
-    )
-    .await;
+    let n_new =
+        enqueue_worktree_new_on_branch(pool, queue_manager, &target, allowed_extensions, &bulk)
+            .await;
     record_enqueued(WorktreeSet::NewOnBranch, n_new, tenant_id, branch, &wt_root);
 
     // 3. Divergent: the branch's own bytes, a new content-generation (#151).
     let n_div = enqueue_worktree_divergent(
         queue_manager,
-        tenant_id,
-        collection,
-        &wt_root,
-        main_project_root,
-        branch,
+        &target,
         &divergent,
         allowed_extensions,
+        &bulk,
     )
     .await;
     record_enqueued(WorktreeSet::Divergent, n_div, tenant_id, branch, &wt_root);
 
-    n_base + n_new + n_div
+    bulk.len() + n_base + n_new + n_div
 }
 
 /// The worktree's root as the daemon reads it, or `None` when there is nothing

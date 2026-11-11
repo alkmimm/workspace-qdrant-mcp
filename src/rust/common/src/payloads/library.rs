@@ -34,7 +34,8 @@ pub struct ProjectPayload {
 ///
 /// Set by the branch-switch handler when a `git checkout` (including branch
 /// creation, where the new branch points at the same commit) leaves files
-/// byte-identical across branches. Instead of enqueuing one `Add` per unchanged
+/// byte-identical across branches, and by the worktree reconcile for the
+/// worktree files whose content the index already holds (see `hashes`). Instead of enqueuing one `Add` per unchanged
 /// file — each taking the cross-branch dedup fast-path individually — it enqueues
 /// a few of these carrying the verified-identical path list, and the processor
 /// appends `branch` to all three stores (`tracked_files.branches`, the Qdrant
@@ -67,6 +68,14 @@ pub struct BranchMembershipBulk {
     /// this field shipped) keeps the legacy unscoped behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_branch: Option<String>,
+    /// Content hash of each path, aligned with `paths` — set by a worktree
+    /// reconcile instead of `from_branch`. The branch's working-tree file
+    /// hashes to exactly the content of an indexed generation (from whichever
+    /// branch indexed it first), which certifies that generation without
+    /// knowing where the branch was created from. When present the processor
+    /// selects by `(path, hash)` and ignores `from_branch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hashes: Option<Vec<String>>,
 }
 
 /// Payload for tenant items with collection="libraries"
