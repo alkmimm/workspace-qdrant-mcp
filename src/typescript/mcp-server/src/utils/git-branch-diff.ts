@@ -38,6 +38,12 @@ export type TrunkLookup = (repoRoot: string) => string | null;
 
 const noTrunk: TrunkLookup = () => null;
 
+/**
+ * The repository's trunk, looked up only when a name has both a local and an
+ * origin ref to choose between — never for reads that do not need it.
+ */
+const repoTrunk: TrunkLookup = (repoRoot) => getDefaultBranch(repoRoot);
+
 const runGitRaw: GitRunner = (repoRoot, args) =>
   new Promise((resolve) => {
     execFile(
@@ -94,7 +100,7 @@ export function getPathsChangedBetween(
   base: string,
   branch: string
 ): Promise<ReadonlySet<string> | null> {
-  return getPathsChangedBetweenWith(repoRoot, base, branch, runGitRaw, Date.now, getDefaultBranch);
+  return getPathsChangedBetweenWith(repoRoot, base, branch, runGitRaw, Date.now, repoTrunk);
 }
 
 /** {@link getPathsChangedBetween} with an injectable git runner, clock and trunk (tests). */
@@ -237,5 +243,5 @@ export function countFilesAtBranchTipWith(
 
 /** {@link countFilesAtBranchTipWith} with the real git, clock and trunk. */
 export function countFilesAtBranchTip(repoRoot: string, branch: string): Promise<number | null> {
-  return countFilesAtBranchTipWith(repoRoot, branch, runGitRaw, Date.now, getDefaultBranch);
+  return countFilesAtBranchTipWith(repoRoot, branch, runGitRaw, Date.now, repoTrunk);
 }
