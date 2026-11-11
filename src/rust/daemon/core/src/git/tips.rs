@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use once_cell::sync::Lazy;
 
+use super::trunk_tip::{followed_trunk_in, FollowedTrunk};
+
 /// Git config key naming a repository's trunk when it is not the remote's
 /// default branch (`git config wqm.trunk release/platform`).
 pub const TRUNK_CONFIG_KEY: &str = "wqm.trunk";
@@ -25,8 +27,12 @@ pub const TRUNK_CONFIG_KEY: &str = "wqm.trunk";
 /// branch views filled in from `master` and default reads landed on legacy
 /// code (field feedback 2026-11-11).
 pub fn default_branch(repo_root: &Path) -> Option<String> {
-    let repo = git2::Repository::open(repo_root).ok()?;
-    if let Some(trunk) = configured_trunk(&repo) {
+    default_branch_in(&git2::Repository::open(repo_root).ok()?)
+}
+
+/// [`default_branch`] of a repository already open.
+pub(crate) fn default_branch_in(repo: &git2::Repository) -> Option<String> {
+    if let Some(trunk) = configured_trunk(repo) {
         return Some(trunk);
     }
     if let Ok(head) = repo.find_reference("refs/remotes/origin/HEAD") {
@@ -69,18 +75,20 @@ const CHANGED_CACHE_MAX: usize = 256;
 /// The paths whose content differs between the tips of `base` and `head`,
 /// relative to `repo_root` (which may be a sub-directory of the repository).
 /// Renames count as a delete plus an add, so both paths are reported — a path
-/// renamed away on `head` is gone there. Each branch resolves to its local ref,
-/// else `origin/<name>`. `None` when git cannot say (not a repository, a branch
-/// that does not resolve, an unreadable tree): the caller decides what an
-/// unknown means.
+/// renamed away on `head` is gone there. Each branch resolves to the tip the
+/// index follows it at: the trunk's `followed_trunk` tip, else its local
+/// ref, else `origin/<name>`. `None` when git cannot say (not a repository, a
+/// branch that does not resolve, an unreadable tree): the caller decides what
+/// an unknown means.
 pub fn paths_changed_between(
     repo_root: &Path,
     base: &str,
     head: &str,
 ) -> Option<Arc<HashSet<String>>> {
     let repo = git2::Repository::open(repo_root).ok()?;
-    let base_oid = branch_tip(&repo, base)?;
-    let head_oid = branch_tip(&repo, head)?;
+    let trunk = followed_trunk_in(&repo);
+    let base_oid = branch_tip(&repo, trunk.as_ref(), base)?;
+    let head_oid = branch_tip(&repo, trunk.as_ref(), head)?;
     let key = (repo_root.to_path_buf(), base_oid, head_oid);
     if let Some(hit) = CHANGED_CACHE.lock().unwrap().get(&key) {
         return Some(Arc::clone(hit));
@@ -118,13 +126,17 @@ pub fn paths_changed_between(
 
 /// The bytes of `relative_path` (relative to `repo_root`) at the tip of the
 /// LOCAL branch `branch` — the version that branch holds, whether or not any
-/// checkout has it. Local refs only, matching the branch prune's notion of a
-/// live branch: a branch it treats as deleted is not read. `None` when git
-/// cannot say: not a repository, no such local branch, no such path at that
-/// tip, or a path that is not a file.
+/// checkout has it; for the trunk, at its `followed_trunk` tip. Local
+/// branches only, matching the branch prune's notion of a live branch: a
+/// branch it treats as deleted is not read. `None` when git cannot say: not a
+/// repository, no such local branch, no such path at that tip, or a path that
+/// is not a file.
 pub fn blob_at_branch_tip(repo_root: &Path, branch: &str, relative_path: &str) -> Option<Vec<u8>> {
     let repo = git2::Repository::open(repo_root).ok()?;
-    let tip = repo.refname_to_id(&format!("refs/heads/{branch}")).ok()?;
+    let tip = match followed_trunk_in(&repo).filter(|t| t.name == branch) {
+        Some(trunk) => trunk.tip,
+        None => repo.refname_to_id(&format!("refs/heads/{branch}")).ok()?,
+    };
     let tree = repo.find_commit(tip).ok()?.tree().ok()?;
     let prefix = root_prefix(&repo, repo_root);
     let path = if prefix.is_empty() {
@@ -154,7 +166,14 @@ pub(crate) fn root_prefix(repo: &git2::Repository, repo_root: &Path) -> String {
     prefix.to_string_lossy().replace('\\', "/")
 }
 
-fn branch_tip(repo: &git2::Repository, branch: &str) -> Option<git2::Oid> {
+fn branch_tip(
+    repo: &git2::Repository,
+    trunk: Option<&FollowedTrunk>,
+    branch: &str,
+) -> Option<git2::Oid> {
+    if let Some(trunk) = trunk.filter(|t| t.name == branch) {
+        return Some(trunk.tip);
+    }
     [
         format!("refs/heads/{branch}"),
         format!("refs/remotes/origin/{branch}"),

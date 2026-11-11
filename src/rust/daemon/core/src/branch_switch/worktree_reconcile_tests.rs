@@ -391,3 +391,64 @@ async fn test_reconcile_worktree_branches_gated_and_noop() {
         .unwrap();
     assert_eq!(count, 0, "no enqueues in either gated/no-op case");
 }
+
+/// A worktree on the trunk is not read from its disk: the branch tip follower
+/// holds the trunk at its git tip, and that worktree may be far behind it
+/// (tecsul's `release/platform`: 1,406 commits, 2026-11-11). A worktree on any
+/// other branch is reconciled as before.
+#[tokio::test]
+async fn a_worktree_on_the_trunk_is_left_to_the_tip_follower() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_repo = tmp.path().join("main");
+    let repo = git2::Repository::init(&main_repo).unwrap();
+    let c1 = super::branch_tips_tests::commit(&repo, &[("a.rs", "fn a() {}")], None);
+    for b in ["main", "develop", "feat"] {
+        repo.reference(&format!("refs/heads/{b}"), c1, true, "")
+            .unwrap();
+    }
+    repo.set_head("refs/heads/develop").unwrap();
+    std::fs::write(main_repo.join("a.rs"), "fn a() {}").unwrap();
+    for (name, branch) in [("wt-main", "main"), ("wt-feat", "feat")] {
+        let reference = repo
+            .find_reference(&format!("refs/heads/{branch}"))
+            .unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(&reference));
+        repo.worktree(name, &tmp.path().join(name), Some(&opts))
+            .unwrap();
+    }
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let main_str = main_repo.to_string_lossy().to_string();
+    insert_watch_folder(&pool, "w1", "t1", &main_str).await;
+    let hash = wqm_common::hashing::compute_content_hash("fn a() {}");
+    insert_tracked_file(&pool, "w1", &["develop"], &hash, "a.rs").await;
+
+    let qm = QueueManager::new(pool.clone());
+    let n = reconcile_worktree_branches(
+        &pool,
+        &qm,
+        "w1",
+        "t1",
+        "projects",
+        &main_str,
+        &AllowedExtensions::default(),
+    )
+    .await;
+    assert!(n >= 1, "the feat worktree is reconciled");
+    let branches: Vec<(Option<String>, String)> =
+        sqlx::query_as("SELECT branch, payload_json FROM unified_queue")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        branches
+            .iter()
+            .all(|(b, p)| b.as_deref() != Some("main") && !p.contains("\"main\"")),
+        "nothing queued for the trunk from its worktree: {branches:?}"
+    );
+    assert!(branches
+        .iter()
+        .any(|(b, p)| b.as_deref() == Some("feat") || p.contains("\"feat\"")));
+}

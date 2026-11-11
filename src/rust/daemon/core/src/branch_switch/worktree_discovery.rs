@@ -9,7 +9,9 @@
 //! with no scan were picked up only by the next daemon restart, ~5.1k files each
 //! at once. [`WorktreeDiscovery`] watches every project's linked-worktree set on
 //! a short interval and reconciles a worktree once it appears, switches branch,
-//! or its branch tip moves — and only that worktree.
+//! or its branch tip moves — and only that worktree. A worktree on the trunk is
+//! not reconciled from its disk: the branch tip follower holds the trunk at its
+//! git tip, origin's when that fast-forwards it (`git::followed_trunk`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -105,6 +107,16 @@ pub(super) async fn reconcile_linked_worktree(
     let Some(branch) = wt.branch.as_deref() else {
         return 0; // detached HEAD: no branch to tag
     };
+    if crate::git::is_followed_trunk(Path::new(main_project_root), branch) {
+        // The branch tip follower holds the trunk at its git tip; this
+        // worktree's disk may be behind it (`git::followed_trunk`).
+        debug!(
+            "worktree membership: '{}' is the trunk, followed from git; not read from {}",
+            branch,
+            wt.root.display()
+        );
+        return 0;
+    }
     let Some(wt_root) = readable_worktree_root(wt, main_project_root, branch) else {
         return 0;
     };
@@ -371,13 +383,18 @@ impl WorktreeDiscovery {
 }
 
 /// Each branch-carrying worktree's state, paired with the worktree itself. A
-/// detached HEAD has no branch to tag and is left out.
+/// detached HEAD has no branch to tag and is left out, and so is the trunk the
+/// branch tip follower holds at its git tip (`git::followed_trunk`).
 fn observe(main_root: &str, worktrees: &[LinkedWorktree]) -> Vec<(WorktreeState, LinkedWorktree)> {
     let repo = git2::Repository::open(main_root).ok();
+    let trunk = repo
+        .as_ref()
+        .and_then(crate::git::followed_trunk_in)
+        .map(|t| t.name);
     worktrees
         .iter()
         .filter_map(|wt| {
-            let branch = wt.branch.clone()?;
+            let branch = wt.branch.clone().filter(|b| trunk.as_ref() != Some(b))?;
             let tip = repo
                 .as_ref()
                 .and_then(|r| r.refname_to_id(&format!("refs/heads/{branch}")).ok())

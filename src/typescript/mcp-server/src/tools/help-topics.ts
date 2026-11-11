@@ -101,7 +101,9 @@ export const HELP_TOPICS = {
       'tenant_ids are stable per clone; if results come from the wrong clone, pass `projectId`',
       'explicitly. Trunk: a branch view fills in unchanged files from the project trunk —',
       "origin/HEAD by default, or the repo's `wqm.trunk` git config when the work happens off",
-      'another branch (e.g. `git config wqm.trunk release/platform`).',
+      'another branch (e.g. `git config wqm.trunk release/platform`). Unless the main clone has',
+      'the trunk checked out, it is indexed at origin/<trunk> whenever that fast-forwards the',
+      'local trunk — as fresh as the last `git fetch`; no need to pull a worktree on it.',
     ].join(' '),
   },
   graph: {

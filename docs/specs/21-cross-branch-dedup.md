@@ -136,6 +136,24 @@ through the prune's per-branch delete (C). A tip whose re-ingest could not enter
 the queue (an older tip's item for the same path still pending) is planned again
 on the next pass, so an intermediate version is never where the branch rests.
 
+**The trunk is followed from git.** Unless the main folder has it checked out
+(the watcher follows that disk), the trunk is held by the tip follower wherever
+it lives — no checkout, or a linked worktree — at the tip `git::followed_trunk`
+names: `origin/<trunk>` when that fast-forwards the local trunk (what
+`git pull --ff-only` would check out), else the local trunk (local commits are
+never overridden). Agents branch off `origin/<trunk>`, and nothing pulled the
+local copy: on 2026-11-11 tecsul's `release/platform` worktree sat 1,406 commits
+(2,329 files) behind origin, bws-engineer `master` 52 and backend-api `main` 27.
+The same answer is used everywhere the trunk is read: worktree discovery leaves
+a worktree on it alone, `git::BranchCheckouts` gives it no checkout (its paths
+are never judged against that worktree's possibly older disk), and the fill-in
+diffs — `git::paths_changed_between` and the MCP server's `git-branch-diff.ts`
+— compare branches against that tip. The first time the follower sees a trunk
+that origin is ahead of, it diffs from the local tip, so what origin added
+joins in. The daemon never fetches: origin's ref is as fresh as the last fetch
+anyone ran in the repository. A trunk the main folder has checked out stays
+the disk's — pull there.
+
 ### C. Branch pruning — orphaned-branch tag removal (delete side)
 
 The inverse of dedup-append. [`startup/reconciliation/branch_prune.rs`](../../src/rust/daemon/core/src/startup/reconciliation/branch_prune.rs)

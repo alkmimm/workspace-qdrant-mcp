@@ -20,26 +20,27 @@
 //! generation to the new one (a dedup hit when another branch already holds that
 //! content). A path the tip no longer has drops the tag through the branch
 //! prune's per-branch delete.
+//!
+//! The trunk is held the same way wherever it is checked out but the main
+//! folder — at its `git::followed_trunk` tip, `origin/<trunk>` when that is the
+//! local trunk fast-forwarded. A worktree on it fell behind unnoticed: tecsul's
+//! `release/platform` worktree sat 1,406 commits behind origin (2026-11-11)
+//! while every agent branch came off origin's tip. The first time the follower
+//! sees such a trunk it diffs from the local tip, so what origin added joins in.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
-use tracing::{debug, info, warn};
-use wqm_common::constants::COLLECTION_PROJECTS;
+use tracing::{debug, warn};
 use wqm_common::hashing::compute_bytes_hash;
-use wqm_common::paths::RelativePath;
 
 use crate::allowed_extensions::AllowedExtensions;
 use crate::queue_operations::QueueManager;
-use crate::startup::reconciliation::branch_prune::{
-    build_prune_delete_payload, BRANCH_PRUNE_COVERED_DELETE_METADATA, BRANCH_PRUNE_DELETE_METADATA,
-};
-use crate::unified_queue_schema::{FilePayload, ItemType, QueueOperation};
 
 use super::db;
-use super::tip_stage::{stage_dir, stage_file, sweep_stage};
-use super::worktree_eligibility::{main_eligibility_gate, worktree_path_eligible};
+use super::tip_apply::{apply_plan, Target};
+use super::tip_stage::{stage_dir, sweep_stage};
 
 /// What one branch's tip asks of the index.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -129,7 +130,8 @@ pub(super) fn plan_branch(
     Some(plan)
 }
 
-/// Follows local branches nobody has checked out, once per tip.
+/// Follows local branches nobody has checked out, and the trunk outside the
+/// main folder, once per tip.
 #[derive(Debug)]
 pub struct BranchTipFollower {
     /// Where tip versions are staged for the queue to read (the daemon's data
@@ -137,15 +139,6 @@ pub struct BranchTipFollower {
     stage_root: PathBuf,
     /// The tip each (watch folder, branch) was last checked at.
     tips: HashMap<(String, String), String>,
-}
-
-/// The branch a plan is applied to.
-struct Target<'a> {
-    watch_id: &'a str,
-    tenant_id: &'a str,
-    root: &'a str,
-    branch: &'a str,
-    tip: &'a str,
 }
 
 impl BranchTipFollower {
@@ -170,245 +163,191 @@ impl BranchTipFollower {
                 return 0;
             }
         };
+        let io = Io {
+            pool,
+            queue_manager,
+            allowed_extensions,
+        };
         let mut total = 0usize;
         let mut live_projects = HashSet::new();
         let mut staged_now = HashSet::new();
         for (watch_id, root, tenant_id) in projects {
             live_projects.insert(watch_id.clone());
-            let Some(local) = local_branch_tips(Path::new(&root)) else {
-                continue; // not a git repository the daemon can read
-            };
-            let live: HashSet<String> = local.keys().cloned().collect();
-            let checked_out = checked_out_branches(Path::new(&root));
-            let tagged = match db::fetch_tagged_branches(pool, &watch_id).await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!("branch tips: {}", e);
-                    continue;
-                }
-            };
-            for branch in tagged {
-                let key = (watch_id.clone(), branch.clone());
-                if checked_out.contains(&branch) {
-                    // Its checkout follows it; check afresh once it has none.
-                    self.tips.remove(&key);
-                    continue;
-                }
-                // A branch git no longer has is the branch prune's business.
-                let Some(tip) = local.get(&branch).copied() else {
-                    continue;
-                };
-                let tip_str = tip.to_string();
-                let previous = self.tips.get(&key).cloned();
-                if previous.as_deref() == Some(tip_str.as_str()) {
-                    continue;
-                }
-                let hashes = match db::fetch_branch_tagged_hashes(pool, &watch_id, &branch).await {
-                    Ok(h) => h,
-                    Err(e) => {
-                        warn!("branch tips: {}", e);
-                        continue;
-                    }
-                };
-                let moved_from = previous
-                    .as_deref()
-                    .and_then(|p| git2::Oid::from_str(p).ok());
-                let repo_root = PathBuf::from(&root);
-                let plan = tokio::task::spawn_blocking(move || {
-                    plan_branch(&repo_root, tip, moved_from, &hashes)
-                })
-                .await
-                .ok()
-                .flatten();
-                let Some(plan) = plan else {
-                    debug!(
-                        "branch tips: git could not answer for '{}' at {}",
-                        branch, tip_str
-                    );
-                    continue;
-                };
-                if plan.reingest.is_empty() && plan.untag.is_empty() {
-                    self.tips.insert(key, tip_str);
-                    continue;
-                }
-                let target = Target {
-                    watch_id: &watch_id,
-                    tenant_id: &tenant_id,
-                    root: &root,
-                    branch: &branch,
-                    tip: &tip_str,
-                };
-                let dir = stage_dir(&self.stage_root, &tenant_id, &branch, &tip_str);
-                let applied = apply_plan(
-                    pool,
-                    queue_manager,
-                    allowed_extensions,
-                    &target,
-                    &dir,
-                    plan,
-                    &live,
-                )
+            total += self
+                .follow_project(&io, &watch_id, &root, &tenant_id, &mut staged_now)
                 .await;
-                total += applied.enqueued;
-                staged_now.insert(dir);
-                // Not settled: the next pass plans this tip again (see `Applied`).
-                if applied.settled {
-                    self.tips.insert(key, tip_str);
-                }
-            }
         }
         self.tips
             .retain(|(watch_id, _), _| live_projects.contains(watch_id));
         sweep_stage(pool, &self.stage_root, &staged_now).await;
         total
     }
-}
 
-/// What applying a plan did.
-struct Applied {
-    enqueued: usize,
-    /// Every re-ingest entered the queue. A pending item for the same
-    /// `(branch, path)` from an OLDER tip makes the queue ignore the newer one
-    /// (`INSERT OR IGNORE` on the per-file unique index) — the older bytes would
-    /// land and the branch would rest on an intermediate version. Such a tip is
-    /// left unsettled and planned again on the next pass, until the older item
-    /// has run and the newer one can enter.
-    settled: bool,
-}
-
-/// Stage and enqueue one branch's plan.
-async fn apply_plan(
-    pool: &SqlitePool,
-    queue_manager: &QueueManager,
-    allowed_extensions: &AllowedExtensions,
-    t: &Target<'_>,
-    dir: &Path,
-    plan: TipPlan,
-    live: &HashSet<String>,
-) -> Applied {
-    let gate = main_eligibility_gate(t.root);
-    let (mut reingested, mut untagged, mut settled) = (0usize, 0usize, true);
-    for (rel, bytes) in plan.reingest {
-        // Every re-ingest passes the main scan's eligibility — a path the move
-        // added must, a tagged one did when it was indexed. A library-format
-        // document is followed like any file: the queue routes it to the
-        // project's library (it was refused here until 2026-10-05).
-        if !worktree_path_eligible(t.root, &gate, allowed_extensions, COLLECTION_PROJECTS, &rel) {
-            continue;
-        }
-        if !stage_file(dir, &rel, &bytes) {
-            warn!("branch tips: could not stage {} of '{}'", rel, t.branch);
-            settled = false;
-            continue;
-        }
-        match enqueue_reingest(queue_manager, t, &rel, dir).await {
-            Ok(true) => reingested += 1,
-            Ok(false) => settled = false,
+    /// Every branch of one project this follower holds: the ones nobody has
+    /// checked out, and the trunk wherever it is checked out but the main folder.
+    async fn follow_project(
+        &mut self,
+        io: &Io<'_>,
+        watch_id: &str,
+        root: &str,
+        tenant_id: &str,
+        staged_now: &mut HashSet<PathBuf>,
+    ) -> usize {
+        let Some(local) = local_branch_tips(Path::new(root)) else {
+            return 0; // not a git repository the daemon can read
+        };
+        let checked_out = checked_out_branches(Path::new(root));
+        let trunk = crate::git::followed_trunk(Path::new(root));
+        let tagged = match db::fetch_tagged_branches(io.pool, watch_id).await {
+            Ok(b) => b,
             Err(e) => {
-                warn!(
-                    "branch tips: enqueue {} on '{}' failed: {}",
-                    rel, t.branch, e
-                );
-                settled = false;
+                warn!("branch tips: {}", e);
+                return 0;
+            }
+        };
+        let project = Project {
+            watch_id,
+            tenant_id,
+            root,
+            live: local.keys().cloned().collect(),
+        };
+        let mut total = 0usize;
+        for branch in tagged {
+            match follow_target(&branch, trunk.as_ref(), &local, &checked_out) {
+                Some(target) => {
+                    total += self
+                        .follow_branch(io, &project, &branch, target, staged_now)
+                        .await
+                }
+                // Its checkout follows it, or git no longer has it (the branch
+                // prune's business): check afresh if it comes back to us.
+                None => {
+                    self.tips.remove(&(watch_id.to_string(), branch));
+                }
             }
         }
+        total
     }
-    for rel in plan.untag {
-        // An untag already pending is the same untag: nothing to retry.
-        match enqueue_untag(pool, queue_manager, t, &rel, live).await {
-            Ok(true) => untagged += 1,
-            Ok(false) => {}
-            Err(e) => {
-                warn!("branch tips: untag {} on '{}' failed: {}", rel, t.branch, e);
-                settled = false;
-            }
+
+    /// Plan and apply one branch at `target`'s tip, once per tip.
+    async fn follow_branch(
+        &mut self,
+        io: &Io<'_>,
+        p: &Project<'_>,
+        branch: &str,
+        target: FollowTarget,
+        staged_now: &mut HashSet<PathBuf>,
+    ) -> usize {
+        let key = (p.watch_id.to_string(), branch.to_string());
+        let tip_str = target.tip.to_string();
+        let previous = self.tips.get(&key).cloned();
+        if previous.as_deref() == Some(tip_str.as_str()) {
+            return 0;
         }
-    }
-    if reingested + untagged > 0 {
-        info!(
-            "branch tips: '{}' ({}) is at {} with no checkout; {} file(s) re-ingested from git, {} untagged",
-            t.branch, t.tenant_id, t.tip, reingested, untagged
-        );
-    }
-    Applied {
-        enqueued: reingested + untagged,
-        settled,
+        let hashes = match db::fetch_branch_tagged_hashes(io.pool, p.watch_id, branch).await {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("branch tips: {}", e);
+                return 0;
+            }
+        };
+        let moved_from = previous
+            .as_deref()
+            .and_then(|seen| git2::Oid::from_str(seen).ok())
+            .or(target.first_from);
+        let repo_root = PathBuf::from(p.root);
+        let tip = target.tip;
+        let plan =
+            tokio::task::spawn_blocking(move || plan_branch(&repo_root, tip, moved_from, &hashes))
+                .await
+                .ok()
+                .flatten();
+        let Some(plan) = plan else {
+            debug!(
+                "branch tips: git could not answer for '{}' at {}",
+                branch, tip_str
+            );
+            return 0;
+        };
+        if plan.reingest.is_empty() && plan.untag.is_empty() {
+            self.tips.insert(key, tip_str);
+            return 0;
+        }
+        let t = Target {
+            watch_id: p.watch_id,
+            tenant_id: p.tenant_id,
+            root: p.root,
+            branch,
+            tip: &tip_str,
+        };
+        let dir = stage_dir(&self.stage_root, p.tenant_id, branch, &tip_str);
+        let applied = apply_plan(
+            io.pool,
+            io.queue_manager,
+            io.allowed_extensions,
+            &t,
+            &dir,
+            plan,
+            &p.live,
+        )
+        .await;
+        staged_now.insert(dir);
+        // Not settled: the next pass plans this tip again (see `Applied`).
+        if applied.settled {
+            self.tips.insert(key, tip_str);
+        }
+        applied.enqueued
     }
 }
 
-/// `File/Add` of `rel` under the branch, reading the staged tip bytes. The tip
-/// rides in the payload so the idempotency key differs per tip: an item still
-/// pending for an older tip never swallows the newer one.
-async fn enqueue_reingest(
-    queue_manager: &QueueManager,
-    t: &Target<'_>,
-    rel: &str,
-    dir: &Path,
-) -> Result<bool, String> {
-    let rel_path = RelativePath::from_user_input(rel).map_err(|e| e.to_string())?;
-    let mut payload = serde_json::to_value(FilePayload {
-        file_path: rel_path,
-        file_type: None,
-        file_hash: None,
-        size_bytes: None,
-        old_path: None,
-    })
-    .map_err(|e| e.to_string())?;
-    payload["branch_tip"] = serde_json::Value::String(t.tip.to_string());
-    // `worktree_membership` keeps the item's branch (no restamp to the main
-    // HEAD) and scopes the idempotency key to the branch; `git_stage` keeps the
-    // language server out of bytes it cannot see.
-    let metadata = serde_json::json!({
-        "worktree_membership": true,
-        "read_root": dir.to_string_lossy(),
-        "git_stage": true,
-    })
-    .to_string();
-    queue_manager
-        .enqueue_unified(
-            ItemType::File,
-            QueueOperation::Add,
-            t.tenant_id,
-            COLLECTION_PROJECTS,
-            &payload.to_string(),
-            Some(t.branch),
-            Some(metadata.as_str()),
-        )
-        .await
-        .map(|(_, new)| new)
-        .map_err(|e| e.to_string())
+/// What a pass reads and writes through.
+struct Io<'a> {
+    pool: &'a SqlitePool,
+    queue_manager: &'a QueueManager,
+    allowed_extensions: &'a AllowedExtensions,
 }
 
-/// Drop the branch's tag from `rel` — the branch prune's per-branch delete,
-/// marked covered when another live generation keeps the path indexed.
-async fn enqueue_untag(
-    pool: &SqlitePool,
-    queue_manager: &QueueManager,
-    t: &Target<'_>,
-    rel: &str,
-    live: &HashSet<String>,
-) -> Result<bool, String> {
-    let rel_path = RelativePath::from_user_input(rel).map_err(|e| e.to_string())?;
-    let payload_json = build_prune_delete_payload(&rel_path, t.branch)?;
-    let covered = db::path_served_without_branch(pool, t.watch_id, rel, t.branch, live).await?;
-    let metadata = if covered {
-        BRANCH_PRUNE_COVERED_DELETE_METADATA
-    } else {
-        BRANCH_PRUNE_DELETE_METADATA
-    };
-    queue_manager
-        .enqueue_unified(
-            ItemType::File,
-            QueueOperation::Delete,
-            t.tenant_id,
-            COLLECTION_PROJECTS,
-            &payload_json,
-            Some(t.branch),
-            Some(metadata),
-        )
-        .await
-        .map(|(_, new)| new)
-        .map_err(|e| e.to_string())
+/// One project in a pass.
+struct Project<'a> {
+    watch_id: &'a str,
+    tenant_id: &'a str,
+    root: &'a str,
+    /// Its live local branches: an untag is covered only by one of these.
+    live: HashSet<String>,
+}
+
+/// The tip the follower holds a branch at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FollowTarget {
+    pub(super) tip: git2::Oid,
+    /// Where to diff from when the follower has not seen the branch yet: the
+    /// local trunk when origin is ahead of it, so what origin added joins in.
+    pub(super) first_from: Option<git2::Oid>,
+}
+
+/// Whether this follower holds `branch`, and at which tip. The trunk is held
+/// at its `git::followed_trunk` tip even where a linked worktree has it
+/// checked out (worktree discovery leaves that worktree alone); any other
+/// branch only while no checkout has it, at its local tip.
+pub(super) fn follow_target(
+    branch: &str,
+    trunk: Option<&crate::git::FollowedTrunk>,
+    local: &HashMap<String, git2::Oid>,
+    checked_out: &HashSet<String>,
+) -> Option<FollowTarget> {
+    if let Some(trunk) = trunk.filter(|t| t.name == branch) {
+        return Some(FollowTarget {
+            tip: trunk.tip,
+            first_from: trunk.from_origin().then_some(trunk.local),
+        });
+    }
+    if checked_out.contains(branch) {
+        return None;
+    }
+    local.get(branch).map(|tip| FollowTarget {
+        tip: *tip,
+        first_from: None,
+    })
 }
 
 /// Each local branch's tip commit; `None` when the folder is not a repository.

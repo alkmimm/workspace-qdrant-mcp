@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::allowed_extensions::AllowedExtensions;
 use crate::queue_operations::QueueManager;
 
-use super::branch_tips::{plan_branch, TipPlan};
+use super::branch_tips::{follow_target, plan_branch, FollowTarget, TipPlan};
 use super::tests::{create_test_pool, insert_tracked_file, insert_watch_folder, setup_tables};
 use super::BranchTipFollower;
 
@@ -196,4 +196,106 @@ async fn the_follower_moves_a_branch_nobody_has_checked_out_once_per_tip() {
     // resting state.
     assert_eq!(follower.tick(&pool, &qm, &ext).await, 1, "a.rs at c3");
     assert_eq!(follower.tick(&pool, &qm, &ext).await, 0, "settled");
+}
+
+#[test]
+fn the_trunk_is_held_at_its_followed_tip_even_where_a_worktree_has_it() {
+    let oid = |n: u8| git2::Oid::from_bytes(&[n; 20]).unwrap();
+    let (c1, c2, f1) = (oid(1), oid(2), oid(3));
+    let trunk = crate::git::FollowedTrunk {
+        name: "main".into(),
+        tip: c2,
+        local: c1,
+    };
+    let local: HashMap<String, git2::Oid> = [("main".to_string(), c1), ("feat".to_string(), f1)]
+        .into_iter()
+        .collect();
+    let checked_out: std::collections::HashSet<String> =
+        ["main".to_string(), "wt".to_string()].into_iter().collect();
+
+    assert_eq!(
+        follow_target("main", Some(&trunk), &local, &checked_out),
+        Some(FollowTarget {
+            tip: c2,
+            first_from: Some(c1),
+        }),
+        "origin's tip; a first sight diffs from the local trunk"
+    );
+    assert_eq!(
+        follow_target("feat", Some(&trunk), &local, &checked_out),
+        Some(FollowTarget {
+            tip: f1,
+            first_from: None,
+        })
+    );
+    assert_eq!(
+        follow_target("wt", Some(&trunk), &local, &checked_out),
+        None,
+        "its checkout follows it"
+    );
+    assert_eq!(
+        follow_target("gone", Some(&trunk), &local, &checked_out),
+        None
+    );
+    // The main folder's own trunk (no followed trunk): its checkout follows it.
+    assert_eq!(follow_target("main", None, &local, &checked_out), None);
+}
+
+/// Live 2026-11-11: tecsul's `release/platform` worktree sat 1,406 commits
+/// behind origin; its index held the worktree's stale tip while every agent
+/// branch came off origin's. Here the trunk `main` is checked out in a linked
+/// worktree at c1 and origin is at c2: the follower moves it to c2 — the
+/// changed file and the one origin added — without anyone pulling.
+#[tokio::test]
+async fn the_follower_moves_the_trunk_to_origin_past_a_stale_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let repo = git2::Repository::init(&root).unwrap();
+    let c1 = commit(&repo, &[("a.rs", "1"), ("b.rs", "1")], None);
+    let c2 = commit(
+        &repo,
+        &[("a.rs", "2"), ("b.rs", "1"), ("new.rs", "1")],
+        Some(c1),
+    );
+    repo.reference("refs/heads/main", c1, true, "").unwrap();
+    repo.reference("refs/remotes/origin/main", c2, true, "")
+        .unwrap();
+    repo.reference("refs/heads/develop", c1, true, "").unwrap();
+    repo.set_head("refs/heads/develop").unwrap(); // the main folder is elsewhere
+    let main_ref = repo.find_reference("refs/heads/main").unwrap();
+    let mut opts = git2::WorktreeAddOptions::new();
+    opts.reference(Some(&main_ref));
+    repo.worktree("wt-main", &dir.path().join("wt-main"), Some(&opts))
+        .unwrap();
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let root_str = root.to_string_lossy().to_string();
+    insert_watch_folder(&pool, "w1", "t1", &root_str).await;
+    // What the stale worktree indexed: c1's versions.
+    insert_tracked_file(&pool, "w1", &["main", "develop"], &h("1"), "a.rs").await;
+    insert_tracked_file(&pool, "w1", &["main", "develop"], &h("1"), "b.rs").await;
+
+    let stage = tempfile::tempdir().unwrap();
+    let qm = QueueManager::new(pool.clone());
+    let ext = AllowedExtensions::default();
+    let mut follower = BranchTipFollower::new(stage.path().to_path_buf());
+    assert_eq!(follower.tick(&pool, &qm, &ext).await, 2, "a.rs and new.rs");
+
+    let rows: Vec<(String, String, String, Option<String>)> =
+        sqlx::query_as("SELECT op, branch, payload_json, metadata FROM unified_queue")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        rows.iter().all(|r| r.0 == "add" && r.1 == "main"),
+        "{rows:?}"
+    );
+    for (rel, bytes) in [("a.rs", &b"2"[..]), ("new.rs", &b"1"[..])] {
+        let row = rows.iter().find(|r| r.2.contains(rel)).expect(rel);
+        let meta: serde_json::Value = serde_json::from_str(row.3.as_deref().unwrap()).unwrap();
+        let staged = Path::new(meta["read_root"].as_str().unwrap()).join(rel);
+        assert_eq!(std::fs::read(staged).unwrap(), bytes, "origin's {rel}");
+    }
+    assert_eq!(follower.tick(&pool, &qm, &ext).await, 0, "once per tip");
 }

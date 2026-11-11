@@ -465,6 +465,9 @@ a test here, bump this count."; exit 1; }
 # Qdrant points and search.db rows. These pin the shared resolver
 # (`git::checkouts`) and each consumer. Hermetic: tempdir git admin fixtures +
 # in-memory/tempfile SQLite. NAMES via module path, exact count asserted.
+# Also the trunk followed from git (`git::trunk_tip`): a linked worktree on the
+# trunk is no checkout of it — tecsul's sat 1,406 commits behind origin, and
+# judging the trunk's paths against that disk would drop what origin added.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
@@ -472,6 +475,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         git::checkouts::tests \
+        git::trunk_tip::tests \
         idle::tasks::filesystem_reconcile::tests \
         strategies::processing::file::delete_target::tests \
         queue_operations::tests::delete_completion_tests \
@@ -480,8 +484,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         startup::reconciliation::tests::missing_files \
         startup::reconciliation::tests::clean_stale_state \
         --test-threads=4 2>&1 | tee /tmp/branch-checkouts.log; \
-    grep -q "^test result: ok\. 39 passed" /tmp/branch-checkouts.log \
-    || { echo "GATE: expected exactly 39 branch-checkout deletion tests to run and pass — \
+    grep -q "^test result: ok\. 44 passed" /tmp/branch-checkouts.log \
+    || { echo "GATE: expected exactly 44 branch-checkout deletion + followed-trunk tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the rule that keeps worktree-only files from being deleted. If you ADDED a test here, \
 bump this count."; exit 1; }
@@ -504,7 +508,10 @@ bump this count."; exit 1; }
 # but keep its branch, so its ~4–6k per-file items stayed queued (2026-11-10:
 # 195k of 278k pending adds, 64 tecsul branches with no checkout). And the
 # hash-matched bulk tag of a new worktree: content some branch already indexed
-# costs one bulk op per 25 paths instead of one per-file item each.
+# costs one bulk op per 25 paths instead of one per-file item each. And the
+# trunk held at its git tip — origin's when that fast-forwards the local trunk —
+# with a worktree on it left alone (tecsul `release/platform`, 2026-11-11: the
+# worktree sat 1,406 commits behind origin and the index with it).
 # Hermetic: in-memory SQLite + tempdir git repos.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -514,8 +521,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
         strategies::processing::file::item_metadata \
         --test-threads=4 2>&1 | tee /tmp/branch-switch.log; \
-    grep -q "^test result: ok\. 39 passed" /tmp/branch-switch.log \
-    || { echo "GATE: expected exactly 39 branch_switch + item_metadata tests to run and pass — \
+    grep -q "^test result: ok\. 42 passed" /tmp/branch-switch.log \
+    || { echo "GATE: expected exactly 42 branch_switch + item_metadata tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the membership reconcile, worktree discovery and the branch tip follower. If you ADDED \
 a test here, bump this count."; exit 1; }
