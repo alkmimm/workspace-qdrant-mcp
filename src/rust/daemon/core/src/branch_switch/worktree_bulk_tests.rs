@@ -118,3 +118,90 @@ async fn a_new_worktree_tags_already_indexed_content_in_bulk() {
     );
     assert!(spec.get("from_branch").is_none(), "hash mode: {spec}");
 }
+
+/// Insert a pending `File/Add` queued by an earlier reconcile pass.
+async fn insert_old_worktree_add(pool: &sqlx::SqlitePool, id: &str, path: &str, meta: &str) {
+    sqlx::query(
+        "INSERT INTO unified_queue (queue_id, item_type, op, tenant_id, collection, status, \
+         created_at, branch, file_path, idempotency_key, metadata) \
+         VALUES (?1, 'file', 'add', 't1', 'projects', 'pending', '2020-01-01T00:00:00.000Z', \
+                 'agent/x', ?2, ?1, ?3)",
+    )
+    .bind(id)
+    .bind(path)
+    .bind(meta)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A reconcile replaces the per-file adds an earlier pass queued for the
+/// branch (the backlog planned before the hash bulk existed) with a fresh
+/// plan: the already-indexed file now goes in bulk. The tip follower's staged
+/// item is not the reconcile's and stays.
+#[tokio::test]
+async fn a_reconcile_replans_the_branch_backlog_in_bulk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_repo = tmp.path().join("main");
+    std::fs::create_dir_all(main_repo.join(".git")).unwrap();
+    std::fs::write(main_repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::create_dir_all(main_repo.join("src")).unwrap();
+    std::fs::write(main_repo.join("src/same.rs"), b"fn same() {}").unwrap();
+    let wt = add_linked_worktree(&main_repo, "wt-x", "agent/x");
+    std::fs::write(wt.join("src/same.rs"), b"fn same() {}").unwrap();
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let main_str = main_repo.to_string_lossy().to_string();
+    insert_watch_folder(&pool, "w1", "t1", &main_str).await;
+    let hash = compute_bytes_hash(b"fn same() {}");
+    insert_tracked_file(&pool, "w1", &["main"], &hash, "src/same.rs").await;
+    insert_old_worktree_add(
+        &pool,
+        "old",
+        "src/same.rs",
+        r#"{"worktree_membership":true}"#,
+    )
+    .await;
+    insert_old_worktree_add(
+        &pool,
+        "staged",
+        "src/tip.rs",
+        r#"{"worktree_membership":true,"read_root":"/stage","git_stage":true}"#,
+    )
+    .await;
+
+    let qm = QueueManager::new(pool.clone());
+    reconcile_worktree_branches(
+        &pool,
+        &qm,
+        "w1",
+        "t1",
+        "projects",
+        &main_str,
+        &AllowedExtensions::default(),
+    )
+    .await;
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT queue_id, item_type FROM unified_queue WHERE tenant_id = 't1' ORDER BY item_type",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    assert!(
+        !ids.contains(&"old"),
+        "the old per-file add is replaced: {rows:?}"
+    );
+    assert!(
+        ids.contains(&"staged"),
+        "the follower's item stays: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter().filter(|r| r.1 == "tenant").count(),
+        1,
+        "the file now goes in one bulk op: {rows:?}"
+    );
+    assert_eq!(rows.len(), 2, "{rows:?}");
+}

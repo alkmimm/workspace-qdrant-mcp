@@ -131,6 +131,40 @@ pub(super) async fn purge_checkoutless_worktree_work(
     Ok(removed)
 }
 
+/// Drop `branch`'s pending worktree-reconcile adds right before the branch is
+/// reconciled again, so the reconcile re-plans them from scratch.
+///
+/// Those adds were planned by an earlier pass: before the hash-matched bulk
+/// existed (2026-11-11: ~124k per-file items of live worktrees queued that
+/// way, ~680 ms each), or for content another branch has indexed since. The
+/// reconcile that follows decides again what the branch still owes — in bulk
+/// where the index holds the content, per file where it does not — so
+/// replacing them never loses work. Items a worker holds, the tip follower's
+/// staged items and anything queued after `cutoff` are kept. Returns the
+/// items removed (0 on error, logged: the reconcile then simply adds to them).
+pub(super) async fn replan_pending_worktree_adds(
+    pool: &SqlitePool,
+    tenant_id: &str,
+    branch: &str,
+    cutoff: &str,
+) -> u64 {
+    match purge_branch(pool, tenant_id, branch, cutoff).await {
+        Ok(n) => {
+            if n > 0 {
+                info!(
+                    "worktree replan: {tenant_id} — branch '{branch}': replaced {n} pending \
+                     worktree item(s) with a fresh plan"
+                );
+            }
+            n
+        }
+        Err(e) => {
+            warn!("worktree replan: {tenant_id} — {e}");
+            0
+        }
+    }
+}
+
 /// Delete one branch's pending worktree-reconcile adds (one short statement).
 /// `json_valid` guards `json_extract`, which fails on malformed metadata.
 async fn purge_branch(

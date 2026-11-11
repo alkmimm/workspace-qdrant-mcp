@@ -28,7 +28,9 @@ use super::worktree_membership::{
     enqueue_worktree_divergent, enqueue_worktree_membership, enqueue_worktree_new_on_branch,
     WorktreeRef,
 };
-use super::worktree_queue_purge::{checked_out_branches, CheckoutlessPurge, PurgeTarget};
+use super::worktree_queue_purge::{
+    checked_out_branches, replan_pending_worktree_adds, CheckoutlessPurge, PurgeTarget,
+};
 
 /// Reconcile branch membership for every linked worktree of a main repository.
 ///
@@ -106,6 +108,12 @@ pub(super) async fn reconcile_linked_worktree(
     let Some(wt_root) = readable_worktree_root(wt, main_project_root, branch) else {
         return 0;
     };
+
+    // Re-plan from scratch: what an earlier pass queued for this branch is
+    // replaced by what the sets below decide now (bulk where the index already
+    // holds the content). Taken before anything is enqueued below.
+    let cutoff = wqm_common::timestamps::now_utc();
+    replan_pending_worktree_adds(pool, tenant_id, branch, &cutoff).await;
 
     // Committed divergence: paths git reports as Modified between the main
     // HEAD and this branch's tip. The baseline SKIPS these (reading them from

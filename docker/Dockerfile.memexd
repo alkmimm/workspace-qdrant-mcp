@@ -514,8 +514,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
         strategies::processing::file::item_metadata \
         --test-threads=4 2>&1 | tee /tmp/branch-switch.log; \
-    grep -q "^test result: ok\. 38 passed" /tmp/branch-switch.log \
-    || { echo "GATE: expected exactly 38 branch_switch + item_metadata tests to run and pass — \
+    grep -q "^test result: ok\. 39 passed" /tmp/branch-switch.log \
+    || { echo "GATE: expected exactly 39 branch_switch + item_metadata tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the membership reconcile, worktree discovery and the branch tip follower. If you ADDED \
 a test here, bump this count."; exit 1; }
