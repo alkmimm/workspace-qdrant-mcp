@@ -238,7 +238,9 @@ never there, and a file the worktree branch deleted may still be. Every
 on-disk staleness decision per `(path, branch)` resolves the branch's checkout
 through `git::BranchCheckouts` — the main folder for its HEAD, the leaf
 worktree for a worktree branch, nothing for a branch no checkout has (left to
-branch pruning):
+branch pruning) and nothing for the trunk outside the main folder (followed
+from git, `git::followed_trunk`: a worktree on it may be behind what the index
+holds):
 
 | Path | Decision |
 |---|---|

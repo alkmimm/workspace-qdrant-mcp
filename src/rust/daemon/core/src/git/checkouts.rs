@@ -10,7 +10,9 @@
 //! wiped ~92% of what it touched (2026-10-03).
 //!
 //! A branch with no checkout cannot be judged from disk at all; its tags are
-//! branch pruning's business. Every on-disk staleness check that acts per
+//! branch pruning's business. Nor can the trunk outside the main folder: it is
+//! followed from git (`git::followed_trunk`), so a linked worktree on it is
+//! not its checkout. Every on-disk staleness check that acts per
 //! `(path, branch)` resolves the checkout here (CLAUDE.md reconciliation
 //! invariant: "the branch comes from the walked tree").
 
@@ -76,10 +78,16 @@ impl BranchCheckouts {
         if let Some(branch) = &head {
             roots.insert(branch.clone(), main_root.to_path_buf());
         }
+        // The trunk outside the main folder is followed from git: a linked
+        // worktree on it is a copy git may have moved past, never its judge.
+        let followed = super::followed_trunk(main_root).map(|t| t.name);
         for wt in list_linked_worktrees(main_root) {
             let Some(branch) = wt.branch else {
                 continue;
             };
+            if followed.as_deref() == Some(branch.as_str()) {
+                continue;
+            }
             let root = PathBuf::from(canonicalize_host_path(&wt.root.to_string_lossy()));
             if root == main_root || !root.is_dir() || !is_leaf_worktree_root(&root) {
                 continue;

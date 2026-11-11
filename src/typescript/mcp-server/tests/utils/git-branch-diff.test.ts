@@ -119,6 +119,76 @@ describe('getPathsChangedBetween', () => {
   });
 });
 
+/**
+ * The trunk resolves as the daemon indexes it (`git::followed_trunk`): tecsul's
+ * local `release/platform` sat 1,406 commits behind origin (2026-11-11), and a
+ * diff against it reported every file origin had changed as the branch's own.
+ */
+describe('the trunk at its followed tip', () => {
+  beforeEach(() => clearBranchDiffCache());
+
+  const TRUNK_REFS = ['refs/heads/main', 'refs/remotes/origin/main', 'refs/heads/feat'];
+
+  /** A repo whose main folder has `head` checked out; `fastForward`: origin/main contains main. */
+  function trunkRunner(head: string, fastForward: boolean): ReturnType<typeof vi.fn> & GitRunner {
+    return vi.fn().mockImplementation(async (_root: string, args: readonly string[]) => {
+      if (args[0] === 'for-each-ref') return TRUNK_REFS.join('\n') + '\n';
+      if (args[0] === 'symbolic-ref') return `${head}\n`;
+      if (args[0] === 'merge-base') return fastForward ? '' : null;
+      if (args[0] === 'diff') return '';
+      if (args[0] === 'ls-tree') return 'a.ts\0';
+      return null;
+    }) as ReturnType<typeof vi.fn> & GitRunner;
+  }
+
+  const trunkIsMain = () => 'main';
+  const diffArgs = (run: ReturnType<typeof vi.fn>) =>
+    run.mock.calls.find((c) => (c[1] as string[])[0] === 'diff')?.[1] as string[];
+
+  it('diffs against origin/<trunk> when it fast-forwards the local trunk', async () => {
+    const run = trunkRunner('refs/heads/develop', true);
+    await getPathsChangedBetweenWith('/repo', 'main', 'feat', run, NOW, trunkIsMain);
+    expect(diffArgs(run)).toContain('refs/remotes/origin/main');
+    expect(run).toHaveBeenCalledWith('/repo', [
+      'merge-base',
+      '--is-ancestor',
+      'refs/heads/main',
+      'refs/remotes/origin/main',
+    ]);
+  });
+
+  it('keeps the local trunk when the main folder has it, or it has commits of its own', async () => {
+    const onTrunk = trunkRunner('refs/heads/main', true);
+    await getPathsChangedBetweenWith('/repo', 'main', 'feat', onTrunk, NOW, trunkIsMain);
+    expect(diffArgs(onTrunk)).toContain('refs/heads/main');
+    clearBranchDiffCache();
+    const diverged = trunkRunner('refs/heads/develop', false);
+    await getPathsChangedBetweenWith('/repo', 'main', 'feat', diverged, NOW, trunkIsMain);
+    expect(diffArgs(diverged)).toContain('refs/heads/main');
+  });
+
+  it('leaves every other branch at its local ref', async () => {
+    const run = trunkRunner('refs/heads/develop', true);
+    await getPathsChangedBetweenWith('/repo', 'main', 'feat', run, NOW, () => 'develop');
+    expect(diffArgs(run)).toContain('refs/heads/main');
+    expect(run).not.toHaveBeenCalledWith('/repo', expect.arrayContaining(['merge-base']));
+  });
+
+  it('counts the files of the followed trunk tip', async () => {
+    const run = trunkRunner('refs/heads/develop', true);
+    expect(await countFilesAtBranchTipWith('/repo', 'main', run, NOW, trunkIsMain)).toBe(1);
+    expect(run).toHaveBeenLastCalledWith('/repo', [
+      'ls-tree',
+      '-r',
+      '--name-only',
+      '-z',
+      'refs/remotes/origin/main',
+      '--',
+      '.',
+    ]);
+  });
+});
+
 describe('countFilesAtBranchTip', () => {
   beforeEach(() => clearBranchDiffCache());
 

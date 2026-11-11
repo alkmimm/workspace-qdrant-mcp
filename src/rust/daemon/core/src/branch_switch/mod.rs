@@ -16,6 +16,7 @@ mod branch_tips;
 mod db;
 mod handlers;
 mod queue;
+mod tip_apply;
 mod tip_stage;
 mod types;
 mod worktree_bulk;
