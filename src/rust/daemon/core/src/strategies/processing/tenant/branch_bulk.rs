@@ -85,40 +85,32 @@ pub(super) async fn handle_branch_membership_bulk(
         return Ok(());
     }
 
-    // Append the branch per base_point, CHECKPOINTING each one as it succeeds.
-    // Qdrant first (the proven `add_branch_to_base_point`, keeping only the
-    // base_points the vector store still backs via its count==0 fallback), then
-    // immediately persist that single base_point to state.db + search.db.
+    // Qdrant first, then the two SQLite stores only for the base_points the
+    // vector store backs (a base_point with no point is never tagged, so the
+    // index never claims membership the vector store cannot serve).
     //
-    // Persisting per base_point — rather than once at the end — means a lease
-    // expiry mid-op leaves COMMITTED progress: the next pass's candidate SELECT
-    // (`branch NOT EXISTS`) skips the done base_points, so the op RESUMES instead
-    // of re-running every (slow) set_payload. With an end-only persist, an op that
-    // exceeded the 300s lease before its single terminal write was silently
-    // re-leased from scratch and looped forever without converging (the lease-loop
-    // that starved the queue under heavy Qdrant load).
-    let mut tagged = 0usize;
-    let mut missing = 0usize;
-    for bp in &candidates {
-        let points = ctx
-            .storage_client
-            .add_branch_to_base_point(&item.collection, bp, &spec.branch)
-            .await
-            .map_err(|e| UnifiedProcessorError::Storage(e.to_string()))?;
-        if points > 0 {
-            persist_branch_tag_for_base_points(
-                &ctx.pool,
-                ctx.search_db.as_ref(),
-                &spec.watch_folder_id,
-                &spec.branch,
-                std::slice::from_ref(bp),
-            )
-            .await?;
-            tagged += 1;
-        } else {
-            missing += 1;
-        }
-    }
+    // One batched append for the whole op (concurrent reads, writes grouped by
+    // resulting branch set): ~1 s for 25 base_points instead of ~6 s of
+    // sequential round-trips. The op is too short now for a lease to expire
+    // mid-way (the lease loop that once forced per-base_point checkpoints), and
+    // a crash between the two steps only re-runs an idempotent append: the
+    // next pass's candidate SELECT still lists the base_points and the Qdrant
+    // append skips arrays that already hold the branch.
+    let tagged_bps = ctx
+        .storage_client
+        .add_branch_to_base_points(&item.collection, &candidates, &spec.branch)
+        .await
+        .map_err(|e| UnifiedProcessorError::Storage(e.to_string()))?;
+    persist_branch_tag_for_base_points(
+        &ctx.pool,
+        ctx.search_db.as_ref(),
+        &spec.watch_folder_id,
+        &spec.branch,
+        &tagged_bps,
+    )
+    .await?;
+    let tagged = tagged_bps.len();
+    let missing = candidates.len() - tagged;
     if missing > 0 {
         warn!(
             "branch bulk: {} base_points had 0 Qdrant points — left for per-file reconcile (branch={})",
