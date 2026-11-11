@@ -12,8 +12,10 @@ use crate::unified_queue_schema::{
 use crate::watching_queue::get_current_branch;
 
 /// Paths per bulk branch-membership op. Kept SMALL on purpose: the processor
-/// runs each op to completion on one concurrency slot, and the op does a
-/// SEQUENTIAL Qdrant `set_payload` (`add_branch_to_base_point`) per base_point.
+/// runs each op to completion on one concurrency slot. Its Qdrant append is
+/// batched now (concurrent reads, one write per resulting branch set —
+/// `add_branch_to_base_points`), but it used to be a SEQUENTIAL `set_payload`
+/// per base_point, which is what these numbers describe.
 /// Under heavy load (e.g. a concurrent force-reembed hammering Qdrant) each
 /// set_payload can take seconds, so a large chunk turns one op into a 30-80 min
 /// monolith that monopolizes its slot and starves File ingestion — and a daemon

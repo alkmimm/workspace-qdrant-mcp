@@ -556,9 +556,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- \
         branch_mirror branch_reconcile add_branch_to_file_metadata_by_file_ids branch_bulk \
         --test-threads=4 2>&1 | tee /tmp/branch-mirror.log; \
-    grep -q "^test result: ok\. 21 passed" /tmp/branch-mirror.log \
-    || { echo "GATE: expected exactly 21 branch-mirror + bulk branch-membership tests (incl. \
-the hash-certified worktree bulk) to run and pass — this gate counted nothing until 2026-11-10, \
+    grep -q "^test result: ok\. 23 passed" /tmp/branch-mirror.log \
+    || { echo "GATE: expected exactly 23 branch-mirror + bulk branch-membership tests (incl. \
+the hash-certified worktree bulk and the batched Qdrant append plan) to run and pass — this gate counted nothing until 2026-11-10, \
 so a rename silently emptied it. If you ADDED a test here, bump this count."; exit 1; }
 
 # search.db pool per-connection PRAGMA test runs here, same rationale: hermetic
