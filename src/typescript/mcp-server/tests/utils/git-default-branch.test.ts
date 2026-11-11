@@ -37,9 +37,9 @@ describe('parseDefaultBranch', () => {
   });
 
   it('falls back to a local main, then a local master', () => {
-    expect(parseDefaultBranch([line('refs/heads/master'), line('refs/heads/main')].join('\n'))).toBe(
-      'main'
-    );
+    expect(
+      parseDefaultBranch([line('refs/heads/master'), line('refs/heads/main')].join('\n'))
+    ).toBe('main');
     expect(parseDefaultBranch(line('refs/heads/master'))).toBe('master');
   });
 
@@ -56,24 +56,37 @@ describe('parseDefaultBranch', () => {
   it('returns null when git listed none of the refs', () => {
     expect(parseDefaultBranch('')).toBeNull();
   });
+
+  it('prefers the configured trunk over origin/HEAD when it exists', () => {
+    const out = [
+      line('refs/remotes/origin/HEAD', 'refs/remotes/origin/master'),
+      line('refs/heads/release/platform'),
+    ].join('\n');
+    expect(parseDefaultBranch(out, 'release/platform')).toBe('release/platform');
+    expect(parseDefaultBranch(out, 'no-such')).toBe('master');
+  });
 });
 
 describe('getDefaultBranchWith — caching', () => {
   beforeEach(() => clearDefaultBranchCache());
 
-  it('asks git once and keeps a definitive answer', () => {
+  it('keeps a definitive answer for minutes, then asks again', () => {
+    // Finite so a `git config wqm.trunk …` takes effect without a restart.
     const run = vi.fn(() => line('refs/heads/main'));
     let now = 0;
     expect(getDefaultBranchWith('/repo', run, () => now)).toBe('main');
-    now = 10 * 60 * 60 * 1000; // ten hours later
+    now = 4 * 60_000; // inside the success TTL: no new subprocess
     expect(getDefaultBranchWith('/repo', run, () => now)).toBe('main');
     expect(run).toHaveBeenCalledTimes(1);
+    now = 6 * 60_000;
+    expect(getDefaultBranchWith('/repo', run, () => now)).toBe('main');
+    expect(run).toHaveBeenCalledTimes(2);
   });
 
   it('keeps a definitive "no trunk here" answer too', () => {
     const run = vi.fn(() => '');
     expect(getDefaultBranchWith('/repo', run, () => 0)).toBeNull();
-    expect(getDefaultBranchWith('/repo', run, () => 999_999_999)).toBeNull();
+    expect(getDefaultBranchWith('/repo', run, () => 4 * 60_000)).toBeNull();
     expect(run).toHaveBeenCalledTimes(1);
   });
 
@@ -90,6 +103,42 @@ describe('getDefaultBranchWith — caching', () => {
     now = 61_000; // past it: git is asked again and the real answer sticks
     expect(getDefaultBranchWith('/repo', run, () => now)).toBe('main');
     expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('a configured wqm.trunk wins when the branch exists, and its refs are asked for', () => {
+    // tecsul: origin/HEAD is the legacy master; the work happens off release/platform.
+    const run = vi.fn((_root: string, extra?: readonly string[]) =>
+      [
+        line('refs/remotes/origin/HEAD', 'refs/remotes/origin/master'),
+        ...((extra ?? []).includes('refs/remotes/origin/release/platform')
+          ? [line('refs/remotes/origin/release/platform')]
+          : []),
+      ].join('\n')
+    );
+    expect(
+      getDefaultBranchWith(
+        '/repo',
+        run,
+        () => 0,
+        () => 'release/platform\n'
+      )
+    ).toBe('release/platform');
+    expect(run.mock.calls[0]?.[1]).toEqual([
+      'refs/heads/release/platform',
+      'refs/remotes/origin/release/platform',
+    ]);
+  });
+
+  it('a configured trunk that names no branch is ignored', () => {
+    const run = vi.fn(() => line('refs/remotes/origin/HEAD', 'refs/remotes/origin/master'));
+    expect(
+      getDefaultBranchWith(
+        '/repo',
+        run,
+        () => 0,
+        () => 'relese/platform'
+      )
+    ).toBe('master');
   });
 
   it('caches per repository', () => {

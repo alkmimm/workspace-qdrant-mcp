@@ -129,8 +129,23 @@ export function getHeadCommit(repoRoot: string): string | null {
  */
 const DEFAULT_BRANCH_FAILURE_TTL_MS = 60_000;
 
+/**
+ * How long a SUCCESSFUL lookup is remembered. Finite so a `git config
+ * wqm.trunk …` (or a re-pointed `origin/HEAD`) takes effect without restarting
+ * the server; one cheap lookup per repo every few minutes.
+ */
+const DEFAULT_BRANCH_SUCCESS_TTL_MS = 5 * 60_000;
+
+/** Git config key naming a repository's trunk (mirrors the daemon's `TRUNK_CONFIG_KEY`). */
+export const TRUNK_CONFIG_KEY = 'wqm.trunk';
+
 /** The refs that decide the trunk, in one `git for-each-ref` call. */
 const DEFAULT_BRANCH_REFS = ['refs/remotes/origin/HEAD', 'refs/heads/main', 'refs/heads/master'];
+
+/** The refs that prove a configured trunk exists (local, or only on the remote). */
+function trunkRefs(trunk: string): string[] {
+  return [`refs/heads/${trunk}`, `refs/remotes/origin/${trunk}`];
+}
 
 interface CachedDefaultBranch {
   value: string | null;
@@ -150,19 +165,32 @@ export function clearDefaultBranchCache(): void {
  * `null` when git could not answer (not a repo, git missing, timeout) — which
  * is different from git answering "none of those refs exist" (empty output).
  */
-export type ForEachRefRunner = (repoRoot: string) => string | null;
+export type ForEachRefRunner = (repoRoot: string, extraRefs?: readonly string[]) => string | null;
 
-const runForEachRef: ForEachRefRunner = (repoRoot) => {
+const runForEachRef: ForEachRefRunner = (repoRoot, extraRefs = []) => {
   try {
     return execFileSync(
       'git',
-      ['-C', repoRoot, 'for-each-ref', '--format=%(refname)%09%(symref)', ...DEFAULT_BRANCH_REFS],
+      [
+        '-C',
+        repoRoot,
+        'for-each-ref',
+        '--format=%(refname)%09%(symref)',
+        ...DEFAULT_BRANCH_REFS,
+        ...extraRefs,
+      ],
       { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000, windowsHide: true }
     );
   } catch {
     return null;
   }
 };
+
+/** Reads the {@link TRUNK_CONFIG_KEY} config; `null` when unset or unreadable. */
+export type TrunkConfigRunner = (repoRoot: string) => string | null;
+
+const runTrunkConfig: TrunkConfigRunner = (repoRoot) =>
+  runGit(repoRoot, ['config', '--get', TRUNK_CONFIG_KEY]);
 
 /**
  * The repository's DEFAULT branch — the trunk, not the checked-out branch.
@@ -175,7 +203,11 @@ const runForEachRef: ForEachRefRunner = (repoRoot) => {
  * is not reliably the trunk (measured: a feature branch held 98.7% of one
  * project's files against the trunk's 97.3%).
  *
- * Precedence: `refs/remotes/origin/HEAD` (what the remote itself calls
+ * Precedence: the `wqm.trunk` git config when it names a branch the repository
+ * has (locally or as `origin/<name>`) — for a repo whose work happens off a
+ * branch other than the remote's default (tecsul: `origin/HEAD` is the legacy
+ * `master`, every agent branch comes off `release/platform`) — then
+ * `refs/remotes/origin/HEAD` (what the remote itself calls
  * default), then a local `main`, then a local `master`. Deliberately NOT
  * `init.defaultBranch`: that config names the branch git creates in NEW
  * repositories — a user-wide preference, not this repository's trunk — and
@@ -187,24 +219,27 @@ const runForEachRef: ForEachRefRunner = (repoRoot) => {
  * heuristic rather than guessing a name that does not exist in the repo.
  */
 export function getDefaultBranch(repoRoot: string): string | null {
-  return getDefaultBranchWith(repoRoot, runForEachRef, Date.now);
+  return getDefaultBranchWith(repoRoot, runForEachRef, Date.now, runTrunkConfig);
 }
 
-/** {@link getDefaultBranch} with an injectable git runner and clock (tests). */
+/** {@link getDefaultBranch} with injectable git runners and clock (tests). */
 export function getDefaultBranchWith(
   repoRoot: string,
   run: ForEachRefRunner,
-  now: () => number
+  now: () => number,
+  readTrunkConfig: TrunkConfigRunner = () => null
 ): string | null {
   const cached = defaultBranchCache.get(repoRoot);
   const hit = cached !== undefined && cached.expiresAt > now();
   recordCacheLookup('default_branch', hit);
   if (hit) return cached.value;
-  const output = run(repoRoot);
-  const value = output === null ? null : parseDefaultBranch(output);
+  const configured = readTrunkConfig(repoRoot)?.trim() || null;
+  const output = run(repoRoot, configured ? trunkRefs(configured) : []);
+  const value = output === null ? null : parseDefaultBranch(output, configured);
   defaultBranchCache.set(repoRoot, {
     value,
-    expiresAt: output === null ? now() + DEFAULT_BRANCH_FAILURE_TTL_MS : Number.POSITIVE_INFINITY,
+    expiresAt:
+      now() + (output === null ? DEFAULT_BRANCH_FAILURE_TTL_MS : DEFAULT_BRANCH_SUCCESS_TTL_MS),
   });
   return value;
 }
@@ -213,12 +248,20 @@ export function getDefaultBranchWith(
  * Pick the trunk out of `for-each-ref --format=%(refname)%09%(symref)` output.
  * Ref names are compared exactly: `for-each-ref` treats a pattern as a prefix,
  * so `refs/heads/main` also lists a branch called `main/experiment`.
+ * `configured` (the `wqm.trunk` config) wins when the output proves the
+ * branch exists; a name that resolves to nothing is ignored.
  */
-export function parseDefaultBranch(forEachRefOutput: string): string | null {
+export function parseDefaultBranch(
+  forEachRefOutput: string,
+  configured: string | null = null
+): string | null {
   const symrefByRef = new Map<string, string>();
   for (const line of forEachRefOutput.split('\n')) {
     const [refname, symref = ''] = line.split('\t');
     if (refname && refname.trim().length > 0) symrefByRef.set(refname.trim(), symref.trim());
+  }
+  if (configured && trunkRefs(configured).some((ref) => symrefByRef.has(ref))) {
+    return configured;
   }
   const remotePrefix = 'refs/remotes/origin/';
   const remoteHead = symrefByRef.get('refs/remotes/origin/HEAD');
