@@ -9,6 +9,7 @@
 import type { ProjectDetector, ProjectInfo } from '../utils/project-detector.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import { getCurrentBranch } from '../utils/git-utils.js';
+import { linkedWorktreeOf } from '../utils/linked-worktrees.js';
 import {
   getEffectiveCwd,
   getRequestContext,
@@ -64,6 +65,18 @@ function record(identity: ProjectIdentity): ProjectIdentity {
   return identity;
 }
 
+/**
+ * The branch a project-scoped read defaults to: the explicit `branch`, else
+ * the branch of the linked worktree the caller's cwd is in, else the branch
+ * checked out in the project's main folder.
+ *
+ * The worktree rung matters because `projectPath` is always the MAIN checkout
+ * (worktrees are indexed under it): without it, an agent working in a
+ * worktree read the main folder's branch — on tecsul a personal branch, with
+ * the legacy trunk filling in — and had to pass `branch` on every call (field
+ * feedback 2026-11-11). A detached worktree falls through to the main folder,
+ * as before.
+ */
 export function resolveEffectiveBranch(params: {
   explicitBranch: string | undefined;
   scope: string;
@@ -73,6 +86,8 @@ export function resolveEffectiveBranch(params: {
   if (params.explicitBranch !== undefined) return params.explicitBranch;
   if (params.scope !== 'project' || !params.projectId) return undefined;
   if (!params.projectPath) return undefined;
+  const worktree = linkedWorktreeOf(getEffectiveCwd(), params.projectPath);
+  if (worktree?.branch) return worktree.branch;
   const branch = getCurrentBranch(params.projectPath);
   return branch && branch !== 'HEAD' ? branch : undefined;
 }
