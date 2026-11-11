@@ -11,6 +11,7 @@ import { dirname, posix, resolve } from 'node:path';
 import { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import { canonicalizeHostPath } from '../clients/project-queries.js';
 import { getEffectiveCwd } from './request-context.js';
+import { linkedWorktreeOf } from './linked-worktrees.js';
 import { recordCacheLookup } from '../telemetry/metrics.js';
 
 // Project signature files/directories
@@ -172,6 +173,10 @@ export class ProjectDetector {
     if (info) {
       return info;
     }
+    const viaWorktree = this.projectOwningWorktreeAt(projectPath);
+    if (viaWorktree) {
+      return viaWorktree;
+    }
     if (options.fallbackToSoleProject) {
       const sole = this.soleRegisteredProject();
       return sole ? { ...sole, resolvedBy: 'sole-project' } : null;
@@ -232,6 +237,37 @@ export class ProjectDetector {
     }
 
     return this.fetchProjectInfo(normalizedPath);
+  }
+
+  /**
+   * The registered project one of whose linked worktrees contains `path` — a
+   * worktree outside the repository (`~/.codex/worktrees/<n>/<repo>`,
+   * `<repo>-worktrees/<name>`) that no registered path prefixes. Read from
+   * each project's `.git/worktrees` (see `linked-worktrees.ts`); null when
+   * none owns it or the database is unavailable.
+   */
+  private projectOwningWorktreeAt(path: string): ProjectInfo | null {
+    if (!this.stateManager.isConnected()) {
+      const initResult = this.stateManager.initialize();
+      if (initResult.status === 'degraded') {
+        return null;
+      }
+    }
+    const all = this.stateManager.listAllProjects();
+    if (all.status !== 'ok') {
+      return null;
+    }
+    for (const project of all.data) {
+      if (linkedWorktreeOf(path, project.project_path)) {
+        return {
+          projectId: project.project_id,
+          projectPath: project.project_path,
+          isActive: project.is_active,
+          gitRemote: project.git_remote_url,
+        };
+      }
+    }
+    return null;
   }
 
   /**
