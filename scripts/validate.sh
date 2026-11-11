@@ -25,4 +25,7 @@ cd "$REPO_ROOT"
 
 echo "=== Containerized validation (clippy + tests, CI parity) ==="
 echo "Building target 'validate' from docker/Dockerfile.memexd ..."
-exec docker build --target validate -f docker/Dockerfile.memexd "$@" .
+# `type=cacheonly`: the gate's verdict is the build result, never an image.
+# Exporting the stage left an untagged ~2.7 GB image behind on EVERY run
+# (2026-11-10: 7 such <none> images from one day of validating).
+exec docker build --target validate --output type=cacheonly -f docker/Dockerfile.memexd "$@" .

@@ -31,8 +31,16 @@ ingester:
 
 compactor:
   compaction:
-    # Local dev retention: keep two days of traces, then compact away.
-    block_retention: 48h
+    # Local dev retention: keep one day of traces, then compact away. memexd
+    # writes ~5 GB of blocks a day, so 48h kept ~11 GB for little benefit.
+    #
+    # Retention only runs while the blocklist poller succeeds. ONE block whose
+    # meta.json is empty (a crash mid-write) makes every poll fail with
+    # "unexpected end of JSON input", the compactor then sees no blocks, and
+    # nothing is ever deleted: on 2026-11-10 the volume held 12k blocks back
+    # to 2026-09-11 (11.2 GB). If `failed to poll` shows in the tempo logs,
+    # move the block with the empty meta.json out of /var/tempo/blocks.
+    block_retention: 24h
 
 storage:
   trace:
