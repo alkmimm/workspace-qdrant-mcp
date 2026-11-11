@@ -40,14 +40,14 @@ export const HELP_TOPICS = {
       '(default, strongest) and "hybrid" only; for a known identifier or exact string use the',
       '`grep` tool or exact=true, not a mode. Parameter-level detail — the ENGLISH-query rule, the',
       'fileType taxonomy and its text-vs-docs gotcha, pathGlob/pathExclude semantics, excludeTests',
-      '— lives in the `search` tool\'s own parameter descriptions; read those rather than guessing.',
+      "— lives in the `search` tool's own parameter descriptions; read those rather than guessing.",
     ].join(' '),
   },
   exact: {
     summary: 'grep paging, list layout, retrieve by point id vs metadata filter.',
     content: [
       'Use `grep` for regex / exact substring across the project — faster and cheaper than `search`',
-      'with exact=true for known strings; page big sweeps by passing the response\'s next_offset',
+      "with exact=true for known strings; page big sweeps by passing the response's next_offset",
       'back as offset. Use `list` (start with format="summary") to understand layout before',
       'drilling in. `retrieve` fetches a known point: pass the result `id` field as `documentId`',
       `(NOT metadata.document_id). ${RETRIEVE_ID_FILTER_HINT} ${RETRIEVE_LOCATION_HINT}`,
@@ -55,7 +55,8 @@ export const HELP_TOPICS = {
     ].join(' '),
   },
   store: {
-    summary: 'The store types (scratchpad, library, url, feedback, project) and what is daemon-owned.',
+    summary:
+      'The store types (scratchpad, library, url, feedback, project) and what is daemon-owned.',
     content: [
       '`store` infers `type` from an unambiguous arg (libraryName → library, path → project,',
       'url → url); a bare {content} with no signal errors rather than silently defaulting. Types:',
@@ -98,7 +99,9 @@ export const HELP_TOPICS = {
       'close out with finish_agent_branch (merged) or abandon_agent_branch (discarded).',
       'sync_current_branch is for git hooks only — agents must not call it. Multi-clone:',
       'tenant_ids are stable per clone; if results come from the wrong clone, pass `projectId`',
-      'explicitly.',
+      'explicitly. Trunk: a branch view fills in unchanged files from the project trunk —',
+      "origin/HEAD by default, or the repo's `wqm.trunk` git config when the work happens off",
+      'another branch (e.g. `git config wqm.trunk release/platform`).',
     ].join(' '),
   },
   graph: {

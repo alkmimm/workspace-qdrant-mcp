@@ -9,11 +9,26 @@ use std::sync::{Arc, Mutex};
 
 use once_cell::sync::Lazy;
 
-/// The repository's default branch: `origin/HEAD`'s target when the remote
-/// names one, else `main`, else `master` (the same order the MCP server's
-/// `getDefaultBranch` uses, so both sides agree on the trunk).
+/// Git config key naming a repository's trunk when it is not the remote's
+/// default branch (`git config wqm.trunk release/platform`).
+pub const TRUNK_CONFIG_KEY: &str = "wqm.trunk";
+
+/// The repository's default branch — its trunk: the `wqm.trunk` git config
+/// when set to a branch the repository has (locally or as `origin/<name>`),
+/// else `origin/HEAD`'s target when the remote names one, else `main`, else
+/// `master` (the same order the MCP server's `getDefaultBranch` uses, so both
+/// sides agree on the trunk).
+///
+/// The override exists because the remote's default is not always where the
+/// work happens: tecsul's `origin/HEAD` is the legacy `master` (0 files under
+/// `plataforma/`), while every agent branch comes off `release/platform` — so
+/// branch views filled in from `master` and default reads landed on legacy
+/// code (field feedback 2026-11-11).
 pub fn default_branch(repo_root: &Path) -> Option<String> {
     let repo = git2::Repository::open(repo_root).ok()?;
+    if let Some(trunk) = configured_trunk(&repo) {
+        return Some(trunk);
+    }
     if let Ok(head) = repo.find_reference("refs/remotes/origin/HEAD") {
         if let Some(target) = head.symbolic_target() {
             if let Some(name) = target.strip_prefix("refs/remotes/origin/") {
@@ -27,6 +42,20 @@ pub fn default_branch(repo_root: &Path) -> Option<String> {
         .into_iter()
         .find(|b| repo.find_reference(&format!("refs/heads/{b}")).is_ok())
         .map(str::to_string)
+}
+
+/// The `wqm.trunk` config, when it names a branch the repository has. A name
+/// that resolves to nothing is ignored, so a typo falls back to the remote's
+/// default instead of pointing every fill-in at an empty branch.
+fn configured_trunk(repo: &git2::Repository) -> Option<String> {
+    let name = repo.config().ok()?.get_string(TRUNK_CONFIG_KEY).ok()?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let exists = |r: &str| repo.find_reference(r).is_ok();
+    (exists(&format!("refs/heads/{name}")) || exists(&format!("refs/remotes/origin/{name}")))
+        .then(|| name.to_string())
 }
 
 type TipKey = (PathBuf, git2::Oid, git2::Oid);
@@ -249,5 +278,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(default_branch(dir.path()).as_deref(), Some("develop"));
+    }
+
+    /// `wqm.trunk` overrides the remote's default when it names a branch the
+    /// repository has; a name that resolves to nothing is ignored.
+    #[test]
+    fn default_branch_honours_the_configured_trunk() {
+        let dir = two_branch_repo();
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        let dev = repo.refname_to_id("refs/heads/develop").unwrap();
+        repo.reference("refs/heads/master", dev, true, "").unwrap();
+        let mut config = repo.config().unwrap();
+
+        config.set_str(TRUNK_CONFIG_KEY, "feature").unwrap();
+        assert_eq!(default_branch(dir.path()).as_deref(), Some("feature"));
+
+        config.set_str(TRUNK_CONFIG_KEY, "no-such-branch").unwrap();
+        assert_eq!(
+            default_branch(dir.path()).as_deref(),
+            Some("master"),
+            "a typo falls back to the remote's default"
+        );
+
+        repo.reference("refs/remotes/origin/release/platform", dev, true, "")
+            .unwrap();
+        config
+            .set_str(TRUNK_CONFIG_KEY, "release/platform")
+            .unwrap();
+        assert_eq!(
+            default_branch(dir.path()).as_deref(),
+            Some("release/platform"),
+            "a trunk only the remote has still counts"
+        );
     }
 }

@@ -730,8 +730,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         strategies::processing::file::graph_lsp_calls::tests \
         lsp::project_manager::call_hierarchy::tests \
         --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
-    grep -q "^test result: ok\. 284 passed" /tmp/graph-core.log \
-    || { echo "GATE: expected exactly 284 core graph tests (graph::, backfill, ingest, LSP calls, git::tips) \
+    grep -q "^test result: ok\. 285 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 285 core graph tests (graph::, backfill, ingest, LSP calls, git::tips) \
 to run and pass. If you ADDED a test here, bump this count."; exit 1; } \
  && cargo test -p workspace-qdrant-core --no-fail-fast \
         --test graph_algorithm_tests --test graph_extractor_tests \
