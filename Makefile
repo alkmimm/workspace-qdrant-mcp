@@ -160,7 +160,7 @@ check-env:
 # short host (wired into stack-up / redeploy; PREFLIGHT_SOFT=1 downgrades to a
 # warning), `stack-guard` stops THIS compose project — never the others — if
 # the host charge for the VM (vmmemWSL working set; guest footprint when the
-# host cannot be asked) grows past VM_GUARD_STOP_GB (70) or host free memory
+# host cannot be asked) grows past VM_GUARD_STOP_GB (80) or host free memory
 # drops below HOST_GUARD_MIN_FREE_GB (16) for 2 polls in a row while it runs.
 GUARD_PID := $(REPO)/.wqm-fork/memory-guard.pid
 GUARD_UNIT := wqm-memory-guard

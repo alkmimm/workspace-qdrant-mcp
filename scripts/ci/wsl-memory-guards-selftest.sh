@@ -22,7 +22,7 @@ done
 # Probe stubs. Scalars come from FAKE_* env vars ("" = unmeasurable, exactly
 # what the real probes return when they cannot measure). The VM charge can be
 # a space-separated SEQUENCE consumed one value per call, so a guard run can
-# be fed "80 80" (trip) or "80 20 20" (recover) across its polls.
+# be fed "90 90" (trip) or "90 20 20" (recover) across its polls.
 cat > "$TMP/probes.sh" <<'STUB'
 wsl_host_free_kb()        { echo "${FAKE_HOST_FREE_KB-}"; }
 wsl_host_total_kb()       { echo "${FAKE_HOST_TOTAL_KB-133000000}"; }
@@ -57,8 +57,10 @@ expect_preflight() {
 # ── preflight ────────────────────────────────────────────────────────────────
 expect_preflight healthy                    0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 20)
 expect_preflight host-short                 1 FAKE_HOST_FREE_KB=$(gb 10)  FAKE_CHARGE_SEQ=$(gb 20)
-expect_preflight charge-high                1 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 65)
-expect_preflight charge-high-soft           0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 65) PREFLIGHT_SOFT=1
+expect_preflight charge-high                1 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 75)
+expect_preflight charge-high-soft           0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 75) PREFLIGHT_SOFT=1
+# The line is 70 since 2026-11-11 (was 60): 65 GB is a start, not a refusal.
+expect_preflight charge-under-line          0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 65)
 # Cache is only capped when the host cannot say what it is charged: 50 GB of
 # guest cache with a 30 GB host charge is a reclaimed cache, not a risk.
 expect_preflight big-cache-charge-fine      0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 30) FAKE_CACHED_KB=$(gb 50) FAKE_GUEST_KB=$(gb 66)
@@ -70,10 +72,10 @@ expect_preflight psi-unmeasurable           0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_C
 expect_preflight host-unmeasurable          2 FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ=
 expect_preflight host-unmeasurable-soft     0 FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= PREFLIGHT_SOFT=1
 expect_preflight no-host-guest-cache-high   1 FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_CACHED_KB=$(gb 50) FAKE_GUEST_KB=$(gb 55)
-expect_preflight no-host-guest-footprint    1 FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 66)
+expect_preflight no-host-guest-footprint    1 FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 76)
 # Host measurable but no vmmem process (older WSL naming): guest caps apply.
 expect_preflight host-ok-no-vmmem-guest-ok  0 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=
-expect_preflight host-ok-no-vmmem-guest-big 1 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 66)
+expect_preflight host-ok-no-vmmem-guest-big 1 FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 76)
 
 # ── guard ────────────────────────────────────────────────────────────────────
 # run_guard <name> <expected-exit> <expect-stop:yes|no> [VAR=value ...]
@@ -99,26 +101,29 @@ run_guard() {
   fi
 }
 # exit 3 = tripped and stopped; exit 124 = timeout ran out with no trip.
-run_guard trips-after-two-breaches   3   yes FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ="$(gb 80) $(gb 80)"
-run_guard one-breach-then-recovery   124 no  FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ="$(gb 80) $(gb 20)"
+run_guard trips-after-two-breaches   3   yes FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ="$(gb 90) $(gb 90)"
+run_guard one-breach-then-recovery   124 no  FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ="$(gb 90) $(gb 20)"
 run_guard host-short-trips           3   yes FAKE_HOST_FREE_KB=$(gb 5)   FAKE_CHARGE_SEQ=$(gb 20)
 run_guard healthy-never-trips        124 no  FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 20)
+# The line is 80 since 2026-11-11 (was 70): a busy indexer holding the charge
+# at 71–75 GB with 44+ GB free on the host is not stopped any more.
+run_guard under-the-line-never-trips 124 no  FAKE_HOST_FREE_KB=$(gb 45)  FAKE_CHARGE_SEQ="$(gb 75) $(gb 75)"
 # No host view: the guest footprint stands in for the charge.
-run_guard no-host-guest-footprint    3   yes FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 75)
+run_guard no-host-guest-footprint    3   yes FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 85)
 run_guard no-host-guest-fine         124 no  FAKE_HOST_FREE_KB= FAKE_CHARGE_SEQ= FAKE_GUEST_KB=$(gb 20)
 # Page cache is the charge (the 2026-09-19 redeploy): the drop runs, the
 # re-measure (second value in the sequence) is back under the line, and the
 # breach is averted — no stop, ever. The 3rd reading onward stays at 20.
 run_guard cache-drop-averts-breach   124 no  LOG=averted FAKE_HOST_FREE_KB=$(gb 100) FAKE_CACHED_KB=$(gb 50) \
-  GUARD_DROP_CMD="touch '$TMP/dropped'" FAKE_CHARGE_SEQ="$(gb 80) $(gb 40) $(gb 20)"
+  GUARD_DROP_CMD="touch '$TMP/dropped'" FAKE_CHARGE_SEQ="$(gb 90) $(gb 40) $(gb 20)"
 [[ -e "$TMP/dropped" ]] || { echo "FAIL: guard/cache-drop-averts-breach: the drop command never ran"; fails=$(( fails + 1 )); }
 # Real pressure under a big cache: the drop runs, the re-measure is still
 # over the line, the breach counts, and two of them trip as before.
 run_guard cache-drop-not-enough-trips 3  yes LOG="did not clear" FAKE_HOST_FREE_KB=$(gb 100) FAKE_CACHED_KB=$(gb 50) \
-  GUARD_DROP_CMD=true FAKE_CHARGE_SEQ="$(gb 80) $(gb 78) $(gb 80) $(gb 78)"
+  GUARD_DROP_CMD=true FAKE_CHARGE_SEQ="$(gb 90) $(gb 88) $(gb 90) $(gb 88)"
 # No way to drop (sudo and docker both refused): the breach counts as is.
 run_guard cache-drop-unavailable-trips 3 yes LOG="drop unavailable" FAKE_HOST_FREE_KB=$(gb 100) FAKE_CACHED_KB=$(gb 50) \
-  GUARD_DROP_CMD=false FAKE_CHARGE_SEQ="$(gb 80) $(gb 80)"
+  GUARD_DROP_CMD=false FAKE_CHARGE_SEQ="$(gb 90) $(gb 90)"
 # Single-instance lock: the boot unit and `make stack-guard` both start the
 # script, and two guards would each answer the same breach with its own
 # `compose stop`. With a free lock the guard runs normally; with the lock held
@@ -128,9 +133,9 @@ run_guard cache-drop-unavailable-trips 3 yes LOG="drop unavailable" FAKE_HOST_FR
 run_guard lock-free-guard-runs          124 no  GUARD_LOCK="$TMP/free.lock" FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 20)
 exec 8>"$TMP/held.lock"; flock -n 8 || { echo "FAIL: harness could not take the test lock"; fails=$(( fails + 1 )); }
 run_guard lock-held-second-exits-zero     0 no  LOG="another guard already holds" GUARD_LOCK="$TMP/held.lock" \
-  FAKE_HOST_FREE_KB=$(gb 5) FAKE_CHARGE_SEQ="$(gb 80) $(gb 80)"
+  FAKE_HOST_FREE_KB=$(gb 5) FAKE_CHARGE_SEQ="$(gb 90) $(gb 90)"
 exec 8>&-
 
 echo "wsl-memory-guards selftest: $ran cases, $fails failed"
-(( ran == 25 )) || { echo "GATE: expected exactly 25 cases to run (got $ran) — a deleted case is a silently un-gated behaviour; adjust the count when you add one."; exit 1; }
+(( ran == 27 )) || { echo "GATE: expected exactly 27 cases to run (got $ran) — a deleted case is a silently un-gated behaviour; adjust the count when you add one."; exit 1; }
 exit $(( fails > 0 ))

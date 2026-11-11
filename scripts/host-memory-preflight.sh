@@ -29,7 +29,9 @@
 # residue (a `make validate` leaves ~50 GB of reclaimable cargo cache in the
 # guest) when the script cannot; the stack-guard watchdog stays the backstop.
 # Every threshold is an env var; the defaults fit a 127 GB host with a 96 GB
-# WSL cap.
+# WSL cap. VM_MAX_FOOTPRINT_GB keeps 10 GB of room under the guard's
+# VM_GUARD_STOP_GB: both moved up 10 GB on 2026-11-11 (60→70 here, 70→80
+# there). See scripts/wsl-memory-guard.sh for why.
 #
 # Usage:  scripts/host-memory-preflight.sh            # check and exit
 #         PREFLIGHT_SOFT=1 scripts/host-memory-preflight.sh   # warn only
@@ -38,7 +40,7 @@ set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/wsl-memory-lib.sh"
 
 HOST_MIN_FREE_GB="${HOST_MIN_FREE_GB:-24}"
-VM_MAX_FOOTPRINT_GB="${VM_MAX_FOOTPRINT_GB:-60}"
+VM_MAX_FOOTPRINT_GB="${VM_MAX_FOOTPRINT_GB:-70}"
 VM_MAX_CACHE_GB="${VM_MAX_CACHE_GB:-40}"
 VM_MAX_PSI_FULL_PCT="${VM_MAX_PSI_FULL_PCT:-10}"
 PREFLIGHT_SOFT="${PREFLIGHT_SOFT:-0}"
