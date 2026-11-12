@@ -10,7 +10,12 @@ set -u
 
 ROOT="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 SCRIPT="$ROOT/scripts/trunk-autopull.sh"
-EXPECTED_CASES=44
+EXPECTED_CASES=45
+# A wrong root fails here, before anything runs, and nothing below writes to
+# $SCRIPT: on 2026-11-12 a run with the wrong root reached the lock wait, whose
+# `flock <path>` created an empty trunk-autopull.sh in the main checkout (the
+# next fast-forward was then refused by git over that untracked file).
+[[ -f "$SCRIPT" ]] || { echo "trunk-autopull selftest: no script at $SCRIPT" >&2; exit 1; }
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -200,8 +205,10 @@ expect_skip "--dry-run reports what it would do from the refs on disk" "$r" "$h"
 
 echo " process"
 r=$(new_pair busy); h=$(head_of "$r")
+# Both sides open the script read-only (as the script itself does): `flock
+# <path>` would create the file if the path were wrong.
 ( flock 9; exec sleep 5 ) 9<"$SCRIPT" & holder=$!
-for _ in $(seq 1 50); do flock -n "$SCRIPT" true 2>/dev/null || break; sleep 0.1; done
+for _ in $(seq 1 50); do ( flock -n 9 ) 9<"$SCRIPT" 2>/dev/null || break; sleep 0.1; done
 out=$(run --repo "$r"); rc=$?
 kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 if [[ $rc -eq 0 && "$(head_of "$r")" == "$h" && "$out" == *"another run holds the lock"* ]]; then
@@ -209,6 +216,18 @@ if [[ $rc -eq 0 && "$(head_of "$r")" == "$h" && "$out" == *"another run holds th
 
 bash "$SCRIPT" --bogus >/dev/null 2>&1; rc=$?
 [[ $rc -eq 2 ]] && pass "a usage error exits 2" || bad "usage rc=$rc"
+
+# This selftest, pointed at a root without the script, fails and writes
+# nothing into that root. One level deep only (the nested run skips this case,
+# so it can never recurse), and bounded, so a regression fails the build
+# instead of hanging it.
+if [[ -z "${WQM_AUTOPULL_SELFTEST_NESTED:-}" ]]; then
+    nr="$TMP/no-root"; mkdir -p "$nr/scripts"
+    WQM_AUTOPULL_SELFTEST_NESTED=1 timeout 120 bash "$0" "$nr" >/dev/null 2>&1; rc=$?
+    if [[ $rc -ne 0 && $rc -ne 124 && -z "$(ls -A "$nr/scripts")" ]]; then
+        pass "the selftest on a root without the script fails and writes nothing there"
+    else bad "no-root: rc=$rc, left: [$(ls -A "$nr/scripts")]"; fi
+fi
 
 a=$(new_pair multi-a); b=$(new_pair multi-b); hb=$(head_of "$b"); echo edit > "$b/a.txt"
 out=$(run --repo "$a" --repo "$b" --repo "$TMP/multi-missing"); rc=$?
