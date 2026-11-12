@@ -218,17 +218,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = git2::Repository::init(dir.path()).unwrap();
         let sig = git2::Signature::now("t", "t@t").unwrap();
-        let tree = repo
-            .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
-            .unwrap();
-        let c1 = repo.commit(None, &sig, &sig, "c1", &tree, &[]).unwrap();
-        let mut tip = c1;
-        for _ in 0..behind {
-            let parent = repo.find_commit(tip).unwrap();
-            tip = repo
-                .commit(None, &sig, &sig, "c", &tree, &[&parent])
+        // The tree borrows `repo`: keep it in this block so `repo` can move out.
+        let (c1, tip) = {
+            let tree = repo
+                .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
                 .unwrap();
-        }
+            let c1 = repo.commit(None, &sig, &sig, "c1", &tree, &[]).unwrap();
+            let mut tip = c1;
+            for _ in 0..behind {
+                let parent = repo.find_commit(tip).unwrap();
+                tip = repo
+                    .commit(None, &sig, &sig, "c", &tree, &[&parent])
+                    .unwrap();
+            }
+            (c1, tip)
+        };
         repo.reference("refs/heads/main", c1, true, "").unwrap();
         repo.reference("refs/remotes/origin/main", tip, true, "")
             .unwrap();
