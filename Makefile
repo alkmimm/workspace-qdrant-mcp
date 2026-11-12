@@ -84,6 +84,7 @@ DB_BACKUP_KEEP ?= 2
 .PHONY: help check-env first-time redeploy \
 	stack-up stack-down stack-restart stack-status stack-logs verify-deploy \
 	preflight stack-guard stack-guard-stop stack-guard-install stack-guard-status \
+	autopull autopull-dry-run autopull-install autopull-status \
 	build-images mcp-rebuild memexd-recreate \
 	backup-db rehearse-migrations \
 	codex-register claude-register \
@@ -104,6 +105,10 @@ help:
 	@echo "  stack-guard-stop stop the watchdog"
 	@echo "  stack-guard-install  make the watchdog a boot service (survives wsl --shutdown; needs sudo once)"
 	@echo "  stack-guard-status   whether the watchdog is running, and how"
+	@echo "  autopull         fast-forward watched projects' main checkouts to origin, where safe"
+	@echo "  autopull-dry-run report what autopull would do; changes nothing"
+	@echo "  autopull-install run autopull hourly as a boot timer (needs sudo once)"
+	@echo "  autopull-status  timer state + the last run's log"
 	@echo "  stack-restart    down + up"
 	@echo "  stack-status     compose ps + ping admin/qdrant/daemon"
 	@echo "  stack-logs       tail mcp + memexd logs (LOG_TAIL=$(LOG_TAIL))"
@@ -206,6 +211,35 @@ stack-guard-status:
 		echo "guard: NOT RUNNING — the stack is unprotected ('make stack-guard' now, 'make stack-guard-install' for good)"; \
 	fi
 	@tail -n 2 "$(REPO)/.wqm-fork/logs/memory-guard.log" 2>/dev/null | sed 's/^/  /' || true
+
+# ── Main-checkout autopull (docs/runbooks/trunk-autopull.md) ─────────────────
+# The daemon indexes what is on disk; these keep each watched project's main
+# checkout on origin's trunk, advancing it only when that is provably safe.
+AUTOPULL_UNIT := wqm-trunk-autopull
+
+autopull:
+	@bash "$(REPO)/scripts/trunk-autopull.sh"
+
+autopull-dry-run:
+	@bash "$(REPO)/scripts/trunk-autopull.sh" --dry-run
+
+# Needs root once, like stack-guard-install: a system timer fires at VM boot
+# with no login session; a user timer would not.
+autopull-install:
+	@echo "Installing $(AUTOPULL_UNIT).service + .timer (sudo will prompt once)…"
+	@sudo install -m 0644 "$(REPO)/assets/systemd/$(AUTOPULL_UNIT).service" "/etc/systemd/system/$(AUTOPULL_UNIT).service"
+	@sudo install -m 0644 "$(REPO)/assets/systemd/$(AUTOPULL_UNIT).timer" "/etc/systemd/system/$(AUTOPULL_UNIT).timer"
+	@sudo systemctl daemon-reload
+	@sudo systemctl enable --now $(AUTOPULL_UNIT).timer
+	@$(MAKE) --no-print-directory autopull-status
+
+autopull-status:
+	@if systemctl is-active --quiet $(AUTOPULL_UNIT).timer 2>/dev/null; then \
+		echo "autopull: timer ACTIVE (next: $$(systemctl show $(AUTOPULL_UNIT).timer -p NextElapseUSecRealtime --value 2>/dev/null))"; \
+	else \
+		echo "autopull: timer NOT installed/active — 'make autopull-install'"; \
+	fi
+	@journalctl -u $(AUTOPULL_UNIT) --no-pager -n 20 -o cat 2>/dev/null | sed 's/^/  /' || true
 
 # ── Stack lifecycle ──────────────────────────────────────────────────────────
 

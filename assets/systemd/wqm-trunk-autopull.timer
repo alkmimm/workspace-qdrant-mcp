@@ -1,0 +1,15 @@
+# Hourly trigger for wqm-trunk-autopull.service. Persistent=true runs a missed
+# slot after the VM was down; the random delay keeps it off the exact hour, when
+# other scheduled work tends to start.
+# Install: make autopull-install   (see docs/runbooks/trunk-autopull.md)
+
+[Unit]
+Description=Hourly safe fast-forward of watched projects' main checkouts
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
