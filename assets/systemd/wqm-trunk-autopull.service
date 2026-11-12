@@ -1,0 +1,32 @@
+# Fast-forward the main checkout of every watched project to origin/<trunk>
+# when it is provably safe (scripts/trunk-autopull.sh lists the rules: on the
+# trunk, no tracked change, no merge/rebase in progress, no local commits).
+# Started hourly by wqm-trunk-autopull.timer; see docs/runbooks/trunk-autopull.md.
+#
+# A SYSTEM unit that runs as the user, like wqm-memory-guard: at WSL boot there
+# is no login session, so a `systemctl --user` timer would not fire until one
+# opens, while this one fires as soon as the VM is up.
+#
+# Install (one privileged step, from the repo root):  make autopull-install
+# Check:  make autopull-status   |   journalctl -u wqm-trunk-autopull
+# Run now by hand:  bash scripts/trunk-autopull.sh   (--dry-run to only report)
+
+[Unit]
+Description=workspace-qdrant: fast-forward watched projects' main checkouts to origin
+Documentation=file:///home/alkmimm/respositorios/workspace-qdrant-mcp/docs/runbooks/trunk-autopull.md
+# The project list comes from the daemon's registry, read through the container.
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=alkmimm
+Group=alkmimm
+WorkingDirectory=/home/alkmimm/respositorios/workspace-qdrant-mcp
+ExecStart=/bin/bash /home/alkmimm/respositorios/workspace-qdrant-mcp/scripts/trunk-autopull.sh
+# A fetch is capped at 120 s per repo inside the script; this bounds the run.
+TimeoutStartSec=30min
+Nice=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wqm-trunk-autopull
