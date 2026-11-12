@@ -17,6 +17,18 @@ groups:
     interval: 30s
     rules:
 
+      # ── Index freshness ───────────────────────────────────────
+
+      - alert: MainCheckoutBehindOrigin
+        expr: max by (project, trunk) (memexd_main_checkout_behind_commits) >= 20
+        for: 6h
+        labels:
+          severity: warning
+          component: daemon
+        annotations:
+          summary: "{{ $labels.project }}: main checkout of {{ $labels.trunk }} is {{ $value }} commits behind origin"
+          description: "The trunk's index follows the main checkout's disk, so it (and every branch's fill-in from it) holds old code until someone pulls. The hourly wqm-trunk-autopull timer skips a checkout that is dirty, diverged or on another branch."
+
       # ── Queue health ──────────────────────────────────────────
 
       - alert: QueueStuck

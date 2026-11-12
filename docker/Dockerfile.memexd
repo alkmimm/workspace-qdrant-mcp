@@ -468,6 +468,9 @@ a test here, bump this count."; exit 1; }
 # Also the trunk followed from git (`git::trunk_tip`): a linked worktree on the
 # trunk is no checkout of it — tecsul's sat 1,406 commits behind origin, and
 # judging the trunk's paths against that disk would drop what origin added.
+# And the opposite case, the trunk checked out in the main folder: how far it
+# trails origin (`git::checkout_lag`, DOC-V2 sat 412 behind) and the metric
+# that reports it (`monitoring::checkout_lag_metrics`).
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
@@ -476,6 +479,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- \
         git::checkouts::tests \
         git::trunk_tip::tests \
+        git::checkout_lag::tests \
+        monitoring::checkout_lag_metrics::tests \
         idle::tasks::filesystem_reconcile::tests \
         strategies::processing::file::delete_target::tests \
         queue_operations::tests::delete_completion_tests \
@@ -484,8 +489,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         startup::reconciliation::tests::missing_files \
         startup::reconciliation::tests::clean_stale_state \
         --test-threads=4 2>&1 | tee /tmp/branch-checkouts.log; \
-    grep -q "^test result: ok\. 44 passed" /tmp/branch-checkouts.log \
-    || { echo "GATE: expected exactly 44 branch-checkout deletion + followed-trunk tests to run and pass — \
+    grep -q "^test result: ok\. 50 passed" /tmp/branch-checkouts.log \
+    || { echo "GATE: expected exactly 50 branch-checkout deletion + followed-trunk + checkout-lag tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the rule that keeps worktree-only files from being deleted. If you ADDED a test here, \
 bump this count."; exit 1; }
@@ -660,10 +665,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 by tenant, oldest waiting item) to run and pass. If you ADDED a test here, bump this \
 count."; exit 1; } \
     && cargo test -p workspace-qdrant-grpc --lib -- services::project_service::indexing_progress:: \
+        services::project_service::project_status:: \
         --test-threads=4 2>&1 | tee /tmp/index-stale-grpc.log; \
-    grep -q "^test result: ok\. 1 passed" /tmp/index-stale-grpc.log \
-    || { echo "GATE: expected exactly 1 GetProjectStatus age test to run and pass — libtest exits \
-0 when a positional filter matches nothing. If you ADDED a test here, bump this count."; exit 1; }
+    grep -q "^test result: ok\. 4 passed" /tmp/index-stale-grpc.log \
+    || { echo "GATE: expected exactly 4 GetProjectStatus tests (queue age; main-checkout lag: which \
+folder is measured, a lagging checkout, no lag) to run and pass — libtest exits 0 when a positional \
+filter matches nothing. If you ADDED a test here, bump this count."; exit 1; }
 
 # Failure classification runs here, same rationale: hermetic (no I/O). Until
 # 2026-10-08 every document-extraction failure became `ProcessingFailed`, which

@@ -240,7 +240,13 @@ through `git::BranchCheckouts` — the main folder for its HEAD, the leaf
 worktree for a worktree branch, nothing for a branch no checkout has (left to
 branch pruning) and nothing for the trunk outside the main folder (followed
 from git, `git::followed_trunk`: a worktree on it may be behind what the index
-holds):
+holds). The trunk checked out IN the main folder is the opposite case: its
+disk is the truth and the daemon never moves it, so a checkout nobody pulls
+holds the trunk's index at an old commit. `git::main_checkout_lag` measures
+it: `memexd_main_checkout_behind_commits` (alert `MainCheckoutBehindOrigin`),
+`GetProjectStatus.checkout_behind_commits`, and the MCP's `checkout_stale`
+warning on project-scoped search and grep (`WQM_CHECKOUT_BEHIND_WARN_COMMITS`,
+default 20). The `wqm-trunk-autopull` timer fast-forwards a clean checkout:
 
 | Path | Decision |
 |---|---|

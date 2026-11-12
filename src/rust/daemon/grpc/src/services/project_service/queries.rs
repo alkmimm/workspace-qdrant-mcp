@@ -1,20 +1,20 @@
 //! Project query operations
 //!
-//! Handles read-only project operations: status lookup, listing, and heartbeat.
+//! Handles read-only project operations: listing, failed items, and heartbeat
+//! (the status lookup is `project_status`).
 
 use chrono::Utc;
 use tonic::Status;
 use tracing::{debug, error};
 
 use crate::proto::{
-    FailedQueueItem, GetProjectStatusRequest, GetProjectStatusResponse, HeartbeatRequest,
-    HeartbeatResponse, ListFailedItemsRequest, ListFailedItemsResponse, ListProjectsRequest,
-    ListProjectsResponse, ListWatchesRequest, ListWatchesResponse, ProjectInfo, WatchInfo,
+    FailedQueueItem, HeartbeatRequest, HeartbeatResponse, ListFailedItemsRequest,
+    ListFailedItemsResponse, ListProjectsRequest, ListProjectsResponse, ListWatchesRequest,
+    ListWatchesResponse, ProjectInfo, WatchInfo,
 };
 
 use wqm_common::constants::COLLECTION_PROJECTS;
 
-use super::indexing_progress::fetch_indexing_progress;
 use super::ProjectServiceImpl;
 
 /// Heartbeat deadline window in seconds — how long a client has to send its
@@ -31,141 +31,6 @@ fn heartbeat_timeout_secs() -> u64 {
 }
 
 impl ProjectServiceImpl {
-    /// Execute the get_project_status business logic
-    pub(crate) async fn handle_get_project_status(
-        &self,
-        req: GetProjectStatusRequest,
-    ) -> Result<GetProjectStatusResponse, Status> {
-        if req.project_id.is_empty() {
-            return Err(Status::invalid_argument("project_id cannot be empty"));
-        }
-
-        debug!("Getting project status: {}", req.project_id);
-
-        let query = r#"
-            SELECT wf.tenant_id, wf.path, wf.is_active, wf.last_activity_at,
-                   wf.created_at, wf.git_remote_url, wf.is_worktree,
-                   wf.main_worktree_watch_id,
-                   mw.path AS main_worktree_path
-            FROM watch_folders wf
-            LEFT JOIN watch_folders mw ON wf.main_worktree_watch_id = mw.watch_id
-            WHERE wf.tenant_id = ?1 AND wf.collection = ?2
-            LIMIT 1
-        "#;
-
-        let row = sqlx::query(query)
-            .bind(&req.project_id)
-            .bind(COLLECTION_PROJECTS)
-            .fetch_optional(&self.db_pool)
-            .await
-            .map_err(|e| {
-                error!("Database error fetching project: {e}");
-                Status::internal(format!("Database error: {e}"))
-            })?;
-
-        if let Some(row) = row {
-            let mut response = Self::build_project_status_response(row)?;
-            let progress = fetch_indexing_progress(&self.db_pool, &req.project_id).await;
-            response.pending_count = progress.pending;
-            response.in_progress_count = progress.in_progress;
-            response.failed_count = progress.failed;
-            response.done_count = progress.done;
-            response.total_count = progress.total();
-            response.percent_complete = progress.percent_complete();
-            response.eta_seconds = progress.eta_seconds;
-            response.oldest_pending_age_seconds = progress.oldest_pending_age_seconds;
-            Ok(response)
-        } else {
-            Ok(GetProjectStatusResponse {
-                found: false,
-                project_id: req.project_id,
-                project_name: String::new(),
-                project_root: String::new(),
-                priority: String::new(),
-                is_active: false,
-                last_active: None,
-                registered_at: None,
-                git_remote: None,
-                is_worktree: false,
-                main_worktree_path: None,
-                pending_count: 0,
-                in_progress_count: 0,
-                failed_count: 0,
-                done_count: 0,
-                total_count: 0,
-                percent_complete: 0.0,
-                eta_seconds: None,
-                oldest_pending_age_seconds: None,
-            })
-        }
-    }
-
-    /// Build a status response from a database row. Indexing-progress fields
-    /// are left at zero here; the caller fills them via `fetch_indexing_progress`.
-    fn build_project_status_response(
-        row: sqlx::sqlite::SqliteRow,
-    ) -> Result<GetProjectStatusResponse, Status> {
-        use sqlx::Row;
-
-        let last_active_str: Option<String> = row
-            .try_get("last_activity_at")
-            .map_err(|e| Status::internal(format!("Failed to get last_activity_at: {e}")))?;
-        let last_active = last_active_str
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|dt| to_timestamp(dt.with_timezone(&Utc)));
-
-        let registered_at_str: Option<String> = row
-            .try_get("created_at")
-            .map_err(|e| Status::internal(format!("Failed to get created_at: {e}")))?;
-        let registered_at = registered_at_str
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|dt| to_timestamp(dt.with_timezone(&Utc)));
-
-        let is_active_int: i32 = row
-            .try_get("is_active")
-            .map_err(|e| Status::internal(format!("Failed to get is_active: {e}")))?;
-
-        let priority = if is_active_int > 0 { "high" } else { "normal" };
-
-        let path: String = row
-            .try_get("path")
-            .map_err(|e| Status::internal(format!("Failed to get path: {e}")))?;
-        let project_name = std::path::Path::new(&path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        let is_worktree_int: i32 = row.try_get("is_worktree").unwrap_or(0);
-        let main_worktree_path: Option<String> = row.try_get("main_worktree_path").unwrap_or(None);
-
-        Ok(GetProjectStatusResponse {
-            found: true,
-            project_id: row
-                .try_get("tenant_id")
-                .map_err(|e| Status::internal(format!("Failed to get tenant_id: {e}")))?,
-            project_name,
-            project_root: path,
-            priority: priority.to_string(),
-            is_active: is_active_int > 0,
-            last_active,
-            registered_at,
-            git_remote: row
-                .try_get("git_remote_url")
-                .map_err(|e| Status::internal(format!("Failed to get git_remote_url: {e}")))?,
-            is_worktree: is_worktree_int != 0,
-            main_worktree_path,
-            pending_count: 0,
-            in_progress_count: 0,
-            failed_count: 0,
-            done_count: 0,
-            total_count: 0,
-            percent_complete: 0.0,
-            eta_seconds: None,
-            oldest_pending_age_seconds: None,
-        })
-    }
-
     /// Execute the list_failed_items business logic — read-only listing of
     /// `unified_queue` rows in the 'failed' state, optionally scoped to one
     /// tenant. Backs the admin UI's failed-items drill-down; retry is a
@@ -509,7 +374,7 @@ impl ProjectServiceImpl {
 }
 
 /// Convert chrono DateTime to prost Timestamp
-fn to_timestamp(dt: chrono::DateTime<Utc>) -> prost_types::Timestamp {
+pub(super) fn to_timestamp(dt: chrono::DateTime<Utc>) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: dt.timestamp(),
         nanos: dt.timestamp_subsec_nanos() as i32,

@@ -8128,6 +8128,7 @@ dependencies = [
  "chrono",
  "fastembed",
  "futures",
+ "git2",
  "http",
  "lru 0.16.4",
  "pin-project",

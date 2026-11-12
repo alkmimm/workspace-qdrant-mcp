@@ -13,7 +13,9 @@
 
 mod background;
 mod branch_tip_task;
+mod checkout_lag_task;
 mod database;
+mod git_tasks;
 mod grpc_setup;
 mod pressure_metrics;
 mod queue_init;
@@ -233,16 +235,8 @@ async fn run_daemon(
         &qc.mirror_storage,
         &daemon_config,
     );
-    // New linked worktrees are reconciled as they appear, not at the next scan.
-    let _worktree_discovery = worktree_discovery_task::start(
-        db_handles.queue_pool.clone(),
-        Arc::clone(&qc.allowed_extensions),
-    );
-    // ...and branches nobody has checked out are followed as their tips move.
-    let _branch_tips = branch_tip_task::start(
-        db_handles.queue_pool.clone(),
-        Arc::clone(&qc.allowed_extensions),
-    );
+    // Worktree discovery, the branch tip follower, the checkout lag sampler.
+    let _git_tasks = git_tasks::start(&db_handles.queue_pool, &qc.allowed_extensions);
 
     let _ignore_reconcile_handle =
         database::spawn_background_reconciliation(db_handles.queue_pool.clone());

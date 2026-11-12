@@ -12,6 +12,7 @@ import type { WorktreeReadNote } from './worktree-note.js';
 import type { ProjectSource } from './project-echo.js';
 import type { FallbackGuard } from './fallback-guard.js';
 import type { IndexStaleWarning } from './index-staleness.js';
+import type { CheckoutLag, CheckoutStaleWarning } from './checkout-staleness.js';
 export const PROJECTS_COLLECTION = COLLECTION_PROJECTS;
 export const LIBRARIES_COLLECTION = COLLECTION_LIBRARIES;
 export const SCRATCHPAD_COLLECTION = COLLECTION_SCRATCHPAD;
@@ -282,6 +283,9 @@ export interface IndexingProgress {
   /** Seconds the tenant's oldest pending/in-progress item has waited.
    *  Absent when nothing is in flight or the daemon predates the field. */
   oldest_pending_age_seconds?: number;
+  /** The main checkout's trunk against origin/<trunk>, when the main folder
+   *  has the trunk checked out and is behind (see checkout-staleness.ts). */
+  checkout_lag?: CheckoutLag;
 }
 
 /** How the query-translation leg ended (see search-translated-leg.ts). */
@@ -344,6 +348,10 @@ export interface SearchResponse {
    *  the stale threshold (`WQM_INDEX_STALE_WARN_SECONDS`, default 6 h): the
    *  results may miss recent changes and the user should be told. */
   index_stale?: IndexStaleWarning;
+  /** Attached only when the project's main checkout of its trunk trails
+   *  origin by `WQM_CHECKOUT_BEHIND_WARN_COMMITS` (default 20) or more: the
+   *  trunk's index, and every branch's fill-in from it, is that old code. */
+  checkout_stale?: CheckoutStaleWarning;
   /** Attached only when the caller's cwd is inside a linked worktree and there
    *  are results: result `file_path`s are MAIN-anchored, so this tells the caller
    *  how to Read the worktree's own copy. Absent otherwise. */

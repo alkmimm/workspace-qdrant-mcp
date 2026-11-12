@@ -525,6 +525,13 @@ message GetProjectStatusResponse {
     // unset when nothing is in flight. The stall signal: counts and ETA can
     // look plausible while none of this project's items is being processed.
     optional int64 oldest_pending_age_seconds = 19;
+    // The main folder's checkout of the trunk against `origin/<trunk>` (git
+    // only, no fetch): set only when the main folder has the trunk checked out
+    // and `origin/<trunk>` exists. A checkout nobody pulls keeps the trunk's
+    // index — and every branch view filled in from it — at that old commit.
+    optional string checkout_trunk = 20;
+    optional int64 checkout_behind_commits = 21;  // origin/<trunk> commits the checkout lacks
+    optional int64 checkout_ahead_commits = 22;   // checkout commits origin/<trunk> lacks
 }
 
 // ListProjects Request/Response
