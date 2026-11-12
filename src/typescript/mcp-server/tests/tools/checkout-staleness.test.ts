@@ -107,8 +107,10 @@ describe('read responses', () => {
       'project',
       'lagging-tenant-1'
     );
-    expect(response.indexing?.checkout_lag).toEqual({ trunk: 'main', behind: 412, ahead: 0 });
-    expect(response.checkout_stale?.behind).toBe(412);
+    expect(response.checkout_stale).toMatchObject({ trunk: 'main', behind: 412, ahead: 0 });
+    // Carried by the warning; the indexing block does not repeat it.
+    expect(response.indexing).toBeDefined();
+    expect(response.indexing?.checkout_lag).toBeUndefined();
   });
 
   it('a current checkout ships neither the lag nor the warning', async () => {

@@ -68,15 +68,19 @@ impl ProjectServiceImpl {
 }
 
 /// Fill the checkout-lag fields from the main folder's git (the main working
-/// tree's, when the row is a worktree's). Absent when it does not apply.
+/// tree's, when the row is a worktree's). Absent when it does not apply —
+/// including a worktree row whose main tree is unknown: a linked worktree on
+/// the trunk is followed from origin (`git::followed_trunk`), so its own
+/// checkout lagging is no stale index and must not be reported as one.
 async fn attach_checkout_lag(response: &mut GetProjectStatusResponse) {
-    let main_root = PathBuf::from(
-        response
-            .main_worktree_path
-            .as_deref()
-            .filter(|_| response.is_worktree)
-            .unwrap_or(&response.project_root),
-    );
+    let main_root = if response.is_worktree {
+        match response.main_worktree_path.as_deref() {
+            Some(main) => PathBuf::from(main),
+            None => return,
+        }
+    } else {
+        PathBuf::from(&response.project_root)
+    };
     let lag = tokio::task::spawn_blocking(move || main_checkout_lag(&main_root))
         .await
         .ok()

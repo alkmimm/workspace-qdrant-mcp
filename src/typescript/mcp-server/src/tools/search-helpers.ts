@@ -178,7 +178,13 @@ export async function attachIndexingProgress(
 ): Promise<void> {
   if (scope !== 'project' || !projectId) return;
   const progress = await fetchIndexingProgress(daemonClient, projectId);
-  if (progress) response.indexing = progress;
+  if (progress) {
+    // The lag only feeds `checkout_stale` below, which carries it when it
+    // matters; the indexing block does not repeat it on every response.
+    const shown: IndexingProgress = { ...progress };
+    delete shown.checkout_lag;
+    response.indexing = shown;
+  }
   const stale = indexStaleWarning(progress);
   if (stale) response.index_stale = stale;
   const checkoutStale = checkoutStaleWarning(progress);
