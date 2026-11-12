@@ -30,6 +30,7 @@ wsl_guest_footprint_kb()  { echo "${FAKE_GUEST_KB-20971520}"; }
 wsl_guest_cached_kb()     { echo "${FAKE_CACHED_KB-5242880}"; }
 wsl_guest_swap_used_kb()  { echo "${FAKE_SWAP_KB-0}"; }
 wsl_psi_full_avg60_pct()  { echo "${FAKE_PSI-0}"; }
+wsl_host_top_processes()  { echo "fake=1.0"; }
 wsl_vm_charge_kb() {
   local seq=( ${FAKE_CHARGE_SEQ-} ) n
   [[ ${#seq[@]} -gt 0 ]] || { echo ""; return; }
@@ -101,7 +102,9 @@ run_guard() {
   fi
 }
 # exit 3 = tripped and stopped; exit 124 = timeout ran out with no trip.
-run_guard trips-after-two-breaches   3   yes FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ="$(gb 90) $(gb 90)"
+# The needle also proves the seam replaced the host's process list (the real
+# one calls PowerShell on a WSL host, and is empty in the container).
+run_guard trips-after-two-breaches   3   yes LOG="host top working sets (GB): fake=1.0" FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ="$(gb 90) $(gb 90)"
 run_guard one-breach-then-recovery   124 no  FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ="$(gb 90) $(gb 20)"
 run_guard host-short-trips           3   yes FAKE_HOST_FREE_KB=$(gb 5)   FAKE_CHARGE_SEQ=$(gb 20)
 run_guard healthy-never-trips        124 no  FAKE_HOST_FREE_KB=$(gb 100) FAKE_CHARGE_SEQ=$(gb 20)
