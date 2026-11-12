@@ -25,7 +25,7 @@ use crate::allowed_extensions::AllowedExtensions;
 use crate::git::{canonicalize_host_path, is_leaf_worktree_root, LinkedWorktree};
 use crate::queue_operations::QueueManager;
 
-use super::worktree_bulk::enqueue_worktree_bulk;
+use super::worktree_bulk::{enqueue_worktree_bulk, paths_current_on_branch};
 use super::worktree_membership::{
     enqueue_worktree_divergent, enqueue_worktree_membership, enqueue_worktree_new_on_branch,
     WorktreeRef,
@@ -156,13 +156,16 @@ pub(super) async fn reconcile_linked_worktree(
             .await;
     record_enqueued(WorktreeSet::NewOnBranch, n_new, tenant_id, branch, &wt_root);
 
-    // 3. Divergent: the branch's own bytes, a new content-generation (#151).
+    // 3. Divergent: the branch's own bytes, a new content-generation (#151),
+    //    minus what the branch already holds with exactly those bytes.
+    let current = paths_current_on_branch(pool, &target, &divergent).await;
+    let div_skip: HashSet<String> = bulk.union(&current).cloned().collect();
     let n_div = enqueue_worktree_divergent(
         queue_manager,
         &target,
         &divergent,
         allowed_extensions,
-        &bulk,
+        &div_skip,
     )
     .await;
     record_enqueued(WorktreeSet::Divergent, n_div, tenant_id, branch, &wt_root);
