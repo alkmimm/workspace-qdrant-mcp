@@ -131,4 +131,52 @@ mod tests {
         );
         assert_eq!(main_checkout_lag(&dir.path().join("nope")), None);
     }
+
+    /// The trunk measured is the daemon's trunk: `wqm.trunk` (tecsul's
+    /// `release/platform`, with a slash), else what `origin/HEAD` names.
+    #[test]
+    fn the_configured_or_remote_default_trunk_is_the_one_measured() {
+        let (dir, repo, c1, tip) = fixture();
+        repo.reference("refs/heads/release/platform", c1, true, "")
+            .unwrap();
+        repo.reference("refs/remotes/origin/release/platform", tip, true, "")
+            .unwrap();
+        repo.config()
+            .unwrap()
+            .set_str(super::super::tips::TRUNK_CONFIG_KEY, "release/platform")
+            .unwrap();
+        repo.set_head("refs/heads/release/platform").unwrap();
+        let lag = main_checkout_lag(dir.path()).expect("on the configured trunk");
+        assert_eq!((lag.trunk.as_str(), lag.behind), ("release/platform", 3));
+
+        // On `main`, which is no longer the trunk: nothing to report.
+        repo.set_head("refs/heads/main").unwrap();
+        assert_eq!(main_checkout_lag(dir.path()), None);
+
+        // No config: origin/HEAD names the trunk.
+        repo.config()
+            .unwrap()
+            .remove(super::super::tips::TRUNK_CONFIG_KEY)
+            .unwrap();
+        repo.reference("refs/heads/develop", c1, true, "").unwrap();
+        repo.reference("refs/remotes/origin/develop", tip, true, "")
+            .unwrap();
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/develop",
+            true,
+            "",
+        )
+        .unwrap();
+        repo.set_head("refs/heads/develop").unwrap();
+        let lag = main_checkout_lag(dir.path()).expect("on origin's default");
+        assert_eq!((lag.trunk.as_str(), lag.behind), ("develop", 3));
+    }
+
+    #[test]
+    fn a_detached_head_reports_nothing() {
+        let (dir, repo, c1, _) = fixture();
+        repo.set_head_detached(c1).unwrap();
+        assert_eq!(main_checkout_lag(dir.path()), None);
+    }
 }

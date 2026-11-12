@@ -4,7 +4,6 @@
 //! project falls past the warning line. Git reads only: the daemon never
 //! fetches and never moves a working tree.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use sqlx::{Row, SqlitePool};
@@ -13,7 +12,7 @@ use tracing::{debug, info, warn};
 
 use workspace_qdrant_core::git::main_checkout_lag;
 use workspace_qdrant_core::monitoring::checkout_lag_metrics::{
-    publish_checkout_lag, CheckoutLagSample,
+    publish_checkout_lag, CheckoutLagSample, LagWarnings,
 };
 
 /// Seconds between passes: checkouts move on the scale of hours.
@@ -33,8 +32,7 @@ struct Project {
 pub fn start(pool: SqlitePool) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(INTERVAL_SECS));
-        // Last behind count logged as stale, per tenant: log on change only.
-        let mut warned: HashMap<String, usize> = HashMap::new();
+        let mut warnings = LagWarnings::default();
         info!(
             interval_secs = INTERVAL_SECS,
             "Main checkout lag sampler started"
@@ -42,7 +40,7 @@ pub fn start(pool: SqlitePool) -> JoinHandle<()> {
         loop {
             interval.tick().await;
             match main_folders(&pool).await {
-                Ok(projects) => sample(projects, &mut warned).await,
+                Ok(projects) => sample(projects, &mut warnings).await,
                 Err(e) => debug!("checkout lag: list projects: {e}"),
             }
         }
@@ -66,15 +64,24 @@ async fn main_folders(pool: &SqlitePool) -> Result<Vec<Project>, sqlx::Error> {
         .collect())
 }
 
-async fn sample(projects: Vec<Project>, warned: &mut HashMap<String, usize>) {
-    let measured = tokio::task::spawn_blocking(move || {
+async fn sample(projects: Vec<Project>, warnings: &mut LagWarnings) {
+    let measured = match tokio::task::spawn_blocking(move || {
         projects
             .into_iter()
             .filter_map(|p| main_checkout_lag(Path::new(&p.path)).map(|lag| (p, lag)))
             .collect::<Vec<_>>()
     })
     .await
-    .unwrap_or_default();
+    {
+        Ok(measured) => measured,
+        // A pass that could not run keeps the last samples: publishing an
+        // empty pass would erase every series, and a missing series reads as
+        // "nothing wrong".
+        Err(e) => {
+            warn!("checkout lag: sampling pass failed: {e}");
+            return;
+        }
+    };
 
     let names: Vec<String> = measured
         .iter()
@@ -98,10 +105,13 @@ async fn sample(projects: Vec<Project>, warned: &mut HashMap<String, usize>) {
         .collect();
     publish_checkout_lag(&samples);
 
+    let pass: Vec<(&str, usize)> = measured
+        .iter()
+        .map(|(p, lag)| (p.tenant_id.as_str(), lag.behind))
+        .collect();
+    let due = warnings.due(&pass, WARN_BEHIND);
     for ((p, lag), name) in measured.iter().zip(&names) {
-        if lag.behind < WARN_BEHIND {
-            warned.remove(&p.tenant_id);
-        } else if warned.insert(p.tenant_id.clone(), lag.behind) != Some(lag.behind) {
+        if due.contains(&p.tenant_id.as_str()) {
             warn!(
                 project = %name,
                 trunk = %lag.trunk,

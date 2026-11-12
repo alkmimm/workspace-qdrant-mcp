@@ -6,6 +6,8 @@
 //! out always reports a value — 0 when current — so "nothing wrong" is a real
 //! sample, never a missing one.
 
+use std::collections::HashMap;
+
 use once_cell::sync::Lazy;
 use prometheus::{IntGaugeVec, Opts};
 
@@ -45,9 +47,56 @@ pub fn publish_checkout_lag(samples: &[CheckoutLagSample<'_>]) {
     }
 }
 
+/// Which projects a pass should log as stale: those at or past the threshold
+/// whose count changed since they were last logged. A WARN per project per
+/// change, not one every 5 minutes for as long as nobody pulls.
+#[derive(Debug, Default)]
+pub struct LagWarnings {
+    /// Last count logged, per tenant still at or past the threshold.
+    logged: HashMap<String, usize>,
+}
+
+impl LagWarnings {
+    /// The tenants of `pass` (`(tenant_id, behind)`) to log now. A tenant that
+    /// fell below the threshold, or is absent from the pass (unwatched, left
+    /// its trunk), is forgotten: crossing again logs again.
+    pub fn due<'a>(&mut self, pass: &[(&'a str, usize)], threshold: usize) -> Vec<&'a str> {
+        let mut logged = HashMap::new();
+        let mut due = Vec::new();
+        for &(tenant, behind) in pass {
+            if behind < threshold {
+                continue;
+            }
+            if self.logged.get(tenant) != Some(&behind) {
+                due.push(tenant);
+            }
+            logged.insert(tenant.to_string(), behind);
+        }
+        self.logged = logged;
+        due
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stale_project_is_logged_once_per_change() {
+        let mut w = LagWarnings::default();
+        assert_eq!(w.due(&[("doc", 412), ("agent", 0)], 20), vec!["doc"]);
+        assert!(w.due(&[("doc", 412)], 20).is_empty(), "unchanged: quiet");
+        assert_eq!(w.due(&[("doc", 413)], 20), vec!["doc"], "origin moved on");
+        assert!(w.due(&[("doc", 19)], 20).is_empty(), "below the line");
+        assert_eq!(w.due(&[("doc", 413)], 20), vec!["doc"], "crossed again");
+        assert!(w.due(&[], 20).is_empty(), "unwatched");
+        assert_eq!(
+            w.due(&[("doc", 413)], 20),
+            vec!["doc"],
+            "back after leaving the pass"
+        );
+        assert_eq!(w.due(&[("doc", 20)], 20), vec!["doc"], "the line itself");
+    }
 
     #[test]
     fn a_pass_replaces_the_previous_samples() {

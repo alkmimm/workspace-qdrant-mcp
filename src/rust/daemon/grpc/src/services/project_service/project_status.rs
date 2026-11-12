@@ -67,19 +67,24 @@ impl ProjectServiceImpl {
     }
 }
 
-/// Fill the checkout-lag fields from the main folder's git (the main working
-/// tree's, when the row is a worktree's). Absent when it does not apply —
-/// including a worktree row whose main tree is unknown: a linked worktree on
-/// the trunk is followed from origin (`git::followed_trunk`), so its own
-/// checkout lagging is no stale index and must not be reported as one.
-async fn attach_checkout_lag(response: &mut GetProjectStatusResponse) {
-    let main_root = if response.is_worktree {
-        match response.main_worktree_path.as_deref() {
-            Some(main) => PathBuf::from(main),
-            None => return,
-        }
+/// The folder whose checkout the lag is measured in: the main folder itself,
+/// or a worktree row's main working tree. `None` for a worktree row whose main
+/// tree is unknown: a linked worktree on the trunk is followed from origin
+/// (`git::followed_trunk`), so its own checkout lagging is no stale index and
+/// must not be reported as one.
+fn lag_root(response: &GetProjectStatusResponse) -> Option<PathBuf> {
+    if response.is_worktree {
+        response.main_worktree_path.as_deref().map(PathBuf::from)
     } else {
-        PathBuf::from(&response.project_root)
+        Some(PathBuf::from(&response.project_root))
+    }
+}
+
+/// Fill the checkout-lag fields from the main folder's git. Absent when it
+/// does not apply (see [`lag_root`] and `git::main_checkout_lag`).
+async fn attach_checkout_lag(response: &mut GetProjectStatusResponse) {
+    let Some(main_root) = lag_root(response) else {
+        return;
     };
     let lag = tokio::task::spawn_blocking(move || main_checkout_lag(&main_root))
         .await
@@ -175,4 +180,97 @@ fn build_project_status_response(
     response.is_worktree = is_worktree_int != 0;
     response.main_worktree_path = main_worktree_path;
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(root: &str, is_worktree: bool, main: Option<&str>) -> GetProjectStatusResponse {
+        let mut r = not_found("t".into());
+        r.found = true;
+        r.project_root = root.into();
+        r.is_worktree = is_worktree;
+        r.main_worktree_path = main.map(str::to_string);
+        r
+    }
+
+    #[test]
+    fn the_lag_is_measured_in_the_main_folder() {
+        assert_eq!(
+            lag_root(&row("/repo", false, None)),
+            Some(PathBuf::from("/repo"))
+        );
+        assert_eq!(
+            lag_root(&row("/repo/.claude/worktrees/x", true, Some("/repo"))),
+            Some(PathBuf::from("/repo")),
+            "a worktree row measures its main working tree"
+        );
+        assert_eq!(
+            lag_root(&row("/wt/x", true, None)),
+            None,
+            "never the worktree's own checkout"
+        );
+    }
+
+    /// A main folder on `main` at c1 with `origin/main` `behind` commits ahead.
+    fn repo_behind(behind: usize) -> (tempfile::TempDir, git2::Repository, git2::Oid) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(dir.path()).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let tree = repo
+            .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
+            .unwrap();
+        let c1 = repo.commit(None, &sig, &sig, "c1", &tree, &[]).unwrap();
+        let mut tip = c1;
+        for _ in 0..behind {
+            let parent = repo.find_commit(tip).unwrap();
+            tip = repo
+                .commit(None, &sig, &sig, "c", &tree, &[&parent])
+                .unwrap();
+        }
+        repo.reference("refs/heads/main", c1, true, "").unwrap();
+        repo.reference("refs/remotes/origin/main", tip, true, "")
+            .unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        (dir, repo, c1)
+    }
+
+    #[tokio::test]
+    async fn a_lagging_main_checkout_fills_the_status_fields() {
+        let (dir, _repo, _) = repo_behind(412);
+        let mut status = row(&dir.path().to_string_lossy(), false, None);
+        attach_checkout_lag(&mut status).await;
+        assert_eq!(status.checkout_trunk.as_deref(), Some("main"));
+        assert_eq!(status.checkout_behind_commits, Some(412));
+        assert_eq!(status.checkout_ahead_commits, Some(0));
+
+        // A worktree row of that repo reports the same main checkout.
+        let mut wt = row("/elsewhere/wt", true, Some(&dir.path().to_string_lossy()));
+        attach_checkout_lag(&mut wt).await;
+        assert_eq!(wt.checkout_behind_commits, Some(412));
+    }
+
+    #[tokio::test]
+    async fn no_lag_leaves_the_status_fields_unset() {
+        let (dir, repo, c1) = repo_behind(3);
+        // Main folder on another branch: the user's own work, not a stale trunk.
+        repo.reference("refs/heads/feat", c1, true, "").unwrap();
+        repo.set_head("refs/heads/feat").unwrap();
+        let mut status = row(&dir.path().to_string_lossy(), false, None);
+        attach_checkout_lag(&mut status).await;
+        assert_eq!(
+            (status.checkout_trunk, status.checkout_behind_commits),
+            (None, None)
+        );
+
+        // A worktree row without its main tree, and a root that is no repo.
+        for mut status in [
+            row(&dir.path().to_string_lossy(), true, None),
+            row("/no/such/repo", false, None),
+        ] {
+            attach_checkout_lag(&mut status).await;
+            assert_eq!(status.checkout_behind_commits, None);
+        }
+    }
 }

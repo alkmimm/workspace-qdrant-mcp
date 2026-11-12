@@ -489,8 +489,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         startup::reconciliation::tests::missing_files \
         startup::reconciliation::tests::clean_stale_state \
         --test-threads=4 2>&1 | tee /tmp/branch-checkouts.log; \
-    grep -q "^test result: ok\. 47 passed" /tmp/branch-checkouts.log \
-    || { echo "GATE: expected exactly 47 branch-checkout deletion + followed-trunk + checkout-lag tests to run and pass — \
+    grep -q "^test result: ok\. 50 passed" /tmp/branch-checkouts.log \
+    || { echo "GATE: expected exactly 50 branch-checkout deletion + followed-trunk + checkout-lag tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the rule that keeps worktree-only files from being deleted. If you ADDED a test here, \
 bump this count."; exit 1; }
@@ -665,10 +665,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 by tenant, oldest waiting item) to run and pass. If you ADDED a test here, bump this \
 count."; exit 1; } \
     && cargo test -p workspace-qdrant-grpc --lib -- services::project_service::indexing_progress:: \
+        services::project_service::project_status:: \
         --test-threads=4 2>&1 | tee /tmp/index-stale-grpc.log; \
-    grep -q "^test result: ok\. 1 passed" /tmp/index-stale-grpc.log \
-    || { echo "GATE: expected exactly 1 GetProjectStatus age test to run and pass — libtest exits \
-0 when a positional filter matches nothing. If you ADDED a test here, bump this count."; exit 1; }
+    grep -q "^test result: ok\. 4 passed" /tmp/index-stale-grpc.log \
+    || { echo "GATE: expected exactly 4 GetProjectStatus tests (queue age; main-checkout lag: which \
+folder is measured, a lagging checkout, no lag) to run and pass — libtest exits 0 when a positional \
+filter matches nothing. If you ADDED a test here, bump this count."; exit 1; }
 
 # Failure classification runs here, same rationale: hermetic (no I/O). Until
 # 2026-10-08 every document-extraction failure became `ProcessingFailed`, which

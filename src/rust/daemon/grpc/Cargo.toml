@@ -84,6 +84,8 @@ tokio-test = { workspace = true }
 tonic-build = { workspace = true }
 futures = "0.3"
 tempfile = { workspace = true }
+# Real repositories for the checkout-lag status tests (same version as core).
+git2 = { version = "0.20", default-features = false }
 # Complex dependencies disabled:
 # testcontainers = { workspace = true }
 wiremock = { workspace = true }

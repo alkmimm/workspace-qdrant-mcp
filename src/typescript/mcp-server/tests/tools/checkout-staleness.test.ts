@@ -126,6 +126,59 @@ describe('read responses', () => {
     expect(response.checkout_stale).toBeUndefined();
   });
 
+  it('a non-project scope attaches neither the block nor the warning', async () => {
+    const response = emptyResponse();
+    await attachIndexingProgress(
+      response,
+      daemonWith({ checkout_trunk: 'main', checkout_behind_commits: 412 }),
+      'all',
+      'scope-tenant-1'
+    );
+    expect(response.indexing).toBeUndefined();
+    expect(response.checkout_stale).toBeUndefined();
+  });
+
+  it('a count without its trunk is no lag (older or partial daemon answer)', async () => {
+    const response = emptyResponse();
+    await attachIndexingProgress(
+      response,
+      daemonWith({ checkout_behind_commits: 412 }),
+      'project',
+      'notrunk-tenant-1'
+    );
+    expect(response.checkout_stale).toBeUndefined();
+  });
+
+  it('a failing daemon call yields no warning and no throw', async () => {
+    const response = emptyResponse();
+    const daemon = {
+      getProjectStatus: vi.fn().mockRejectedValue(new Error('UNAVAILABLE')),
+    } as unknown as DaemonClient;
+    await attachIndexingProgress(response, daemon, 'project', 'down-tenant-1');
+    expect(response.indexing).toBeUndefined();
+    expect(response.checkout_stale).toBeUndefined();
+    expect(await fetchReadWarnings('down-tenant-2', async () => null)).toEqual({});
+  });
+
+  it('a stalled queue and a stale checkout are both reported', async () => {
+    const response = emptyResponse();
+    await attachIndexingProgress(
+      response,
+      daemonWith({
+        pending_count: 9,
+        oldest_pending_age_seconds: 7 * 3600,
+        checkout_trunk: 'main',
+        checkout_behind_commits: 412,
+        checkout_ahead_commits: 2,
+      }),
+      'project',
+      'both-tenant-1'
+    );
+    expect(response.index_stale).toBeDefined();
+    expect(response.checkout_stale).toMatchObject({ behind: 412, ahead: 2 });
+    expect(response.checkout_stale?.message).toContain('2 local commit(s)');
+  });
+
   it('grep gets both verdicts from one cached probe', async () => {
     const probe = vi.fn().mockResolvedValue(progress(412));
     const first = await fetchReadWarnings('tenant-lag', probe);
