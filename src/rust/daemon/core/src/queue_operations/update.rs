@@ -272,7 +272,16 @@ impl QueueManager {
                 }
             }
         } else {
-            warn!("Failed to delete unified item: {} (not found)", queue_id);
+            // Expected, not a fault: two finalizers race to delete a finished
+            // item (the processor, and the FTS5 batch writer through
+            // `resolve_search`). The first one deletes it and runs the
+            // post-completion side effects above; the other lands here. On
+            // 2026-11-12 this logged 27 WARNs in 10 minutes during a backlog
+            // drain, all for items that had completed correctly.
+            debug!(
+                "unified item {} already finalized by the other path (not found)",
+                queue_id
+            );
         }
 
         Ok(deleted)
