@@ -129,7 +129,12 @@ ORPHANS=()
 while IFS= read -r call; do
     [ -z "$call" ] && continue
     norm=$(echo "$call" | normalize)
-    if ! echo "$PROTO_NORM" | grep -qx "$norm"; then
+    # A here-string, never `echo … | grep -q`: under `set -o pipefail`, grep -q
+    # exits at its first match, echo can take SIGPIPE, and the pipeline then
+    # reads as "no match". On 2026-11-12 the redeploy failed this way, with
+    # deprioritizeProject and pauseWatch reported as orphans although both
+    # rpcs exist, while the same check passed on the host.
+    if ! grep -qx "$norm" <<< "$PROTO_NORM"; then
         ORPHANS+=("$call")
     fi
 done <<< "$TS_CALLS_UNIQUE"

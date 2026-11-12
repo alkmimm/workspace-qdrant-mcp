@@ -149,14 +149,17 @@ while IFS= read -r filepath; do
     [[ -z "$filepath" ]] && continue
 
     # Look for pattern: to_string_lossy().to_string() assigned to a variable
-    if grep -n "to_string_lossy()\.to_string()" "$filepath" | grep -q "let.*="; then
+    # `grep … >/dev/null`, not `grep -q`, after a pipe: under pipefail an early
+    # -q exit can SIGPIPE the producer and turn a match into "no match", so a
+    # violation would pass unseen (check-proto-consistency.sh, 2026-11-12).
+    if grep -n "to_string_lossy()\.to_string()" "$filepath" | grep "let.*=" >/dev/null; then
         # Check if this is within 50 lines of a canonicalize() call
         while IFS=':' read -r line_no line_text; do
             # Extract context lines and check for canonicalize nearby
             context_start=$(( line_no > 50 ? line_no - 50 : 1 ))
             context_end=$(( line_no + 10 ))
 
-            if sed -n "${context_start},${context_end}p" "$filepath" | grep -q "canonicalize()"; then
+            if sed -n "${context_start},${context_end}p" "$filepath" | grep "canonicalize()" >/dev/null; then
                 echo "VIOLATION: $filepath:$line_no" >&2
                 echo "  Pattern: to_string_lossy().to_string() binding near canonicalize()" >&2
                 echo "  Line: $line_text" >&2

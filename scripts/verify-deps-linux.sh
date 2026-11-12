@@ -33,7 +33,9 @@ check_binary() {
     local use_readelf=false
     deps=$(ldd "$binary" 2>&1) || true
 
-    if echo "$deps" | grep -qE "not a dynamic executable|cannot execute"; then
+    # Here-string, not `echo | grep -q`: under pipefail an early -q exit can
+    # SIGPIPE echo and read as "no match".
+    if grep -qE "not a dynamic executable|cannot execute" <<< "$deps"; then
         # Try readelf for cross-compiled or statically linked binaries
         if command -v readelf &>/dev/null; then
             local needed
