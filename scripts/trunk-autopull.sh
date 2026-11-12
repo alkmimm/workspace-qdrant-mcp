@@ -8,11 +8,17 @@
 # code months old, and the worktree reconcile diffed every agent branch against
 # that stale HEAD (38k redundant queue items; fixed separately in #454).
 #
+# Every repo with an `origin` remote and a resolvable trunk (`git config
+# wqm.trunk` when it names a branch the repo has, else origin/HEAD, else
+# main/master — the daemon's `default_branch` order) is FETCHED first:
+# `git fetch origin <trunk>` moves only the remote-tracking ref, never the
+# working tree, and keeps the daemon's view of origin fresh even for a checkout
+# this script then leaves alone (the trunk followed from git, and the
+# checkout-lag warning, both read origin/<trunk> as of the last fetch).
+#
 # The checkout is the user's working copy, so this never decides anything for
 # them. It advances a repo only when ALL hold, and otherwise logs why it did
 # not and changes nothing:
-#   - the repo has an `origin` remote and a resolvable trunk
-#     (`git config wqm.trunk`, else origin/HEAD, else main/master);
 #   - HEAD is the trunk branch (a checkout on another branch is left alone);
 #   - no tracked file is modified or staged (untracked files do not block: a
 #     fast-forward that would overwrite one fails on its own, untouched);
@@ -47,10 +53,11 @@ done
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-LOCK="${XDG_RUNTIME_DIR:-/tmp}/wqm-trunk-autopull.lock"
-exec 9>"$LOCK" || { log "cannot open lock $LOCK"; exit 0; }
+# The lock is the script file itself, opened read-only: no lock file to create,
+# and none another user (a root run) could leave behind unwritable.
+exec 9<"${BASH_SOURCE[0]}" || { log "cannot open ${BASH_SOURCE[0]} to lock it"; exit 0; }
 if ! flock -n 9; then
-    log "another run holds $LOCK; nothing to do"
+    log "another run holds the lock; nothing to do"
     exit 0
 fi
 
@@ -80,6 +87,12 @@ PY
 trunk_of() {
     local repo="$1" t
     t=$(git -C "$repo" config --get wqm.trunk 2>/dev/null)
+    # Honoured only when it names a branch the repo has, locally or on origin,
+    # as the daemon does: a typo falls back instead of disagreeing with it.
+    if [[ -n "$t" ]] && ! git -C "$repo" show-ref --verify --quiet "refs/heads/$t" \
+        && ! git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$t"; then
+        t=""
+    fi
     if [[ -z "$t" ]]; then
         t=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
         t="${t#origin/}"
@@ -107,6 +120,12 @@ autopull_one() {
     if [[ -z "$trunk" ]]; then
         log "$name: skip — no trunk (set it with: git config wqm.trunk <branch>)"; return
     fi
+    if [[ $DRY_RUN -eq 0 ]]; then
+        if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' \
+            timeout 120 git -C "$repo" fetch --quiet origin "$trunk" 2>/dev/null; then
+            log "$name: skip — fetch of origin/$trunk failed"; return
+        fi
+    fi
     head=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null)
     if [[ "$head" != "$trunk" ]]; then
         log "$name: skip — checkout is on '${head:-detached HEAD}', not the trunk '$trunk'"; return
@@ -119,12 +138,6 @@ autopull_one() {
     done
     if [[ -n "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
         log "$name: skip — tracked files modified or staged"; return
-    fi
-    if [[ $DRY_RUN -eq 0 ]]; then
-        if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' \
-            timeout 120 git -C "$repo" fetch --quiet origin "$trunk" 2>/dev/null; then
-            log "$name: skip — fetch of origin/$trunk failed"; return
-        fi
     fi
     if ! git -C "$repo" rev-parse --verify --quiet "refs/remotes/origin/$trunk" >/dev/null; then
         log "$name: skip — origin/$trunk does not exist"; return

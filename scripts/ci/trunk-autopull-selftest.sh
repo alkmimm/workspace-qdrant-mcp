@@ -7,11 +7,10 @@ set -u
 
 ROOT="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 SCRIPT="$ROOT/scripts/trunk-autopull.sh"
-EXPECTED_CASES=9
+EXPECTED_CASES=11
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-export XDG_RUNTIME_DIR="$TMP/run"; mkdir -p "$XDG_RUNTIME_DIR"
 # Hermetic git: no user/system config, a fixed identity for the commits.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -52,6 +51,10 @@ r=$(new_pair dirty); h=$(head_of "$r"); echo local-edit > "$r/a.txt"
 out=$(run --repo "$r")
 if [[ "$(head_of "$r")" == "$h" && "$(cat "$r/a.txt")" == local-edit && "$out" == *"tracked files modified"* ]]; then
     pass "dirty tracked file is skipped untouched"; else bad "dirty: $out"; fi
+# 2b. ...yet the skipped checkout's origin/main is fresh: the fetch runs before
+#     the skip rules and moves only the remote-tracking ref.
+if [[ "$(git -C "$r" rev-parse origin/main)" == "$(git -C "$TMP/dirty-seed" rev-parse main)" ]]; then
+    pass "a skipped checkout still has origin/<trunk> fetched"; else bad "dirty fetch: origin/main stale"; fi
 
 # 3. checkout on another branch -> skipped.
 r=$(new_pair branch); g "$r" checkout -q -b feature; h=$(head_of "$r")
@@ -99,6 +102,13 @@ printf '[wqm]\n\ttrunk = release\n' >> "$r/.git/config"
 out=$(run --repo "$r")
 if [[ "$(head_of "$r")" == "$(git -C "$r" rev-parse origin/release)" && "$out" == *"release fast-forwarded 1 commit(s)"* ]]; then
     pass "wqm.trunk selects the trunk"; else bad "trunkcfg: $out"; fi
+
+# 10. a wqm.trunk naming no branch (a typo) falls back to origin/HEAD, as the
+#     daemon's default_branch does.
+r=$(new_pair typo); printf '[wqm]\n\ttrunk = relese\n' >> "$r/.git/config"
+out=$(run --repo "$r")
+if [[ "$(head_of "$r")" == "$(git -C "$r" rev-parse origin/main)" && "$out" == *"main fast-forwarded 3 commit(s)"* ]]; then
+    pass "a wqm.trunk typo falls back to the remote's default"; else bad "typo: $out"; fi
 
 if [[ $fail -ne 0 ]]; then echo "trunk-autopull selftest FAILED"; exit 1; fi
 if [[ $cases -ne $EXPECTED_CASES ]]; then
