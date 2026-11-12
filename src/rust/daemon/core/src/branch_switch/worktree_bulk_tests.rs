@@ -119,6 +119,86 @@ async fn a_new_worktree_tags_already_indexed_content_in_bulk() {
     assert!(spec.get("from_branch").is_none(), "hash mode: {spec}");
 }
 
+/// The divergent set (git: main HEAD vs the branch tip) is skipped for every
+/// path whose worktree bytes the branch already holds. Live 2026-11-12: DOC-V2's
+/// main checkout sat 412 commits behind the agents' base, and each daemon
+/// restart re-queued ~1.8k files per worktree, of which 398 in a 400 sample were
+/// already current. Only a path whose bytes the branch does NOT hold is owed:
+/// it holds an older version (edited since), or another branch holds these
+/// bytes but this one does not, or the file is gone from the worktree.
+#[tokio::test]
+async fn divergent_paths_the_branch_already_holds_are_not_requeued() {
+    use super::worktree_bulk::paths_current_on_branch;
+    use super::worktree_membership::WorktreeRef;
+    use std::collections::HashSet;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let wt = tmp.path().join("wt");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(wt.join("src/current.rs"), b"fn v2() {}").unwrap();
+    std::fs::write(wt.join("src/edited.rs"), b"fn v3() {}").unwrap();
+    std::fs::write(wt.join("src/other.rs"), b"fn o() {}").unwrap();
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    insert_watch_folder(
+        &pool,
+        "w1",
+        "t1",
+        &tmp.path().join("main").to_string_lossy(),
+    )
+    .await;
+    let h = |b: &[u8]| compute_bytes_hash(b);
+    insert_tracked_file(
+        &pool,
+        "w1",
+        &["agent/x"],
+        &h(b"fn v2() {}"),
+        "src/current.rs",
+    )
+    .await;
+    insert_tracked_file(
+        &pool,
+        "w1",
+        &["agent/x"],
+        &h(b"fn v2() {}"),
+        "src/edited.rs",
+    )
+    .await;
+    insert_tracked_file(&pool, "w1", &["agent/y"], &h(b"fn o() {}"), "src/other.rs").await;
+    insert_tracked_file(&pool, "w1", &["agent/x"], &h(b"gone"), "src/gone.rs").await;
+
+    let wt_root = wt.to_string_lossy().to_string();
+    let target = WorktreeRef {
+        main_watch_folder_id: "w1",
+        tenant_id: "t1",
+        collection: "projects",
+        wt_root: &wt_root,
+        main_project_root: "/unused",
+        branch: "agent/x",
+    };
+    let candidates: HashSet<String> = [
+        "src/current.rs",
+        "src/edited.rs",
+        "src/other.rs",
+        "src/gone.rs",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let current = paths_current_on_branch(&pool, &target, &candidates).await;
+    assert_eq!(
+        current,
+        ["src/current.rs".to_string()]
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        "only the path whose worktree bytes agent/x already holds is skipped"
+    );
+    assert!(paths_current_on_branch(&pool, &target, &HashSet::new())
+        .await
+        .is_empty());
+}
+
 /// Insert a pending `File/Add` queued by an earlier reconcile pass.
 async fn insert_old_worktree_add(pool: &sqlx::SqlitePool, id: &str, path: &str, meta: &str) {
     sqlx::query(

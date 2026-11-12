@@ -135,6 +135,76 @@ fn hash_worktree_files(root: &Path, rels: Vec<String>) -> Vec<(String, String)> 
         .collect()
 }
 
+/// The paths of `candidates` whose worktree bytes `target.branch` ALREADY
+/// holds: a generation of the path with that exact hash carries the branch.
+/// Re-ingesting them changes nothing, so the divergent set skips them.
+///
+/// The divergent set is git's diff between the MAIN HEAD and the branch tip,
+/// and it does not shrink once the branch has been indexed. A main checkout
+/// behind the base the agents branch from makes it huge on every worktree.
+/// On 2026-11-12 every daemon restart re-queued ~1.8k files per DOC-V2
+/// worktree (main 412 commits behind origin), 38k items in all, and a sample
+/// showed 398 of 400 already carried their branch with that content. A lookup
+/// failure skips nothing, so the per-file path runs as before.
+pub(super) async fn paths_current_on_branch(
+    pool: &SqlitePool,
+    target: &WorktreeRef<'_>,
+    candidates: &HashSet<String>,
+) -> HashSet<String> {
+    if candidates.is_empty() {
+        return HashSet::new();
+    }
+    let root = PathBuf::from(target.wt_root);
+    let rels: Vec<String> = candidates.iter().cloned().collect();
+    let Ok(hashed) = tokio::task::spawn_blocking(move || hash_worktree_files(&root, rels)).await
+    else {
+        return HashSet::new();
+    };
+    match held_hashes(pool, target.main_watch_folder_id, target.branch, &hashed).await {
+        Ok(held) => hashed
+            .into_iter()
+            .filter(|(path, hash)| held.get(path).is_some_and(|h| h.contains(hash)))
+            .map(|(path, _)| path)
+            .collect(),
+        Err(e) => {
+            warn!("worktree divergent: branch '{}': {}", target.branch, e);
+            HashSet::new()
+        }
+    }
+}
+
+/// For each path of `hashed`, the content hashes of its generations under
+/// `watch_folder_id` that carry `branch`.
+async fn held_hashes(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    branch: &str,
+    hashed: &[(String, String)],
+) -> Result<HashMap<String, HashSet<String>>, String> {
+    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+    for chunk in hashed.chunks(HASH_LOOKUP_CHUNK) {
+        let ph = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT t.relative_path, t.file_hash FROM tracked_files t, json_each(t.branches) b
+              WHERE t.watch_folder_id = ? AND b.value = ? AND t.relative_path IN ({ph})"
+        );
+        let mut q = sqlx::query_as::<_, (String, String)>(&sql)
+            .bind(watch_folder_id)
+            .bind(branch);
+        for (path, _) in chunk {
+            q = q.bind(path);
+        }
+        for (path, hash) in q
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("lookup held hashes: {e}"))?
+        {
+            out.entry(path).or_default().insert(hash);
+        }
+    }
+    Ok(out)
+}
+
 /// For each path of `hashed`, the content hashes of its generations under
 /// `watch_folder_id` that some branch still holds (the same generations the
 /// bulk processor may tag).

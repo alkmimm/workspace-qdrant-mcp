@@ -511,7 +511,9 @@ bump this count."; exit 1; }
 # costs one bulk op per 25 paths instead of one per-file item each. And the
 # trunk held at its git tip — origin's when that fast-forwards the local trunk —
 # with a worktree on it left alone (tecsul `release/platform`, 2026-11-11: the
-# worktree sat 1,406 commits behind origin and the index with it).
+# worktree sat 1,406 commits behind origin and the index with it). And a
+# divergent file the branch already holds with those exact bytes is not
+# re-queued (DOC-V2, 2026-11-12: each daemon restart re-queued ~38k such files).
 # Hermetic: in-memory SQLite + tempdir git repos.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -521,8 +523,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
         strategies::processing::file::item_metadata \
         --test-threads=4 2>&1 | tee /tmp/branch-switch.log; \
-    grep -q "^test result: ok\. 42 passed" /tmp/branch-switch.log \
-    || { echo "GATE: expected exactly 42 branch_switch + item_metadata tests to run and pass — \
+    grep -q "^test result: ok\. 43 passed" /tmp/branch-switch.log \
+    || { echo "GATE: expected exactly 43 branch_switch + item_metadata tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the membership reconcile, worktree discovery and the branch tip follower. If you ADDED \
 a test here, bump this count."; exit 1; }
