@@ -17,6 +17,7 @@
 
 import { recordCacheLookup } from '../telemetry/metrics.js';
 import type { IndexingProgress } from './search-types.js';
+import { checkoutStaleWarning, type CheckoutStaleWarning } from './checkout-staleness.js';
 
 /** Default age past which the index is reported stale: 6 hours. Long enough
  *  that a healthy initial index of a large project (tecsul took 5.7 h) or a
@@ -81,8 +82,14 @@ export function indexStaleWarning(
   };
 }
 
+/** Both staleness verdicts a read response can carry. */
+export interface ReadWarnings {
+  indexStale?: IndexStaleWarning;
+  checkoutStale?: CheckoutStaleWarning;
+}
+
 interface StalenessCacheEntry {
-  value: IndexStaleWarning | undefined;
+  value: ReadWarnings;
   fetchedAt: number;
 }
 
@@ -90,24 +97,38 @@ interface StalenessCacheEntry {
 const stalenessCache = new Map<string, StalenessCacheEntry>();
 
 /**
- * The project's stale-index warning for a tool that does not already fetch
- * indexing progress (grep). `probe` is the indexing-progress fetch
- * (`fetchIndexingProgress` bound to the daemon client), injected to keep this
- * module free of the search helpers. Cached per project for a minute; a failed
- * probe (`null`) yields no warning rather than a guess.
+ * The project's staleness warnings (stalled queue, stale main checkout) for a
+ * tool that does not already fetch indexing progress (grep). `probe` is the
+ * indexing-progress fetch (`fetchIndexingProgress` bound to the daemon
+ * client), injected to keep this module free of the search helpers. Cached
+ * per project for a minute; a failed probe (`null`) yields no warning rather
+ * than a guess.
  */
-export async function fetchIndexStaleWarning(
+export async function fetchReadWarnings(
   tenantId: string,
   probe: (tenantId: string) => Promise<IndexingProgress | null>
-): Promise<IndexStaleWarning | undefined> {
+): Promise<ReadWarnings> {
   const now = Date.now();
   const cached = stalenessCache.get(tenantId);
   const hit = cached !== undefined && now - cached.fetchedAt < STALENESS_CACHE_TTL_MS;
   recordCacheLookup('index_staleness', hit);
   if (hit) return cached.value;
-  const value = indexStaleWarning(await probe(tenantId));
+  const progress = await probe(tenantId);
+  const value: ReadWarnings = {};
+  const indexStale = indexStaleWarning(progress);
+  if (indexStale) value.indexStale = indexStale;
+  const checkoutStale = checkoutStaleWarning(progress);
+  if (checkoutStale) value.checkoutStale = checkoutStale;
   stalenessCache.set(tenantId, { value, fetchedAt: now });
   return value;
+}
+
+/** The stale-index half of {@link fetchReadWarnings}. */
+export async function fetchIndexStaleWarning(
+  tenantId: string,
+  probe: (tenantId: string) => Promise<IndexingProgress | null>
+): Promise<IndexStaleWarning | undefined> {
+  return (await fetchReadWarnings(tenantId, probe)).indexStale;
 }
 
 /** Test hook: forget cached verdicts. */

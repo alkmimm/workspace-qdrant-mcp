@@ -47,7 +47,8 @@ import {
 import { whitespaceSensitivityHint } from './exact-hints.js';
 import { lookupTestFlags } from './test-flag.js';
 import { fetchIndexingProgress } from './search-helpers.js';
-import { fetchIndexStaleWarning, type IndexStaleWarning } from './index-staleness.js';
+import { fetchReadWarnings, type IndexStaleWarning } from './index-staleness.js';
+import type { CheckoutStaleWarning } from './checkout-staleness.js';
 import { worktreeReadNote } from './worktree-note.js';
 import { projectEcho, type ProjectEcho, type ProjectSource } from './project-echo.js';
 
@@ -231,6 +232,9 @@ export interface GrepResponse {
   /** Attached only when the project's oldest queued change has waited past
    *  the stale threshold: matches may miss recent changes, tell the user. */
   index_stale?: IndexStaleWarning;
+  /** Attached only when the project's main checkout of its trunk trails
+   *  origin: matches on the trunk (and its fill-in) reflect that old code. */
+  checkout_stale?: CheckoutStaleWarning;
 }
 
 /** Build the text search request object for the daemon. */
@@ -850,11 +854,12 @@ export class GrepTool {
         eventId,
         shaped.matches.map((m) => m.file)
       );
-      // A stalled queue makes every grep answer from an index that no longer
-      // matches the code; say so in-band (project scope, cached per minute).
-      const indexStale = tenantId
-        ? await fetchIndexStaleWarning(tenantId, (t) => fetchIndexingProgress(this.daemonClient, t))
-        : undefined;
+      // A stalled queue or an unpulled main checkout makes grep answer from an
+      // index that no longer matches the code; say so in-band (project scope,
+      // cached per minute).
+      const { indexStale, checkoutStale } = tenantId
+        ? await fetchReadWarnings(tenantId, (t) => fetchIndexingProgress(this.daemonClient, t))
+        : {};
       const latencyMs = Date.now() - startTime;
       finishToolEvent(this.daemonClient, eventId, {
         resultCount: shaped.matches.length,
@@ -921,6 +926,7 @@ export class GrepTool {
           latency_ms: latencyMs,
           ...(message ? { message } : {}),
           ...(indexStale ? { index_stale: indexStale } : {}),
+          ...(checkoutStale ? { checkout_stale: checkoutStale } : {}),
         };
       }
       return {
@@ -935,6 +941,7 @@ export class GrepTool {
         latency_ms: latencyMs,
         ...(message ? { message } : {}),
         ...(indexStale ? { index_stale: indexStale } : {}),
+        ...(checkoutStale ? { checkout_stale: checkoutStale } : {}),
         ...(shaped.dropped > 0 ? { budget_truncated: { dropped: shaped.dropped } } : {}),
         ...(shaped.matches.length > 0 && moreRemain
           ? { next_offset: offset + shaped.matches.length }

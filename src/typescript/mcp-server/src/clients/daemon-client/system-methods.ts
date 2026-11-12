@@ -68,9 +68,17 @@ export function normalizeProjectStatusCounts(
   // Drop the optional int64 fields from the spread so we never assign them
   // `undefined` explicitly — `exactOptionalPropertyTypes` forbids that for an
   // optional field; absence must omit the key entirely.
-  const { eta_seconds, oldest_pending_age_seconds, ...rest } = resp;
+  const {
+    eta_seconds,
+    oldest_pending_age_seconds,
+    checkout_behind_commits,
+    checkout_ahead_commits,
+    ...rest
+  } = resp;
   const eta = optionalInt64ToNumber(eta_seconds);
   const oldestAge = optionalInt64ToNumber(oldest_pending_age_seconds);
+  const behind = optionalInt64ToNumber(checkout_behind_commits);
+  const ahead = optionalInt64ToNumber(checkout_ahead_commits);
   const normalized: GetProjectStatusResponse = {
     ...rest,
     pending_count: int64ToNumber(resp.pending_count),
@@ -82,6 +90,8 @@ export function normalizeProjectStatusCounts(
   };
   if (eta !== undefined) normalized.eta_seconds = eta;
   if (oldestAge !== undefined) normalized.oldest_pending_age_seconds = oldestAge;
+  if (behind !== undefined) normalized.checkout_behind_commits = behind;
+  if (ahead !== undefined) normalized.checkout_ahead_commits = ahead;
   return normalized;
 }
 

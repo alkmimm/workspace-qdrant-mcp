@@ -14,6 +14,7 @@ mod deactivation;
 mod indexing_progress;
 pub(crate) mod lsp_lifecycle;
 mod mutations;
+mod project_status;
 mod queries;
 mod registration;
 mod worktree;

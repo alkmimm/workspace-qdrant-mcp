@@ -106,6 +106,11 @@ export interface GetProjectStatusResponse {
   // Absent when nothing is in flight. The stall signal: counts and ETA can
   // look plausible while none of this project's items is being processed.
   oldest_pending_age_seconds?: number;
+  // The main folder's checkout of the trunk against origin/<trunk>: present
+  // only when the main folder has the trunk checked out and origin has it.
+  checkout_trunk?: string;
+  checkout_behind_commits?: number;
+  checkout_ahead_commits?: number;
 }
 
 export interface ListProjectsRequest {

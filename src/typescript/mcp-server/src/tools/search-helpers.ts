@@ -55,6 +55,7 @@ import {
 } from './branch-scope.js';
 import { admitFallbackEntries } from './fallback-guard.js';
 import { indexStaleWarning } from './index-staleness.js';
+import { checkoutLagOf, checkoutStaleWarning } from './checkout-staleness.js';
 import { FIELD_BASE_POINT, FIELD_BRANCH, FIELD_TENANT_ID } from '../common/native-bridge.js';
 
 /**
@@ -150,6 +151,9 @@ export async function fetchIndexingProgress(
     if (typeof status.oldest_pending_age_seconds === 'number') {
       value.oldest_pending_age_seconds = status.oldest_pending_age_seconds;
     }
+    // Only a lagging checkout is worth the bytes on every response.
+    const lag = checkoutLagOf(status);
+    if (lag !== undefined && lag.behind > 0) value.checkout_lag = lag;
     indexingProgressCache.set(projectId, { value, fetchedAt: now });
     return value;
   } catch (err) {
@@ -177,6 +181,8 @@ export async function attachIndexingProgress(
   if (progress) response.indexing = progress;
   const stale = indexStaleWarning(progress);
   if (stale) response.index_stale = stale;
+  const checkoutStale = checkoutStaleWarning(progress);
+  if (checkoutStale) response.checkout_stale = checkoutStale;
 }
 
 /** Resolution outcome for project-scoped search context.
