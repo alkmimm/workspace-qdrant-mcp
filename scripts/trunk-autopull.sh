@@ -27,7 +27,18 @@
 #     fast-forward that would overwrite one fails on its own, untouched);
 #   - after the fetch, HEAD is an ancestor of origin/<trunk> (local commits
 #     not on origin, or an origin rewritten under them = diverged, skipped);
-#   - the checkout's filesystem has WQM_AUTOPULL_MIN_FREE_GB free (default 8).
+#   - the checkout's filesystem has WQM_AUTOPULL_MIN_FREE_GB free (default 8);
+#   - a BIG jump (at least WQM_AUTOPULL_BIG_JUMP_FILES changed files, default
+#     500; 0 turns this off) also needs memory headroom: it waits until
+#     scripts/host-memory-preflight.sh passes, the same check that gates
+#     starting the stack (thresholds 10 GB under the memory guard's stop line).
+#     On 2026-11-12 the first run fast-forwarded emnify by 764 files, and two
+#     minutes later the guard stopped the stack (host charge 80.3 GB, re-index
+#     on top of a VM already near the line). A checkout kept current moves in
+#     small steps (files changed per active trunk-hour over 60 days: p99 65–170
+#     on most repos), so this holds back only catch-ups (DOC-V2 then: 3,013
+#     files) and the odd release promotion. A held repo is retried every run;
+#     at a quiet hour the VM hands its cache back and the check passes.
 # The advance is `git merge --ff-only` with hooks disabled (also a repo's own
 # core.hooksPath, e.g. husky): no merge commit even under merge.ff=false, no
 # rebase, no user hook runs. git refuses it, changing nothing, when it would
@@ -62,6 +73,12 @@ log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 # Free space a fast-forward needs on the checkout's filesystem (GiB).
 MIN_FREE_GB="${WQM_AUTOPULL_MIN_FREE_GB:-8}"
 [[ "$MIN_FREE_GB" =~ ^[0-9]+$ ]] || MIN_FREE_GB=8
+# Changed files from which a fast-forward is a big jump that needs memory
+# headroom (0 = never ask). Anything but a number means the default, never off.
+BIG_JUMP_FILES="${WQM_AUTOPULL_BIG_JUMP_FILES:-500}"
+[[ "$BIG_JUMP_FILES" =~ ^[0-9]{1,9}$ ]] || BIG_JUMP_FILES=500
+BIG_JUMP_FILES=$((10#$BIG_JUMP_FILES))   # "0500" is 500, not octal
+MEMORY_CHECK="$(dirname "${BASH_SOURCE[0]}")/host-memory-preflight.sh"
 # Reads never take git's optional locks (the index refresh `git status` does),
 # so a check never collides with a git command the user is running.
 export GIT_OPTIONAL_LOCKS=0
@@ -118,9 +135,27 @@ trunk_of() {
     printf '%s' "$t"
 }
 
+# Why a big jump has to wait, or nothing when memory has room for it. Runs the
+# stack's start preflight, which only reads; PREFLIGHT_SOFT is forced off, so a
+# value exported for a manual start cannot wave a jump through. Its exit: 0
+# room, 1 short (its [FAIL] lines say what), anything else unmeasured. An
+# unmeasured host holds the jump, as unknown free disk does.
+memory_hold() {
+    local out rc why
+    out=$(PREFLIGHT_SOFT=0 timeout 60 bash "$MEMORY_CHECK" 2>&1); rc=$?
+    case "$rc" in
+        0) ;;
+        1) why=$(grep -F '[FAIL]' <<<"$out" | sed -e 's/^ *\[FAIL\] *//' -e 's/ ([^)]*)//' -e 's/\. .*//' \
+               | paste -sd';' - | sed 's/;/; /g')
+           printf 'memory is short: %s' "${why:-host-memory-preflight refused}" ;;
+        *) printf 'memory cannot be measured (host-memory-preflight exit %s)' "$rc" ;;
+    esac
+}
+
 # One repo: prints exactly one log line.
 autopull_one() {
-    local repo="$1" name trunk head gitdir marker status counts old new n ahead behind kb free_gb
+    local repo="$1" name trunk head gitdir marker status counts old new ahead behind kb free_gb
+    local changed files jump hold
     name=$(basename "$repo")
     if [[ "$(git -C "$repo" rev-parse --is-inside-work-tree 2>/dev/null)" != true ]] \
         || [[ "$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" != "$(cd "$repo" 2>/dev/null && pwd -P)" ]]; then
@@ -174,8 +209,29 @@ autopull_one() {
         log "$name: $trunk up to date"; return
     fi
     old=$(git -C "$repo" rev-parse --short HEAD)
+    # The files the fast-forward changes are what the daemon re-indexes. A list
+    # git cannot produce counts as a big jump: never guess small.
+    if changed=$(git -C "$repo" diff --name-only --no-renames HEAD "origin/$trunk" 2>/dev/null); then
+        files=$(printf '%s' "$changed" | grep -c '')
+    else
+        files="?"
+    fi
+    jump="$behind commit(s), $files file(s)"
+    hold=""
+    if [[ "$BIG_JUMP_FILES" -gt 0 ]] && { [[ "$files" == "?" ]] || [[ "$files" -ge "$BIG_JUMP_FILES" ]]; }; then
+        hold=$(memory_hold)
+    fi
     if [[ $DRY_RUN -eq 1 ]]; then
-        log "$name: would fast-forward $trunk $behind commit(s) from $old (dry run, origin refs not fetched)"; return
+        if [[ -n "$hold" ]]; then
+            log "$name: would hold $trunk — big jump ($jump, ≥ $BIG_JUMP_FILES): $hold (dry run, origin refs not fetched)"
+        else
+            log "$name: would fast-forward $trunk $jump from $old (dry run, origin refs not fetched)"
+        fi
+        return
+    fi
+    if [[ -n "$hold" ]]; then
+        log "$name: skip — big jump ($jump, ≥ $BIG_JUMP_FILES) held: $hold; retried next run (to pull it now: WQM_AUTOPULL_BIG_JUMP_FILES=0 make autopull)"
+        return
     fi
     # A large fast-forward writes many files; never on a nearly full disk (the
     # C: incident). Free space of the filesystem holding the checkout, in GiB.
@@ -193,8 +249,7 @@ autopull_one() {
         log "$name: skip — fast-forward refused by git (a local file in the way, or another git command running); nothing changed"; return
     fi
     new=$(git -C "$repo" rev-parse --short HEAD)
-    n="$behind"
-    log "$name: $trunk fast-forwarded $n commit(s) ($old..$new)"
+    log "$name: $trunk fast-forwarded $jump ($old..$new)"
 }
 
 if [[ ${#REPOS[@]} -eq 0 ]]; then

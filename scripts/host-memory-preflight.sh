@@ -33,6 +33,11 @@
 # VM_GUARD_STOP_GB: both moved up 10 GB on 2026-11-11 (60→70 here, 70→80
 # there). See scripts/wsl-memory-guard.sh for why.
 #
+# Callers: `make stack-up` / `make redeploy` before a start, and
+# scripts/trunk-autopull.sh before a big fast-forward (its re-index grows the
+# load the same way). Its exit codes and the "[FAIL]" prefix on a refusal line
+# are what that script reads; keep both.
+#
 # Usage:  scripts/host-memory-preflight.sh            # check and exit
 #         PREFLIGHT_SOFT=1 scripts/host-memory-preflight.sh   # warn only
 set -uo pipefail

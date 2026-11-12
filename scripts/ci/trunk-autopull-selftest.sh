@@ -10,7 +10,7 @@ set -u
 
 ROOT="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 SCRIPT="$ROOT/scripts/trunk-autopull.sh"
-EXPECTED_CASES=45
+EXPECTED_CASES=58
 # A wrong root fails here, before anything runs, and nothing below writes to
 # $SCRIPT: on 2026-11-12 a run with the wrong root reached the lock wait, whose
 # `flock <path>` created an empty trunk-autopull.sh in the main checkout (the
@@ -25,6 +25,25 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 # The free-space guard has its own case; elsewhere the build host's disk must
 # not decide the outcome.
 export WQM_AUTOPULL_MIN_FREE_GB=0
+# The big-jump gate runs the real scripts/host-memory-preflight.sh with every
+# probe fixed through its WSL_MEMORY_PROBES_OVERRIDE seam (as
+# wsl-memory-guards-selftest.sh does), so the build host's memory never decides
+# an outcome. Unless a case picks ROOMY or TIGHT the host reads as
+# unmeasurable, and a jump that reaches the gate is held, never pulled.
+cat > "$TMP/probes.sh" <<'STUB'
+wsl_host_free_kb()       { echo "${FAKE_HOST_FREE_KB-}"; }
+wsl_host_total_kb()      { echo 133000000; }
+wsl_vm_charge_kb()       { echo "${FAKE_CHARGE_KB-}"; }
+wsl_guest_footprint_kb() { echo 20971520; }
+wsl_guest_cached_kb()    { echo 5242880; }
+wsl_guest_swap_used_kb() { echo 0; }
+wsl_psi_full_avg60_pct() { echo 0; }
+STUB
+export WSL_MEMORY_PROBES_OVERRIDE="$TMP/probes.sh"
+unset FAKE_HOST_FREE_KB FAKE_CHARGE_KB PREFLIGHT_SOFT WQM_AUTOPULL_BIG_JUMP_FILES
+# Host 60 GB free; the VM charged 40 GB (room) or 75 GB (over the preflight's 70).
+ROOMY=(FAKE_HOST_FREE_KB=62914560 FAKE_CHARGE_KB=41943040)
+TIGHT=(FAKE_HOST_FREE_KB=62914560 FAKE_CHARGE_KB=78643200)
 
 fail=0; cases=0
 pass() { cases=$((cases + 1)); echo "  ok   $1"; }
@@ -53,6 +72,18 @@ tip() { git -C "$(seed "$1")" rev-parse "${2:-main}"; }
 head_of() { git -C "$1" rev-parse HEAD; }
 origin_of() { git -C "$1" rev-parse "refs/remotes/origin/${2:-main}" 2>/dev/null; }
 run() { bash "$SCRIPT" "$@" 2>&1; }
+# run with leading VAR=value words as the script's environment.
+run_with() {
+    local -a e=()
+    while [[ $# -gt 0 && "$1" == *=* ]]; do e+=("$1"); shift; done
+    env "${e[@]}" bash "$SCRIPT" "$@" 2>&1
+}
+# One more origin commit adding $2 files: the jump becomes $2 + 1 files.
+grow() {
+    local s; s=$(seed "$1")
+    for i in $(seq 1 "$2"); do echo "$i" > "$s/f$i.txt"; done
+    g "$s" add .; g "$s" commit -q -m "grow $2"; g "$s" push -q origin main
+}
 
 # $1 label, $2 clone, $3 seed name, $4 expected text in the output, $5 output.
 expect_ff() {
@@ -201,7 +232,58 @@ if [[ "$(origin_of "$r")" == "$before" && "$(head_of "$r")" == "$h" && "$out" ==
     pass "--dry-run fetches nothing and changes nothing"; else bad "dry-run fetched or moved: $out"; fi
 
 r=$(new_pair dry); g "$r" fetch -q origin; h=$(head_of "$r"); out=$(run --dry-run --repo "$r")
-expect_skip "--dry-run reports what it would do from the refs on disk" "$r" "$h" "would fast-forward main 3 commit(s)" "$out"
+expect_skip "--dry-run reports what it would do from the refs on disk" "$r" "$h" "would fast-forward main 3 commit(s), 1 file(s)" "$out"
+
+echo " big jumps wait for memory headroom"
+r=$(new_pair big-roomy); out=$(run_with "${ROOMY[@]}" WQM_AUTOPULL_BIG_JUMP_FILES=1 --repo "$r")
+expect_ff "a big jump with memory headroom is fast-forwarded" "$r" big-roomy "main fast-forwarded 3 commit(s), 1 file(s)" "$out"
+
+r=$(new_pair big-tight); h=$(head_of "$r"); out=$(run_with "${TIGHT[@]}" WQM_AUTOPULL_BIG_JUMP_FILES=1 --repo "$r")
+expect_skip "a big jump without headroom is held, with the preflight's reason" "$r" "$h" \
+    "big jump (3 commit(s), 1 file(s), ≥ 1) held: memory is short: host is charged 75.0 GB for the VM — above VM_MAX_FOOTPRINT_GB=70; retried next run" "$out"
+[[ "$(origin_of "$r")" == "$(tip big-tight)" ]] && pass "...and origin/<trunk> was still fetched" || bad "big-tight: origin/main stale"
+
+r=$(new_pair big-unmeasured); h=$(head_of "$r"); out=$(run_with WQM_AUTOPULL_BIG_JUMP_FILES=1 --repo "$r")
+expect_skip "a big jump when memory cannot be measured is held" "$r" "$h" "held: memory cannot be measured (host-memory-preflight exit 2)" "$out"
+
+r=$(new_pair big-soft); h=$(head_of "$r")
+out=$(run_with "${TIGHT[@]}" PREFLIGHT_SOFT=1 WQM_AUTOPULL_BIG_JUMP_FILES=1 --repo "$r")
+expect_skip "PREFLIGHT_SOFT=1 in the environment does not wave a big jump through" "$r" "$h" "held: memory is short" "$out"
+
+r=$(new_pair small-tight); out=$(run_with "${TIGHT[@]}" WQM_AUTOPULL_BIG_JUMP_FILES=2 --repo "$r")
+expect_ff "a jump under the threshold goes even when memory is short" "$r" small-tight "fast-forwarded 3 commit(s), 1 file(s)" "$out"
+
+r=$(new_pair gate-off); out=$(run_with "${TIGHT[@]}" WQM_AUTOPULL_BIG_JUMP_FILES=0 --repo "$r")
+expect_ff "WQM_AUTOPULL_BIG_JUMP_FILES=0 turns the check off" "$r" gate-off "fast-forwarded" "$out"
+
+r=$(new_pair def-499); grow def-499 498; out=$(run_with "${TIGHT[@]}" --repo "$r")
+expect_ff "by default a 499-file jump goes even when memory is short" "$r" def-499 "fast-forwarded 4 commit(s), 499 file(s)" "$out"
+
+r=$(new_pair def-500); grow def-500 499; h=$(head_of "$r"); out=$(run_with "${TIGHT[@]}" --repo "$r")
+expect_skip "by default a 500-file jump waits for headroom" "$r" "$h" "big jump (4 commit(s), 500 file(s), ≥ 500) held" "$out"
+
+r=$(new_pair def-junk); grow def-junk 499; h=$(head_of "$r")
+out=$(run_with "${TIGHT[@]}" WQM_AUTOPULL_BIG_JUMP_FILES=lots --repo "$r")
+expect_skip "a non-numeric threshold means the default (500), never off" "$r" "$h" "≥ 500) held" "$out"
+
+# "09" is 9, not a bad octal number that makes the comparison error out (and
+# the jump pass as small).
+r=$(new_pair lead-zero); grow lead-zero 8; h=$(head_of "$r")
+out=$(run_with "${TIGHT[@]}" WQM_AUTOPULL_BIG_JUMP_FILES=09 --repo "$r")
+expect_skip "a threshold with a leading zero is read as decimal" "$r" "$h" "big jump (4 commit(s), 9 file(s), ≥ 9) held" "$out"
+
+r=$(new_pair big-dry); g "$r" fetch -q origin; h=$(head_of "$r")
+out=$(run_with "${TIGHT[@]}" WQM_AUTOPULL_BIG_JUMP_FILES=1 --dry-run --repo "$r")
+expect_skip "--dry-run reports a hold and changes nothing" "$r" "$h" "would hold main — big jump (3 commit(s), 1 file(s), ≥ 1): memory is short" "$out"
+
+# The changed files cannot be listed (origin's root tree is missing; the commits
+# are there, so rev-list still counts): that must never read as a small jump.
+r=$(new_pair unlisted); g "$r" fetch -q origin; h=$(head_of "$r")
+t=$(git -C "$r" rev-parse "origin/main^{tree}"); obj="$r/.git/objects/${t:0:2}/${t:2}"
+if [[ -f "$obj" ]]; then
+    rm -f "$obj"; out=$(run_with "${TIGHT[@]}" --dry-run --repo "$r")
+    expect_skip "a jump whose files git cannot list counts as big" "$r" "$h" "big jump (3 commit(s), ? file(s), ≥ 500)" "$out"
+else bad "unlisted: origin's tree is not a loose object ($obj)"; fi
 
 echo " process"
 r=$(new_pair busy); h=$(head_of "$r")
