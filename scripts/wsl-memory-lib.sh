@@ -65,14 +65,6 @@ wsl_psi_full_avg60_pct() {
   awk '$1 == "full" { for (i = 2; i <= NF; i++) if ($i ~ /^avg60=/) { sub(/^avg60=/, "", $i); printf "%d", $i; exit } }' /proc/pressure/memory
 }
 
-# Test seam: a file that redefines the probes above with fixed values, so the
-# preflight and the guard can be exercised without a Windows host
-# (scripts/ci/wsl-memory-guards-selftest.sh, run by the static-checks stage).
-if [[ -n "${WSL_MEMORY_PROBES_OVERRIDE:-}" ]]; then
-  # shellcheck disable=SC1090
-  source "$WSL_MEMORY_PROBES_OVERRIDE"
-fi
-
 # One line naming the host's biggest working sets ("name=GB name=GB …"), for
 # a breach log line. On 2026-09-19 03:07Z the host went from 47 GB free to
 # 52 MB in under a minute, Windows paged the VM out (vmmemWSL 61 → 10 GB
@@ -85,3 +77,15 @@ wsl_host_top_processes() {
   [[ -x "$WSL_PS" ]] || return 0
   "$WSL_PS" -NoProfile -NonInteractive -Command 'Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 6 | ForEach-Object { "{0}={1:N1}" -f $_.ProcessName, ($_.WorkingSet64/1GB) }' 2>/dev/null | tr -d '\r' | paste -sd' ' -
 }
+
+# Test seam: a file that redefines the probes with fixed values, so the
+# preflight, the guard and the autopull's big-jump check run without a Windows
+# host (scripts/ci/wsl-memory-guards-selftest.sh and trunk-autopull-selftest.sh,
+# both in the static-checks stage). It must stay LAST: a probe defined after it
+# cannot be replaced. wsl_host_top_processes once was, so on a real WSL host
+# the selftest called PowerShell and its guard cases ran out of time (they
+# passed only in the container, which has no PowerShell).
+if [[ -n "${WSL_MEMORY_PROBES_OVERRIDE:-}" ]]; then
+  # shellcheck disable=SC1090
+  source "$WSL_MEMORY_PROBES_OVERRIDE"
+fi

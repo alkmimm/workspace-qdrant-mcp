@@ -33,20 +33,53 @@ changing nothing, unless all of these hold:
 | the trunk resolves, in the daemon's order: `git config wqm.trunk` when it names a branch the repo has, else `origin/HEAD`, else `main` or `master` | `no trunk` |
 | the fetch works (non-interactive, 120 s cap) | `fetch of origin/<trunk> failed` |
 | HEAD is the trunk branch | `checkout is on '<branch>', not the trunk` |
-| no merge, rebase, cherry-pick, revert or bisect is in progress | `operation in progress (<marker>)` |
+| no merge, rebase, cherry-pick, revert or bisect is in progress, and no other git command holds `index.lock` | `operation in progress (<marker>)` |
 | no tracked file is modified or staged (untracked files are fine) | `tracked files modified or staged` |
 | HEAD has no commits that origin lacks | `diverged from origin/<trunk>: N ahead, M behind` |
+| a big jump (≥ `WQM_AUTOPULL_BIG_JUMP_FILES` changed files, default 500) has memory headroom | `big jump (…) held: memory is short: <reason>` |
+| the checkout's filesystem has `WQM_AUTOPULL_MIN_FREE_GB` free (default 8) | `only N GiB free` |
 
 Each run writes one line per repo, for example:
 
 ```
-2026-11-12T13:00:04Z DOC-V2: main fast-forwarded 412 commit(s) (1a2b3c4..5d6e7f8)
-2026-11-12T13:00:05Z tecsul: skip — checkout is on 'master', not the trunk 'release/platform'
+2026-11-12T15:02:38Z v0-bws-training: main fast-forwarded 8 commit(s), 81 file(s) (036a5c5f..9cea3dea)
+2026-11-12T15:02:37Z tecsul: skip — checkout is on 'dev-alberto', not the trunk 'release/platform'
+2026-11-12T16:02:30Z DOC-V2: skip — big jump (412 commit(s), 3013 file(s), ≥ 500) held: memory is short: host is charged 74.6 GB for the VM — above VM_MAX_FOOTPRINT_GB=70; retried next run (…)
 ```
 
 The daemon then sees ordinary file changes and re-indexes only the files that
-changed. The first pull of a checkout that is far behind queues that one batch
-of work.
+changed.
+
+### Big jumps wait for memory headroom
+
+Re-indexing a fast-forward costs in proportion to the files it changes. A
+checkout kept current moves in small steps: over the 60 days to 2026-11-12, the
+files changed per active hour on a trunk had a p99 of 65–170 on most repos. A
+catch-up is another matter. On 2026-11-12 the first run moved emnify by 764
+files, and two minutes later the memory guard stopped the stack (VM charged
+80.3 GB, on a host already near its line). DOC-V2's pending catch-up was 3,013
+files.
+
+So a jump of at least `WQM_AUTOPULL_BIG_JUMP_FILES` changed files (default 500)
+also needs memory headroom. It goes ahead only when
+`scripts/host-memory-preflight.sh` passes, the same check `make stack-up` runs
+before a start: the VM charged at most 70 GB, the host with at least 24 GB free,
+no memory pressure. Those lines sit 10 GB under the guard's stop line.
+
+- **Held, not dropped:** the fetch still runs, and every hourly run tries
+  again. At a quiet hour the VM hands its page cache back and the check passes.
+- **Unmeasurable memory holds it too**, as unknown free disk does. So does a
+  change list git cannot produce: it never counts as small.
+- **Small jumps never ask.** At the default threshold this holds only
+  catch-ups and the odd release promotion (bws-engineer: 300–905 files).
+- **To pull a held repo now**, at a moment you choose:
+  `WQM_AUTOPULL_BIG_JUMP_FILES=0 make autopull`. `0` turns the check off for
+  that run.
+- **A dry run** (`make autopull-dry-run`) runs the same check and reports
+  `would hold`.
+
+A repo held for hours stays visible: the `checkout_stale` warning and the
+`MainCheckoutBehindOrigin` alert (#456) keep reporting it.
 
 ## Install, check, run by hand
 
