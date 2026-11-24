@@ -6,10 +6,18 @@ checkout was 412 commits behind `origin/main` and emnify's 274. Every search on
 those trunks answered from old code, and the worktree reconcile diffed each
 agent branch against the stale HEAD.
 
-A trunk checked out in a linked worktree is already followed from git (#449,
-`git::followed_trunk`). The main folder is the user's working copy, so the
-daemon never moves it. `scripts/trunk-autopull.sh` does, on a timer, but only
-when it is safe.
+The index of a trunk checked out in a linked worktree already follows git
+(#449, `git::followed_trunk`). The checkout itself is still what people and
+agents read on disk. The daemon never moves a working copy.
+`scripts/trunk-autopull.sh` does, on a timer, but only when it is safe.
+
+It acts on the checkout of the trunk. That is the main folder when the main
+folder sits on the trunk. Otherwise it is the linked worktree that has the
+trunk checked out: git allows a branch in one checkout only, so there is at
+most one. tecsul keeps its main folder on a personal branch and its trunk in
+`.claude/worktrees/release-platform`. Until 2026-11-24 only main folders were
+advanced, and that worktree drifted 16 commits behind while agents read the
+release from it.
 
 ## What it does
 
@@ -32,7 +40,8 @@ changing nothing, unless all of these hold:
 | an `origin` remote exists | `no origin remote` |
 | the trunk resolves, in the daemon's order: `git config wqm.trunk` when it names a branch the repo has, else `origin/HEAD`, else `main` or `master` | `no trunk` |
 | the fetch works (non-interactive, 120 s cap) | `fetch of origin/<trunk> failed` |
-| HEAD is the trunk branch | `checkout is on '<branch>', not the trunk` |
+| the main folder or one linked worktree has the trunk checked out; every rule below is then read in that checkout (its own git dir, index, files and filesystem) | `checkout is on '<branch>', not the trunk '<trunk>', and no worktree has it` |
+| that worktree's folder still exists and is still on the trunk | `the worktree's folder is gone …` / `the worktree is no longer on the trunk` |
 | no merge, rebase, cherry-pick, revert or bisect is in progress, and no other git command holds `index.lock` | `operation in progress (<marker>)` |
 | no tracked file is modified or staged (untracked files are fine) | `tracked files modified or staged` |
 | HEAD has no commits that origin lacks | `diverged from origin/<trunk>: N ahead, M behind` |
@@ -101,8 +110,12 @@ All watched repos use HTTPS remotes with the `gh` credential helper (checked
 2026-11-12), which works without a login session; a remote that needs an SSH
 agent fails the fetch and is reported.
 
-To keep a repo out without touching the daemon, leave its main checkout on
-another branch: the script only acts on a checkout sitting on its trunk.
+A line about a worktree names it after the repo, for example
+`tecsul (worktree .claude/worktrees/release-platform): release/platform fast-forwarded 21 commit(s), 21 file(s) (…)`.
+
+To keep a repo out without touching the daemon, have no clean checkout of its
+trunk: leave the main folder on another branch and keep no worktree on the
+trunk, or keep local edits in the one that has it.
 
 Two cases are reported but never resolved, because they are the user's call:
 - **Fetch fails:** an SSH key with a passphrase or no agent, or an expired
