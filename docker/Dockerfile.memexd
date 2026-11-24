@@ -479,6 +479,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- \
         git::checkouts::tests \
         git::trunk_tip::tests \
+        git::branch_changes::tests \
         git::checkout_lag::tests \
         monitoring::checkout_lag_metrics::tests \
         idle::tasks::filesystem_reconcile::tests \
@@ -489,8 +490,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         startup::reconciliation::tests::missing_files \
         startup::reconciliation::tests::clean_stale_state \
         --test-threads=4 2>&1 | tee /tmp/branch-checkouts.log; \
-    grep -q "^test result: ok\. 50 passed" /tmp/branch-checkouts.log \
-    || { echo "GATE: expected exactly 50 branch-checkout deletion + followed-trunk + checkout-lag tests to run and pass — \
+    grep -q "^test result: ok\. 53 passed" /tmp/branch-checkouts.log \
+    || { echo "GATE: expected exactly 53 branch-checkout deletion + followed-trunk + branch-changes-since-fork + checkout-lag tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the rule that keeps worktree-only files from being deleted. If you ADDED a test here, \
 bump this count."; exit 1; }
@@ -519,6 +520,9 @@ bump this count."; exit 1; }
 # worktree sat 1,406 commits behind origin and the index with it). And a
 # divergent file the branch already holds with those exact bytes is not
 # re-queued (DOC-V2, 2026-11-12: each daemon restart re-queued ~38k such files).
+# And a branch's own edits are re-read even when the main folder's HEAD lacks
+# the file (tecsul, 2026-11-24: main on a branch with no `plataforma/`, every
+# agent edit diffed as Added and the branch kept the release's bytes).
 # Hermetic: in-memory SQLite + tempdir git repos.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -528,8 +532,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
         strategies::processing::file::item_metadata \
         --test-threads=4 2>&1 | tee /tmp/branch-switch.log; \
-    grep -q "^test result: ok\. 43 passed" /tmp/branch-switch.log \
-    || { echo "GATE: expected exactly 43 branch_switch + item_metadata tests to run and pass — \
+    grep -q "^test result: ok\. 44 passed" /tmp/branch-switch.log \
+    || { echo "GATE: expected exactly 44 branch_switch + item_metadata tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the membership reconcile, worktree discovery and the branch tip follower. If you ADDED \
 a test here, bump this count."; exit 1; }

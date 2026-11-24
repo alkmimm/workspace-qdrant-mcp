@@ -36,6 +36,8 @@ mod tests;
 #[cfg(test)]
 mod worktree_bulk_tests;
 #[cfg(test)]
+mod worktree_fork_divergence_tests;
+#[cfg(test)]
 mod worktree_queue_purge_tests;
 #[cfg(test)]
 mod worktree_reconcile_tests;

@@ -85,8 +85,9 @@ pub async fn reconcile_worktree_branches(
 ///    `tracked_files` row under the main folder, or rows only through other
 ///    worktree branches. Read from the worktree tree via a `read_root` on the
 ///    item; storage is still keyed to the main watch_folder.
-/// 3. **Divergent** — shared files whose content DIFFERS on the branch (git
-///    `Modified` between the main HEAD and the branch tip), read from the
+/// 3. **Divergent** — files whose content DIFFERS on the branch (git `Modified`
+///    between the main HEAD and the branch tip, and everything the branch
+///    changed since its fork from the trunk), read from the
 ///    worktree tree via `read_root` so the branch is indexed with its OWN bytes
 ///    (a new content-generation), not main's. The baseline skips these.
 ///
@@ -128,10 +129,13 @@ pub(super) async fn reconcile_linked_worktree(
     replan_pending_worktree_adds(pool, tenant_id, branch, &cutoff).await;
 
     // Committed divergence: paths git reports as Modified between the main
-    // HEAD and this branch's tip. The baseline SKIPS these (reading them from
-    // the main tree would tag the branch with main's bytes); (c) below reads
-    // them from the worktree so the branch is indexed with its OWN content.
-    let divergent = crate::git::modified_paths_head_vs_branch(Path::new(main_project_root), branch);
+    // HEAD and this branch's tip, plus the branch's own work since it forked
+    // from the trunk (a main HEAD off the trunk may lack those paths, so an
+    // edit there is Added, never Modified: tecsul 2026-11-24). The baseline
+    // SKIPS these; (3) below reads them from the worktree, its OWN content.
+    let main_root = Path::new(main_project_root);
+    let mut divergent = crate::git::modified_paths_head_vs_branch(main_root, branch);
+    divergent.extend(crate::git::paths_changed_since_fork(main_root, branch));
     let target = WorktreeRef {
         main_watch_folder_id,
         tenant_id,
