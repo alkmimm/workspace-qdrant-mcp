@@ -119,6 +119,89 @@ async fn a_new_worktree_tags_already_indexed_content_in_bulk() {
     assert!(spec.get("from_branch").is_none(), "hash mode: {spec}");
 }
 
+/// A library document the index already holds is NOT tagged in bulk: its points
+/// live in the library, the bulk appends in `projects`, finds none and tags
+/// nothing — tecsul 2026-11-24 re-listed the same 14 `.xls`/`.docx`/`.pdf` per
+/// agent branch on every discovery pass. It goes per file (routed to the
+/// library by the queue); the code file next to it still goes in bulk.
+#[tokio::test]
+async fn a_library_document_goes_per_file_not_in_bulk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_repo = tmp.path().join("main");
+    std::fs::create_dir_all(main_repo.join(".git")).unwrap();
+    std::fs::write(main_repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::create_dir_all(main_repo.join("src")).unwrap();
+    std::fs::write(main_repo.join("src/same.rs"), b"fn same() {}").unwrap();
+    std::fs::write(main_repo.join("src/manual.pdf"), b"%PDF-1.4 same").unwrap();
+
+    let wt = add_linked_worktree(&main_repo, "wt-x", "agent/x");
+    std::fs::write(wt.join("src/same.rs"), b"fn same() {}").unwrap();
+    std::fs::write(wt.join("src/manual.pdf"), b"%PDF-1.4 same").unwrap();
+
+    let pool = create_test_pool().await;
+    setup_tables(&pool).await;
+    let main_str = main_repo.to_string_lossy().to_string();
+    insert_watch_folder(&pool, "w1", "t1", &main_str).await;
+    let h = |b: &[u8]| compute_bytes_hash(b);
+    insert_tracked_file(&pool, "w1", &["main"], &h(b"fn same() {}"), "src/same.rs").await;
+    insert_tracked_file(
+        &pool,
+        "w1",
+        &["main"],
+        &h(b"%PDF-1.4 same"),
+        "src/manual.pdf",
+    )
+    .await;
+
+    let qm = QueueManager::new(pool.clone());
+    reconcile_worktree_branches(
+        &pool,
+        &qm,
+        "w1",
+        "t1",
+        "projects",
+        &main_str,
+        &AllowedExtensions::default(),
+    )
+    .await;
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT item_type, payload_json FROM unified_queue WHERE tenant_id = 't1' \
+         ORDER BY item_type, payload_json",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let bulk: Vec<serde_json::Value> = rows
+        .iter()
+        .filter(|r| r.0 == "tenant")
+        .map(|r| serde_json::from_str(&r.1).unwrap())
+        .collect();
+    assert_eq!(bulk.len(), 1, "{rows:?}");
+    assert_eq!(
+        bulk[0]["branch_membership"]["paths"],
+        serde_json::json!(["src/same.rs"]),
+        "the document is not in the bulk op"
+    );
+    assert!(
+        rows.iter().all(|r| r.0 != "file"),
+        "no project file item: {rows:?}"
+    );
+    // The per-file Add the queue routed to the project's library.
+    let docs: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT tenant_id, collection, file_path FROM unified_queue WHERE item_type = 'file'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(docs.len(), 1, "{docs:?}");
+    assert_eq!(
+        (docs[0].0.as_str(), docs[0].1.as_str()),
+        ("t1-refs", "libraries")
+    );
+    assert!(docs[0].2.ends_with("src/manual.pdf"), "{docs:?}");
+}
+
 /// The divergent set (git: main HEAD vs the branch tip) is skipped for every
 /// path whose worktree bytes the branch already holds. Live 2026-11-12: DOC-V2's
 /// main checkout sat 412 commits behind the agents' base, and each daemon
