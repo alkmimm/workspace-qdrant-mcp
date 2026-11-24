@@ -18,6 +18,15 @@
 //! `(path, hash)` the main folder's index holds is tagged by a bulk op
 //! (`BranchMembershipBulk::hashes`) — no read, no embed, ~25 paths per op.
 //! Everything else (content no branch has indexed yet) still goes per file.
+//!
+//! A library-format document (`.pdf`, `.docx`, `.xls`, …) also goes per file:
+//! its points live in the project's library, while the bulk op appends the
+//! branch in its own collection (`projects`), finds no point there and tags
+//! nothing. Each discovery pass then re-listed the same documents and the bulk
+//! warned "base_points had 0 Qdrant points" forever (tecsul 2026-11-24: 14
+//! `.xls`/`.docx`/`.pdf` per agent branch, never tagged). The per-file Add is
+//! routed to the library by the queue — the same split the branch-switch
+//! re-key makes.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -25,7 +34,7 @@ use std::path::{Path, PathBuf};
 use sqlx::SqlitePool;
 use tracing::{info, warn};
 
-use crate::allowed_extensions::AllowedExtensions;
+use crate::allowed_extensions::{is_library_routed, AllowedExtensions};
 use crate::queue_operations::QueueManager;
 
 use super::db::fetch_paths_missing_branch;
@@ -94,18 +103,20 @@ async fn hash_matched_entries(
     if missing.is_empty() {
         return Ok(Vec::new());
     }
-    // The main scan's eligibility, as every worktree set applies it.
+    // The main scan's eligibility, as every worktree set applies it; library
+    // documents stay per file (see the module note).
     let gate = main_eligibility_gate(target.main_project_root);
     let eligible: Vec<String> = missing
         .into_iter()
         .filter(|rel| {
-            worktree_path_eligible(
-                target.main_project_root,
-                &gate,
-                allowed_extensions,
-                target.collection,
-                rel,
-            )
+            !is_library_routed(rel)
+                && worktree_path_eligible(
+                    target.main_project_root,
+                    &gate,
+                    allowed_extensions,
+                    target.collection,
+                    rel,
+                )
         })
         .collect();
     let root = PathBuf::from(target.wt_root);

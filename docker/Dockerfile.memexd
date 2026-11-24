@@ -523,6 +523,9 @@ bump this count."; exit 1; }
 # And a branch's own edits are re-read even when the main folder's HEAD lacks
 # the file (tecsul, 2026-11-24: main on a branch with no `plataforma/`, every
 # agent edit diffed as Added and the branch kept the release's bytes).
+# And a library document (.pdf/.docx/.xls) is never tagged in bulk — its points
+# live in the library, so the bulk found none and re-listed it every pass
+# (tecsul, 2026-11-24: "base_points had 0 Qdrant points" every cycle).
 # Hermetic: in-memory SQLite + tempdir git repos.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -532,8 +535,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- branch_switch:: \
         strategies::processing::file::item_metadata \
         --test-threads=4 2>&1 | tee /tmp/branch-switch.log; \
-    grep -q "^test result: ok\. 44 passed" /tmp/branch-switch.log \
-    || { echo "GATE: expected exactly 44 branch_switch + item_metadata tests to run and pass — \
+    grep -q "^test result: ok\. 45 passed" /tmp/branch-switch.log \
+    || { echo "GATE: expected exactly 45 branch_switch + item_metadata tests to run and pass — \
 libtest exits 0 when a positional filter matches nothing, so a module rename would silently \
 un-gate the membership reconcile, worktree discovery and the branch tip follower. If you ADDED \
 a test here, bump this count."; exit 1; }
