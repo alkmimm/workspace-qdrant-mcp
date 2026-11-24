@@ -1,3 +1,4 @@
+mod branch_changes;
 mod branch_detector;
 mod branch_lifecycle;
 mod checkout_lag;
@@ -14,6 +15,8 @@ mod worktree;
 
 // Re-export from types
 pub use types::{detect_git_status, CacheStats, GitError, GitResult, GitStatus};
+
+pub use branch_changes::paths_changed_since_fork;
 
 // Re-export from branch_detector
 pub use branch_detector::GitBranchDetector;
