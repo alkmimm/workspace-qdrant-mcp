@@ -10,7 +10,7 @@ set -u
 
 ROOT="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 SCRIPT="$ROOT/scripts/trunk-autopull.sh"
-EXPECTED_CASES=58
+EXPECTED_CASES=67
 # A wrong root fails here, before anything runs, and nothing below writes to
 # $SCRIPT: on 2026-11-12 a run with the wrong root reached the lock wait, whose
 # `flock <path>` created an empty trunk-autopull.sh in the main checkout (the
@@ -156,7 +156,7 @@ r=$(new_pair staged); h=$(head_of "$r"); echo staged > "$r/a.txt"; g "$r" add a.
 expect_skip "a staged change" "$r" "$h" "tracked files modified or staged" "$out"
 
 r=$(new_pair branch); g "$r" checkout -q -b feature; h=$(head_of "$r"); out=$(run --repo "$r")
-expect_skip "a checkout on another branch" "$r" "$h" "checkout is on 'feature', not the trunk 'main'" "$out"
+expect_skip "a checkout on another branch, and no worktree on the trunk" "$r" "$h" "checkout is on 'feature', not the trunk 'main', and no worktree has it" "$out"
 
 r=$(new_pair detached); g "$r" checkout -q --detach; h=$(head_of "$r"); out=$(run --repo "$r")
 expect_skip "a detached HEAD" "$r" "$h" "checkout is on 'detached HEAD'" "$out"
@@ -217,6 +217,47 @@ expect_skip "an origin/<trunk> git cannot compare with HEAD" "$r" "$h" "cannot c
 r=$(new_pair fulldisk); h=$(head_of "$r")
 out=$(WQM_AUTOPULL_MIN_FREE_GB=99999999 bash "$SCRIPT" --repo "$r" 2>&1)
 expect_skip "too little free disk for the fast-forward" "$r" "$h" "GiB free" "$out"
+
+echo " the trunk checked out in a linked worktree"
+# tecsul's layout: the main folder on a personal branch, the trunk in a linked
+# worktree. $2 is the worktree's path, relative to the clone or absolute.
+# Echoes the worktree path; the clone is "$TMP/$1".
+wt_pair() {
+    local r wt; r=$(new_pair "$1"); [[ "$2" == /* ]] && wt="$2" || wt="$r/$2"
+    g "$r" checkout -q -b mine; g "$r" worktree add -q "$wt" main; echo "$wt"
+}
+wt=$(wt_pair wt-in .claude/worktrees/rp); r="$TMP/wt-in"; hm=$(head_of "$r"); out=$(run --repo "$r")
+if [[ "$(head_of "$wt")" == "$(tip wt-in)" && "$(head_of "$r")" == "$hm" \
+    && "$(git -C "$r" symbolic-ref --short HEAD)" == mine \
+    && "$out" == *"wt-in (worktree .claude/worktrees/rp): main fast-forwarded 3 commit(s), 1 file(s)"* ]]; then
+    pass "the trunk's worktree is fast-forwarded; the main folder and its branch are untouched"; else bad "wt-in: $out"; fi
+
+wt=$(wt_pair wt-out "$TMP/elsewhere/release platform"); out=$(run --repo "$TMP/wt-out")
+expect_ff "a worktree outside the repo, with a space in its path" "$wt" wt-out "(worktree $TMP/elsewhere/release platform): main fast-forwarded" "$out"
+
+wt=$(wt_pair wt-dirty .wt); h=$(head_of "$wt"); echo edit > "$wt/a.txt"; out=$(run --repo "$TMP/wt-dirty")
+expect_skip "a modified file in the trunk's worktree" "$wt" "$h" "(worktree .wt): skip — tracked files modified" "$out"
+
+# The rules are read in the trunk's checkout, not in the main folder.
+wt=$(wt_pair wt-main-dirty .wt); echo edit > "$TMP/wt-main-dirty/b.txt"; out=$(run --repo "$TMP/wt-main-dirty")
+expect_ff "an edit in the main folder does not hold the worktree" "$wt" wt-main-dirty "fast-forwarded" "$out"
+
+wt=$(wt_pair wt-merge .wt); h=$(head_of "$wt"); echo "$h" > "$(git -C "$wt" rev-parse --absolute-git-dir)/MERGE_HEAD"
+out=$(run --repo "$TMP/wt-merge")
+expect_skip "a merge in progress in the worktree (its own git dir)" "$wt" "$h" "operation in progress (MERGE_HEAD)" "$out"
+
+wt=$(wt_pair wt-main-merge .wt); echo x > "$TMP/wt-main-merge/.git/MERGE_HEAD"; out=$(run --repo "$TMP/wt-main-merge")
+expect_ff "a merge in progress in the main folder does not hold the worktree" "$wt" wt-main-merge "fast-forwarded" "$out"
+
+wt=$(wt_pair wt-diverged .wt); commit "$wt" c.txt local; h=$(head_of "$wt"); out=$(run --repo "$TMP/wt-diverged")
+expect_skip "a local commit on the trunk in the worktree (diverged)" "$wt" "$h" "diverged from origin/main: 1 ahead, 3 behind" "$out"
+
+wt=$(wt_pair wt-gone "$TMP/wt-gone-dir"); rm -rf "$wt"; hm=$(head_of "$TMP/wt-gone"); out=$(run --repo "$TMP/wt-gone")
+if [[ ! -e "$wt" && "$(head_of "$TMP/wt-gone")" == "$hm" && "$out" == *"the worktree's folder is gone"* ]]; then
+    pass "a worktree whose folder was deleted is skipped, nothing recreated"; else bad "wt-gone: $out"; fi
+
+wt=$(wt_pair wt-dry .wt); g "$TMP/wt-dry" fetch -q origin; h=$(head_of "$wt"); out=$(run --dry-run --repo "$TMP/wt-dry")
+expect_skip "--dry-run names the worktree and changes nothing" "$wt" "$h" "wt-dry (worktree .wt): would fast-forward main 3 commit(s)" "$out"
 
 echo " fetch semantics"
 r=$(new_pair fetched-dirty); echo x > "$r/a.txt"; run --repo "$r" >/dev/null

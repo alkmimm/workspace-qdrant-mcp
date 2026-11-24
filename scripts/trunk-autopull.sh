@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
-# Fast-forward the MAIN checkout of every watched project to origin/<trunk>,
-# only when that is provably safe. Run hourly by wqm-trunk-autopull.timer.
+# Fast-forward the checkout of the trunk of every watched project to
+# origin/<trunk>, only when that is provably safe. Run hourly by
+# wqm-trunk-autopull.timer.
+#
+# The checkout of the trunk is the main folder when it sits on the trunk, else
+# the linked worktree that does (git lets a branch be checked out in one place
+# only, so there is at most one). tecsul keeps its main folder on a personal
+# branch and the trunk in .claude/worktrees/release-platform: until 2026-11-24
+# only main folders were advanced, and that worktree drifted 16 commits behind
+# while agents read the release from it.
 #
 # Why this exists: the daemon indexes what is on disk, and nothing kept the
 # main checkouts current. On 2026-11-12 DOC-V2's main checkout sat 412 commits
@@ -19,8 +27,11 @@
 # The checkout is the user's working copy, so this never decides anything for
 # them. It advances a repo only when ALL hold, and otherwise logs why it did
 # not and changes nothing:
-#   - HEAD is the trunk branch (a checkout on another branch, or detached, is
-#     left alone);
+#   - a checkout of the trunk exists: the main folder's HEAD, or a linked
+#     worktree's, is the trunk branch (checkouts on other branches, detached
+#     HEADs and a worktree whose folder is gone are left alone). Every rule
+#     below is read in THAT checkout: its own git dir for the in-progress
+#     markers, its own index and files, its own filesystem;
 #   - no merge, rebase, am, cherry-pick, revert or bisect is in progress, and
 #     no other git command holds the index lock;
 #   - no tracked file is modified or staged (untracked files do not block: a
@@ -135,6 +146,15 @@ trunk_of() {
     printf '%s' "$t"
 }
 
+# The linked worktree of repo $1 that has branch $2 checked out, or nothing.
+# In the porcelain list a "worktree <path>" line opens each block and a
+# "branch refs/heads/<name>" line names its branch (detached HEADs have none).
+trunk_worktree() {
+    git -C "$1" worktree list --porcelain 2>/dev/null | awk -v want="branch refs/heads/$2" '
+        /^worktree / { path = substr($0, 10) }
+        $0 == want   { print path; exit }'
+}
+
 # Why a big jump has to wait, or nothing when memory has room for it. Runs the
 # stack's start preflight, which only reads; PREFLIGHT_SOFT is forced off, so a
 # value exported for a manual start cannot wave a jump through. Its exit: 0
@@ -155,7 +175,7 @@ memory_hold() {
 # One repo: prints exactly one log line.
 autopull_one() {
     local repo="$1" name trunk head gitdir marker status counts old new ahead behind kb free_gb
-    local changed files jump hold
+    local changed files jump hold co
     name=$(basename "$repo")
     if [[ "$(git -C "$repo" rev-parse --is-inside-work-tree 2>/dev/null)" != true ]] \
         || [[ "$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" != "$(cd "$repo" 2>/dev/null && pwd -P)" ]]; then
@@ -179,7 +199,21 @@ autopull_one() {
     fi
     head=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null)
     if [[ "$head" != "$trunk" ]]; then
-        log "$name: skip — checkout is on '${head:-detached HEAD}', not the trunk '$trunk'"; return
+        # The main folder is elsewhere: the trunk's checkout, if any, is a
+        # linked worktree. From here on every check runs in THAT checkout.
+        co=$(trunk_worktree "$repo" "$trunk")
+        if [[ -z "$co" ]]; then
+            log "$name: skip — checkout is on '${head:-detached HEAD}', not the trunk '$trunk', and no worktree has it"; return
+        fi
+        name="$name (worktree ${co#"$repo"/})"
+        if [[ ! -d "$co" ]] \
+            || [[ "$(git -C "$co" rev-parse --show-toplevel 2>/dev/null)" != "$(cd "$co" 2>/dev/null && pwd -P)" ]]; then
+            log "$name: skip — the worktree's folder is gone or not a work tree ($co)"; return
+        fi
+        if [[ "$(git -C "$co" symbolic-ref --quiet --short HEAD 2>/dev/null)" != "$trunk" ]]; then
+            log "$name: skip — the worktree is no longer on the trunk '$trunk'"; return
+        fi
+        repo="$co"
     fi
     gitdir=$(git -C "$repo" rev-parse --absolute-git-dir 2>/dev/null)
     # index.lock: another git command is running in this checkout right now.
