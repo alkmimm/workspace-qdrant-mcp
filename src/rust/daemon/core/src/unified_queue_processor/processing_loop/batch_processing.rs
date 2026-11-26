@@ -25,6 +25,9 @@ use crate::queue_health::QueueProcessorHealth;
 use crate::queue_operations::{QueueError, QueueManager, QueueResult};
 use crate::search_db::SearchDbManager;
 use crate::storage::StorageClient;
+use crate::strategies::processing::file::branch_prune_batch::{
+    process_prune_batch, prune_prefix_len,
+};
 use crate::tree_sitter::GrammarManager;
 use crate::unified_queue_processor::config::{
     UnifiedProcessingMetrics, UnifiedProcessorConfig, WarmupState,
@@ -65,10 +68,9 @@ struct ItemDeps {
 
 /// Process a non-empty batch of queue items.
 ///
-/// With `config.max_concurrent_items == 1` (the default) the dispatch is
-/// strictly sequential and byte-identical to the legacy loop. With values
-/// `> 1`, items are dispatched via `FuturesUnordered` and capped by an
-/// owned semaphore.
+/// A contiguous prune prefix batches tag-only deletes before the regular
+/// dispatcher. The regular dispatcher uses one future per item, bounded by
+/// `config.max_concurrent_items`.
 ///
 /// Returns `Err(())` if a shutdown cancellation is detected during processing
 /// (the caller should then `return Ok(())`). Returns `Ok(processed_tenants)`
@@ -119,6 +121,51 @@ pub(super) async fn process_batch(
         metrics: Arc::clone(metrics),
         queue_health: queue_health.clone(),
         processed_tenants: Arc::clone(&processed_tenants),
+    };
+
+    let prune_prefix = prune_prefix_len(&items);
+    let items = if prune_prefix >= 2
+        && !UnifiedQueueProcessor::check_memory_pressure(config.max_memory_percent).await
+    {
+        let start_time = std::time::Instant::now();
+        let ctx = UnifiedQueueProcessor::build_processing_context(
+            queue_manager,
+            document_processor,
+            embedding_generator,
+            storage_client,
+            lsp_manager,
+            embedding_semaphore,
+            allowed_extensions,
+            lexicon_manager,
+            search_db,
+            graph_store,
+            grammar_manager,
+            ingestion_limits,
+        );
+        let mut batch = process_prune_batch(&ctx, &items[..prune_prefix], cancellation_token).await;
+        let mut remaining = Vec::new();
+        for (index, item) in items.into_iter().enumerate() {
+            match batch.outcomes.remove(&index) {
+                Some(Ok(())) => handle_item_success(&item, start_time, &deps, "File").await,
+                Some(Err(error)) => handle_item_failure(&item, error, start_time, &deps).await,
+                None => remaining.push(item),
+            }
+        }
+        if cancellation_token.is_cancelled() {
+            super::concurrent_dispatch::re_lease_pending(queue_manager, &remaining).await;
+            return Err(());
+        }
+        if batch.defer_remaining {
+            for item in remaining {
+                if let Err(error) = queue_manager.re_lease_item(&item.queue_id, 0).await {
+                    warn!(queue_id = %item.queue_id, %error, "Failed to return deferred branch prune item");
+                }
+            }
+            return Ok(processed_tenants.lock().await.clone());
+        }
+        remaining
+    } else {
+        items
     };
 
     let deps_for_spawn = deps.clone();

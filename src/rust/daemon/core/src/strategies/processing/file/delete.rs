@@ -477,6 +477,9 @@ pub(super) async fn delete_tracked_file(
                     "Failed to drop branch {} from base_point {} on delete of {}: {}",
                     item.branch, bp, relative_path, e
                 );
+                if is_branch_prune_delete(item) {
+                    return Err(UnifiedProcessorError::Storage(e.to_string()));
+                }
             }
         }
     }
@@ -772,7 +775,7 @@ fn would_remove_last_tag(branches: &[String], branch: &str) -> bool {
 /// even when the file still exists on disk: the file lives on the live branch,
 /// but its tag for the *pruned* branch must be dropped. Watcher and folder
 /// deletes carry no such marker, so they keep the stale-file-on-disk skip.
-fn is_branch_prune_delete(item: &UnifiedQueueItem) -> bool {
+pub(super) fn is_branch_prune_delete(item: &UnifiedQueueItem) -> bool {
     use crate::startup::reconciliation::branch_prune::BRANCH_PRUNE_REASON;
     let Some(meta) = item.metadata.as_deref() else {
         return false;

@@ -40,6 +40,15 @@ fn make_item(queue_id: &str) -> UnifiedQueueItem {
     }
 }
 
+fn prune_item(queue_id: &str) -> UnifiedQueueItem {
+    let mut item = make_item(queue_id);
+    item.op = QueueOperation::Delete;
+    item.metadata = Some(
+        crate::startup::reconciliation::branch_prune::BRANCH_PRUNE_DELETE_METADATA.to_string(),
+    );
+    item
+}
+
 async fn setup_queue_manager() -> (QueueManager, tempfile::TempDir) {
     let temp = tempdir().unwrap();
     let db_path = temp.path().join("dispatch_test.db");
@@ -444,7 +453,7 @@ async fn free_slots_are_refilled_while_a_long_item_runs() {
     let finished = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let calls = Arc::new(AtomicUsize::new(0));
     let batch = Vec::from(["long", "s0", "s1", "s2"].map(make_item));
-    let refills = (0..8).map(|i| make_item(&format!("r{i}"))).collect();
+    let refills = (0..8).map(|i| prune_item(&format!("r{i}"))).collect();
 
     let done = Arc::clone(&finished);
     let cancelled = run_dispatch_loop(
@@ -477,6 +486,54 @@ async fn free_slots_are_refilled_while_a_long_item_runs() {
         "{finished:?}"
     );
     assert!(calls.load(Ordering::SeqCst) >= 1);
+}
+
+#[tokio::test]
+async fn prune_only_tail_drains_before_the_next_full_dequeue() {
+    let (manager, _tmp) = setup_queue_manager().await;
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&completed);
+    let cancelled = run_dispatch_loop(
+        vec![prune_item("initial")],
+        semaphore,
+        &manager,
+        &CancellationToken::new(),
+        move |_item, permit| {
+            let count = Arc::clone(&count);
+            tokio::spawn(async move {
+                let _permit = permit;
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        },
+        || async { false },
+        || async {},
+        refill_source(vec![make_item("still in scheduler")], Arc::clone(&calls)),
+        70,
+    )
+    .await;
+
+    assert!(!cancelled);
+    assert_eq!(completed.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn prune_prefix_respects_lease_order_and_inline_priority() {
+    use crate::strategies::processing::file::branch_prune_batch::prune_prefix_len;
+
+    let normal = make_item("normal");
+    let mut items = vec![prune_item("p1"), prune_item("p2"), normal.clone()];
+    assert_eq!(prune_prefix_len(&items), 2);
+    items.swap(0, 2);
+    assert_eq!(prune_prefix_len(&items), 0);
+    items.swap(0, 2);
+    items[2].item_type = ItemType::Text;
+    assert_eq!(prune_prefix_len(&items), 0);
+    items.pop();
+    items[1].branch = "another-dead-branch".into();
+    assert_eq!(prune_prefix_len(&items), 1);
 }
 
 /// Never pull more work under memory pressure: the pressure check guards the

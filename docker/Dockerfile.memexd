@@ -625,9 +625,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- \
         unified_queue_processor::processing_loop::concurrent_dispatch::tests \
         --test-threads=4 2>&1 | tee /tmp/dispatch.log; \
-    grep -q "^test result: ok\. 7 passed" /tmp/dispatch.log \
-    || { echo "GATE: expected exactly 7 dispatch-driver tests (refill, semaphore, cancellation, \
-memory pressure) to run and pass. If you ADDED a test here, bump this count."; exit 1; }
+    grep -q "^test result: ok\. 9 passed" /tmp/dispatch.log \
+    || { echo "GATE: expected exactly 9 dispatch-driver tests (refill, prune priority, semaphore, \
+cancellation, memory pressure) to run and pass. If you ADDED a test here, bump this count."; exit 1; }
 
 # Queue finalization runs here, same rationale: hermetic (tempdir SQLite). The
 # FTS5 batch writer is a SECOND finalizer, running concurrently with the
@@ -1140,10 +1140,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- \
         startup::reconciliation::branch_prune \
         startup::reconciliation::tests::branch_prune:: \
+        strategies::processing::file::branch_prune_batch::tests \
         --test-threads=4 2>&1 | tee /tmp/branch-prune.log; \
-    grep -q "^test result: ok\. 20 passed" /tmp/branch-prune.log \
-    || { echo "GATE: expected exactly 20 branch-prune tests to run and pass (4 payload/count + \
-6 policy + 10 integration, 2 of them on dropping a dead branch's queued work) — libtest exits \
+    grep -q "^test result: ok\. 22 passed" /tmp/branch-prune.log \
+    || { echo "GATE: expected exactly 22 branch-prune tests to run and pass (4 payload/count + \
+6 policy + 10 integration + 2 grouped prune) — libtest exits \
 0 when a positional filter matches nothing, so a module rename would silently un-gate the \
 guards that decide which branch's index is deleted. If you ADDED a test here, bump this \
 count."; exit 1; }

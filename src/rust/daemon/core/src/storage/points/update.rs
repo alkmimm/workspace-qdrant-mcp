@@ -252,6 +252,7 @@ impl StorageClient {
         &self,
         collection_name: &str,
         ids: &[uuid::Uuid],
+        tenant_id: Option<&str>,
     ) -> Result<HashMap<uuid::Uuid, (String, Vec<String>)>, StorageError> {
         use qdrant_client::qdrant::{
             point_id, value::Kind, GetPointsBuilder, PayloadIncludeSelector,
@@ -260,7 +261,11 @@ impl StorageClient {
         let ids: Vec<PointId> = ids.iter().map(|id| PointId::from(id.to_string())).collect();
         let builder = GetPointsBuilder::new(collection_name, ids)
             .with_payload(PayloadIncludeSelector {
-                fields: vec!["base_point".to_string(), "branch".to_string()],
+                fields: vec![
+                    "base_point".to_string(),
+                    "branch".to_string(),
+                    "tenant_id".to_string(),
+                ],
             })
             .with_vectors(false);
         let response = self
@@ -285,6 +290,12 @@ impl StorageClient {
                 else {
                     return None;
                 };
+                if let Some(expected) = tenant_id {
+                    match point.payload.get("tenant_id")?.kind.as_ref()? {
+                        Kind::StringValue(actual) if actual == expected => {}
+                        _ => return None,
+                    }
+                }
                 Some((
                     uuid::Uuid::parse_str(id).ok()?,
                     (base_point.clone(), branch_array(point)),

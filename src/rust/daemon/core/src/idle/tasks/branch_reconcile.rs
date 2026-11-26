@@ -196,7 +196,7 @@ impl MaintenanceTask for BranchReconcileTask {
             self.reads.get_batches += 1;
             let read = ctx
                 .storage_client
-                .read_tracked_branch_sets(collection, &ids);
+                .read_tracked_branch_sets(collection, &ids, None);
             match tokio::time::timeout(GET_TIMEOUT, read).await {
                 Ok(Ok(sets)) => {
                     branch_sets.insert(collection, sets);

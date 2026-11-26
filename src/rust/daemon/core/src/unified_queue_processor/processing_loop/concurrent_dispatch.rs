@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::queue_operations::QueueManager;
+use crate::strategies::processing::file::branch_prune_batch::is_project_prune;
 use crate::unified_queue_schema::UnifiedQueueItem;
 
 /// Drive the per-batch dispatch loop with `FuturesUnordered`, capped by
@@ -63,7 +64,8 @@ where
     RFut: std::future::Future<Output = Vec<UnifiedQueueItem>>,
 {
     let mut pending: VecDeque<UnifiedQueueItem> = items.into();
-    let mut in_flight: FuturesUnordered<tokio::task::JoinHandle<F>> = FuturesUnordered::new();
+    let mut in_flight = FuturesUnordered::new();
+    let mut ordinary_in_flight = 0;
     let mut cancelled = false;
 
     while !pending.is_empty() || !in_flight.is_empty() {
@@ -106,10 +108,17 @@ where
             let item = pending
                 .pop_front()
                 .expect("pending non-empty guarded above");
-            in_flight.push(spawn_item(item, permit));
+            let ordinary = !is_project_prune(&item);
+            ordinary_in_flight += usize::from(ordinary);
+            let task = spawn_item(item, permit);
+            in_flight.push(async move { (ordinary, task.await) });
         }
 
-        if !cancelled && pending.is_empty() && !in_flight.is_empty() {
+        // After a prune-only tail, return to the scheduler for a full page.
+        // One-at-a-time slot refills would keep these deletes on the scalar
+        // path indefinitely. Keep refilling while any ordinary work runs,
+        // so a long ingestion task cannot hold up the rest of the queue.
+        if !cancelled && pending.is_empty() && ordinary_in_flight > 0 {
             let more =
                 refill_free_slots(&item_semaphore, &mut refill, &mut is_memory_pressure).await;
             if !more.is_empty() {
@@ -125,16 +134,15 @@ where
         // Await the next completion. We use FuturesUnordered::next; on
         // cancellation we still want to drain in-flight to avoid half-applied
         // SQLite state, so we do NOT bail out on cancel here.
-        match in_flight.next().await {
-            Some(Ok(_)) => {}
-            Some(Err(join_err)) => {
+        if let Some((ordinary, outcome)) = in_flight.next().await {
+            ordinary_in_flight -= usize::from(ordinary);
+            if let Err(join_err) = outcome {
                 if join_err.is_panic() {
                     error!("Spawned item future panicked: {}", join_err);
                 } else {
                     debug!("Spawned item future cancelled at runtime: {}", join_err);
                 }
             }
-            None => break,
         }
 
         if !cancelled {

@@ -15,6 +15,7 @@
 //! - `zero_byte` — graceful handling of empty (0-byte) files
 
 mod branch_dedup;
+pub(crate) mod branch_prune_batch;
 mod chunk_embed;
 mod component;
 mod delete;
