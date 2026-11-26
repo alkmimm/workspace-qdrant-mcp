@@ -302,13 +302,19 @@ impl UnifiedQueueProcessor {
                         grammar_manager,
                         ingestion_limits,
                     );
-                    state
+                    if state
                         .graph_backfill
                         .step(
                             &ctx,
                             crate::strategies::processing::file::GRAPH_BACKFILL_STEP_BUDGET,
                         )
-                        .await;
+                        .await
+                    {
+                        // Use the normal poll delay if the scheduler did not
+                        // claim the item yet (for example, a busy tenant).
+                        tokio::time::sleep(poll_interval).await;
+                        return true;
+                    }
                 }
                 run_idle_work(
                     state,

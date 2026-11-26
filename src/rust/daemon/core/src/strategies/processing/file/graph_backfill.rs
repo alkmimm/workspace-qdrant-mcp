@@ -17,15 +17,18 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use sqlx::Row;
+use sqlx::{Row, SqlitePool};
 use tracing::{debug, info, warn};
+use wqm_common::timestamps;
 
 use crate::context::ProcessingContext;
 use crate::git::BranchCheckouts;
+use crate::graph::GRAPH_EXTRACTOR_VERSION;
 use crate::tracked_files_schema::compute_file_hash;
 
-/// How often the pending list is rebuilt from `tracked_files` once drained.
+/// Delay between completed sweeps.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+const PAGE_SIZE: i64 = 512;
 /// Wall-clock budget of one idle step: the queue may fill meanwhile, so the
 /// step yields well before a user-visible delay.
 pub(crate) const STEP_BUDGET: Duration = Duration::from_millis(1500);
@@ -46,26 +49,125 @@ struct Pending {
 #[derive(Debug, Default)]
 pub(crate) struct GraphBackfill {
     pending: VecDeque<Pending>,
-    refreshed_at: Option<Instant>,
+    sweep: Option<Sweep>,
+    finished_at: Option<Instant>,
+    scanned: u64,
     rebuilt: u64,
-    /// Of `rebuilt`, the versions read from git rather than a checkout.
     from_git: u64,
     unreachable: u64,
 }
 
-impl GraphBackfill {
-    /// Rebuild pending generations until `budget` runs out. Returns how many
-    /// were rebuilt in this step.
-    pub(crate) async fn step(&mut self, ctx: &ProcessingContext, budget: Duration) -> usize {
-        let Some(ref graph) = ctx.graph_store else {
-            return 0;
-        };
-        if self.pending.is_empty() && self.refresh_due() {
-            self.refresh(ctx).await;
+#[derive(Debug)]
+struct Sweep {
+    folders: VecDeque<String>,
+    last_id: i64,
+    upper_id: i64,
+    queued: HashSet<(String, String)>,
+}
+
+impl Sweep {
+    async fn start(pool: &SqlitePool) -> Result<Self, sqlx::Error> {
+        let upper_id = sqlx::query_scalar("SELECT COALESCE(MAX(file_id), 0) FROM tracked_files")
+            .fetch_one(pool)
+            .await?;
+        let folders = sqlx::query_scalar(
+            "SELECT watch_id FROM watch_folders WHERE enabled = 1
+             ORDER BY is_active DESC, tenant_id, watch_id",
+        )
+        .fetch_all(pool)
+        .await?
+        .into();
+        Ok(Self {
+            folders,
+            last_id: 0,
+            upper_id,
+            queued: HashSet::new(),
+        })
+    }
+
+    async fn page(
+        &self,
+        pool: &SqlitePool,
+        watch_id: &str,
+    ) -> Result<Vec<sqlx::sqlite::SqliteRow>, sqlx::Error> {
+        // Bound the number of tracked rows visited, including rows without a
+        // base point. The watch-folder index also orders ties by rowid/file_id.
+        sqlx::query(
+            "SELECT tf.file_id, w.tenant_id, w.path, tf.relative_path, tf.base_point,
+                    tf.file_hash, tf.branches, COALESCE(tf.collection, w.collection) AS collection
+             FROM watch_folders w
+             JOIN tracked_files tf ON tf.watch_folder_id = w.watch_id
+             WHERE w.watch_id = ?1 AND w.enabled = 1
+               AND tf.file_id > ?2 AND tf.file_id <= ?3
+             ORDER BY tf.file_id LIMIT ?4",
+        )
+        .bind(watch_id)
+        .bind(self.last_id)
+        .bind(self.upper_id)
+        .bind(PAGE_SIZE)
+        .fetch_all(pool)
+        .await
+    }
+
+    fn advance(&mut self, rows: &[sqlx::sqlite::SqliteRow]) {
+        if rows.len() < PAGE_SIZE as usize {
+            self.folders.pop_front();
+            self.last_id = 0;
+        } else if let Some(last) = rows.last() {
+            self.last_id = last.get("file_id");
         }
+    }
+}
+
+impl GraphBackfill {
+    /// Discover at most one page and rebuild within the idle work budget.
+    /// Returns true when the queue should be polled before more maintenance.
+    pub(crate) async fn step(&mut self, ctx: &ProcessingContext, budget: Duration) -> bool {
+        let Some(ref graph) = ctx.graph_store else {
+            return false;
+        };
         let started = Instant::now();
-        let mut rebuilt = 0usize;
-        while started.elapsed() < budget {
+        if self.pending.is_empty() {
+            if self.sweep.is_none() {
+                if self
+                    .finished_at
+                    .is_some_and(|at| at.elapsed() < REFRESH_INTERVAL)
+                {
+                    return false;
+                }
+                match Sweep::start(&ctx.pool).await {
+                    Ok(sweep) => self.sweep = Some(sweep),
+                    Err(e) => {
+                        warn!(error = %e, "graph backfill: could not start sweep");
+                        self.finish();
+                        return false;
+                    }
+                }
+            }
+            match self.discover_page(ctx).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.finish();
+                    return false;
+                }
+                Err(e) => {
+                    warn!(error = %e, "graph backfill: page discovery failed");
+                    self.finish();
+                    return false;
+                }
+            }
+        }
+        while !self.pending.is_empty() && started.elapsed() < budget {
+            // Work can arrive while discovering a page or rebuilding a file.
+            // A delayed retry is not claimable and must not stall backfill.
+            match has_ready_work(&ctx.pool).await {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(e) => {
+                    debug!(error = %e, "graph backfill: queue probe failed");
+                    return true;
+                }
+            }
             let Some(p) = self.pending.pop_front() else {
                 break;
             };
@@ -76,9 +178,9 @@ impl GraphBackfill {
                 Ok(true) => continue, // an ingest got there first
                 Ok(false) => {}
                 Err(e) => {
-                    warn!(error = %e, "graph backfill: generation probe failed — pausing until the next refresh");
-                    self.pending.clear();
-                    break;
+                    warn!(error = %e, "graph backfill: generation probe failed");
+                    self.finish();
+                    return false;
                 }
             }
             let (abs, staged) = match locate_version(&p) {
@@ -110,100 +212,111 @@ impl GraphBackfill {
             if staged.is_some() {
                 self.from_git += 1;
             }
-            rebuilt += 1;
             self.rebuilt += 1;
         }
-        if rebuilt > 0 && self.pending.is_empty() {
+        false
+    }
+
+    /// Discover missing generations only for the page's watch folder.
+    async fn discover_page(&mut self, ctx: &ProcessingContext) -> Result<bool, sqlx::Error> {
+        let (Some(sweep), Some(graph)) = (self.sweep.as_mut(), ctx.graph_store.as_ref()) else {
+            return Ok(false);
+        };
+        let Some(watch_id) = sweep.folders.front() else {
+            return Ok(false);
+        };
+        let rows = sweep.page(&ctx.pool, watch_id).await?;
+        if let Some(first) = rows.first() {
+            let tenant_id: &str = first.get("tenant_id");
+            let generations: Vec<&str> = rows
+                .iter()
+                .filter_map(|row| row.get::<Option<&str>, _>("base_point"))
+                .collect();
+            let current = {
+                let store = graph.read().await;
+                current_generations(store.pool(), tenant_id, &generations).await?
+            };
+            for row in &rows {
+                let (Some(generation), Some(relative_path)) = (
+                    row.get::<Option<&str>, _>("base_point"),
+                    row.get::<Option<&str>, _>("relative_path"),
+                ) else {
+                    continue;
+                };
+                if current.contains(generation)
+                    || !sweep
+                        .queued
+                        .insert((tenant_id.to_owned(), generation.to_owned()))
+                {
+                    continue;
+                }
+                let raw: Option<&str> = row.get("branches");
+                self.pending.push_back(Pending {
+                    tenant_id: tenant_id.to_owned(),
+                    collection: row.get("collection"),
+                    watch_root: PathBuf::from(row.get::<&str, _>("path")),
+                    relative_path: relative_path.to_owned(),
+                    generation: generation.to_owned(),
+                    file_hash: row.get("file_hash"),
+                    branches: raw
+                        .and_then(|json| serde_json::from_str(json).ok())
+                        .unwrap_or_default(),
+                });
+            }
+        }
+        self.scanned += rows.len() as u64;
+        sweep.advance(&rows);
+        Ok(true)
+    }
+
+    fn finish(&mut self) {
+        if self.sweep.is_some() {
             info!(
+                scanned = self.scanned,
+                page_size = PAGE_SIZE,
                 rebuilt = self.rebuilt,
                 from_git = self.from_git,
                 unreachable = self.unreachable,
-                "Graph backfill drained: every reachable generation has a graph \
-                 (unreachable = versions neither a checkout nor a live branch tip holds)"
+                "Graph backfill sweep ended"
             );
         }
-        rebuilt
-    }
-
-    fn refresh_due(&self) -> bool {
-        self.refreshed_at
-            .map_or(true, |at| at.elapsed() >= REFRESH_INTERVAL)
-    }
-
-    /// Rebuild the pending list: every tracked generation of an enabled watch
-    /// folder with no extraction record by the current extractor
-    /// (`GRAPH_EXTRACTOR_VERSION`). Active projects first.
-    async fn refresh(&mut self, ctx: &ProcessingContext) {
-        self.refreshed_at = Some(Instant::now());
-        self.unreachable = 0;
-        let Some(ref graph) = ctx.graph_store else {
-            return;
+        *self = Self {
+            finished_at: Some(Instant::now()),
+            ..Self::default()
         };
-        let rows = match sqlx::query(
-            "SELECT w.tenant_id, w.path, tf.relative_path, tf.base_point, tf.file_hash,
-                    tf.branches, COALESCE(tf.collection, w.collection) AS collection
-             FROM tracked_files tf JOIN watch_folders w ON w.watch_id = tf.watch_folder_id
-             WHERE tf.base_point IS NOT NULL AND w.enabled = 1
-             ORDER BY w.is_active DESC, w.tenant_id, tf.relative_path",
-        )
-        .fetch_all(&ctx.pool)
-        .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                warn!(error = %e, "graph backfill: tracked_files query failed");
-                return;
-            }
-        };
-        let mut extracted_by_tenant: std::collections::HashMap<String, HashSet<String>> =
-            std::collections::HashMap::new();
-        let mut queued: HashSet<(String, String)> = HashSet::new();
-        for r in &rows {
-            let tenant_id: String = r.get("tenant_id");
-            if !extracted_by_tenant.contains_key(&tenant_id) {
-                // One an older extractor wrote is rebuilt in place.
-                let extracted = match graph.extracted_generations(&tenant_id).await {
-                    Ok(list) => list
-                        .into_iter()
-                        .filter(|g| g.current)
-                        .map(|g| g.generation)
-                        .collect(),
-                    Err(e) => {
-                        warn!(tenant = %tenant_id, error = %e, "graph backfill: listing generations failed");
-                        return;
-                    }
-                };
-                extracted_by_tenant.insert(tenant_id.clone(), extracted);
-            }
-            let generation: String = r.get("base_point");
-            if extracted_by_tenant[&tenant_id].contains(&generation)
-                || !queued.insert((tenant_id.clone(), generation.clone()))
-            {
-                continue;
-            }
-            let raw: Option<String> = r.get("branches");
-            self.pending.push_back(Pending {
-                tenant_id,
-                collection: r.get("collection"),
-                watch_root: PathBuf::from(r.get::<String, _>("path")),
-                relative_path: r.get("relative_path"),
-                generation,
-                file_hash: r.get("file_hash"),
-                branches: raw
-                    .as_deref()
-                    .and_then(|j| serde_json::from_str(j).ok())
-                    .unwrap_or_default(),
-            });
-        }
-        if self.pending.is_empty() {
-            debug!("graph backfill: nothing pending");
-        } else {
-            info!(
-                pending = self.pending.len(),
-                "Graph backfill: generations in the index without a current graph"
-            );
-        }
     }
+}
+
+async fn current_generations(
+    pool: &SqlitePool,
+    tenant_id: &str,
+    generations: &[&str],
+) -> Result<HashSet<String>, sqlx::Error> {
+    let current = sqlx::query_scalar(
+        "SELECT generation FROM graph_generations
+         WHERE tenant_id = ?1 AND extractor_version >= ?2
+           AND generation IN (SELECT value FROM json_each(?3))",
+    )
+    .bind(tenant_id)
+    .bind(GRAPH_EXTRACTOR_VERSION)
+    .bind(sqlx::types::Json(generations))
+    .fetch_all(pool)
+    .await?;
+    Ok(current.into_iter().collect())
+}
+
+async fn has_ready_work(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM unified_queue
+             WHERE status = 'pending' AND (lease_until IS NULL OR lease_until < ?1)
+             UNION ALL
+             SELECT 1 FROM unified_queue WHERE status = 'in_progress' AND lease_until < ?1
+         )",
+    )
+    .bind(timestamps::now_utc())
+    .fetch_one(pool)
+    .await
 }
 
 /// The on-disk copy of exactly this version: the file at its path in a
@@ -272,6 +385,96 @@ fn stage_from_git(p: &Pending) -> Option<StagedVersion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sweep_pages_in_active_order_and_defers_rows_added_mid_sweep() {
+        use crate::tracked_files_schema::schema::{
+            CREATE_TRACKED_FILES_V41_INDEXES_SQL, CREATE_TRACKED_FILES_V41_SQL,
+        };
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(crate::watch_folders_schema::CREATE_WATCH_FOLDERS_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(CREATE_TRACKED_FILES_V41_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for index in CREATE_TRACKED_FILES_V41_INDEXES_SQL {
+            sqlx::query(index).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO watch_folders (watch_id, path, collection, tenant_id,
+                                         is_active, enabled, created_at, updated_at)
+             VALUES ('idle', '/idle', 'projects', 'a', 0, 1, '', ''),
+                    ('active', '/active', 'projects', 'b', 1, 1, '', ''),
+                    ('disabled', '/disabled', 'projects', 'c', 1, 0, '', '')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let insert = "INSERT INTO tracked_files (watch_folder_id, relative_path, file_hash,
+                                                 file_mtime, created_at, updated_at)
+                      SELECT 'active', CAST(value AS TEXT), 'hash', '', '', ''
+                      FROM json_each(?1)";
+        sqlx::query(insert)
+            .bind(sqlx::types::Json((1..=PAGE_SIZE + 1).collect::<Vec<_>>()))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut sweep = Sweep::start(&pool).await.unwrap();
+        assert_eq!(
+            sweep.folders,
+            VecDeque::from([String::from("active"), String::from("idle")])
+        );
+        sqlx::query(insert)
+            .bind("[9999]")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let first = sweep.page(&pool, "active").await.unwrap();
+        assert_eq!(first.len(), PAGE_SIZE as usize);
+        assert_eq!(first[0].get::<i64, _>("file_id"), 1);
+        sweep.advance(&first);
+
+        let last = sweep.page(&pool, "active").await.unwrap();
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].get::<i64, _>("file_id"), PAGE_SIZE + 1);
+        sweep.advance(&last);
+        assert_eq!(sweep.folders, VecDeque::from([String::from("idle")]));
+        assert!(sweep.page(&pool, "idle").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn page_probe_filters_by_generation_tenant_and_extractor_version() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE graph_generations (
+                 tenant_id TEXT, generation TEXT, extractor_version INTEGER,
+                 PRIMARY KEY (tenant_id, generation)
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO graph_generations VALUES
+             ('project', 'current', ?1), ('project', 'stale', ?1 - 1),
+             ('project', 'outside-page', ?1), ('other', 'elsewhere', ?1)",
+        )
+        .bind(GRAPH_EXTRACTOR_VERSION)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let page = ["current", "stale", "elsewhere", "missing"];
+        assert_eq!(
+            current_generations(&pool, "project", &page).await.unwrap(),
+            HashSet::from([String::from("current")]),
+        );
+    }
 
     fn pending(root: &Path, rel: &str, hash: &str, branches: &[&str]) -> Pending {
         Pending {

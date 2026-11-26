@@ -832,3 +832,58 @@ async fn test_file_metadata_stats_normalizes_null_branch_to_none_literal() {
 
     manager.close().await;
 }
+
+#[tokio::test]
+async fn stats_reader_skips_unchanged_ticks_and_refreshes_after_external_commit() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("search.db");
+    let manager = SearchDbManager::new(&db_path).await.unwrap();
+    let mut reader = FileMetadataStatsReader::open(&db_path).await.unwrap();
+
+    assert!(reader
+        .refresh_if_changed()
+        .await
+        .unwrap()
+        .unwrap()
+        .is_empty());
+    assert!(reader.refresh_if_changed().await.unwrap().is_none());
+
+    sqlx::query(crate::code_lines_schema::UPSERT_FILE_METADATA_SQL)
+        .bind(1_i64)
+        .bind("project")
+        .bind("main")
+        .bind("/source.rs")
+        .bind(None::<&str>)
+        .bind(None::<&str>)
+        .bind(None::<&str>)
+        .bind(Some(42_i64))
+        .bind(1_i64)
+        .execute(manager.pool())
+        .await
+        .unwrap();
+
+    let rows = reader.refresh_if_changed().await.unwrap().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((&*rows[0].tenant_id, &*rows[0].branch), ("project", "main"));
+    assert_eq!(
+        (
+            rows[0].file_count,
+            rows[0].total_bytes,
+            rows[0].skipped_count
+        ),
+        (1, 42, 1)
+    );
+    assert!(reader.refresh_if_changed().await.unwrap().is_none());
+
+    sqlx::query("DELETE FROM file_metadata")
+        .execute(manager.pool())
+        .await
+        .unwrap();
+    assert!(reader
+        .refresh_if_changed()
+        .await
+        .unwrap()
+        .unwrap()
+        .is_empty());
+    assert!(reader.refresh_if_changed().await.unwrap().is_none());
+}

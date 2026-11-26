@@ -37,7 +37,7 @@ pub use types::{
 
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    SqlitePool,
+    ConnectOptions, Executor, Sqlite, SqliteConnection, SqlitePool,
 };
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
@@ -63,6 +63,79 @@ pub struct FileMetadataStats {
     pub file_count: i64,
     pub total_bytes: i64,
     pub skipped_count: i64,
+}
+
+/// Change-aware reader for periodic file metadata metrics.
+pub struct FileMetadataStatsReader {
+    connection: SqliteConnection,
+    last_version: Option<i64>,
+}
+
+impl FileMetadataStatsReader {
+    pub async fn open(path: &Path) -> Result<Self> {
+        let connection = SqliteConnectOptions::new()
+            .filename(path)
+            .read_only(true)
+            .connect()
+            .await?;
+        Ok(Self {
+            connection,
+            last_version: None,
+        })
+    }
+
+    /// Returns the initial snapshot and refreshes it after external commits.
+    /// SQLite only defines comparisons between reads on the same connection.
+    pub async fn refresh_if_changed(&mut self) -> Result<Option<Vec<FileMetadataStats>>> {
+        let version = sqlx::query_scalar("PRAGMA data_version")
+            .fetch_one(&mut self.connection)
+            .await?;
+        if self.last_version == Some(version) {
+            return Ok(None);
+        }
+
+        let rows = file_metadata_stats(&mut self.connection).await?;
+        // Remember the version from before the query. A commit racing this
+        // refresh will still invalidate the snapshot at the next tick.
+        self.last_version = Some(version);
+        Ok(Some(rows))
+    }
+}
+
+async fn file_metadata_stats<'e>(
+    executor: impl Executor<'e, Database = Sqlite>,
+) -> Result<Vec<FileMetadataStats>> {
+    // Layer 2 stage 2: `branches` is a JSON set, so a file shared by N
+    // branches counts once per branch (same per-(tenant,branch) semantics as
+    // the old per-branch rows). `json_each` expands the set; a LEFT JOIN keeps
+    // rows with an EMPTY set (e.g. libraries, or a NULL-branch upsert) so they
+    // still contribute to the gauge under the literal "(none)" branch label —
+    // dropping them would silently undercount indexed files.
+    let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT \
+             fm.tenant_id, \
+             COALESCE(je.value, '(none)') AS branch, \
+             COUNT(*) AS file_count, \
+             COALESCE(SUM(fm.size_bytes), 0) AS total_bytes, \
+             COALESCE(SUM(CASE WHEN fm.fts5_skipped = 1 THEN 1 ELSE 0 END), 0) AS skipped_count \
+         FROM file_metadata fm \
+         LEFT JOIN json_each(fm.branches) je \
+         GROUP BY fm.tenant_id, COALESCE(je.value, '(none)')",
+    )
+    .fetch_all(executor)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(tenant_id, branch, file_count, total_bytes, skipped_count)| FileMetadataStats {
+                tenant_id,
+                branch,
+                file_count,
+                total_bytes,
+                skipped_count,
+            },
+        )
+        .collect())
 }
 
 impl SearchDbManager {
@@ -157,37 +230,7 @@ impl SearchDbManager {
     /// gauge label is non-empty (Prometheus dislikes empty label values in
     /// aggregations) and matches the convention used elsewhere in the daemon.
     pub async fn file_metadata_stats_by_tenant_branch(&self) -> Result<Vec<FileMetadataStats>> {
-        // Layer 2 stage 2: `branches` is a JSON set, so a file shared by N
-        // branches counts once per branch (same per-(tenant,branch) semantics as
-        // the old per-branch rows). `json_each` expands the set; a LEFT JOIN keeps
-        // rows with an EMPTY set (e.g. libraries, or a NULL-branch upsert) so they
-        // still contribute to the gauge under the literal "(none)" branch label —
-        // dropping them would silently undercount indexed files.
-        let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
-            "SELECT \
-                 fm.tenant_id, \
-                 COALESCE(je.value, '(none)') AS branch, \
-                 COUNT(*) AS file_count, \
-                 COALESCE(SUM(fm.size_bytes), 0) AS total_bytes, \
-                 COALESCE(SUM(CASE WHEN fm.fts5_skipped = 1 THEN 1 ELSE 0 END), 0) AS skipped_count \
-             FROM file_metadata fm \
-             LEFT JOIN json_each(fm.branches) je \
-             GROUP BY fm.tenant_id, COALESCE(je.value, '(none)')",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(tenant_id, branch, file_count, total_bytes, skipped_count)| FileMetadataStats {
-                    tenant_id,
-                    branch,
-                    file_count,
-                    total_bytes,
-                    skipped_count,
-                },
-            )
-            .collect())
+        file_metadata_stats(&self.pool).await
     }
 
     /// Drop a single branch from a file's `file_metadata` `branches` set without
