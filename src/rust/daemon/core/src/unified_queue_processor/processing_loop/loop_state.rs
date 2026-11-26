@@ -18,6 +18,7 @@ pub(super) struct LoopState {
     pub last_resurrection: std::time::Instant,
     /// Configuration for the metadata uplift pass (carries current generation).
     pub uplift_config: crate::metadata_uplift::UpliftConfig,
+    pub uplift_cursors: std::collections::HashMap<String, qdrant_client::qdrant::PointId>,
     /// When the last uplift pass was attempted.
     pub last_uplift_attempt: std::time::Instant,
     /// When the last triage pass ran.
@@ -74,6 +75,7 @@ impl LoopState {
             warmup_logged: false,
             last_resurrection,
             uplift_config,
+            uplift_cursors: Default::default(),
             last_uplift_attempt,
             last_triage,
             idle_since: None,

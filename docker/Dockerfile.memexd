@@ -652,6 +652,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 resolve_destination, FTS5 batch finalize) to run and pass. If you ADDED a test here, bump this \
 count."; exit 1; }
 
+# Guard the shared file-mutation lookup and typed uplift selection.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    content-mtimes /build/target/.content-mtimes /build /assets /patterns && \
+    ORT_LIB_LOCATION=/opt/onnxruntime/lib \
+    cargo test -p workspace-qdrant-core --lib -- \
+        file_mutation_retries_when_tracking_lookup_fails uplift_page_keeps_real_ids_for_unmarked_points \
+        --test-threads=4 > /tmp/file-mutation-uplift.log 2>&1; \
+    result=$?; cat /tmp/file-mutation-uplift.log; \
+    [ "$result" -eq 0 ] && grep -q "^test result: ok\. 2 passed; 0 failed; 0 ignored" /tmp/file-mutation-uplift.log
+
 # Index staleness runs here, same rationale: hermetic (in-memory SQLite, no
 # I/O). On 2026-11-10 the queue had been stuck for 4 days and nobody knew: the
 # QueueStuck alert has no dispatcher in this stack. GetProjectStatus now reports
@@ -753,8 +765,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         strategies::processing::file::graph_lsp_calls::tests \
         lsp::project_manager::call_hierarchy::tests \
         --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
-    grep -q "^test result: ok\. 285 passed" /tmp/graph-core.log \
-    || { echo "GATE: expected exactly 285 core graph tests (graph::, backfill, ingest, LSP calls, git::tips) \
+    grep -q "^test result: ok\. 286 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 286 core graph tests (graph::, backfill, ingest, LSP calls, git::tips) \
 to run and pass. If you ADDED a test here, bump this count."; exit 1; } \
  && cargo test -p workspace-qdrant-core --no-fail-fast \
         --test graph_algorithm_tests --test graph_extractor_tests \

@@ -618,13 +618,13 @@ async fn prepare_update(
     .await
     .map_err(|e| UnifiedProcessorError::ProcessingFailed(format!("Failed to hash file: {}", e)))?;
 
-    if let Ok(Some(existing)) = tracked_files_schema::lookup_tracked_file(
+    if let Some(existing) = lookup_tracked_file_for_mutation(
         pool,
         watch_folder_id,
         relative_path,
         Some(item.branch.as_str()),
     )
-    .await
+    .await?
     {
         if existing.file_hash == new_hash {
             // Same detection inputs as run_ingest_pipeline, so the value
@@ -675,9 +675,8 @@ async fn prepare_update(
         // require that no generation survives; when one does, skip — the
         // ingest below upserts deterministic per-content point IDs, and
         // tracked-path GC is `execute_update_deletion`'s job.
-        if let Ok(Some(other)) =
-            tracked_files_schema::lookup_tracked_file(pool, watch_folder_id, relative_path, None)
-                .await
+        if let Some(other) =
+            lookup_tracked_file_for_mutation(pool, watch_folder_id, relative_path, None).await?
         {
             tracing::debug!(
                 "Skipping defensive filter-delete for '{}': not tracked on branch '{}', \
@@ -884,9 +883,37 @@ async fn disambiguate_multi_path(
         .find(|(_, bp)| Path::new(bp).join(relative_path).exists())
 }
 
+/// A failed authority lookup cannot establish that a generation is absent.
+async fn lookup_tracked_file_for_mutation(
+    pool: &SqlitePool,
+    watch_folder_id: &str,
+    relative_path: &str,
+    branch: Option<&str>,
+) -> UnifiedProcessorResult<Option<tracked_files_schema::TrackedFile>> {
+    tracked_files_schema::lookup_tracked_file(pool, watch_folder_id, relative_path, branch)
+        .await
+        .map_err(|e| {
+            UnifiedProcessorError::Storage(format!(
+                "Failed to look up tracked file {relative_path}: {e}"
+            ))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn file_mutation_retries_when_tracking_lookup_fails() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        // No tracked_files table: both queries must return an error that the
+        // mutation callers propagate before deciding they can delete by path.
+        for branch in [Some("main"), None] {
+            let result =
+                lookup_tracked_file_for_mutation(&pool, "watch", "src/lib.rs", branch).await;
+            assert!(matches!(result, Err(UnifiedProcessorError::Storage(_))));
+        }
+    }
 
     #[test]
     fn test_file_strategy_handles_file_items() {

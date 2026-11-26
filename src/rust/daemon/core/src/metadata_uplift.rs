@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use qdrant_client::qdrant::{Condition, Filter};
+use qdrant_client::qdrant::{Condition, Filter, PointId, RetrievedPoint};
 use tracing::{debug, info, warn};
 
 use crate::lexicon::LexiconManager;
@@ -56,34 +56,13 @@ pub struct UpliftStats {
     pub errors: u64,
 }
 
-/// Scroll Qdrant for points needing metadata uplift.
-///
-/// Finds points where `concept_tags` is missing/empty AND
-/// `uplift_generation` < current_generation.
-///
-/// Returns point IDs and their current payloads.
-pub async fn find_points_needing_uplift(
-    storage_client: &StorageClient,
-    collection: &str,
-    config: &UpliftConfig,
-) -> Result<Vec<UpliftCandidate>, StorageError> {
-    // Filter: concept_tags missing/empty — the only thing this pass can still
-    // improve. (The former lsp_enrichment_status conditions were retired with
-    // ingest-time chunk enrichment, F2.1 2026-07-02.)
-    let filter = Filter::must([Condition::is_empty("concept_tags")]);
-
+/// Return the eligible points from one page. The cursor belongs to the
+/// unfiltered page, including points that already carry the generation marker.
+fn points_needing_uplift(response: Vec<RetrievedPoint>, generation: u64) -> Vec<UpliftCandidate> {
     let mut candidates = Vec::new();
-    let mut offset: Option<qdrant_client::qdrant::PointId> = None;
-
-    // Single batch scroll (limited by batch_size)
-    let response = storage_client
-        .scroll_with_filter(collection, filter.clone(), config.batch_size, offset.take())
-        .await?;
-
     for point in response {
-        let point_id = match &point.id {
-            Some(id) => format_point_id(id),
-            None => continue,
+        let Some(point_id) = point.id.filter(|id| id.point_id_options.is_some()) else {
+            continue;
         };
 
         let mut payload_map: HashMap<String, serde_json::Value> = HashMap::new();
@@ -97,29 +76,23 @@ pub async fn find_points_needing_uplift(
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        if current_gen >= config.current_generation {
+        if current_gen >= generation {
             continue; // Already uplifted at current generation
         }
 
         candidates.push(UpliftCandidate {
             point_id,
-            collection: collection.to_string(),
             payload: payload_map,
         });
-
-        if candidates.len() >= config.batch_size as usize {
-            break;
-        }
     }
 
-    Ok(candidates)
+    candidates
 }
 
 /// A point that needs metadata uplift.
 #[derive(Debug, Clone)]
 pub struct UpliftCandidate {
-    pub point_id: String,
-    pub collection: String,
+    pub point_id: PointId,
     pub payload: HashMap<String, serde_json::Value>,
 }
 
@@ -131,42 +104,71 @@ pub async fn run_uplift_pass(
     lexicon_manager: &Arc<LexiconManager>,
     collections: &[String],
     config: &UpliftConfig,
+    cursors: &mut HashMap<String, PointId>,
 ) -> UpliftStats {
     let mut stats = UpliftStats::default();
 
     for collection in collections {
-        let candidates = match find_points_needing_uplift(storage_client, collection, config).await
+        let filter = Filter::must([Condition::is_empty("concept_tags")]);
+        let (page, next) = match storage_client
+            .scroll_filtered_page(
+                collection,
+                filter,
+                config.batch_size,
+                cursors.get(collection).cloned(),
+            )
+            .await
         {
-            Ok(c) => c,
+            Ok(page) => page,
             Err(e) => {
+                stats.errors += 1;
                 debug!("Skipping uplift for '{}': {}", collection, e);
                 continue;
             }
         };
+        let candidates = points_needing_uplift(page, config.current_generation);
+        let errors_before = stats.errors;
 
-        if candidates.is_empty() {
-            debug!("No points need uplift in '{}'", collection);
-            continue;
+        if !candidates.is_empty() {
+            info!(
+                "Found {} points needing uplift in '{}'",
+                candidates.len(),
+                collection
+            );
         }
-
-        info!(
-            "Found {} points needing uplift in '{}'",
-            candidates.len(),
-            collection
-        );
 
         for candidate in &candidates {
             stats.scanned += 1;
 
-            match uplift_single_point(storage_client, lexicon_manager, candidate, config).await {
+            match uplift_single_point(
+                storage_client,
+                lexicon_manager,
+                collection,
+                candidate,
+                config,
+            )
+            .await
+            {
                 Ok(true) => stats.updated += 1,
                 Ok(false) => stats.skipped += 1,
                 Err(e) => {
                     warn!(
-                        "Failed to uplift point {} in '{}': {}",
+                        "Failed to uplift point {:?} in '{}': {}",
                         candidate.point_id, collection, e
                     );
                     stats.errors += 1;
+                }
+            }
+        }
+        // A page with only marked points still advances. If an update fails,
+        // retry the page and skip points already stamped on the next pass.
+        if stats.errors == errors_before {
+            match next {
+                Some(next) => {
+                    cursors.insert(collection.clone(), next);
+                }
+                None => {
+                    cursors.remove(collection);
                 }
             }
         }
@@ -185,6 +187,7 @@ pub async fn run_uplift_pass(
 async fn uplift_single_point(
     storage_client: &Arc<StorageClient>,
     lexicon_manager: &Arc<LexiconManager>,
+    collection: &str,
     candidate: &UpliftCandidate,
     config: &UpliftConfig,
 ) -> Result<bool, StorageError> {
@@ -213,13 +216,11 @@ async fn uplift_single_point(
                 .collect();
 
             // Find distinctive terms (high DF relative to corpus)
-            let corpus_size = lexicon_manager.corpus_size(&candidate.collection).await;
+            let corpus_size = lexicon_manager.corpus_size(collection).await;
             if corpus_size > 0 {
                 let mut term_scores: Vec<(String, f64)> = Vec::new();
                 for term in &tokens {
-                    let df = lexicon_manager
-                        .document_frequency(&candidate.collection, term)
-                        .await;
+                    let df = lexicon_manager.document_frequency(collection, term).await;
                     if df > 0 {
                         // IDF score: ln(N / (1 + df))
                         let idf = (corpus_size as f64 / (1.0 + df as f64)).ln();
@@ -250,23 +251,11 @@ async fn uplift_single_point(
         serde_json::json!(config.current_generation),
     );
 
-    // Apply updates via set_payload
-    let filter = Filter::must([Condition::matches("chunk_id", candidate.point_id.clone())]);
-
     storage_client
-        .set_payload_by_filter(&candidate.collection, filter, updates)
+        .set_payload_on_point_id(collection, candidate.point_id.clone(), updates)
         .await?;
 
     Ok(changed)
-}
-
-/// Convert a Qdrant PointId to a string.
-fn format_point_id(id: &qdrant_client::qdrant::PointId) -> String {
-    match &id.point_id_options {
-        Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(uuid)) => uuid.clone(),
-        Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(num)) => num.to_string(),
-        None => String::new(),
-    }
 }
 
 /// Convert a Qdrant Value to serde_json::Value.
@@ -306,6 +295,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn uplift_page_keeps_real_ids_for_unmarked_points() {
+        let uuid = PointId::from("00183067-42d9-c9df-d9a1-4a5f1e7e8d54");
+        let numeric = PointId::from(42u64);
+        let marked = RetrievedPoint {
+            id: Some(PointId::from(7u64)),
+            payload: [("uplift_generation".to_string(), 1i64.into())].into(),
+            ..Default::default()
+        };
+        let page = [uuid.clone(), numeric.clone()].map(|id| RetrievedPoint {
+            id: Some(id),
+            ..Default::default()
+        });
+        let eligible = points_needing_uplift([vec![marked], Vec::from(page)].concat(), 1);
+        let ids: Vec<_> = eligible.into_iter().map(|p| p.point_id).collect();
+        assert_eq!(ids, vec![uuid, numeric]);
+    }
+
+    #[test]
     fn test_uplift_config_defaults() {
         let config = UpliftConfig::default();
         assert_eq!(config.batch_size, 10);
@@ -320,24 +327,6 @@ mod tests {
         assert_eq!(stats.updated, 0);
         assert_eq!(stats.skipped, 0);
         assert_eq!(stats.errors, 0);
-    }
-
-    #[test]
-    fn test_format_point_id_uuid() {
-        let id = qdrant_client::qdrant::PointId {
-            point_id_options: Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(
-                "abc-123".to_string(),
-            )),
-        };
-        assert_eq!(format_point_id(&id), "abc-123");
-    }
-
-    #[test]
-    fn test_format_point_id_num() {
-        let id = qdrant_client::qdrant::PointId {
-            point_id_options: Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(42)),
-        };
-        assert_eq!(format_point_id(&id), "42");
     }
 
     #[test]

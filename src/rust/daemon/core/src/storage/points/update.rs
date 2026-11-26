@@ -2,8 +2,7 @@
 //!
 //! Update sparse vectors and payload fields on existing Qdrant points.
 
-use qdrant_client::qdrant::Filter;
-use tracing::info;
+use qdrant_client::qdrant::{Filter, PointId};
 
 use crate::storage::client::StorageClient;
 use crate::storage::convert::convert_json_to_qdrant_value;
@@ -79,11 +78,18 @@ impl StorageClient {
         point_id: &str,
         payload: std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<(), StorageError> {
-        use qdrant_client::qdrant::{point_id, PointId, SetPayloadPointsBuilder};
+        self.set_payload_on_point_id(collection_name, PointId::from(point_id), payload)
+            .await
+    }
 
-        let id = PointId {
-            point_id_options: Some(point_id::PointIdOptions::Uuid(point_id.to_string())),
-        };
+    /// Update payload fields by Qdrant point ID, preserving UUID and numeric IDs.
+    pub(crate) async fn set_payload_on_point_id(
+        &self,
+        collection_name: &str,
+        point_id: PointId,
+        payload: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        use qdrant_client::qdrant::SetPayloadPointsBuilder;
 
         let qdrant_payload: std::collections::HashMap<String, qdrant_client::qdrant::Value> =
             payload
@@ -93,7 +99,7 @@ impl StorageClient {
 
         // Vec<PointId> implements Into<PointsIdsList> which implements Into<PointsSelectorOneOf>.
         let set_payload_request = SetPayloadPointsBuilder::new(collection_name, qdrant_payload)
-            .points_selector(vec![id])
+            .points_selector(vec![point_id])
             .wait(true);
 
         self.retry_operation(|| async {
@@ -118,26 +124,11 @@ impl StorageClient {
     ) -> Result<(), StorageError> {
         use qdrant_client::qdrant::SetPayloadPointsBuilder;
 
-        if !self.collection_exists(collection_name).await? {
-            return Err(StorageError::Collection(format!(
-                "Collection not found: {}",
-                collection_name
-            )));
-        }
-
         let qdrant_payload: std::collections::HashMap<String, qdrant_client::qdrant::Value> =
             payload
                 .into_iter()
                 .map(|(k, v)| (k, convert_json_to_qdrant_value(v)))
                 .collect();
-
-        let count = self
-            .count_points_with_filter(collection_name, filter.clone())
-            .await?;
-        info!(
-            "Updating payload on {} point(s) in collection '{}'",
-            count, collection_name
-        );
 
         let set_payload_request = SetPayloadPointsBuilder::new(collection_name, qdrant_payload)
             .points_selector(filter)
@@ -150,11 +141,6 @@ impl StorageClient {
                 .map_err(|e| StorageError::Point(format!("Failed to set payload: {}", e)))
         })
         .await?;
-
-        info!(
-            "Updated payload on {} point(s) in '{}'",
-            count, collection_name
-        );
 
         Ok(())
     }
@@ -213,11 +199,8 @@ impl StorageClient {
     /// Returns the base_points that have points (the rest have none; the
     /// caller leaves them to a per-file ingest).
     ///
-    /// The per-base_point call costs five sequential Qdrant round-trips (count,
-    /// read, collection check, count again, write); a 25-path bulk op made 125
-    /// of them, ~6 s per op under load, holding a processing slot the whole
-    /// time (2026-11-11: all 4 slots on bulk ops, per-file adds starved). Here
-    /// the reads run concurrently and the writes are grouped by resulting
+    /// The per-base_point call costs three sequential Qdrant round trips (count,
+    /// read and write). Here the reads run concurrently and the writes are grouped by resulting
     /// branch set — base_points that end with the same array share one
     /// filtered `set_payload`, usually one to three per op.
     pub async fn add_branch_to_base_points(
@@ -281,24 +264,12 @@ impl StorageClient {
         base_points: &[String],
         set: &[String],
     ) -> Result<(), StorageError> {
-        use qdrant_client::qdrant::{Condition, Filter, SetPayloadPointsBuilder};
+        use qdrant_client::qdrant::Condition;
         let filter = Filter::must([Condition::matches("base_point", base_points.to_vec())]);
-        let mut payload = std::collections::HashMap::new();
-        payload.insert(
-            "branch".to_string(),
-            convert_json_to_qdrant_value(serde_json::json!(set)),
-        );
-        let request = SetPayloadPointsBuilder::new(collection_name, payload)
-            .points_selector(filter)
-            .wait(true);
-        self.retry_operation(|| async {
-            self.client
-                .set_payload(request.clone())
-                .await
-                .map_err(|e| StorageError::Point(format!("Failed to set branch payload: {}", e)))
-        })
-        .await?;
-        Ok(())
+        let payload =
+            std::collections::HashMap::from([("branch".to_string(), serde_json::json!(set))]);
+        self.set_payload_by_filter(collection_name, filter, payload)
+            .await
     }
 
     /// Remove `branch` from the shared `branch` array of every point under

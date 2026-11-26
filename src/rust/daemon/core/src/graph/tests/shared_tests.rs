@@ -104,6 +104,59 @@ async fn test_concurrent_readers() {
 }
 
 #[tokio::test]
+async fn stub_resolution_advances_past_unresolvable_edges_and_stops_at_snapshot() {
+    let store = test_shared_store().await;
+    let caller = GraphNode::new(T, "a.rs", "caller", NodeType::Function);
+    let target = GraphNode::new(T, "b.rs", "known", NodeType::Function);
+    let known = GraphNode::stub(T, "known", NodeType::Function);
+    let unknown = GraphNode::stub(T, "external", NodeType::Function);
+    store
+        .upsert_nodes(&[
+            caller.clone(),
+            target.clone(),
+            known.clone(),
+            unknown.clone(),
+        ])
+        .await
+        .unwrap();
+    // Fill the first page with unresolvable edges. Distinct generations
+    // exercise the key used to identify edges without changing their IDs.
+    let mut unresolved = GraphEdge::new(
+        T,
+        &caller.node_id,
+        &unknown.node_id,
+        EdgeType::Calls,
+        "a.rs",
+    );
+    let edges: Vec<_> = (0..1024)
+        .map(|i| {
+            unresolved.generation = format!("external-{i}");
+            unresolved.clone()
+        })
+        .collect();
+    store.insert_edges(&edges).await.unwrap();
+    let mut resolvable =
+        GraphEdge::new(T, &caller.node_id, &known.node_id, EdgeType::Calls, "a.rs");
+    store.insert_edges(&[resolvable.clone()]).await.unwrap();
+    let upper = store.stub_sweep_upper_bound().await.unwrap();
+    resolvable.generation = "new-after-sweep".to_string();
+    store.insert_edges(&[resolvable]).await.unwrap();
+    let membership = GenerationBranches::unknown();
+    let (count, next) = store
+        .resolve_stub_batch(T, &membership, upper, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let (count, next) = store
+        .resolve_stub_batch(T, &membership, upper, &next.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    assert!(next.is_none());
+    assert_eq!(store.resolve_stub_edges(T, &membership).await.unwrap(), 1);
+}
+
+#[tokio::test]
 async fn test_resolve_stub_edges_by_name() {
     let store = test_shared_store().await;
 

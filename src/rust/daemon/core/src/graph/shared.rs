@@ -11,7 +11,8 @@ use tokio::sync::RwLock;
 
 use super::{
     EdgeType, ExtractedGeneration, GenerationBranches, GraphDbResult, GraphEdge, GraphNode,
-    GraphScope, GraphStats, GraphStore, ImpactReport, TraversalNode,
+    GraphScope, GraphStats, GraphStore, ImpactReport, SqliteGraphStore, StubResolutionCursor,
+    TraversalNode,
 };
 
 /// Thread-safe, cloneable handle to a `GraphStore` with read-write coordination.
@@ -209,6 +210,29 @@ impl<S: GraphStore> SharedGraphStore<S> {
                 resolved_names,
                 precise_targets,
             )
+            .await
+    }
+}
+
+impl SharedGraphStore<SqliteGraphStore> {
+    /// Bound a sweep to the graph rows present when it starts.
+    pub async fn stub_sweep_upper_bound(&self) -> GraphDbResult<i64> {
+        self.inner.read().await.stub_sweep_upper_bound().await
+    }
+
+    /// Keep the graph exclusively locked for one page, then yield to readers
+    /// and ingest writers before loading the next page.
+    pub async fn resolve_stub_batch(
+        &self,
+        tenant_id: &str,
+        membership: &GenerationBranches,
+        upper_rowid: i64,
+        cursor: &StubResolutionCursor,
+    ) -> GraphDbResult<(u64, Option<StubResolutionCursor>)> {
+        self.inner
+            .write()
+            .await
+            .resolve_stub_batch(tenant_id, membership, upper_rowid, cursor)
             .await
     }
 }

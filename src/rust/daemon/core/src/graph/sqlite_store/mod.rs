@@ -10,6 +10,7 @@ mod candidate_pick;
 mod impact;
 mod resolution_tiers;
 mod stub_resolution;
+pub use stub_resolution::StubResolutionCursor;
 mod traversal;
 mod writes;
 

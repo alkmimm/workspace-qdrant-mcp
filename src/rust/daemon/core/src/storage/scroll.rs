@@ -224,6 +224,26 @@ impl StorageClient {
         limit: u32,
         offset: Option<qdrant_client::qdrant::PointId>,
     ) -> Result<Vec<qdrant_client::qdrant::RetrievedPoint>, StorageError> {
+        let (points, _) = self
+            .scroll_filtered_page(collection_name, filter, limit, offset)
+            .await?;
+        Ok(points)
+    }
+
+    /// Read one filtered page and preserve Qdrant's opaque continuation ID.
+    pub(crate) async fn scroll_filtered_page(
+        &self,
+        collection_name: &str,
+        filter: Filter,
+        limit: u32,
+        offset: Option<qdrant_client::qdrant::PointId>,
+    ) -> Result<
+        (
+            Vec<qdrant_client::qdrant::RetrievedPoint>,
+            Option<qdrant_client::qdrant::PointId>,
+        ),
+        StorageError,
+    > {
         let response = self
             .retry_operation(|| {
                 let f = filter.clone();
@@ -246,7 +266,7 @@ impl StorageClient {
             })
             .await?;
 
-        Ok(response.result)
+        Ok((response.result, response.next_page_offset))
     }
 
     /// Scroll through points matching a filter, returning full point data

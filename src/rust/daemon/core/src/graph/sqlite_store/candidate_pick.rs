@@ -93,19 +93,37 @@ pub(super) struct CandidateIndex<'m> {
     membership: &'m GenerationBranches,
 }
 
+/// Only the names and context referenced by a page of dangling edges.
+#[derive(Default)]
+pub(super) struct CandidateScope {
+    pub names: HashSet<String>,
+    pub caller_ids: HashSet<String>,
+    pub source_files: HashSet<String>,
+}
+
 impl<'m> CandidateIndex<'m> {
     pub(super) async fn load(
         pool: &SqlitePool,
         tenant_id: &str,
         membership: &'m GenerationBranches,
+        scope: &CandidateScope,
     ) -> GraphDbResult<Self> {
-        let (by_name, node_lang, container_names) = load_candidates(pool, tenant_id).await?;
+        let (by_name, node_lang, container_names) = load_candidates(pool, tenant_id, scope).await?;
+        // Same-class resolution compares the enclosing class of the caller
+        // with the enclosing class of each possible definition.
+        let members = scope
+            .caller_ids
+            .iter()
+            .map(String::as_str)
+            .chain(by_name.values().flatten().map(|c| c.node_id.as_str()))
+            .collect();
+        let contained_by = load_contained_by(pool, tenant_id, &members).await?;
         Ok(Self {
             by_name,
             node_lang,
             container_names,
-            contained_by: load_contained_by(pool, tenant_id).await?,
-            imports_by_symbol: load_imports(pool, tenant_id).await?,
+            contained_by,
+            imports_by_symbol: load_imports(pool, tenant_id, scope).await?,
             fanout_ceiling: std::env::var("WQM_GRAPH_FANOUT_CEILING")
                 .ok()
                 .and_then(|v| v.trim().parse().ok())
@@ -352,16 +370,29 @@ type CandidateMaps = (
 /// Real candidate nodes (resolved file_path, not file-typed), indexed by
 /// symbol_name, one entry per node_id carrying every defining generation;
 /// plus each node's language and the tenant's container names.
-async fn load_candidates(pool: &SqlitePool, tenant_id: &str) -> GraphDbResult<CandidateMaps> {
-    let rows = sqlx::query(
-        "SELECT node_id, generation, symbol_name, file_path, symbol_type, language,
-                parent_symbol, start_line
-         FROM graph_nodes
-         WHERE tenant_id = ?1 AND file_path <> '' AND symbol_type <> 'file'",
-    )
-    .bind(tenant_id)
-    .fetch_all(pool)
-    .await?;
+async fn load_candidates(
+    pool: &SqlitePool,
+    tenant_id: &str,
+    scope: &CandidateScope,
+) -> GraphDbResult<CandidateMaps> {
+    let fields = "node_id, generation, symbol_name, file_path, symbol_type, language,
+                  parent_symbol, start_line";
+    let filter = "WHERE tenant_id = ?1 AND file_path <> '' AND symbol_type <> 'file'";
+    // Use the symbol and primary-key indexes independently. Caller nodes
+    // supply language context even when their names are not candidates.
+    let query = format!(
+        "SELECT {fields} FROM graph_nodes INDEXED BY idx_nodes_symbol
+         {filter} AND symbol_name IN (SELECT value FROM json_each(?2))
+         UNION
+         SELECT {fields} FROM graph_nodes INDEXED BY sqlite_autoindex_graph_nodes_1
+         {filter} AND node_id IN (SELECT value FROM json_each(?3))"
+    );
+    let rows = sqlx::query(&query)
+        .bind(tenant_id)
+        .bind(sqlx::types::Json(&scope.names))
+        .bind(sqlx::types::Json(&scope.caller_ids))
+        .fetch_all(pool)
+        .await?;
     let mut by_name: HashMap<String, Vec<Candidate>> = HashMap::new();
     let mut node_lang: HashMap<String, String> = HashMap::new();
     let mut container_names: HashSet<String> = HashSet::new();
@@ -404,23 +435,28 @@ async fn load_candidates(pool: &SqlitePool, tenant_id: &str) -> GraphDbResult<Ca
 async fn load_contained_by(
     pool: &SqlitePool,
     tenant_id: &str,
+    members: &HashSet<&str>,
 ) -> GraphDbResult<HashMap<String, String>> {
-    Ok(sqlx::query(
+    let rows = sqlx::query(
         "SELECT source_node_id AS class_id, target_node_id AS member_id
-         FROM graph_edges
-         WHERE tenant_id = ?1 AND edge_type = 'CONTAINS'",
+         FROM graph_edges INDEXED BY idx_edges_tenant_target
+         WHERE tenant_id = ?1 AND edge_type = 'CONTAINS'
+           AND target_node_id IN (SELECT value FROM json_each(?2))
+         ORDER BY rowid",
     )
     .bind(tenant_id)
+    .bind(sqlx::types::Json(members))
     .fetch_all(pool)
-    .await?
-    .iter()
-    .map(|r| {
-        (
-            r.get::<String, _>("member_id"),
-            r.get::<String, _>("class_id"),
-        )
-    })
-    .collect())
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<String, _>("member_id"),
+                r.get::<String, _>("class_id"),
+            )
+        })
+        .collect())
 }
 
 /// (source_file, imported_symbol) -> module locators, read from IMPORTS edge
@@ -430,14 +466,18 @@ async fn load_contained_by(
 async fn load_imports(
     pool: &SqlitePool,
     tenant_id: &str,
+    scope: &CandidateScope,
 ) -> GraphDbResult<HashMap<(String, String), Vec<String>>> {
     let rows = sqlx::query(
         "SELECT DISTINCT e.source_file AS sf, n.symbol_name AS sym, e.metadata_json AS mj
-         FROM graph_edges e JOIN graph_nodes n ON e.target_node_id = n.node_id
+         FROM graph_edges e INDEXED BY idx_edges_source_file
+         JOIN graph_nodes n INDEXED BY sqlite_autoindex_graph_nodes_1 ON e.target_node_id = n.node_id
          WHERE e.tenant_id = ?1 AND e.edge_type = 'IMPORTS'
-           AND e.metadata_json LIKE '%\"module\"%'",
+           AND e.metadata_json LIKE '%\"module\"%'
+           AND e.source_file IN (SELECT value FROM json_each(?2))",
     )
     .bind(tenant_id)
+    .bind(sqlx::types::Json(&scope.source_files))
     .fetch_all(pool)
     .await?;
     let mut imports: HashMap<(String, String), Vec<String>> = HashMap::new();

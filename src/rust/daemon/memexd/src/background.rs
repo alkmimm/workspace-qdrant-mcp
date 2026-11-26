@@ -1211,23 +1211,30 @@ pub fn start_lsp_metrics_collector(
 /// Stdlib/external names (no project node) stay dangling and are excluded.
 ///
 /// Branch membership of every generation is read from `tracked_files` per
-/// pass, so a candidate only counts for an edge when some branch holds both;
-/// if that read fails the pass resolves tenant-wide (never narrower).
+/// sweep, so a candidate only counts for an edge when some branch holds both.
+/// A failed membership read defers that tenant to the next sweep.
 ///
-/// Runs periodically (not per-file) so it stays O(dangling) per tenant and
-/// converges as indexing settles.
+/// Periodic sweeps process bounded pages and release the write lock between
+/// them so foreground graph reads and ingestion can make progress.
 pub fn start_graph_stub_resolver(
     graph_store: crate::database::ConcreteGraphStore,
     state_pool: SqlitePool,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120));
-        info!("Graph stub-edge resolver started (120s interval)");
+        use workspace_qdrant_core::graph::StubResolutionCursor;
+
+        const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
+        const PAGE_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+        info!("Graph stub-edge resolver started (paged sweeps)");
         loop {
-            interval.tick().await;
-            // Enumerate tenants present in the graph. The read guard is dropped
-            // before resolve_stub_edges (which takes the write lock) to avoid
-            // self-deadlock on the shared store's RwLock.
+            let upper = match graph_store.stub_sweep_upper_bound().await {
+                Ok(upper) => upper,
+                Err(e) => {
+                    warn!(error = %e, "Graph stub resolver could not start sweep");
+                    tokio::time::sleep(SWEEP_INTERVAL).await;
+                    continue;
+                }
+            };
             let tenants: Vec<String> = {
                 let guard = graph_store.read().await;
                 sqlx::query_scalar("SELECT DISTINCT tenant_id FROM graph_edges")
@@ -1245,25 +1252,40 @@ pub fn start_graph_stub_resolver(
                     {
                         Ok(m) => m,
                         Err(e) => {
-                            warn!(tenant = %tenant, error = %e,
-                            "Graph stub resolver: branch membership unreadable — resolving tenant-wide");
-                            workspace_qdrant_core::graph::GenerationBranches::unknown()
+                            warn!(tenant = %tenant, error = %e, "Graph stub resolver could not read branch membership");
+                            continue;
                         }
                     };
-                match graph_store.resolve_stub_edges(&tenant, &membership).await {
-                    Ok(n) if n > 0 => {
-                        METRICS
-                            .graph_stub_resolved_total
-                            .with_label_values(&[tenant.as_str()])
-                            .inc_by(n as u64);
-                        info!(tenant = %tenant, repointed = n, "Graph stub resolver repointed edges")
+                let mut cursor = StubResolutionCursor::default();
+                let started = std::time::Instant::now();
+                let (mut total, mut pages) = (0, 0);
+                loop {
+                    match graph_store
+                        .resolve_stub_batch(&tenant, &membership, upper, &cursor)
+                        .await
+                    {
+                        Ok((repointed, next)) => {
+                            pages += 1;
+                            total += repointed;
+                            METRICS
+                                .graph_stub_resolved_total
+                                .with_label_values(&[tenant.as_str()])
+                                .inc_by(repointed);
+                            let Some(next) = next else {
+                                break;
+                            };
+                            cursor = next;
+                        }
+                        Err(e) => {
+                            warn!(tenant = %tenant, error = %e, "Graph stub resolution failed");
+                            break;
+                        }
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!(tenant = %tenant, error = %e, "Graph stub resolution failed")
-                    }
+                    tokio::time::sleep(PAGE_PAUSE).await;
                 }
+                debug!(tenant = %tenant, pages, repointed = total, elapsed_ms = started.elapsed().as_millis(), "Graph stub resolver sweep finished");
             }
+            tokio::time::sleep(SWEEP_INTERVAL).await;
         }
     })
 }

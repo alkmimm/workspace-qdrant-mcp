@@ -19,7 +19,7 @@ impl StorageClient {
         collection_name: &str,
         file_path: &str,
         tenant_id: &str,
-    ) -> Result<u64, StorageError> {
+    ) -> Result<(), StorageError> {
         if tenant_id.trim().is_empty() {
             return Err(StorageError::Point(
                 "tenant_id must not be empty for delete operations".to_string(),
@@ -32,10 +32,6 @@ impl StorageClient {
             Condition::matches("file_path", file_path.to_string()),
             Condition::matches("tenant_id", tenant_id.to_string()),
         ]);
-
-        let count = self
-            .count_points_with_filter(collection_name, filter.clone())
-            .await?;
 
         let delete_request = DeletePointsBuilder::new(collection_name)
             .points(filter)
@@ -52,12 +48,11 @@ impl StorageClient {
         info!(
             collection = collection_name,
             op = "delete_by_filter",
-            point_count = count,
             duration_ms = op_start.elapsed().as_millis() as u64,
             "qdrant delete completed"
         );
 
-        Ok(count)
+        Ok(())
     }
 
     /// Delete points from a collection by tenant_id filter
@@ -267,17 +262,13 @@ impl StorageClient {
         &self,
         collection_name: &str,
         fields: &[(&str, &str)],
-    ) -> Result<u64, StorageError> {
+    ) -> Result<(), StorageError> {
         let filter = validate_and_build_payload_field_filter(fields)?;
 
         info!(
             "Deleting points matching {:?} from collection '{}'",
             fields, collection_name
         );
-
-        let count = self
-            .count_points_with_filter(collection_name, filter.clone())
-            .await?;
 
         let delete_request = DeletePointsBuilder::new(collection_name)
             .points(filter)
@@ -294,11 +285,11 @@ impl StorageClient {
         .await?;
 
         info!(
-            "Deleted {} points matching {:?} from '{}'",
-            count, fields, collection_name
+            "Finished deleting points matching {:?} from '{}'",
+            fields, collection_name
         );
 
-        Ok(count)
+        Ok(())
     }
 }
 

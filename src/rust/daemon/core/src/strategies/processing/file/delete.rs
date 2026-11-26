@@ -251,13 +251,13 @@ pub(super) async fn process_file_delete(
         return Ok(());
     }
 
-    if let Ok(Some(existing)) = tracked_files_schema::lookup_tracked_file(
+    if let Some(existing) = super::lookup_tracked_file_for_mutation(
         pool,
         watch_folder_id,
         relative_path,
         Some(item.branch.as_str()),
     )
-    .await
+    .await?
     {
         timings.push(PhaseTiming {
             phase: "lookup",
@@ -309,8 +309,8 @@ pub(super) async fn process_file_delete(
     // protos holding 308 chunk_count between them and 0 points, re-swept ~40x/hour
     // by a delete that could never converge (#224). The filter sweep exists for a
     // genuinely orphaned path, so require that no generation survives.
-    if let Ok(Some(other)) =
-        tracked_files_schema::lookup_tracked_file(pool, watch_folder_id, relative_path, None).await
+    if let Some(other) =
+        super::lookup_tracked_file_for_mutation(pool, watch_folder_id, relative_path, None).await?
     {
         debug!(
             "Skipping fallback filter-delete for '{}': not tracked on branch '{}', but \
@@ -431,11 +431,19 @@ pub(super) async fn delete_tracked_file(
             ctx.queue_manager
                 .has_other_references(bp, existing.file_id)
                 .await
-                .unwrap_or(false),
+                .map_err(|e| {
+                    UnifiedProcessorError::Storage(format!(
+                        "Failed to check shared point references: {e}"
+                    ))
+                })?,
             ctx.queue_manager
                 .branch_held_by_other(bp, existing.file_id, &item.branch)
                 .await
-                .unwrap_or(false),
+                .map_err(|e| {
+                    UnifiedProcessorError::Storage(format!(
+                        "Failed to check shared branch references: {e}"
+                    ))
+                })?,
         ),
         None => (false, false),
     };
@@ -589,7 +597,9 @@ async fn delete_qdrant_points(
 ) -> UnifiedProcessorResult<()> {
     let point_ids = tracked_files_schema::get_chunk_point_ids(pool, existing.file_id)
         .await
-        .unwrap_or_default();
+        .map_err(|e| {
+            UnifiedProcessorError::Storage(format!("Failed to read tracked point IDs: {e}"))
+        })?;
 
     if point_ids.is_empty() {
         return Ok(());

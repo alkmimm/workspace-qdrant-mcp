@@ -92,6 +92,7 @@ async fn run_uplift_pass(
         lexicon_manager,
         &collections,
         &state.uplift_config,
+        &mut state.uplift_cursors,
     )
     .await;
     if stats.scanned > 0 {

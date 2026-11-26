@@ -52,7 +52,7 @@ pub use schema::{
 pub use schema_v9::GRAPH_EXTRACTOR_VERSION;
 pub use scope::{ExtractedGeneration, GenerationBranches, GraphScope};
 pub use shared::{stamp_generation, SharedGraphStore};
-pub use sqlite_store::SqliteGraphStore;
+pub use sqlite_store::{SqliteGraphStore, StubResolutionCursor};
 pub use store::GraphStore;
 
 use serde::{Deserialize, Serialize};
