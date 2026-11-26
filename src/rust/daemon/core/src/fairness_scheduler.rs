@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::queue_operations::{QueueError, QueueManager};
-use crate::unified_queue_schema::UnifiedQueueItem;
+use crate::unified_queue_schema::{ItemType, UnifiedQueueItem};
 
 #[path = "fairness_tenant_rotation.rs"]
 mod tenant_rotation;
@@ -169,6 +169,7 @@ impl FairnessScheduler {
         project_id: &str,
         max_items: i32,
         priority_descending: bool,
+        item_type: Option<ItemType>,
     ) -> FairnessResult<Vec<UnifiedQueueItem>> {
         let items = self
             .queue_manager
@@ -177,7 +178,7 @@ impl FairnessScheduler {
                 &self.config.worker_id,
                 Some(self.config.lease_duration_secs),
                 Some(project_id),
-                None,
+                item_type,
                 Some(priority_descending),
                 Some(self.config.age_promotion_warning_seconds),
                 Some(self.config.age_promotion_critical_seconds),
@@ -215,7 +216,7 @@ impl FairnessScheduler {
     /// Algorithm (asymmetric anti-starvation alternation):
     /// 1. Get current priority direction (DESC or ASC)
     /// 2. High-priority turns use global ranking; low-priority turns rotate
-    ///    tenants, retaining delete-before-add precedence within each tenant
+    ///    tenants and serve text writes before unrelated file maintenance
     /// 3. Track items processed
     /// 4. After high_priority_batch items in DESC, flip to ASC
     /// 5. After low_priority_batch items in ASC, flip back to DESC
@@ -336,7 +337,7 @@ impl FairnessScheduler {
         };
 
         let items = self
-            .dequeue_project_batch(project_id, max_batch_size, priority_descending)
+            .dequeue_project_batch(project_id, max_batch_size, priority_descending, None)
             .await?;
         let items_count = items.len() as u64;
 

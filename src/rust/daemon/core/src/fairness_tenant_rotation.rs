@@ -2,12 +2,12 @@
 //!
 //! A global delete-first queue can spend hours pruning one project's dead
 //! branches while unrelated scratchpad writes and scans never run. Rotate the
-//! tenant on low-priority turns, then use the existing tenant-scoped dequeue:
-//! correctness precedence and lease checks remain unchanged inside that tenant.
+//! tenant on low-priority turns and serve inline writes before file maintenance.
+//! Scoped dequeue retains delete precedence within each item type and lease checks.
 
 use super::{FairnessResult, FairnessScheduler};
 use crate::queue_operations::QueueError;
-use crate::unified_queue_schema::UnifiedQueueItem;
+use crate::unified_queue_schema::{ItemType, UnifiedQueueItem};
 
 impl FairnessScheduler {
     pub(super) async fn dequeue_rotating_tenant_batch(
@@ -29,8 +29,17 @@ impl FairnessScheduler {
             next
         };
         if let Some(tenant) = tenant {
+            // Inline writes are independent of file/branch maintenance. A
+            // tenant's own delete backlog must not block its scratchpad/rules
+            // after rotation has protected it from OTHER tenants' deletes.
+            let text = self
+                .dequeue_project_batch(&tenant, max_items, false, Some(ItemType::Text))
+                .await?;
+            if !text.is_empty() {
+                return Ok(text);
+            }
             let items = self
-                .dequeue_project_batch(&tenant, max_items, false)
+                .dequeue_project_batch(&tenant, max_items, false, None)
                 .await?;
             if !items.is_empty() {
                 return Ok(items);

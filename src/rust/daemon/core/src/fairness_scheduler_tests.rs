@@ -130,3 +130,35 @@ async fn tenant_turn_skips_live_leases_and_recovers_expired_work() {
     );
     assert!(scheduler.dequeue_next_batch(1).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn tenant_own_file_deletes_do_not_block_inline_writes() {
+    let (pool, scheduler, _dir) = setup().await;
+    for i in 0..32 {
+        enqueue(
+            &pool,
+            &format!("file-delete-{i}"),
+            "doc",
+            "projects",
+            "delete",
+        )
+        .await;
+    }
+    sqlx::query("UPDATE unified_queue SET item_type = 'file' WHERE collection = 'projects'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    enqueue(&pool, "scratchpad-update", "doc", "scratchpad", "update").await;
+    enqueue(&pool, "rule-update", "doc", "rules", "update").await;
+    scheduler.set_priority_direction(false).await;
+    let items = scheduler.dequeue_next_batch(2).await.unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|item| item.item_type == ItemType::Text));
+    let pending_deletes: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM unified_queue WHERE op = 'delete' AND status = 'pending'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending_deletes, 32, "file maintenance must remain queued");
+}
