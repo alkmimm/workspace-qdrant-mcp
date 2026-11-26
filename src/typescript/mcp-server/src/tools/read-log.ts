@@ -3,11 +3,18 @@ import { lstat, open, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { formatLog } from './read-log-format.js';
+import { recordReadLogUsage } from '../telemetry/metrics.js';
+import { READ_LOG_MODES } from '../tool-definitions/read-log.js';
 import { getLogDirectory } from '../utils/paths.js';
 
 const DEFAULT_LINES = 200;
 const MAX_LINES = 2000;
 const MAX_RANGE_BYTES = 1024 * 1024;
+
+interface LogRange {
+  bytes: Buffer;
+  lastLine: number | null;
+}
 
 function lineNumber(value: unknown, field: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
@@ -23,7 +30,7 @@ async function readRange(
   size: number,
   startLine: number,
   endLine: number
-): Promise<string> {
+): Promise<LogRange> {
   const buffer = Buffer.allocUnsafe(64 * 1024);
   const parts: Buffer[] = [];
   let retained = 0;
@@ -57,10 +64,19 @@ async function readRange(
       parts.push(Buffer.from(chunk.subarray(start, offset)));
     }
   }
-  return Buffer.concat(parts, retained).toString('utf8');
+  const bytes = Buffer.concat(parts, retained);
+  // After a final LF the scanner points one line beyond the last retained byte.
+  const lastLine = retained === 0 ? null : line - Number(bytes.at(-1) === 0x0a);
+  return { bytes, lastLine };
 }
 
-export async function readLog(args: Record<string, unknown> | undefined): Promise<string> {
+export async function readLog(
+  args: Record<string, unknown> | undefined,
+  logFields?: Record<string, unknown>
+): Promise<string> {
+  const requested = args?.['mode'];
+  const mode = requested === undefined ? 'compact' : READ_LOG_MODES.find((m) => m === requested);
+  if (logFields && mode) logFields.mode = mode;
   const name = args?.['file'];
   if (
     typeof name !== 'string' ||
@@ -71,14 +87,7 @@ export async function readLog(args: Record<string, unknown> | undefined): Promis
       'file must be a log filename under WQM_LOG_DIR (.log or .jsonl, optional numeric rotation)'
     );
   }
-  const mode = args?.['mode'] === undefined ? 'compact' : args['mode'];
-  if (
-    mode !== 'raw' &&
-    mode !== 'compact' &&
-    mode !== 'template' &&
-    mode !== 'interleaved' &&
-    mode !== 'auto'
-  ) {
+  if (!mode) {
     throw new Error('mode must be compact, template, interleaved, auto or raw');
   }
   const groupBy = args?.['groupBy'] === undefined ? 'block' : args['groupBy'];
@@ -94,6 +103,7 @@ export async function readLog(args: Record<string, unknown> | undefined): Promis
   );
   if (end < start || end - start >= MAX_LINES)
     throw new Error(`Select 1 to ${MAX_LINES} consecutive lines`);
+  if (logFields) Object.assign(logFields, { requested_start_line: start, requested_end_line: end });
 
   const path = join(getLogDirectory(), name);
   const entry = await lstat(path);
@@ -102,14 +112,27 @@ export async function readLog(args: Record<string, unknown> | undefined): Promis
     path,
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
   );
+  let range: LogRange;
   try {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.dev !== entry.dev || opened.ino !== entry.ino) {
       throw new Error('Log file changed while opening. Retry the read.');
     }
-    const text = await readRange(handle, opened.size, start, end);
-    return mode === 'raw' ? text : formatLog(text, name, start, mode, groupBy);
+    range = await readRange(handle, opened.size, start, end);
   } finally {
     await handle.close();
   }
+  const text = range.bytes.toString('utf8');
+  const output = mode === 'raw' ? text : formatLog(text, name, start, mode, groupBy);
+  const bytesOut = Buffer.byteLength(output);
+  if (logFields) {
+    Object.assign(logFields, {
+      start_line: range.lastLine === null ? null : start,
+      end_line: range.lastLine,
+      bytes_in: range.bytes.length,
+      bytes_out: bytesOut,
+    });
+  }
+  recordReadLogUsage(mode, range.bytes.length, bytesOut);
+  return output;
 }

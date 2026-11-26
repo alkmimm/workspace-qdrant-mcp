@@ -1,3 +1,6 @@
+export const READ_LOG_MODES = ['compact', 'template', 'interleaved', 'auto', 'raw'] as const;
+export type ReadLogMode = (typeof READ_LOG_MODES)[number];
+
 export const readLogToolDefinition = {
   name: 'read_log',
   annotations: {
@@ -16,7 +19,7 @@ export const readLogToolDefinition = {
       },
       mode: {
         type: 'string',
-        enum: ['compact', 'template', 'interleaved', 'auto', 'raw'],
+        enum: [...READ_LOG_MODES],
         description:
           'Default: compact. auto returns the smallest UTF-8 text among compact, template, interleaved/block and interleaved/window. Earlier formats win ties.',
       },

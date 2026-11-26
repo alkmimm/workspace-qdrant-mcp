@@ -247,8 +247,10 @@ export async function routeTool(
   toolName: string,
   args: Record<string, unknown> | undefined,
   components: ServerComponents,
-  sessionState: SessionState
+  sessionState: SessionState,
+  logFields?: Record<string, unknown>
 ): Promise<unknown> {
+  if (toolName === 'read_log') return readLog(args, logFields);
   if (OP_EVENT_TOOLS.has(toolName)) {
     return withOpEvent(components.daemonClient, toolName, args, () =>
       routeToolInner(toolName, args, components, sessionState)
@@ -293,8 +295,6 @@ async function routeToolInner(
       return listTool.list(buildListOptions(args));
     case 'embedding':
       return handleEmbedding(args, daemonClient);
-    case 'read_log':
-      return readLog(args);
     case 'help':
       // Static topical manual. The handler reads only in-process constants;
       // the dispatch-level preamble is skipped via LOCAL_TOOLS above.
@@ -372,11 +372,12 @@ export async function dispatchToolCall(
     return { content: [{ type: 'text', text: `Unknown tool: ${toolName}` }], isError: true };
   }
 
+  const logFields = toolName === 'read_log' ? {} : undefined;
   try {
     const result = await withToolMetrics(toolName, () =>
-      routeTool(toolName, args, components, sessionState)
+      routeTool(toolName, args, components, sessionState, logFields)
     );
-    logToolCall(toolName, Date.now() - startTime, true);
+    logToolCall(toolName, Date.now() - startTime, true, logFields);
     const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
     // Read tools mirror their object result into structuredContent (validated
     // against the declared outputSchema) while TextContent stays the universal
@@ -395,7 +396,7 @@ export async function dispatchToolCall(
     return { content: [{ type: 'text', text }] };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logToolCall(toolName, Date.now() - startTime, false, { error: errorMessage });
+    logToolCall(toolName, Date.now() - startTime, false, { ...logFields, error: errorMessage });
     return { content: [{ type: 'text', text: `Error: ${errorMessage}` }], isError: true };
   }
 }

@@ -30,6 +30,7 @@ import {
   gitHookDuration,
   withToolMetrics,
   recordSessionStart,
+  recordReadLogUsage,
   recordSessionEnd,
   recordDaemonFallback,
   startGitHookTimer,
@@ -63,6 +64,20 @@ beforeEach(async () => {
 });
 
 // ── Registration tests ────────────────────────────────────────────────────────
+
+it('accumulates successful log reads and both byte counts by requested mode', async () => {
+  recordReadLogUsage('auto', 10, 8);
+  recordReadLogUsage('auto', 0, 0);
+  recordReadLogUsage('raw', 7, 7);
+  expect(await getCounterValue('wqm_mcp_read_log_reads_total', { mode: 'auto' })).toBe(2);
+  expect(await getCounterValue('wqm_mcp_read_log_bytes_total', { mode: 'auto', kind: 'raw' })).toBe(
+    10
+  );
+  expect(
+    await getCounterValue('wqm_mcp_read_log_bytes_total', { mode: 'auto', kind: 'returned' })
+  ).toBe(8);
+  expect(await getCounterValue('wqm_mcp_read_log_reads_total', { mode: 'raw' })).toBe(1);
+});
 
 describe('metric registration', () => {
   it('registers wqm_mcp_tool_invocations_total as a Counter', () => {

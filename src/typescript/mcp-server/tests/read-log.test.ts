@@ -33,8 +33,42 @@ describe('read_log', () => {
 
   it('preserves UTF-8, CRLF, blank lines and an unterminated last line across chunks', async () => {
     await writeFile(join(dir, args.file), 'x'.repeat(65535) + '\npré\r\n\r\nend');
-    expect(await readLog({ ...args, mode: 'raw', startLine: 2 })).toBe('pré\r\n\r\nend');
-    expect(await readLog({ ...args, startLine: 5 })).toBe('');
+    const fields = {};
+    const text = 'pré\r\n\r\nend';
+    expect(await readLog({ ...args, mode: 'raw', startLine: 2 }, fields)).toBe(text);
+    expect(fields).toEqual({
+      mode: 'raw',
+      requested_start_line: 2,
+      requested_end_line: 201,
+      start_line: 2,
+      end_line: 4,
+      bytes_in: Buffer.byteLength(text),
+      bytes_out: Buffer.byteLength(text),
+    });
+    const empty = {};
+    expect(await readLog({ ...args, startLine: 5 }, empty)).toBe('');
+    expect(empty).toEqual({
+      mode: 'compact',
+      requested_start_line: 5,
+      requested_end_line: 204,
+      start_line: null,
+      end_line: null,
+      bytes_in: 0,
+      bytes_out: 0,
+    });
+  });
+
+  it('counts the source bytes before UTF-8 decoding and a final LF only once', async () => {
+    await writeFile(join(dir, args.file), Buffer.from([0xff, 0x0a]));
+    const fields = {};
+    expect(await readLog({ ...args, mode: 'auto' }, fields)).toBe('�\n');
+    expect(fields).toMatchObject({
+      mode: 'auto',
+      start_line: 1,
+      end_line: 1,
+      bytes_in: 2,
+      bytes_out: 4,
+    });
   });
 
   it('keeps a repeated untimestamped message separate from its timestamped counterpart', async () => {

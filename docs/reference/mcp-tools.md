@@ -470,6 +470,19 @@ Use `"mode":"interleaved"` to group matching events across intervening messages 
 
 Use `"mode":"auto"` to return the smallest summary by UTF-8 byte length. It compares `compact`, `template`, `interleaved` with `groupBy:"block"`, and `interleaved` with `groupBy:"window"`, in that tie-breaking order. The response is the chosen text verbatim, including any line references. Omit `groupBy` with `auto`. Token savings depend on the tokenizer.
 
+### Usage and byte savings by mode
+
+Each successful MCP `Tool called` log entry for `tool="read_log"` includes the requested `mode`. An omitted mode is recorded as `compact`. An `auto` request is recorded as `auto` regardless of the selected format. The inclusive bounds are `requested_start_line` and `requested_end_line` for the request, and `start_line` and `end_line` for the lines actually read. Both actual bounds are null for an empty read. `bytes_in` counts source bytes in the selected range, including line endings. `bytes_out` counts the UTF-8 bytes of the returned text, excluding the MCP envelope. A summary can expand the input.
+
+For successful reads, Prometheus exposes `wqm_mcp_read_log_reads_total{mode}` and `wqm_mcp_read_log_bytes_total{mode,kind}`, with `kind="raw"` or `"returned"`. Errors use the existing tool invocation counter. To calculate the percentage of source bytes saved in the last day for each mode with nonzero input, use:
+
+```promql
+100 * (1 -
+  sum by (mode) (increase(wqm_mcp_read_log_bytes_total{kind="returned"}[1d]))
+  / (sum by (mode) (increase(wqm_mcp_read_log_bytes_total{kind="raw"}[1d])) > 0)
+)
+```
+
 ### Decision on the 18-line shortcut
 
 The fork keeps the `auto` shortcut at **18 lines inclusive** and considers this optimization complete. When no adjacent events share a template key, both `compact` and `template` reproduce the input, so `auto` can skip rendering them. From 19 lines onward, `auto` uses the general selection algorithm. The cutoff affects formatting time only. The byte-length comparison, tie order and line references for `raw` apply at every window size.
