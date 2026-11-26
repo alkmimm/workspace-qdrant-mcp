@@ -189,7 +189,7 @@ describe('read_log', () => {
       expect(await readLog({ ...auto, startLine: 2, endLine: 2 })).toBe('\r\n');
     });
 
-    it.each([16, 17])('groups nonadjacent variable IDs in a %i-line range', async (size) => {
+    it.each([16, 17, 18, 19])('groups nonadjacent IDs in a %i-line range', async (size) => {
       const span = (id: string) => `WARN queue.process_item{queue_id=${id}}: ${'界'.repeat(60)}`;
       const middle = Array.from({ length: size - 2 }, (_, i) => `event ${i}`);
       const lines = ['outside', span('a'.repeat(32)), ...middle, span('b'.repeat(32))];

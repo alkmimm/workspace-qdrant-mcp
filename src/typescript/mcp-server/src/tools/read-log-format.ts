@@ -1,6 +1,6 @@
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})(?=[ \t])/;
 const BLOCK_LINES = 100;
-const SHORT_AUTO_LINES = 16;
+const SHORT_AUTO_LINES = 18;
 const VARIABLE_ID = '<id>';
 
 type SummaryMode = 'compact' | 'template' | 'interleaved';
