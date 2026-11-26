@@ -52,12 +52,11 @@ function eventKey(event: LogEvent): string {
   ]);
 }
 
-function groupIndices(events: LogEvent[], mode: SummaryMode, groupBy: GroupBy): number[][] {
+function groupIndices(keys: string[], mode: SummaryMode, groupBy: GroupBy): number[][] {
   const groups: number[][] = [];
   const byKey = new Map<string, number[]>();
   let previousKey: string | undefined;
-  for (const [index, event] of events.entries()) {
-    const key = eventKey(event);
+  for (const [index, key] of keys.entries()) {
     let group: number[] | undefined;
     if (mode === 'interleaved') {
       if (groupBy === 'block' && index % BLOCK_LINES === 0) byKey.clear();
@@ -90,19 +89,27 @@ function lineRefs(indices: number[], startLine: number): string {
   return ranges.join(',');
 }
 
-export function formatLog(
-  text: string,
+interface ParsedLog {
+  lines: string[];
+  events: LogEvent[];
+  keys: string[];
+}
+
+function parseLines(lines: string[], mode: 'compact' | 'template'): ParsedLog {
+  const events = lines.map((line) => parseEvent(line, mode));
+  return { lines, events, keys: events.map(eventKey) };
+}
+
+function renderLog(
+  { lines, events, keys }: ParsedLog,
   file: string,
   startLine: number,
   mode: SummaryMode,
   groupBy: GroupBy
 ): string {
-  if (!text) return '';
-  const lines = text.split(/(?<=\n)/);
-  const events = lines.map((line) => parseEvent(line, mode === 'compact' ? 'compact' : 'template'));
   const interleaved = mode === 'interleaved';
   const output = interleaved ? [`file=${file}\n`] : [];
-  for (const indices of groupIndices(events, mode, groupBy)) {
+  for (const indices of groupIndices(keys, mode, groupBy)) {
     const index = indices[0]!;
     const event = events[index]!;
     if (!interleaved && indices.length === 1) {
@@ -134,4 +141,38 @@ export function formatLog(
     );
   }
   return output.join('');
+}
+
+export function formatLog(
+  text: string,
+  file: string,
+  startLine: number,
+  mode: SummaryMode | 'auto',
+  groupBy: GroupBy
+): string {
+  if (!text) return '';
+  const lines = text.split(/(?<=\n)/);
+  if (mode !== 'auto') {
+    const log = parseLines(lines, mode === 'compact' ? 'compact' : 'template');
+    return renderLog(log, file, startLine, mode, groupBy);
+  }
+
+  let best = renderLog(parseLines(lines, 'compact'), file, startLine, 'compact', 'block');
+  let bestBytes = Buffer.byteLength(best, 'utf8');
+  const log = parseLines(lines, 'template');
+  // Earlier formats win ties. Within one block the two interleaved outputs are identical.
+  for (const [candidateMode, scope] of [
+    ['template', 'block'],
+    ['interleaved', 'block'],
+    ['interleaved', 'window'],
+  ] as const) {
+    if (scope === 'window' && lines.length <= BLOCK_LINES) break;
+    const candidate = renderLog(log, file, startLine, candidateMode, scope);
+    const bytes = Buffer.byteLength(candidate, 'utf8');
+    if (bytes < bestBytes) {
+      best = candidate;
+      bestBytes = bytes;
+    }
+  }
+  return best;
 }

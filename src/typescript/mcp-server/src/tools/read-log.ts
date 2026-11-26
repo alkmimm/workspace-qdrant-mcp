@@ -72,8 +72,14 @@ export async function readLog(args: Record<string, unknown> | undefined): Promis
     );
   }
   const mode = args?.['mode'] === undefined ? 'compact' : args['mode'];
-  if (mode !== 'raw' && mode !== 'compact' && mode !== 'template' && mode !== 'interleaved') {
-    throw new Error('mode must be compact, template, interleaved or raw');
+  if (
+    mode !== 'raw' &&
+    mode !== 'compact' &&
+    mode !== 'template' &&
+    mode !== 'interleaved' &&
+    mode !== 'auto'
+  ) {
+    throw new Error('mode must be compact, template, interleaved, auto or raw');
   }
   const groupBy = args?.['groupBy'] === undefined ? 'block' : args['groupBy'];
   if (args?.['groupBy'] !== undefined && mode !== 'interleaved') {

@@ -16,8 +16,9 @@ export const readLogToolDefinition = {
       },
       mode: {
         type: 'string',
-        enum: ['compact', 'template', 'interleaved', 'raw'],
-        description: 'Default: compact.',
+        enum: ['compact', 'template', 'interleaved', 'auto', 'raw'],
+        description:
+          'Default: compact. auto returns the smallest UTF-8 text among compact, template, interleaved/block and interleaved/window. Earlier formats win ties.',
       },
       groupBy: {
         type: 'string',

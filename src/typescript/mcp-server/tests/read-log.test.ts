@@ -95,6 +95,9 @@ describe('read_log', () => {
       expect(await readLog({ ...template, ...range })).toBe(
         '[L2-5 ×4 through 2026-11-26T12:00:05Z] ' + times[1] + done('<id>', '0–107') + '\r\n'
       );
+      expect(await readLog({ ...args, ...range, mode: 'auto' })).toBe(
+        await readLog({ ...template, ...range })
+      );
       const original = lines.slice(1).join('');
       expect(await readLog({ ...args, ...range, mode: 'raw' })).toBe(original);
       expect(await readLog({ ...args, ...range })).toBe(original);
@@ -176,6 +179,47 @@ describe('read_log', () => {
     });
   });
 
+  describe('auto mode', () => {
+    const auto = { ...args, mode: 'auto' };
+
+    it('compares UTF-8 bytes and returns the selected summary without an envelope', async () => {
+      const raw = '界界界\nX\n'.repeat(6);
+      await writeFile(join(dir, args.file), raw);
+      const compact = await readLog(args);
+      const interleaved = await readLog({ ...args, mode: 'interleaved' });
+      expect(compact.length).toBeLessThan(interleaved.length);
+      expect(Buffer.byteLength(compact)).toBeGreaterThan(Buffer.byteLength(interleaved));
+      expect(await readLog(auto)).toBe(interleaved);
+      expect(await readLog({ ...auto, startLine: 13 })).toBe('');
+    });
+
+    it('prefers compact on a byte tie between distinct outputs', async () => {
+      const raw = ('界'.repeat(6) + '\nX\n').repeat(3);
+      await writeFile(join(dir, args.file), raw);
+      const interleaved = await readLog({ ...args, mode: 'interleaved' });
+      expect(interleaved).not.toBe(raw);
+      expect(Buffer.byteLength(interleaved)).toBe(Buffer.byteLength(raw));
+      expect(await readLog(auto)).toBe(raw);
+    });
+
+    it('considers the entire window when events repeat across block boundaries', async () => {
+      const block = Array.from(
+        { length: 100 },
+        (_, i) => `long message from worker number ${i}\n`
+      ).join('');
+      await writeFile(join(dir, args.file), 'excluded\n' + block + block);
+      const range = { ...args, startLine: 2, endLine: 201 };
+      const window = await readLog({ ...range, mode: 'interleaved', groupBy: 'window' });
+      expect(window).toContain('[L2,102 ×2]');
+      for (const mode of ['compact', 'template', 'interleaved']) {
+        expect(Buffer.byteLength(window)).toBeLessThan(
+          Buffer.byteLength(await readLog({ ...range, mode }))
+        );
+      }
+      expect(await readLog({ ...range, mode: 'auto' })).toBe(window);
+    });
+  });
+
   it('caps retained bytes, even for a single line, and can read past it', async () => {
     await writeFile(join(dir, args.file), 'x'.repeat(1024 * 1024 + 1) + '\nOK\n');
     await expect(readLog(args)).rejects.toThrow('1 MiB');
@@ -198,6 +242,7 @@ describe('read_log', () => {
     { mode: 'interleaved', groupBy: 'other' },
     { mode: 'interleaved', groupBy: null },
     { mode: 'compact', groupBy: 'window' },
+    { mode: 'auto', groupBy: 'block' },
   ])('rejects invalid options %o', async (bad) => {
     await expect(readLog({ ...args, ...bad })).rejects.toThrow();
   });

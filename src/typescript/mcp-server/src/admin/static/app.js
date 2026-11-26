@@ -1513,7 +1513,7 @@ const PG_TOOLS = [
   ] },
   { name: 'read_log', mutates: false, note: 'read consecutive lines from a server log', fields: [
     F('file', 'text', { req: true, ph: 'memexd.log' }),
-    F('mode', 'enum', { enum: ['compact', 'template', 'interleaved', 'raw'] }),
+    F('mode', 'enum', { enum: ['compact', 'template', 'interleaved', 'auto', 'raw'] }),
     F('groupBy', 'enum', { enum: ['block', 'window'], adv: true }),
     F('startLine', 'number'),
     F('endLine', 'number'),

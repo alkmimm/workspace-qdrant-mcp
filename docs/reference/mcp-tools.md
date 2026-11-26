@@ -468,6 +468,8 @@ Use `"mode":"interleaved"` to group matching events across intervening messages 
 {"file":"memexd-snapshot.log","mode":"interleaved","groupBy":"window","startLine":1,"endLine":1000}
 ```
 
+Use `"mode":"auto"` to return the smallest summary by UTF-8 byte length. It compares `compact`, `template`, `interleaved` with `groupBy:"block"`, and `interleaved` with `groupBy:"window"`, in that tie-breaking order. The response is the chosen text verbatim, including any line references. Omit `groupBy` with `auto`. Token savings depend on the tokenizer.
+
 ## grep
 
 Search code with exact substring or regex pattern matching. Uses an FTS5 trigram index for fast line-level search across all indexed files. Unlike `search`, `grep` does not use embeddings and always returns exact matches.
