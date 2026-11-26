@@ -483,6 +483,27 @@ For successful reads, Prometheus exposes `wqm_mcp_read_log_reads_total{mode}` an
 )
 ```
 
+#### Track local usage after the two manual validations
+
+From the repository root, run the following command whenever you want the cumulative usage since **2026-11-26 22:55:25 UTC** (19:55:25 in São Paulo).
+
+```sh
+python3 scripts/read-log-usage.py
+```
+
+The [usage script](../../scripts/read-log-usage.py) reads `http://127.0.0.1:9092/metrics` and uses the Docker CLI to check the start time of the local `wqm-mcp` container. The query itself adds no `read_log` calls. If the endpoint requires authentication, export `MCP_METRICS_TOKEN` or the Compose stack's `MCP_HTTP_TOKEN` in the calling shell.
+
+The script subtracts the following baseline from each mode's current counters. The other three modes started at zero.
+
+| Manual validation | Requested mode | Successful calls | Raw bytes | Returned bytes |
+|---|---|---:|---:|---:|
+| Telemetry check on `memexd-heartbeats.log`, lines 997–1010 requested and 997–1000 read | `auto` | 1 | 885 | 282 |
+| Codex client check on `mcp-server.1.jsonl`, lines 1–2 | `raw` | 1 | 361 | 361 |
+
+Each row reports the additional successful calls, raw bytes and returned bytes for that mode. `saved_bytes` is raw minus returned after subtracting the baseline. `savings` divides those saved bytes by the raw bytes for the period. It shows `n/a` for zero input and a negative percentage when the output grew. Later manual checks count alongside other calls because the counters have no caller label.
+
+The counters reset when the MCP restarts. If the container generation changes or a counter falls below its baseline, the script exits with an error. To recover exact totals across restarts, aggregate retained successful `Tool called` events for `tool="read_log"` after the baseline time by `mode`, counting events and summing `bytes_in` and `bytes_out`. The time filter already excludes both validations.
+
 ### Decision on the 18-line shortcut
 
 The fork keeps the `auto` shortcut at **18 lines inclusive** and considers this optimization complete. When no adjacent events share a template key, both `compact` and `template` reproduce the input, so `auto` can skip rendering them. From 19 lines onward, `auto` uses the general selection algorithm. The cutoff affects formatting time only. The byte-length comparison, tie order and line references for `raw` apply at every window size.
