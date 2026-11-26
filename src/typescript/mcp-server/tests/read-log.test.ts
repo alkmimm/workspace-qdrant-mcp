@@ -53,6 +53,39 @@ describe('read_log', () => {
       `WARN queue.process_item{queue_id=${id} item_type=File op=Delete collection=projects tenant_id=${tenant}}: worker: ${message}`;
     const template = { ...args, mode: 'template' };
 
+    it('uses the same template across gaps, retaining tenant, operation, timestamps and raw locators', async () => {
+      const times = [1, 2, 3, 4, 5, 6].map((i) => `2026-01-01T10:00:0${i}Z `);
+      const messages = [
+        done(idA, 2),
+        span(idA, 'one', 'retry'),
+        done(idB, 100),
+        done(idB, 0),
+        span(idB, 'two', 'retry'),
+        done(idB, 2, 'Add'),
+      ];
+      const lines = messages.map((msg, i) => times[i] + msg + '\r\n');
+      await writeFile(join(dir, args.file), 'outside\n' + lines.join(''));
+      const out = await readLog({ ...args, mode: 'interleaved', startLine: 2, groupBy: 'window' });
+      expect(out).toBe(
+        'file=memexd.log\n[L2,4-5 ×3 through 2026-01-01T10:00:04Z] ' +
+          times[0] +
+          done('<id>', '0–100') +
+          '\n[L3] ' +
+          times[1] +
+          messages[1] +
+          '\n[L6] ' +
+          times[4] +
+          messages[4] +
+          '\n[L7] ' +
+          times[5] +
+          messages[5] +
+          '\n'
+      );
+      expect(await readLog({ ...args, mode: 'raw', startLine: 4, endLine: 5 })).toBe(
+        lines.slice(2, 4).join('')
+      );
+    });
+
     it('summarizes changing IDs and all durations within the selected interval', async () => {
       const times = [1, 2, 3, 4, 5].map((i) => `2026-11-26T12:00:0${i}Z `);
       const input = [done(idA, 600), done(idB, 42), done(idA, 107), done(idB, 0), done(idA, 85)];
@@ -113,6 +146,36 @@ describe('read_log', () => {
     });
   });
 
+  describe('interleaved block boundaries', () => {
+    const selected = { ...args, mode: 'interleaved', startLine: 9, endLine: 109 };
+    it('anchors blocks at startLine, clips the window and orders groups by first appearance', async () => {
+      const rows = [
+        ...Array<string>(8).fill('before'),
+        'hit',
+        ...Array<string>(98).fill('other'),
+        'hit',
+        'hit',
+        'after',
+      ];
+      await writeFile(join(dir, args.file), rows.join('\n'));
+      const block = 'file=memexd.log\n[L9,108 ×2] hit\n[L10-107 ×98] other\n[L109] hit\n';
+      expect(await readLog(selected)).toBe(block);
+      expect(await readLog({ ...selected, groupBy: 'block' })).toBe(block);
+      expect(await readLog({ ...selected, groupBy: 'window' })).toBe(
+        'file=memexd.log\n[L9,108-109 ×3] hit\n[L10-107 ×98] other\n'
+      );
+    });
+
+    it('identifies blank and unterminated lines and returns empty text past EOF', async () => {
+      await writeFile(join(dir, args.file), '\r\nx\n\nlast');
+      expect(await readLog({ ...args, mode: 'interleaved' })).toBe(
+        'file=memexd.log\n[L1,3 ×2] \n[L2] x\n[L4] last\n'
+      );
+      expect(await readLog({ ...args, mode: 'raw', startLine: 4 })).toBe('last');
+      expect(await readLog(selected)).toBe('');
+    });
+  });
+
   it('caps retained bytes, even for a single line, and can read past it', async () => {
     await writeFile(join(dir, args.file), 'x'.repeat(1024 * 1024 + 1) + '\nOK\n');
     await expect(readLog(args)).rejects.toThrow('1 MiB');
@@ -132,6 +195,9 @@ describe('read_log', () => {
     { endLine: 2001 },
     { endLine: null },
     { mode: 'other' },
+    { mode: 'interleaved', groupBy: 'other' },
+    { mode: 'interleaved', groupBy: null },
+    { mode: 'compact', groupBy: 'window' },
   ])('rejects invalid options %o', async (bad) => {
     await expect(readLog({ ...args, ...bad })).rejects.toThrow();
   });

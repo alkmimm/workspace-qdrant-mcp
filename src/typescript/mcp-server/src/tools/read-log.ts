@@ -2,12 +2,12 @@ import { constants } from 'node:fs';
 import { lstat, open, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { formatLog } from './read-log-format.js';
 import { getLogDirectory } from '../utils/paths.js';
 
 const DEFAULT_LINES = 200;
 const MAX_LINES = 2000;
 const MAX_RANGE_BYTES = 1024 * 1024;
-const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})(?=[ \t])/;
 
 function lineNumber(value: unknown, field: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
@@ -60,90 +60,6 @@ async function readRange(
   return Buffer.concat(parts, retained).toString('utf8');
 }
 
-// Match only the queue span and the success message emitted by memexd.
-// Other IDs (including tenant_id), counts, error codes and paths stay literal.
-const QUEUE_SPAN =
-  /^([ \t]*(?:TRACE|DEBUG|INFO|WARN|ERROR)[ \t]+queue\.process_item\{queue_id=)([a-fA-F0-9]{32})(?=[ \t}])/;
-const PROCESSED_ITEM =
-  /^([ \t]*INFO[ \t]+workspace_qdrant_core::unified_queue_processor::processing_loop::batch_processing: Successfully processed unified item )([a-fA-F0-9]{32})( \(type=\w+, op=\w+\) in )(0|[1-9]\d*)ms$/;
-
-interface LogEvent {
-  timestamp: string;
-  beforeId: string;
-  id: string;
-  afterId: string;
-  durationMs?: number;
-}
-
-function parseEvent(line: string, mode: 'compact' | 'template'): LogEvent {
-  const timestamp = TIMESTAMP.exec(line)?.[0] ?? '';
-  const body = line.slice(timestamp.length).replace(/\r?\n$/, '');
-  if (mode === 'template') {
-    const span = QUEUE_SPAN.exec(body);
-    if (span) {
-      return { timestamp, beforeId: span[1]!, id: span[2]!, afterId: body.slice(span[0].length) };
-    }
-    const item = PROCESSED_ITEM.exec(body);
-    if (item && Number.isSafeInteger(Number(item[4]))) {
-      return {
-        timestamp,
-        beforeId: item[1]!,
-        id: item[2]!,
-        afterId: item[3]!,
-        durationMs: Number(item[4]),
-      };
-    }
-  }
-  return { timestamp, beforeId: body, id: '', afterId: '' };
-}
-
-function sameEvent(first: LogEvent, next: LogEvent): boolean {
-  return (
-    Boolean(first.timestamp) === Boolean(next.timestamp) &&
-    Boolean(first.id) === Boolean(next.id) &&
-    first.beforeId === next.beforeId &&
-    first.afterId === next.afterId
-  );
-}
-
-function compact(text: string, startLine: number, mode: 'compact' | 'template'): string {
-  const lines = text.split(/(?<=\n)/);
-  const events = lines.map((line) => parseEvent(line, mode));
-  const output: string[] = [];
-  let first = 0;
-  while (first < events.length) {
-    const event = events[first]!;
-    let id = event.id;
-    let minMs = event.durationMs ?? 0;
-    let maxMs = minMs;
-    let next = first + 1;
-    while (next < events.length && sameEvent(event, events[next]!)) {
-      const other = events[next]!;
-      if (other.id !== event.id) id = '<id>';
-      if (other.durationMs !== undefined) {
-        minMs = Math.min(minMs, other.durationMs);
-        maxMs = Math.max(maxMs, other.durationMs);
-      }
-      next++;
-    }
-    let line = lines[first]!;
-    if (next > first + 1) {
-      const lastTimestamp = events[next - 1]!.timestamp;
-      const until = lastTimestamp ? ` through ${lastTimestamp}` : '';
-      output.push(`[L${startLine + first}-${startLine + next - 1} ×${next - first}${until}] `);
-      if (id !== event.id || minMs !== maxMs) {
-        const ending = line.endsWith('\r\n') ? '\r\n' : '\n';
-        const range = minMs === maxMs ? String(minMs) : `${minMs}–${maxMs}`;
-        const duration = event.durationMs === undefined ? '' : `${range}ms`;
-        line = event.timestamp + event.beforeId + id + event.afterId + duration + ending;
-      }
-    }
-    output.push(line);
-    first = next;
-  }
-  return output.join('');
-}
-
 export async function readLog(args: Record<string, unknown> | undefined): Promise<string> {
   const name = args?.['file'];
   if (
@@ -156,9 +72,15 @@ export async function readLog(args: Record<string, unknown> | undefined): Promis
     );
   }
   const mode = args?.['mode'] === undefined ? 'compact' : args['mode'];
-  if (mode !== 'raw' && mode !== 'compact' && mode !== 'template') {
-    throw new Error('mode must be compact, template or raw');
+  if (mode !== 'raw' && mode !== 'compact' && mode !== 'template' && mode !== 'interleaved') {
+    throw new Error('mode must be compact, template, interleaved or raw');
   }
+  const groupBy = args?.['groupBy'] === undefined ? 'block' : args['groupBy'];
+  if (args?.['groupBy'] !== undefined && mode !== 'interleaved') {
+    throw new Error('groupBy requires interleaved mode');
+  }
+  if (groupBy !== 'block' && groupBy !== 'window')
+    throw new Error('groupBy must be block or window');
   const start = lineNumber(args?.['startLine'] === undefined ? 1 : args['startLine'], 'startLine');
   const end = lineNumber(
     args?.['endLine'] === undefined ? start + DEFAULT_LINES - 1 : args['endLine'],
@@ -180,7 +102,7 @@ export async function readLog(args: Record<string, unknown> | undefined): Promis
       throw new Error('Log file changed while opening. Retry the read.');
     }
     const text = await readRange(handle, opened.size, start, end);
-    return mode === 'raw' ? text : compact(text, start, mode);
+    return mode === 'raw' ? text : formatLog(text, name, start, mode, groupBy);
   } finally {
     await handle.close();
   }

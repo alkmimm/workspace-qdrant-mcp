@@ -462,6 +462,12 @@ The default `compact` mode groups adjacent lines with matching text, ignoring a 
 
 Set `"mode":"template"` for memexd queue logs. Within a run of consecutive events, a changing 32-digit hexadecimal queue item ID is displayed as `<id>`. This applies to the `queue_id` field of a `queue.process_item` span and to the item ID in the batch processor’s success message. For those success messages, varying durations are displayed as a minimum–maximum range in milliseconds. Tenant fields, operations, counts and error codes must match. Unrecognized lines follow the usual compact grouping. To inspect each ID and duration in a group marked `[L120-127 ×8 …]`, call `read_log` on the same snapshot with `{"file":"memexd-snapshot.log","mode":"raw","startLine":120,"endLine":127}`.
 
+Use `"mode":"interleaved"` to group matching events across intervening messages using the same rules as `template`. By default, `"groupBy":"block"` starts a new group set every 100 lines from the requested `startLine`. Choose `"groupBy":"window"` to group across the entire selected interval. Groups appear in order of first occurrence within each block. The summary names the snapshot and lists the absolute line numbers of every occurrence, including singletons. For example, `[L18,57-58,826 ×4 …]` refers to four occurrences. To inspect them with `raw`, request lines 18–18, 57–58 and 826–826 of the same file.
+
+```json
+{"file":"memexd-snapshot.log","mode":"interleaved","groupBy":"window","startLine":1,"endLine":1000}
+```
+
 ## grep
 
 Search code with exact substring or regex pattern matching. Uses an FTS5 trigram index for fast line-level search across all indexed files. Unlike `search`, `grep` does not use embeddings and always returns exact matches.
