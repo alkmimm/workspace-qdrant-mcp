@@ -1,5 +1,6 @@
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})(?=[ \t])/;
 const BLOCK_LINES = 100;
+const SHORT_AUTO_LINES = 16;
 const VARIABLE_ID = '<id>';
 
 type SummaryMode = 'compact' | 'template' | 'interleaved';
@@ -191,7 +192,16 @@ export function formatLog(
     return renderLog(log, file, startLine, mode, groupBy);
   }
 
+  if (lines.length === 1) return text;
   const log = parseLines(lines, 'template');
+  if (lines.length <= SHORT_AUTO_LINES && !log.keys.some((key, i) => key === log.keys[i - 1])) {
+    // Without adjacent template matches, compact and template both reproduce the input.
+    // Interleaved can only save bytes if a key occurs more than once.
+    if (new Set(log.keys).size === lines.length) return text;
+    const interleaved = renderLog(log, file, startLine, 'interleaved', 'block');
+    return Buffer.byteLength(text) <= Buffer.byteLength(interleaved) ? text : interleaved;
+  }
+
   const multipleBlocks = lines.length > BLOCK_LINES;
   let best = renderLog(log, file, startLine, 'interleaved', 'window');
   let bestBytes = Buffer.byteLength(best, 'utf8');

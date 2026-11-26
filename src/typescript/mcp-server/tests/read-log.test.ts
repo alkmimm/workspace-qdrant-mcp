@@ -182,6 +182,24 @@ describe('read_log', () => {
   describe('auto mode', () => {
     const auto = { ...args, mode: 'auto' };
 
+    it('preserves the original bytes for distinct short-window events', async () => {
+      const text = 'início\r\n\r\n終';
+      await writeFile(join(dir, args.file), text);
+      expect(await readLog(auto)).toBe(text);
+      expect(await readLog({ ...auto, startLine: 2, endLine: 2 })).toBe('\r\n');
+    });
+
+    it.each([16, 17])('groups nonadjacent variable IDs in a %i-line range', async (size) => {
+      const span = (id: string) => `WARN queue.process_item{queue_id=${id}}: ${'界'.repeat(60)}`;
+      const middle = Array.from({ length: size - 2 }, (_, i) => `event ${i}`);
+      const lines = ['outside', span('a'.repeat(32)), ...middle, span('b'.repeat(32))];
+      await writeFile(join(dir, args.file), lines.join('\n'));
+      const range = { ...args, startLine: 2 };
+      const interleaved = await readLog({ ...range, mode: 'interleaved' });
+      expect(interleaved).toContain(`[L2,${size + 1} ×2] ${span('<id>')}`);
+      expect(await readLog({ ...range, mode: 'auto' })).toBe(interleaved);
+    });
+
     it('compares UTF-8 bytes and returns the selected summary without an envelope', async () => {
       const raw = '界界界\nX\n'.repeat(6);
       await writeFile(join(dir, args.file), raw);
