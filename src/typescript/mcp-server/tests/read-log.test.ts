@@ -202,6 +202,23 @@ describe('read_log', () => {
       expect(await readLog(auto)).toBe(raw);
     });
 
+    it('prefers block on a byte tie with a different whole-window summary', async () => {
+      const lines = [
+        '2026-01-01T00:00:00Z boundary',
+        ...Array.from(
+          { length: 99 },
+          (_, i) => `repeat long log message ${i % 2} for a background worker`
+        ),
+        '2026-01-01T00:00:01Z boundary',
+      ];
+      await writeFile(join(dir, args.file), lines.join('\n'));
+      const block = await readLog({ ...args, mode: 'interleaved', groupBy: 'block' });
+      const window = await readLog({ ...args, mode: 'interleaved', groupBy: 'window' });
+      expect(block).not.toBe(window);
+      expect(Buffer.byteLength(block)).toBe(Buffer.byteLength(window));
+      expect(await readLog(auto)).toBe(block);
+    });
+
     it('considers the entire window when events repeat across block boundaries', async () => {
       const block = Array.from(
         { length: 100 },

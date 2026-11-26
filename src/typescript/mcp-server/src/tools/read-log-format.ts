@@ -1,5 +1,6 @@
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})(?=[ \t])/;
 const BLOCK_LINES = 100;
+const VARIABLE_ID = '<id>';
 
 type SummaryMode = 'compact' | 'template' | 'interleaved';
 type GroupBy = 'block' | 'window';
@@ -100,6 +101,39 @@ function parseLines(lines: string[], mode: 'compact' | 'template'): ParsedLog {
   return { lines, events, keys: events.map(eventKey) };
 }
 
+function minimumSummaryBytes(
+  log: ParsedLog,
+  multipleBlocks: boolean
+): { runs: number; blocks: number } {
+  let runs = 0;
+  let blocks = 0;
+  let previousKey: string | undefined;
+  const seenInBlock = new Set<string>();
+  for (const [index, key] of log.keys.entries()) {
+    const event = log.events[index]!;
+    // Every group retains these fields from its first event. Only the ID can
+    // shrink to VARIABLE_ID. Omit labels, durations and endings from the bound.
+    const required =
+      event.timestamp.length +
+      Buffer.byteLength(event.beforeId) +
+      Buffer.byteLength(event.afterId) +
+      Math.min(event.id.length, VARIABLE_ID.length);
+    if (key !== previousKey) runs += required;
+    previousKey = key;
+
+    if (multipleBlocks) {
+      if (index % BLOCK_LINES === 0) seenInBlock.clear();
+      if (!seenInBlock.has(key)) {
+        seenInBlock.add(key);
+        blocks += required;
+      }
+    }
+  }
+  // Compact can split a template run into more groups. Its first event still
+  // contributes at least the same required bytes.
+  return { runs, blocks };
+}
+
 function renderLog(
   { lines, events, keys }: ParsedLog,
   file: string,
@@ -122,7 +156,7 @@ function renderLog(
     let maxMs = minMs;
     for (const i of indices) {
       const other = events[i]!;
-      if (other.id !== event.id) id = '<id>';
+      if (other.id !== event.id) id = VARIABLE_ID;
       if (other.durationMs !== undefined) {
         minMs = Math.min(minMs, other.durationMs);
         maxMs = Math.max(maxMs, other.durationMs);
@@ -157,19 +191,24 @@ export function formatLog(
     return renderLog(log, file, startLine, mode, groupBy);
   }
 
-  let best = renderLog(parseLines(lines, 'compact'), file, startLine, 'compact', 'block');
-  let bestBytes = Buffer.byteLength(best, 'utf8');
   const log = parseLines(lines, 'template');
-  // Earlier formats win ties. Within one block the two interleaved outputs are identical.
-  for (const [candidateMode, scope] of [
-    ['template', 'block'],
-    ['interleaved', 'block'],
-    ['interleaved', 'window'],
+  const multipleBlocks = lines.length > BLOCK_LINES;
+  let best = renderLog(log, file, startLine, 'interleaved', 'window');
+  let bestBytes = Buffer.byteLength(best, 'utf8');
+  const minimum = minimumSummaryBytes(log, multipleBlocks);
+  // Visit the remaining formats in reverse tie priority: a tie wins, so only
+  // a strictly larger bound permits skipping a candidate.
+  for (const [candidateMode, bound] of [
+    ['interleaved', minimum.blocks],
+    ['template', minimum.runs],
+    ['compact', minimum.runs],
   ] as const) {
-    if (scope === 'window' && lines.length <= BLOCK_LINES) break;
-    const candidate = renderLog(log, file, startLine, candidateMode, scope);
+    if (candidateMode === 'interleaved' && !multipleBlocks) continue;
+    if (bound > bestBytes) continue;
+    const parsed = candidateMode === 'compact' ? parseLines(lines, 'compact') : log;
+    const candidate = renderLog(parsed, file, startLine, candidateMode, 'block');
     const bytes = Buffer.byteLength(candidate, 'utf8');
-    if (bytes < bestBytes) {
+    if (bytes <= bestBytes) {
       best = candidate;
       bestBytes = bytes;
     }
