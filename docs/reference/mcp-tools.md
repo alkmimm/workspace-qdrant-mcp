@@ -460,6 +460,8 @@ Line numbers are one-based and inclusive. The default window is 200 lines. Each 
 
 The default `compact` mode groups adjacent lines with matching text, ignoring a leading RFC 3339 timestamp when both lines have one. Each run shows its source lines, count, last timestamp when available, and first original line. Messages with differing IDs, codes, or stack frames stay distinct. Use `"mode":"raw"` with the same file and a narrower interval to get the exact lines, including line endings.
 
+Set `"mode":"template"` for memexd queue logs. Within a run of consecutive events, a changing 32-digit hexadecimal queue item ID is displayed as `<id>`. This applies to the `queue_id` field of a `queue.process_item` span and to the item ID in the batch processor’s success message. For those success messages, varying durations are displayed as a minimum–maximum range in milliseconds. Tenant fields, operations, counts and error codes must match. Unrecognized lines follow the usual compact grouping. To inspect each ID and duration in a group marked `[L120-127 ×8 …]`, call `read_log` on the same snapshot with `{"file":"memexd-snapshot.log","mode":"raw","startLine":120,"endLine":127}`.
+
 ## grep
 
 Search code with exact substring or regex pattern matching. Uses an FTS5 trigram index for fast line-level search across all indexed files. Unlike `search`, `grep` does not use embeddings and always returns exact matches.

@@ -6,7 +6,7 @@ export const readLogToolDefinition = {
     openWorldHint: false,
   },
   description:
-    'Read a UTF-8 file in the server log directory (WQM_LOG_DIR). Compact mode groups only consecutive identical lines, ignoring a leading RFC 3339 timestamp. Use raw mode on the reported line range to inspect the original text.',
+    'Read a UTF-8 file in the server log directory (WQM_LOG_DIR). Compact mode groups only consecutive identical lines, ignoring a leading RFC 3339 timestamp. Template mode also groups consecutive memexd queue events with varying item IDs and shows min–max duration for successful items. Use raw mode on the reported line range to inspect the original text.',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -14,7 +14,11 @@ export const readLogToolDefinition = {
         type: 'string',
         description: 'Log basename (.log or .jsonl, optional numeric rotation).',
       },
-      mode: { type: 'string', enum: ['compact', 'raw'], description: 'Default: compact.' },
+      mode: {
+        type: 'string',
+        enum: ['compact', 'template', 'raw'],
+        description: 'Default: compact.',
+      },
       startLine: { type: 'integer', minimum: 1, description: 'Inclusive. Default: 1.' },
       endLine: {
         type: 'integer',

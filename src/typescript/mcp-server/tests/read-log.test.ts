@@ -42,6 +42,77 @@ describe('read_log', () => {
     expect(await readLog(args)).toBe('[L1-2 ×2]  msg\n2026-01-01T00:00:00Z msg\n');
   });
 
+  describe('template mode', () => {
+    const idA = 'a'.repeat(32);
+    const idB = 'b'.repeat(32);
+    const target =
+      'INFO workspace_qdrant_core::unified_queue_processor::processing_loop::batch_processing: ';
+    const done = (id: string, ms: number | string, op = 'Delete') =>
+      `${target}Successfully processed unified item ${id} (type=File, op=${op}) in ${ms}ms`;
+    const span = (id: string, tenant: string, message: string) =>
+      `WARN queue.process_item{queue_id=${id} item_type=File op=Delete collection=projects tenant_id=${tenant}}: worker: ${message}`;
+    const template = { ...args, mode: 'template' };
+
+    it('summarizes changing IDs and all durations within the selected interval', async () => {
+      const times = [1, 2, 3, 4, 5].map((i) => `2026-11-26T12:00:0${i}Z `);
+      const input = [done(idA, 600), done(idB, 42), done(idA, 107), done(idB, 0), done(idA, 85)];
+      const lines = input.map((msg, i) => times[i] + msg + '\r\n');
+      await writeFile(join(dir, args.file), lines.join(''));
+      const range = { startLine: 2, endLine: 5 };
+      expect(await readLog({ ...template, ...range })).toBe(
+        '[L2-5 ×4 through 2026-11-26T12:00:05Z] ' + times[1] + done('<id>', '0–107') + '\r\n'
+      );
+      const original = lines.slice(1).join('');
+      expect(await readLog({ ...args, ...range, mode: 'raw' })).toBe(original);
+      expect(await readLog({ ...args, ...range })).toBe(original);
+    });
+
+    it('keeps stable IDs and durations, singleton lines and boundaries between operations', async () => {
+      const lines = [done(idA, 42), done(idA, 41), done(idB, 2, 'Add'), done(idA, 9), done(idB, 9)];
+      await writeFile(join(dir, args.file), lines.join('\n'));
+      expect(await readLog(template)).toBe(
+        '[L1-2 ×2] ' +
+          done(idA, '41–42') +
+          '\n' +
+          lines[2] +
+          '\n[L4-5 ×2] ' +
+          done('<id>', 9) +
+          '\n'
+      );
+      expect(await readLog({ ...template, startLine: 5 })).toBe(lines[4]);
+    });
+
+    it('masks only the queue span ID and keeps tenants, error codes and intervening events distinct', async () => {
+      const lines = [
+        span(idA, 'one', 'HTTP 429'),
+        span(idB, 'one', 'HTTP 429'),
+        span(idB, 'two', 'HTTP 429'),
+        span(idA, 'two', 'HTTP 503'),
+        '    at retry',
+        span(idA, 'two', 'HTTP 503'),
+      ];
+      await writeFile(join(dir, args.file), lines.join('\n'));
+      expect(await readLog(template)).toBe(
+        '[L1-2 ×2] ' + span('<id>', 'one', 'HTTP 429') + '\n' + lines.slice(2).join('\n')
+      );
+    });
+
+    it('uses exact grouping for unrecognized lines and never merges a literal placeholder with an ID', async () => {
+      const lines = [
+        span('<id>', 'one', 'ok'),
+        span(idA, 'one', 'ok'),
+        `ERROR worker: queue_id=${idA}`,
+        `ERROR worker: queue_id=${idB}`,
+        'heartbeat',
+        'heartbeat',
+      ];
+      await writeFile(join(dir, args.file), lines.join('\n'));
+      expect(await readLog(template)).toBe(
+        lines.slice(0, 4).join('\n') + '\n[L5-6 ×2] heartbeat\n'
+      );
+    });
+  });
+
   it('caps retained bytes, even for a single line, and can read past it', async () => {
     await writeFile(join(dir, args.file), 'x'.repeat(1024 * 1024 + 1) + '\nOK\n');
     await expect(readLog(args)).rejects.toThrow('1 MiB');
