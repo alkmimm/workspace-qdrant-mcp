@@ -23,6 +23,7 @@ import {
 } from './tool-builders/index.js';
 import { storeUrl, storeScratchpad, storeFeedback } from './store-handlers.js';
 import { handleEmbedding } from './tools/embedding.js';
+import { readLog } from './tools/read-log.js';
 import { handleHelp } from './tools/help.js';
 import { handleWorkspaceIndex } from './tools/workspace-index.js';
 import { probeBranchCoverage } from './tools/branch-coverage.js';
@@ -55,15 +56,8 @@ export type ToolResult = {
  *  in tool-definitions/index.ts. */
 const STRUCTURED_OUTPUT_TOOLS = new Set(['search', 'grep', 'list', 'retrieve', 'graph']);
 
-/** Tools answered entirely from in-process constants. The dispatcher skips its
- *  session preamble (heartbeat RPC, git-state refresh, project activation) for
- *  these, so a static lookup can never block on the daemon, spawn git, or
- *  side-effect project registration — this set is what makes the "static,
- *  local" claim in their docs true, rather than merely asserted. Safe to skip:
- *  heartbeat cadence is already kept by the self-rescheduling timer in
- *  session-lifecycle.ts, and activation simply defers to the next non-static
- *  call. */
-const STATIC_TOOLS = new Set(['help']);
+/** These tools need no daemon heartbeat, git refresh, or project activation. */
+const LOCAL_TOOLS = new Set(['help', 'read_log']);
 
 // Derived from src/constants/mcp-public-config.json (single source of truth).
 // publicTools = tools exposed in client `enabled_tools` lists.
@@ -91,7 +85,7 @@ const OP_EVENT_TOOLS = new Set([
   'search_eval',
   // 'help' rides the same lane since schema v49 widened the op CHECK — its
   // adoption then shows in the dashboard's "by op & actor" panels. The event
-  // write is fire-and-forget, so it does not undo the STATIC_TOOLS preamble
+  // write is fire-and-forget, so it does not undo the LOCAL_TOOLS preamble
   // skip: a help RESPONSE still never waits on the daemon.
   'help',
 ]);
@@ -299,9 +293,11 @@ async function routeToolInner(
       return listTool.list(buildListOptions(args));
     case 'embedding':
       return handleEmbedding(args, daemonClient);
+    case 'read_log':
+      return readLog(args);
     case 'help':
       // Static topical manual. The handler reads only in-process constants;
-      // the dispatch-level preamble is skipped via STATIC_TOOLS above.
+      // the dispatch-level preamble is skipped via LOCAL_TOOLS above.
       return handleHelp(args);
     case 'workspace_index': {
       const { qdrantUrl, qdrantApiKey } = components.qdrantConfig;
@@ -351,7 +347,7 @@ export async function dispatchToolCall(
 ): Promise<ToolResult> {
   const startTime = Date.now();
 
-  if (!STATIC_TOOLS.has(toolName)) {
+  if (!LOCAL_TOOLS.has(toolName)) {
     sendHeartbeat(sessionState, components.daemonClient);
 
     // Refresh cached git state (branch + worktree flag) if stale. Cheap inside
@@ -381,7 +377,7 @@ export async function dispatchToolCall(
       routeTool(toolName, args, components, sessionState)
     );
     logToolCall(toolName, Date.now() - startTime, true);
-    const text = JSON.stringify(result, null, 2);
+    const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
     // Read tools mirror their object result into structuredContent (validated
     // against the declared outputSchema) while TextContent stays the universal
     // fallback. Non-object / array results keep content-only.

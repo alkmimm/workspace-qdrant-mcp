@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-The workspace-qdrant MCP server exposes twelve tools to AI assistants. All tools except the static `help` communicate with the `memexd` daemon over gRPC.
+The workspace-qdrant MCP server exposes thirteen tools to AI assistants. `help` and `read_log` are handled locally.
 
 ## Tool Index
 
@@ -11,6 +11,7 @@ The workspace-qdrant MCP server exposes twelve tools to AI assistants. All tools
 | [`rules`](#rules) | Manage persistent behavioral rules |
 | [`store`](#store) | Store content, register projects, save notes |
 | [`scratchpad`](#scratchpad) | List, update, or delete scratchpad notes |
+| [`read_log`](#read_log) | Read a server log by line range and group consecutive repetitions |
 | [`grep`](#grep) | Exact substring or regex search using FTS5 |
 | [`list`](#list) | List project files and folder structure |
 | [`embedding`](#embedding) | Generate vector embeddings for text |
@@ -442,6 +443,22 @@ truncated). If nothing matches exactly, the call fails with a clear error instea
 ```
 
 ---
+
+## read_log
+
+Read a UTF-8 log by basename from the MCP server's log directory (`WQM_LOG_DIR` or the platform default). Supply a regular `.log` or `.jsonl` file, optionally with a numeric rotation suffix. The file must be visible to the server. For Docker Compose, capture the daemon's stdout and stderr in the MCP log volume first, for example from the repository root:
+
+```sh
+docker compose logs --no-color --no-log-prefix memexd > "${WQM_STATE_DIR:-./state}/mcp/logs/memexd-snapshot.log" 2>&1
+```
+
+```json
+{"file":"memexd-snapshot.log","startLine":120,"endLine":609}
+```
+
+Line numbers are one-based and inclusive. The default window is 200 lines. Each call accepts up to 2,000 lines and 1 MiB of source text. Reading past EOF returns the available portion. Use a stable snapshot for repeatable line numbers across calls.
+
+The default `compact` mode groups adjacent lines with matching text, ignoring a leading RFC 3339 timestamp when both lines have one. Each run shows its source lines, count, last timestamp when available, and first original line. Messages with differing IDs, codes, or stack frames stay distinct. Use `"mode":"raw"` with the same file and a narrower interval to get the exact lines, including line endings.
 
 ## grep
 

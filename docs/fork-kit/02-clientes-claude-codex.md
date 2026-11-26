@@ -92,7 +92,7 @@ bearer_token_env_var = "MCP_HTTP_TOKEN"
 startup_timeout_sec = 20
 tool_timeout_sec = 120
 required = true
-enabled_tools = ["search", "retrieve", "grep", "list", "store", "scratchpad", "rules", "workspace_index", "graph", "help"]
+enabled_tools = ["search", "retrieve", "grep", "list", "store", "scratchpad", "rules", "workspace_index", "graph", "help", "read_log"]
 ```
 
 No Windows/WSL, o `apply-config` também registra o projeto como trusted nas

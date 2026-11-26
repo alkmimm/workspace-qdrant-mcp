@@ -10,7 +10,8 @@
     "rules",
     "workspace_index",
     "graph",
-    "help"
+    "help",
+    "read_log"
   ],
   "internalTools": [
     "embedding",

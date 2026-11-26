@@ -8,6 +8,7 @@ export { retrieveToolDefinition } from './retrieve.js';
 export { rulesToolDefinition } from './rules.js';
 export { storeToolDefinition } from './store.js';
 export { scratchpadToolDefinition } from './scratchpad.js';
+export { readLogToolDefinition } from './read-log.js';
 export { grepToolDefinition } from './grep.js';
 export { listToolDefinition } from './list.js';
 export { embeddingToolDefinition } from './embedding.js';
@@ -21,6 +22,7 @@ import { retrieveToolDefinition } from './retrieve.js';
 import { rulesToolDefinition } from './rules.js';
 import { storeToolDefinition } from './store.js';
 import { scratchpadToolDefinition } from './scratchpad.js';
+import { readLogToolDefinition } from './read-log.js';
 import { grepToolDefinition } from './grep.js';
 import { listToolDefinition } from './list.js';
 import { embeddingToolDefinition } from './embedding.js';
@@ -134,5 +136,6 @@ export function getToolDefinitions(): McpToolDefinition[] {
     searchEvalToolDefinition,
     { ...graphToolDefinition, outputSchema: GRAPH_OUTPUT_SCHEMA },
     helpToolDefinition,
+    readLogToolDefinition,
   ];
 }
