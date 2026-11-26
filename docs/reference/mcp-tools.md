@@ -470,6 +470,23 @@ Use `"mode":"interleaved"` to group matching events across intervening messages 
 
 Use `"mode":"auto"` to return the smallest summary by UTF-8 byte length. It compares `compact`, `template`, `interleaved` with `groupBy:"block"`, and `interleaved` with `groupBy:"window"`, in that tie-breaking order. The response is the chosen text verbatim, including any line references. Omit `groupBy` with `auto`. Token savings depend on the tokenizer.
 
+### Decision on the 18-line shortcut
+
+The fork keeps the `auto` shortcut at **18 lines inclusive** and considers this optimization complete. When no adjacent events share a template key, both `compact` and `template` reproduce the input, so `auto` can skip rendering them. From 19 lines onward, `auto` uses the general selection algorithm. The cutoff affects formatting time only. The byte-length comparison, tie order and line references for `raw` apply at every window size.
+
+The benchmarks measured in-memory formatting on two memexd snapshots, using 17 fresh Node.js processes and an A/A control with two identical copies of the baseline. Values below are median latency reductions with 95% confidence intervals. The 17–19-line comparison covered every starting offset. The 19–32-line simulation sampled across all offsets and gave each window size equal weight.
+
+| Comparison | Lines | `memexd-heartbeats.log` | `memexd.log` |
+|---|---:|---:|---:|
+| Fixed limit of 18 vs. 16 | 17 | 18.61% [17.94, 19.01] | 3.87% [3.67, 4.75] |
+| Fixed limit of 18 vs. 16 | 18 | 16.94% [15.76, 17.86] | 1.69% [0.57, 2.76] |
+| Fixed limit of 18 vs. 16 | 19 (reference) | −0.45% [−1.59, 0.38] | −0.74% [−1.59, 0.09] |
+| Shortcut selected by repetition pattern vs. fixed limit of 18 | 19–32 | 11.28% [10.80, 11.42] | 0.33% [0.04, 0.63] |
+
+The adaptive rule saved about 0.16 µs per window on `memexd.log`. Its direct comparison with a simple extension to 32 lines yielded confidence intervals spanning zero on both files. All 41,314 sliding windows in the 19–32-line simulation returned byte-identical output. These results closed the investigation on these captures.
+
+**Reevaluate the cutoff** if profiling real `read_log` calls shows that formatting 19–32-line windows accounts for a meaningful share of end-to-end latency, especially on heartbeat-like workloads. Start with the simple fixed extension on a new representative capture. Compare it with the 18-line baseline using an A/A control, and check output equality byte for byte.
+
 ## grep
 
 Search code with exact substring or regex pattern matching. Uses an FTS5 trigram index for fast line-level search across all indexed files. Unlike `search`, `grep` does not use embeddings and always returns exact matches.
