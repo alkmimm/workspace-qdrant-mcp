@@ -2,7 +2,9 @@
 //!
 //! Update sparse vectors and payload fields on existing Qdrant points.
 
-use qdrant_client::qdrant::{Filter, PointId};
+use std::collections::HashMap;
+
+use qdrant_client::qdrant::{Filter, PointId, RetrievedPoint};
 
 use crate::storage::client::StorageClient;
 use crate::storage::convert::convert_json_to_qdrant_value;
@@ -233,7 +235,7 @@ impl StorageClient {
         collection_name: &str,
         base_point: &str,
     ) -> Result<Option<Vec<String>>, StorageError> {
-        use qdrant_client::qdrant::{value::Kind, Condition, Filter};
+        use qdrant_client::qdrant::Condition;
         let filter = Filter::must([Condition::matches("base_point", base_point.to_string())]);
         let points = self
             .scroll_with_filter(collection_name, filter, 1, None)
@@ -241,19 +243,54 @@ impl StorageClient {
         let Some(p) = points.into_iter().next() else {
             return Ok(None);
         };
-        let set = match p.payload.get("branch").and_then(|v| v.kind.as_ref()) {
-            Some(Kind::ListValue(list)) => list
-                .values
-                .iter()
-                .filter_map(|v| match v.kind.as_ref() {
-                    Some(Kind::StringValue(s)) => Some(s.clone()),
-                    _ => None,
-                })
-                .collect(),
-            Some(Kind::StringValue(s)) => vec![s.clone()],
-            _ => Vec::new(),
+        Ok(Some(branch_array(&p)))
+    }
+
+    /// Fetch branch metadata for a bounded list of tracked point UUIDs.
+    /// Include the returned base point so callers can verify the mapping.
+    pub(crate) async fn read_tracked_branch_sets(
+        &self,
+        collection_name: &str,
+        ids: &[uuid::Uuid],
+    ) -> Result<HashMap<uuid::Uuid, (String, Vec<String>)>, StorageError> {
+        use qdrant_client::qdrant::{
+            point_id, value::Kind, GetPointsBuilder, PayloadIncludeSelector,
         };
-        Ok(Some(set))
+
+        let ids: Vec<PointId> = ids.iter().map(|id| PointId::from(id.to_string())).collect();
+        let builder = GetPointsBuilder::new(collection_name, ids)
+            .with_payload(PayloadIncludeSelector {
+                fields: vec!["base_point".to_string(), "branch".to_string()],
+            })
+            .with_vectors(false);
+        let response = self
+            .retry_operation(|| async {
+                self.client
+                    .get_points(builder.clone())
+                    .await
+                    .map_err(|e| StorageError::Point(e.to_string()))
+            })
+            .await?;
+        Ok(response
+            .result
+            .iter()
+            .filter_map(|point| {
+                let point_id::PointIdOptions::Uuid(id) =
+                    point.id.as_ref()?.point_id_options.as_ref()?
+                else {
+                    return None;
+                };
+                let Kind::StringValue(base_point) =
+                    point.payload.get("base_point")?.kind.as_ref()?
+                else {
+                    return None;
+                };
+                Some((
+                    uuid::Uuid::parse_str(id).ok()?,
+                    (base_point.clone(), branch_array(point)),
+                ))
+            })
+            .collect())
     }
 
     /// Overwrite the `branch` array of every point under `base_points` with
@@ -328,6 +365,23 @@ impl StorageClient {
                 .await?;
         }
         Ok(())
+    }
+}
+
+/// Decode the current list and the scalar used by older payloads.
+fn branch_array(point: &RetrievedPoint) -> Vec<String> {
+    use qdrant_client::qdrant::value::Kind;
+    match point.payload.get("branch").and_then(|v| v.kind.as_ref()) {
+        Some(Kind::ListValue(list)) => list
+            .values
+            .iter()
+            .filter_map(|v| match v.kind.as_ref() {
+                Some(Kind::StringValue(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        Some(Kind::StringValue(s)) => vec![s.clone()],
+        _ => Vec::new(),
     }
 }
 

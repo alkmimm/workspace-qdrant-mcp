@@ -19,11 +19,11 @@ use std::time::{Duration, Instant};
 
 use sqlx::{Row, SqlitePool};
 use tracing::{debug, info, warn};
-use wqm_common::timestamps;
 
 use crate::context::ProcessingContext;
 use crate::git::BranchCheckouts;
 use crate::graph::GRAPH_EXTRACTOR_VERSION;
+use crate::queue_operations::has_ready_work;
 use crate::tracked_files_schema::compute_file_hash;
 
 /// Delay between completed sweeps.
@@ -303,20 +303,6 @@ async fn current_generations(
     .fetch_all(pool)
     .await?;
     Ok(current.into_iter().collect())
-}
-
-async fn has_ready_work(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM unified_queue
-             WHERE status = 'pending' AND (lease_until IS NULL OR lease_until < ?1)
-             UNION ALL
-             SELECT 1 FROM unified_queue WHERE status = 'in_progress' AND lease_until < ?1
-         )",
-    )
-    .bind(timestamps::now_utc())
-    .fetch_one(pool)
-    .await
 }
 
 /// The on-disk copy of exactly this version: the file at its path in a

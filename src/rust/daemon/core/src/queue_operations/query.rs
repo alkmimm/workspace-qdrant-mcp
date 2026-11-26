@@ -12,6 +12,21 @@ use crate::unified_queue_schema::{
 
 use super::{QueueError, QueueManager, QueueResult};
 
+/// Whether the queue has an item eligible for dequeue, including an expired lease.
+pub(crate) async fn has_ready_work(pool: &sqlx::SqlitePool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM unified_queue
+             WHERE status = 'pending' AND (lease_until IS NULL OR lease_until < ?1)
+             UNION ALL
+             SELECT 1 FROM unified_queue WHERE status = 'in_progress' AND lease_until < ?1
+         )",
+    )
+    .bind(timestamps::now_utc())
+    .fetch_one(pool)
+    .await
+}
+
 impl QueueManager {
     /// Get statistics for the unified queue
     pub async fn get_unified_queue_stats(&self) -> QueueResult<UnifiedQueueStats> {

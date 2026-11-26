@@ -46,7 +46,9 @@
 //! forward-drift #224 direction. For base_points the authority marks with 2+
 //! branches — the only shape where Qdrant-side inverse drift can exist, since a
 //! single-branch file was ingested on that branch and already carries the tag —
-//! it reads the live Qdrant `branch` set and, if the authority holds branches
+//! it reads the live Qdrant `branch` set by tracked point ID, in one batch per
+//! collection on each page. Candidates without a verified point use a filtered
+//! Scroll. If the authority holds branches
 //! Qdrant lacks, merges them in via the daemon-owned
 //! `merge_branches_into_base_point`. Idempotent (a synced base_point is a
 //! no-op). A base_point with zero live points is skipped: that is a
@@ -56,16 +58,45 @@
 //! cursor on `file_id`, resumable and cancellable — same shape as
 //! [`super::orphan_cleanup`].
 
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
+
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::idle::task::{MaintenanceContext, MaintenanceResult, MaintenanceTask};
 use crate::idle::IdleState;
+use crate::queue_operations::has_ready_work;
 use crate::search_db::branch_mirror::target_branches;
 
-/// One candidate row: `(file_id, base_point, branches_json, collection)`.
-type CandidateRow = (i64, String, String, String);
+// The queue loop awaits maintenance. Bound the new batched read so a slow
+// Qdrant response cannot keep the next dequeue waiting on its normal retries.
+const GET_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(sqlx::FromRow)]
+struct CandidateRow {
+    file_id: i64,
+    base_point: String,
+    branches: String,
+    collection: String,
+    point_id: Option<String>,
+}
+
+impl CandidateRow {
+    fn tracked_uuid(&self) -> Option<Uuid> {
+        Uuid::parse_str(self.point_id.as_deref()?).ok()
+    }
+}
+
+#[derive(Default)]
+struct ReconcileReads {
+    get_batches: u64,
+    get_errors: u64,
+    fallback_scrolls: u64,
+    repair_scrolls: u64,
+}
 
 /// Syncs the shared Qdrant `branch` array up to the `tracked_files` authority.
 pub struct BranchReconcileTask {
@@ -78,6 +109,7 @@ pub struct BranchReconcileTask {
     /// search.db `file_metadata` rows whose `branches` set was synced to the
     /// authority this cycle (missing tags added AND stale tags removed).
     file_metadata_repaired: u64,
+    reads: ReconcileReads,
 }
 
 impl BranchReconcileTask {
@@ -89,6 +121,7 @@ impl BranchReconcileTask {
             base_points_repaired: 0,
             tags_added: 0,
             file_metadata_repaired: 0,
+            reads: ReconcileReads::default(),
         }
     }
 }
@@ -123,6 +156,7 @@ impl MaintenanceTask for BranchReconcileTask {
         self.base_points_repaired = 0;
         self.tags_added = 0;
         self.file_metadata_repaired = 0;
+        self.reads = ReconcileReads::default();
     }
 
     async fn run_batch(
@@ -138,45 +172,83 @@ impl MaintenanceTask for BranchReconcileTask {
             }
         };
 
-        // Empty batch → the keyset has passed the last candidate; cycle done.
-        let Some(next_cursor) = rows.last().map(|r| r.0) else {
+        if rows.is_empty() {
             self.log_completion();
             return MaintenanceResult::Done;
-        };
+        }
 
-        for (file_id, base_point, branches_json, collection) in &rows {
-            if cancel.is_cancelled() {
-                // Cursor not advanced: the batch is re-examined on resume, which
-                // is idempotent (merge only adds missing tags).
+        let mut ids_by_collection = BTreeMap::<&str, Vec<Uuid>>::new();
+        for row in &rows {
+            if let Some(id) = row.tracked_uuid() {
+                ids_by_collection
+                    .entry(&row.collection)
+                    .or_default()
+                    .push(id);
+            }
+        }
+        let mut branch_sets = HashMap::new();
+        for (collection, mut ids) in ids_by_collection {
+            if should_yield(ctx, cancel).await {
                 return MaintenanceResult::Yielded;
             }
-            self.total_checked += 1;
-            let authority: Vec<String> = match serde_json::from_str(branches_json) {
-                Ok(v) => v,
-                Err(e) => {
-                    debug!(
-                        "branch reconcile: unparsable branches {:?} for base_point {}: {}",
-                        branches_json, base_point, e
-                    );
-                    continue;
+            ids.sort_unstable();
+            ids.dedup();
+            self.reads.get_batches += 1;
+            let read = ctx
+                .storage_client
+                .read_tracked_branch_sets(collection, &ids);
+            match tokio::time::timeout(GET_TIMEOUT, read).await {
+                Ok(Ok(sets)) => {
+                    branch_sets.insert(collection, sets);
                 }
-            };
-            // search.db side first: keyed directly by file_id, independent of
-            // Qdrant state (a base_point with zero live points still deserves
-            // a correct FTS branch filter). Runs for EVERY candidate, including
-            // single-branch files (heals corrupt/`[]` branch sets).
-            self.reconcile_file_metadata(ctx, *file_id, &authority)
-                .await;
-            // The Qdrant read is the expensive half — only 2+-branch
-            // authorities can hold inverse drift there (a single-branch file
-            // was ingested on that branch and already carries the tag).
-            if authority.len() >= 2 {
-                self.reconcile_base_point(ctx, base_point, &authority, collection)
-                    .await;
+                Ok(Err(error)) => {
+                    self.reads.get_errors += 1;
+                    warn!(collection, %error, "branch reconcile: batch Get failed, using Scroll");
+                }
+                Err(_) => {
+                    self.reads.get_errors += 1;
+                    warn!(
+                        collection,
+                        "branch reconcile: batch Get timed out, using Scroll"
+                    );
+                }
             }
         }
 
-        self.cursor = next_cursor;
+        for row in &rows {
+            if cancel.is_cancelled() {
+                return MaintenanceResult::Yielded;
+            }
+            let authority: Vec<String> = match serde_json::from_str(&row.branches) {
+                Ok(v) => v,
+                Err(error) => {
+                    debug!(file_id = row.file_id, %error, "branch reconcile: invalid branch authority");
+                    self.cursor = row.file_id;
+                    self.total_checked += 1;
+                    continue;
+                }
+            };
+
+            // FTS branch membership is independently keyed by file_id and covers
+            // single-branch files and rows without matching Qdrant points.
+            self.reconcile_file_metadata(ctx, row.file_id, &authority)
+                .await;
+            if authority.len() >= 2 {
+                let returned = row
+                    .tracked_uuid()
+                    .and_then(|id| branch_sets.get(row.collection.as_str())?.get(&id));
+                let verified = verified_branch_set(returned, &row.base_point);
+                if !self
+                    .reconcile_base_point(ctx, cancel, row, &authority, verified)
+                    .await
+                {
+                    return MaintenanceResult::Yielded;
+                }
+            }
+            self.cursor = row.file_id;
+            self.total_checked += 1;
+        }
+
         MaintenanceResult::Continue
     }
 }
@@ -211,73 +283,105 @@ impl BranchReconcileTask {
         }
     }
 
-    /// Sync one base_point's Qdrant `branch` array up to its authority set.
+    /// Returns false when foreground work requires resuming this row later.
     async fn reconcile_base_point(
         &mut self,
         ctx: &MaintenanceContext<'_>,
-        base_point: &str,
+        cancel: &CancellationToken,
+        row: &CandidateRow,
         authority: &[String],
-        collection: &str,
-    ) {
-        let qdrant = match ctx
-            .storage_client
-            .read_branch_set(collection, base_point)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(
-                    "branch reconcile: read_branch_set failed for base_point {} ({}): {}",
-                    base_point, collection, e
-                );
-                return;
+        verified: Option<&[String]>,
+    ) -> bool {
+        let fallback;
+        let current = match verified {
+            Some(set) => set,
+            None => {
+                if should_yield(ctx, cancel).await {
+                    return false;
+                }
+                self.reads.fallback_scrolls += 1;
+                fallback = match ctx
+                    .storage_client
+                    .read_branch_set(&row.collection, &row.base_point)
+                    .await
+                {
+                    Ok(set) => set,
+                    Err(error) => {
+                        warn!(file_id = row.file_id, %error, "branch reconcile: fallback Scroll failed");
+                        return true;
+                    }
+                };
+                &fallback
             }
         };
-        if qdrant.is_empty() {
-            // No live points back this base_point — a missing-points / empty-`[]`
-            // case for re-ingest, not a tag reconcile. Leave it.
-            return;
+        if current.is_empty() {
+            // Missing points or an empty branch array are for re-ingestion.
+            return true;
         }
-
-        let missing = missing_branches(authority, &qdrant);
+        let missing = missing_branches(authority, current);
         if missing.is_empty() {
-            return;
+            return true;
+        }
+        if should_yield(ctx, cancel).await {
+            return false;
         }
 
+        // Keep the existing additive repair and its fresh read before writing.
+        self.reads.repair_scrolls += 1;
         match ctx
             .storage_client
-            .merge_branches_into_base_point(collection, base_point, &missing)
+            .merge_branches_into_base_point(&row.collection, &row.base_point, &missing)
             .await
         {
             Ok(()) => {
                 self.base_points_repaired += 1;
                 self.tags_added += missing.len() as u64;
                 debug!(
-                    "branch reconcile: added {:?} to base_point {} ({})",
-                    missing, base_point, collection
+                    file_id = row.file_id,
+                    tags_added = missing.len(),
+                    "branch reconcile: added missing tags"
                 );
             }
-            Err(e) => warn!(
-                "branch reconcile: merge failed for base_point {} ({}): {}",
-                base_point, collection, e
-            ),
+            Err(error) => warn!(file_id = row.file_id, %error, "branch reconcile: merge failed"),
         }
+        true
     }
 
     fn log_completion(&self) {
-        if self.base_points_repaired > 0 || self.file_metadata_repaired > 0 {
-            info!(
-                "Branch reconcile complete: checked={}, base_points_repaired={}, tags_added={}, file_metadata_repaired={}",
-                self.total_checked,
-                self.base_points_repaired,
-                self.tags_added,
-                self.file_metadata_repaired
-            );
-        } else {
-            debug!(
-                "Branch reconcile complete: checked={}, no drift",
-                self.total_checked
-            );
+        info!(
+            checked = self.total_checked,
+            base_points_repaired = self.base_points_repaired,
+            tags_added = self.tags_added,
+            file_metadata_repaired = self.file_metadata_repaired,
+            get_batches = self.reads.get_batches,
+            get_errors = self.reads.get_errors,
+            fallback_scrolls = self.reads.fallback_scrolls,
+            repair_scrolls = self.reads.repair_scrolls,
+            "Branch reconcile complete"
+        );
+    }
+}
+
+/// A point whose payload belongs to another generation cannot authorize a
+/// repair. Preserve the Scroll path for missing or unusable metadata.
+fn verified_branch_set<'a>(
+    entry: Option<&'a (String, Vec<String>)>,
+    base_point: &str,
+) -> Option<&'a [String]> {
+    entry
+        .filter(|(returned, branches)| returned == base_point && !branches.is_empty())
+        .map(|(_, branches)| branches.as_slice())
+}
+
+async fn should_yield(ctx: &MaintenanceContext<'_>, cancel: &CancellationToken) -> bool {
+    if cancel.is_cancelled() {
+        return true;
+    }
+    match has_ready_work(ctx.pool).await {
+        Ok(ready) => ready,
+        Err(error) => {
+            debug!(%error, "branch reconcile: queue probe failed");
+            true
         }
     }
 }
@@ -336,7 +440,7 @@ fn missing_branches(authority: &[String], qdrant: &[String]) -> Vec<String> {
 /// Includes single-branch files: the search.db `file_metadata` repair covers
 /// them too (one cheap indexed SELECT each — this is what heals a corrupt/`[]`
 /// branches set on a file that only ever lived on one branch). The EXPENSIVE
-/// per-base_point Qdrant read stays gated to 2+-branch authorities in
+/// Qdrant lookup stays gated to 2+-branch authorities in
 /// `run_batch` — a single-branch file was ingested on that branch and its
 /// Qdrant payload already carries it, so the read would be redundant.
 async fn fetch_candidate_batch(
@@ -344,14 +448,23 @@ async fn fetch_candidate_batch(
     after_file_id: i64,
     limit: i64,
 ) -> Result<Vec<CandidateRow>, sqlx::Error> {
+    // Scroll orders UUIDs by ID. Pick the same representative among the
+    // tracked chunks, regardless of chunk index or stored UUID spelling.
     sqlx::query_as(
-        "SELECT file_id, base_point, branches, collection
-         FROM tracked_files
-         WHERE file_id > ?1
-           AND base_point IS NOT NULL
-           AND branches IS NOT NULL
-           AND collection IS NOT NULL
-         ORDER BY file_id
+        "SELECT tf.file_id, tf.base_point, tf.branches, tf.collection,
+                CASE WHEN json_array_length(
+                    CASE WHEN json_valid(tf.branches) THEN tf.branches ELSE '[]' END
+                ) >= 2 THEN (
+                    SELECT point_id FROM qdrant_chunks
+                    WHERE file_id = tf.file_id
+                    ORDER BY lower(replace(point_id, '-', '')) LIMIT 1
+                ) END AS point_id
+         FROM tracked_files tf
+         WHERE tf.file_id > ?1
+           AND tf.base_point IS NOT NULL
+           AND tf.branches IS NOT NULL
+           AND tf.collection IS NOT NULL
+         ORDER BY tf.file_id
          LIMIT ?2",
     )
     .bind(after_file_id)
@@ -363,7 +476,10 @@ async fn fetch_candidate_batch(
 #[cfg(test)]
 mod tests {
     use super::super::orphan_cleanup::tests_support::{seed_file, test_pool};
-    use super::{fetch_candidate_batch, missing_branches, sync_authority_into_file_metadata};
+    use super::{
+        fetch_candidate_batch, missing_branches, sync_authority_into_file_metadata,
+        verified_branch_set,
+    };
 
     /// Temp search.db with one seeded `file_metadata` row (branches as given).
     async fn search_db_with_row(
@@ -499,13 +615,59 @@ mod tests {
             .unwrap();
 
         let batch = fetch_candidate_batch(&pool, 0, 100).await.unwrap();
-        let ids: Vec<i64> = batch.iter().map(|r| r.0).collect();
+        let ids: Vec<i64> = batch.iter().map(|r| r.file_id).collect();
         assert_eq!(
             ids,
             vec![single, multi],
             "single-branch files are candidates too (fm-side repair)"
         );
-        let multi_row = batch.iter().find(|r| r.0 == multi).unwrap();
-        assert_eq!(multi_row.2, r#"["main","fix/x"]"#);
+        let multi_row = batch.iter().find(|r| r.file_id == multi).unwrap();
+        assert_eq!(multi_row.branches, r#"["main","fix/x"]"#);
+    }
+    #[test]
+    fn batch_get_missing_or_unrelated_branch_set_requires_scroll() {
+        let good = ("base-a".to_string(), vec!["main".to_string()]);
+        assert_eq!(
+            verified_branch_set(Some(&good), "base-a"),
+            Some(good.1.as_slice())
+        );
+        assert!(verified_branch_set(Some(&good), "base-b").is_none());
+        assert!(verified_branch_set(Some(&("base-a".into(), Vec::new())), "base-a").is_none());
+        assert!(verified_branch_set(None, "base-a").is_none());
+    }
+
+    #[tokio::test]
+    async fn candidate_batch_selects_lowest_tracked_uuid_only_for_multibranch_rows() {
+        let pool = test_pool().await;
+        let single = seed_file(&pool, 1, true, true).await;
+        let multi = seed_file(&pool, 2, true, true).await;
+        let legacy = seed_file(&pool, 3, true, true).await;
+        let smallest = "00000000-0000-0000-0000-000000000001";
+        sqlx::query(
+            "UPDATE tracked_files SET branches = '[\"main\",\"fix/x\"]' WHERE file_id IN (?1, ?2)",
+        )
+        .bind(multi)
+        .bind(legacy)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM qdrant_chunks")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO qdrant_chunks (file_id, point_id, chunk_index, content_hash, created_at)
+                     VALUES (?1, ?3, 0, 'hash', ''), (?2, ?4, 0, 'hash', ''), (?2, ?3, 1, 'hash', '')")
+            .bind(single)
+            .bind(multi)
+            .bind(smallest)
+            .bind("00000000000000000000000000000002")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let rows = fetch_candidate_batch(&pool, 0, 3).await.unwrap();
+        assert!(rows[0].tracked_uuid().is_none());
+        assert_eq!(rows[1].tracked_uuid().unwrap().to_string(), smallest);
+        assert!(rows[2].tracked_uuid().is_none());
     }
 }
