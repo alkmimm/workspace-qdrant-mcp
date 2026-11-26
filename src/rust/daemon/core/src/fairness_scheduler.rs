@@ -4,6 +4,8 @@
 //! Uses different batch sizes for high-priority (default 10) and low-priority (default 3)
 //! directions, flipping between priority DESC (active first) and priority ASC
 //! (inactive projects get a turn) to prevent starvation while preserving priority advantage.
+//! Low-priority turns rotate tenants: otherwise the unconditional delete-first
+//! rank lets one project's branch cleanup monopolize BOTH directions.
 
 use std::sync::Arc;
 use thiserror::Error;
@@ -12,6 +14,9 @@ use tracing::{debug, info};
 
 use crate::queue_operations::{QueueError, QueueManager};
 use crate::unified_queue_schema::UnifiedQueueItem;
+
+#[path = "fairness_tenant_rotation.rs"]
+mod tenant_rotation;
 
 /// Fairness scheduler errors
 #[derive(Error, Debug)]
@@ -100,6 +105,9 @@ struct AlternationState {
 
     /// Items processed since last flip
     items_since_flip: u64,
+
+    /// Last tenant served on a low-priority turn (lexical round-robin cursor).
+    last_fair_tenant: Option<String>,
 }
 
 impl Default for AlternationState {
@@ -107,6 +115,7 @@ impl Default for AlternationState {
         Self {
             use_priority_descending: true, // Start with high priority first
             items_since_flip: 0,
+            last_fair_tenant: None,
         }
     }
 }
@@ -205,7 +214,8 @@ impl FairnessScheduler {
     ///
     /// Algorithm (asymmetric anti-starvation alternation):
     /// 1. Get current priority direction (DESC or ASC)
-    /// 2. Dequeue up to max_batch_size items with that direction
+    /// 2. High-priority turns use global ranking; low-priority turns rotate
+    ///    tenants, retaining delete-before-add precedence within each tenant
     /// 3. Track items processed
     /// 4. After high_priority_batch items in DESC, flip to ASC
     /// 5. After low_priority_batch items in ASC, flip back to DESC
@@ -247,10 +257,14 @@ impl FairnessScheduler {
             current_batch_limit
         );
 
-        // Dequeue items with current direction
-        let items = self
-            .dequeue_global_batch(max_batch_size, priority_descending)
-            .await?;
+        // Merely reversing age/active rank cannot prevent starvation: delete
+        // precedence is unconditional in BOTH directions. Bound that precedence
+        // to one tenant on low-priority turns, then rotate the next tenant.
+        let items = if priority_descending {
+            self.dequeue_global_batch(max_batch_size, true).await?
+        } else {
+            self.dequeue_rotating_tenant_batch(max_batch_size).await?
+        };
         let items_count = items.len() as u64;
 
         if items_count > 0 {
@@ -388,6 +402,10 @@ impl FairnessScheduler {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "fairness_scheduler_tests.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {
