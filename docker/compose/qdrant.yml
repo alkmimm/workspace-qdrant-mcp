@@ -19,15 +19,16 @@
 
 services:
   qdrant:
-    image: qdrant/qdrant:v1.12.0
+    image: qdrant/qdrant:${QDRANT_VERSION:-v1.20.2}
     container_name: qdrant
     restart: unless-stopped
     environment:
       - QDRANT__LOG_LEVEL=${WQM_LOG_LEVEL:-INFO}
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-}
     volumes:
       - qdrant_ci_data:/qdrant/storage
     ports:
-      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_BIND_HOST:-127.0.0.1}:${QDRANT_PORT:-6333}:6333"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
       interval: 10s

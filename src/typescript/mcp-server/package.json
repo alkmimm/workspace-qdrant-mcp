@@ -62,7 +62,7 @@
     "@grpc/grpc-js": "^1.12.0",
     "@grpc/proto-loader": "^0.7.13",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@qdrant/js-client-rest": "^1.18.0",
+    "@qdrant/js-client-rest": "1.20.0",
     "better-sqlite3": "^11.7.0",
     "pino": "^9.6.0",
     "pino-roll": "^4.0.0",
@@ -82,5 +82,8 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
+  },
+  "overrides": {
+    "undici": "7.30.1"
   }
 }

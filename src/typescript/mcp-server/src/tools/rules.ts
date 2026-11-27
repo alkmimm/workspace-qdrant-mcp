@@ -7,6 +7,7 @@
  */
 
 import type { QdrantClient } from '@qdrant/js-client-rest';
+import { queryPoints } from '../clients/qdrant-query.js';
 import { getQdrantClient } from '../clients/qdrant-client-factory.js';
 import type { DaemonClient } from '../clients/daemon-client.js';
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
@@ -197,7 +198,7 @@ export class RulesTool {
       const filter = buildDuplicateScopeFilter(scope, projectId);
       if (filter) searchRequest.filter = filter;
 
-      const searchResult = await this.qdrantClient.search(RULES_COLLECTION, searchRequest);
+      const searchResult = await queryPoints(this.qdrantClient, RULES_COLLECTION, searchRequest);
 
       return searchResult
         .filter((point) => point.score >= this.duplicationThreshold)

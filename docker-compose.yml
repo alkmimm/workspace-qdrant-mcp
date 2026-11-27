@@ -43,7 +43,7 @@ services:
   # Qdrant - vector database
   # ───────────────────────────────────────────────
   qdrant:
-    image: qdrant/qdrant:${QDRANT_VERSION:-latest}
+    image: qdrant/qdrant:${QDRANT_VERSION:-v1.20.2}
     container_name: wqm-qdrant
     <<: *restart
     logging: *default-logging
@@ -53,9 +53,11 @@ services:
     # forever, blocking every container that has `depends_on: qdrant healthy`.
     # See docker/qdrant-quarantine-wrapper.sh.
     entrypoint: ["/usr/local/bin/qdrant-quarantine-wrapper.sh"]
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
     ports:
-      - "${QDRANT_HTTP_PORT:-6333}:6333"
-      - "${QDRANT_GRPC_PORT:-6334}:6334"
+      - "${QDRANT_BIND_HOST:-127.0.0.1}:${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_BIND_HOST:-127.0.0.1}:${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - ${WQM_STATE_DIR:-./state}/qdrant/storage:/qdrant/storage
       - ${WQM_STATE_DIR:-./state}/qdrant/snapshots:/qdrant/snapshots
@@ -525,6 +527,7 @@ services:
       - "${PROMETHEUS_PORT:-9090}:9090"
     environment:
       MCP_METRICS_TOKEN: ${MCP_HTTP_TOKEN:?Set MCP_HTTP_TOKEN in .env and reuse it for /metrics}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
     networks:
       - workspace-network
     labels:

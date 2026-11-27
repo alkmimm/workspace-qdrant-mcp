@@ -43,7 +43,7 @@ export MCP_HTTP_TOKEN="${MCP_HTTP_TOKEN:-$(head -c 32 /dev/urandom | od -An -tx1
 # Image tags — override in CI if the workflow wants a specific tag.
 export MEMEXD_IMAGE="${MEMEXD_IMAGE:-ghcr.io/chrisgve/memexd:latest}"
 export MCP_IMAGE="${MCP_IMAGE:-ghcr.io/chrisgve/workspace-qdrant-mcp:latest}"
-export QDRANT_VERSION="${QDRANT_VERSION:-latest}"
+export QDRANT_VERSION="${QDRANT_VERSION:-v1.20.2}"
 export WQM_VERSION="${WQM_VERSION:-latest}"
 
 LOG_DIR="${LOG_DIR:-${TEST_SCRATCH}/logs}"

@@ -121,7 +121,9 @@ fi
 echo ""
 echo "=== 4. endpoint health ==="
 if curl -fsS -o /dev/null -m 3 "http://localhost:$MCP_HTTP_PORT/admin/init"; then say "[OK]" "MCP /admin/init"; else say "[FAIL]" "MCP /admin/init"; warn=$((warn + 1)); fi
-if curl -fsS -o /dev/null -m 3 "http://localhost:$QDRANT_HTTP_PORT/collections"; then say "[OK]" "qdrant /collections"; else say "[FAIL]" "qdrant /collections"; warn=$((warn + 1)); fi
+qdrant_headers=()
+if [[ -n "${QDRANT_API_KEY:-}" ]]; then qdrant_headers=(-H "api-key: $QDRANT_API_KEY"); fi
+if curl -fsS -o /dev/null -m 3 "${qdrant_headers[@]}" "http://localhost:$QDRANT_HTTP_PORT/collections"; then say "[OK]" "qdrant /collections"; else say "[FAIL]" "qdrant /collections"; warn=$((warn + 1)); fi
 if (exec 3<>/dev/tcp/localhost/"$MEMEXD_GRPC_PORT") 2>/dev/null; then say "[OK]" "memexd gRPC :$MEMEXD_GRPC_PORT"; else say "[FAIL]" "memexd gRPC :$MEMEXD_GRPC_PORT"; warn=$((warn + 1)); fi
 
 echo ""

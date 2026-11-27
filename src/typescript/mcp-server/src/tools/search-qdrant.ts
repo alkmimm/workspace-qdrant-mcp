@@ -3,6 +3,7 @@
  * fallback search, and collection existence check.
  */
 import type { QdrantClient } from '@qdrant/js-client-rest';
+import { queryPoints } from '../clients/qdrant-query.js';
 import {
   DENSE_VECTOR_NAME,
   SPARSE_VECTOR_NAME,
@@ -86,7 +87,7 @@ async function searchDense(
     if (params.filter) req.filter = params.filter;
     const searchParams = qdrantSearchParams();
     if (searchParams) req.params = searchParams;
-    const hits = await qdrantClient.search(params.collection, req);
+    const hits = await queryPoints(qdrantClient, params.collection, req);
     return hits.map((h) => hitToResult(h, params.collection, 'semantic'));
   } catch {
     return [];
@@ -119,7 +120,7 @@ async function searchSparse(
     if (params.filter) req.filter = params.filter;
     const searchParams = qdrantSearchParams();
     if (searchParams) req.params = searchParams;
-    const hits = await qdrantClient.search(params.collection, req);
+    const hits = await queryPoints(qdrantClient, params.collection, req);
     return hits.map((h) => hitToResult(h, params.collection, 'keyword'));
   } catch {
     return [];

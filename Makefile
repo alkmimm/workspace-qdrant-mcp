@@ -347,7 +347,7 @@ stack-status: check-env
 	@echo ""
 	@echo "=== endpoints ==="
 	@if curl -fsS -o /dev/null -m 3 "$(MCP_INIT_URL)"; then echo "/admin/init     [ok]"; else echo "/admin/init     [fail]"; fi
-	@if curl -fsS -o /dev/null -m 3 "http://localhost:$(QDRANT_HTTP_PORT)/collections"; then echo "qdrant          [ok]"; else echo "qdrant          [fail]"; fi
+	@if curl -fsS -o /dev/null -m 3 $${QDRANT_API_KEY:+-H "api-key: $$QDRANT_API_KEY"} "http://localhost:$(QDRANT_HTTP_PORT)/collections"; then echo "qdrant          [ok]"; else echo "qdrant          [fail]"; fi
 	@if (exec 3<>/dev/tcp/localhost/$(MEMEXD_GRPC_PORT)) 2>/dev/null; then echo "memexd gRPC     [ok] localhost:$(MEMEXD_GRPC_PORT)"; else echo "memexd gRPC     [fail]"; fi
 	@echo ""
 	@echo "=== prometheus alerts (firing) ==="
@@ -364,6 +364,7 @@ stack-logs: check-env
 # cp/inspect (the `docker exec` rule does not apply).
 verify-deploy: check-env
 	@MCP_HTTP_PORT="$(MCP_HTTP_PORT)" QDRANT_HTTP_PORT="$(QDRANT_HTTP_PORT)" \
+		QDRANT_API_KEY="$${QDRANT_API_KEY:-}" \
 		MEMEXD_GRPC_PORT="$(MEMEXD_GRPC_PORT)" \
 		bash "$(REPO)/scripts/verify-deploy.sh" "$(MARKER)"
 
