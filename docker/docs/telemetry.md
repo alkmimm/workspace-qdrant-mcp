@@ -40,6 +40,7 @@ Source: `src/typescript/mcp-server/src/telemetry/metrics.ts`
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `wqm_mcp_tool_invocations_total` | Counter | `tool`, `status` | Total tool calls; `status` is `success` or `error`. |
+| `wqm_mcp_tool_response_delivery_total` | Counter | `tool`, `outcome` | HTTP tool responses that were actually delivered or failed before the response stream finished. This can disagree with `tool_invocations{status="success"}` when execution succeeds after a client disconnect. |
 | `wqm_mcp_read_log_reads_total` | Counter | `mode` | Successful log reads by requested mode, including empty reads. |
 | `wqm_mcp_read_log_bytes_total` | Counter | `mode`, `kind` | Selected source bytes (`raw`) and returned UTF-8 text bytes (`returned`). See [usage and byte savings by mode](../../docs/reference/mcp-tools.md#usage-and-byte-savings-by-mode). |
 | `wqm_mcp_tool_duration_seconds` | Histogram | `tool` | Tool execution time. |
@@ -100,6 +101,12 @@ sum by (tool) (rate(wqm_mcp_tool_invocations_total[5m]))
 
 ```promql
 sum by (tool) (rate(wqm_mcp_tool_invocations_total{status="error"}[5m]))
+```
+
+### Tool response delivery failures
+
+```promql
+sum by (tool) (increase(wqm_mcp_tool_response_delivery_total{outcome="failed"}[10m]))
 ```
 
 ### Queue staleness

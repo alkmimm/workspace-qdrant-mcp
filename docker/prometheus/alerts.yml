@@ -125,6 +125,16 @@ groups:
           summary: "MCP tool calls returning errors"
           description: "One or more MCP tool invocations failed in the last 10 minutes (status=error). Check the MCP server logs / `wqm status health`."
 
+      - alert: MCPToolResponseDeliveryFailures
+        expr: sum(increase(wqm_mcp_tool_response_delivery_total{outcome="failed"}[10m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: mcp
+        annotations:
+          summary: "MCP tool result failed to reach its client"
+          description: "At least one MCP tool finished but its HTTP response stream failed before delivery. Check `MCP tool response delivery failed` in the MCP logs and compare delivered vs failed by tool."
+
       # ── MCP session health ───────────────────────────────────
 
       - alert: MCPNoInvocations

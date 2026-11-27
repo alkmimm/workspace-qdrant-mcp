@@ -4,6 +4,7 @@
  * Metric families include:
  *   wqm_mcp_tool_invocations_total     - Counter, labels [tool, status]
  *   wqm_mcp_tool_duration_seconds      - Histogram, label [tool], buckets [0.01…5]
+ *   wqm_mcp_tool_response_delivery_total - Counter, labels [tool, outcome]
  *   wqm_mcp_read_log_reads_total       - Counter, label [mode]
  *   wqm_mcp_read_log_bytes_total       - Counter, labels [mode, kind]
  *   wqm_mcp_session_count              - Gauge
@@ -46,6 +47,19 @@ export const toolDuration = new Histogram({
   help: 'MCP tool execution duration in seconds',
   labelNames: ['tool'] as const,
   buckets: [0.01, 0.05, 0.1, 0.5, 1, 5],
+  registers: [register],
+});
+
+/**
+ * HTTP response delivery is deliberately separate from tool execution. A tool
+ * can finish successfully after the client connection or MCP session has been
+ * lost; in that case `toolInvocations` records `success` while this counter
+ * records `failed`.
+ */
+export const toolResponseDelivery = new Counter({
+  name: 'wqm_mcp_tool_response_delivery_total',
+  help: 'MCP HTTP tool responses by tool name and delivery outcome',
+  labelNames: ['tool', 'outcome'] as const,
   registers: [register],
 });
 
@@ -444,6 +458,14 @@ export async function withToolMetrics<T>(toolName: string, fn: () => Promise<T>)
     toolInvocations.labels({ tool: toolName, status: 'error' }).inc();
     throw err;
   }
+}
+
+/** Record whether an HTTP tool response reached the response stream. */
+export function recordToolResponseDelivery(
+  toolName: string,
+  outcome: 'delivered' | 'failed'
+): void {
+  toolResponseDelivery.labels({ tool: toolName, outcome }).inc();
 }
 
 // ── Session helpers ───────────────────────────────────────────────────────────

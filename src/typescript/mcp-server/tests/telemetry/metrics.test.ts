@@ -22,6 +22,7 @@ import {
   register,
   toolInvocations,
   toolDuration,
+  toolResponseDelivery,
   sessionCount,
   daemonFallback,
   cacheHits,
@@ -29,6 +30,7 @@ import {
   gitHookInvocations,
   gitHookDuration,
   withToolMetrics,
+  recordToolResponseDelivery,
   recordSessionStart,
   recordReadLogUsage,
   recordSessionEnd,
@@ -86,6 +88,10 @@ describe('metric registration', () => {
 
   it('registers wqm_mcp_tool_duration_seconds as a Histogram', () => {
     expect(toolDuration).toBeInstanceOf(Histogram);
+  });
+
+  it('registers wqm_mcp_tool_response_delivery_total as a Counter', () => {
+    expect(toolResponseDelivery).toBeInstanceOf(Counter);
   });
 
   it('registers wqm_mcp_session_count as a Gauge', () => {
@@ -156,6 +162,26 @@ describe('metric registration', () => {
     const sampleLabels = (metric!.values[0] as { labels: Record<string, string> }).labels;
     expect(Object.keys(sampleLabels)).toContain('tool');
     expect(Object.keys(sampleLabels)).toContain('reason');
+  });
+});
+
+describe('recordToolResponseDelivery', () => {
+  it('separates delivered responses from delivery failures', async () => {
+    recordToolResponseDelivery('search_eval', 'delivered');
+    recordToolResponseDelivery('search_eval', 'failed');
+
+    expect(
+      await getCounterValue('wqm_mcp_tool_response_delivery_total', {
+        tool: 'search_eval',
+        outcome: 'delivered',
+      })
+    ).toBe(1);
+    expect(
+      await getCounterValue('wqm_mcp_tool_response_delivery_total', {
+        tool: 'search_eval',
+        outcome: 'failed',
+      })
+    ).toBe(1);
   });
 });
 
@@ -342,9 +368,7 @@ describe('git hook metrics', () => {
     )
       .filter((v) => v.labels['le'] !== undefined && v.labels['le'] !== '+Inf')
       .map((v) => parseFloat(v.labels['le'] ?? '0'));
-    expect(bucketLabels).toEqual(
-      expect.arrayContaining([0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30])
-    );
+    expect(bucketLabels).toEqual(expect.arrayContaining([0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30]));
   });
 
   it('startGitHookTimer records a success invocation', async () => {

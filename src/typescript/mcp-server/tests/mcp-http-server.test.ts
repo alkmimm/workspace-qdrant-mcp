@@ -7,9 +7,17 @@
  * transport + MCP server instance (and its daemon gRPC connection).
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { reapIdleSessions, withoutContentLength } from '../src/mcp-http-server.js';
+import {
+  observeToolResponseDelivery,
+  reapIdleSessions,
+  toolNamesFromBody,
+  updateActiveRequests,
+  withoutContentLength,
+} from '../src/mcp-http-server.js';
+import { register } from '../src/telemetry/metrics.js';
 
 function fakeTransport(): StreamableHTTPServerTransport {
   return {
@@ -19,6 +27,10 @@ function fakeTransport(): StreamableHTTPServerTransport {
 
 const NOW = 1_000_000_000_000;
 const TTL = 10 * 60_000; // 10 min
+
+beforeEach(() => {
+  register.resetMetrics();
+});
 
 describe('reapIdleSessions', () => {
   it('evicts only sessions idle longer than the TTL', () => {
@@ -36,7 +48,7 @@ describe('reapIdleSessions', () => {
       ['c', NOW - 9 * 60_000],
     ]);
 
-    const evicted = reapIdleSessions(transports, lastSeen, NOW, TTL);
+    const evicted = reapIdleSessions(transports, lastSeen, new Map(), NOW, TTL);
 
     expect(evicted).toEqual(['b']);
     expect(b.close).toHaveBeenCalledTimes(1);
@@ -49,7 +61,7 @@ describe('reapIdleSessions', () => {
     const transports = new Map([['orphan', orphan]]);
     const lastSeen = new Map<string, number>(); // no entry for "orphan"
 
-    const evicted = reapIdleSessions(transports, lastSeen, NOW, TTL);
+    const evicted = reapIdleSessions(transports, lastSeen, new Map(), NOW, TTL);
 
     expect(evicted).toEqual(['orphan']);
     expect(orphan.close).toHaveBeenCalledTimes(1);
@@ -60,10 +72,87 @@ describe('reapIdleSessions', () => {
     const transports = new Map([['a', a]]);
     const lastSeen = new Map([['a', NOW - 5 * 60_000]]);
 
-    const evicted = reapIdleSessions(transports, lastSeen, NOW, TTL);
+    const evicted = reapIdleSessions(transports, lastSeen, new Map(), NOW, TTL);
 
     expect(evicted).toEqual([]);
     expect(a.close).not.toHaveBeenCalled();
+  });
+
+  it('does not evict a stale session while a long-running request is active', () => {
+    const active = fakeTransport();
+    const transports = new Map([['search-eval', active]]);
+    const lastSeen = new Map([['search-eval', NOW - 20 * 60_000]]);
+    const activeRequests = new Map([['search-eval', 1]]);
+
+    const evicted = reapIdleSessions(transports, lastSeen, activeRequests, NOW, TTL);
+
+    expect(evicted).toEqual([]);
+    expect(active.close).not.toHaveBeenCalled();
+  });
+});
+
+describe('active request tracking', () => {
+  it('keeps a concurrent count and removes the entry at zero', () => {
+    const active = new Map<string, number>();
+    updateActiveRequests(active, 'session', 1);
+    updateActiveRequests(active, 'session', 1);
+    expect(active.get('session')).toBe(2);
+    updateActiveRequests(active, 'session', -1);
+    expect(active.get('session')).toBe(1);
+    updateActiveRequests(active, 'session', -1);
+    expect(active.has('session')).toBe(false);
+  });
+});
+
+class FakeResponse extends EventEmitter {
+  statusCode = 200;
+  writableFinished = false;
+}
+
+async function deliveryCount(tool: string, outcome: string): Promise<number> {
+  const metric = (await register.getMetricsAsJSON()).find(
+    (candidate) => candidate.name === 'wqm_mcp_tool_response_delivery_total'
+  );
+  const sample = metric?.values.find(
+    (value) => value.labels['tool'] === tool && value.labels['outcome'] === outcome
+  );
+  return sample?.value ?? 0;
+}
+
+describe('tool response delivery telemetry', () => {
+  it('records a completed HTTP response as delivered', async () => {
+    const response = new FakeResponse();
+    observeToolResponseDelivery(response as never, 'search_eval');
+    response.writableFinished = true;
+    response.emit('finish');
+
+    expect(await deliveryCount('search_eval', 'delivered')).toBe(1);
+    expect(await deliveryCount('search_eval', 'failed')).toBe(0);
+  });
+
+  it('records a connection closed before finish as failed exactly once', async () => {
+    const response = new FakeResponse();
+    observeToolResponseDelivery(response as never, 'search_eval');
+    response.emit('error', new Error('socket reset'));
+    response.emit('close');
+
+    expect(await deliveryCount('search_eval', 'failed')).toBe(1);
+    expect(await deliveryCount('search_eval', 'delivered')).toBe(0);
+  });
+});
+
+describe('toolNamesFromBody', () => {
+  it('extracts tool calls from single and batch JSON-RPC bodies', () => {
+    expect(toolNamesFromBody({ method: 'tools/call', params: { name: 'search_eval' } })).toEqual([
+      'search_eval',
+    ]);
+    expect(
+      toolNamesFromBody([
+        { method: 'notifications/initialized' },
+        { method: 'tools/call', params: { name: 'search' } },
+        { method: 'tools/call', params: { name: 'search' } },
+      ])
+    ).toEqual(['search', 'search']);
   });
 });
 

@@ -759,6 +759,67 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 12,
+      "title": "Tool Response Delivery",
+      "description": "Counts responses that reached the HTTP stream separately from tool execution. Any failed series means the client did not receive a completed result.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (tool, outcome) (increase(wqm_mcp_tool_response_delivery_total[$__range]))",
+          "legendFormat": "{{tool}} · {{outcome}}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
@@ -778,5 +839,5 @@
   "timezone": "browser",
   "title": "WQM \u2014 MCP Server",
   "uid": "wqm-mcp-server",
-  "version": 2
+  "version": 3
 }

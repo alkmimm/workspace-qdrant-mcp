@@ -100,6 +100,7 @@ Loki from `mcp-server.jsonl`.
 | Active MCP Sessions | `wqm_mcp_session_count` | Open MCP sessions. |
 | Tool Invocation Rate | `sum by (tool) (rate(wqm_mcp_tool_invocations_total[2m]))` | Per-tool call rate. |
 | Tool Error Rate | `sum by (tool) (rate(wqm_mcp_tool_invocations_total{status="error"}[2m]))` | Errors per tool. |
+| Tool Response Delivery | `sum by (tool, outcome) (increase(wqm_mcp_tool_response_delivery_total[$__range]))` | Distinguishes handler completion from the HTTP response actually reaching the client. Any `failed` series is actionable. |
 
 **Row 2 - Latency**
 

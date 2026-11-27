@@ -30,7 +30,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
 import type { HttpTlsOptions, HttpTransportOptions } from './server-types.js';
-import { recordHttpRequest } from './telemetry/metrics.js';
+import { recordHttpRequest, recordToolResponseDelivery } from './telemetry/metrics.js';
 import { logInfo, logError } from './utils/logger.js';
 import type { AuthConfig } from './auth-middleware.js';
 import { createAuthMiddleware } from './auth-middleware.js';
@@ -62,11 +62,13 @@ const SESSION_REAP_INTERVAL_MS = 60_000;
 export function reapIdleSessions(
   transports: Map<string, StreamableHTTPServerTransport>,
   lastSeen: Map<string, number>,
+  activeRequests: ReadonlyMap<string, number>,
   nowMs: number,
   ttlMs: number
 ): string[] {
   const evicted: string[] = [];
   for (const sessionId of transports.keys()) {
+    if ((activeRequests.get(sessionId) ?? 0) > 0) continue;
     if (nowMs - (lastSeen.get(sessionId) ?? 0) > ttlMs) evicted.push(sessionId);
   }
   // Close AFTER collecting so we never mutate `transports` mid-iteration.
@@ -74,6 +76,67 @@ export function reapIdleSessions(
     void transports.get(sessionId)?.close();
   }
   return evicted;
+}
+
+/** Increment/decrement the number of concurrent requests owned by a session. */
+export function updateActiveRequests(
+  activeRequests: Map<string, number>,
+  sessionId: string,
+  delta: 1 | -1
+): void {
+  const next = (activeRequests.get(sessionId) ?? 0) + delta;
+  if (next > 0) activeRequests.set(sessionId, next);
+  else activeRequests.delete(sessionId);
+}
+
+type DeliveryResponse = Pick<ServerResponse, 'once' | 'off' | 'statusCode' | 'writableFinished'>;
+
+/**
+ * Observe the Node response lifecycle for one tool call. `finish` means the
+ * response was handed to the OS; `close` before finish and `error` are delivery
+ * failures. The one-shot guard prevents `error` + `close` double counting.
+ */
+export function observeToolResponseDelivery(res: DeliveryResponse, toolName: string): () => void {
+  let recorded = false;
+
+  const record = (outcome: 'delivered' | 'failed', reason: string): void => {
+    if (recorded) return;
+    recorded = true;
+    res.off('finish', onFinish);
+    res.off('close', onClose);
+    res.off('error', onError);
+    recordToolResponseDelivery(toolName, outcome);
+    if (outcome === 'failed') {
+      logError('MCP tool response delivery failed', undefined, { tool: toolName, reason });
+    }
+  };
+
+  const onFinish = (): void => {
+    record(res.statusCode >= 200 && res.statusCode < 400 ? 'delivered' : 'failed', 'http_status');
+  };
+  const onClose = (): void => {
+    if (!res.writableFinished) record('failed', 'connection_closed');
+  };
+  const onError = (): void => record('failed', 'response_error');
+
+  res.once('finish', onFinish);
+  res.once('close', onClose);
+  res.once('error', onError);
+  return (): void => record('failed', 'transport_error');
+}
+
+/** Return one entry per tools/call message, preserving duplicates in batches. */
+export function toolNamesFromBody(body: unknown): string[] {
+  const messages = Array.isArray(body) ? body : [body];
+  return messages.flatMap((message) => {
+    if (typeof message !== 'object' || message === null) return [];
+    const record = message as Record<string, unknown>;
+    if (record['method'] !== 'tools/call') return [];
+    const params = record['params'];
+    if (typeof params !== 'object' || params === null) return [];
+    const name = (params as Record<string, unknown>)['name'];
+    return typeof name === 'string' && name.length > 0 ? [name] : [];
+  });
 }
 
 /** Extract the per-request context (currently just the host CWD) from headers. */
@@ -164,6 +227,7 @@ export async function startMcpHttpServer(
 ): Promise<McpHttpServerHandle> {
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const lastSeen = new Map<string, number>();
+  const activeRequests = new Map<string, number>();
 
   const authMiddleware = createAuthMiddleware(authConfig);
   const requestHandler = (req: IncomingMessage, res: ServerResponse): void => {
@@ -174,6 +238,7 @@ export async function startMcpHttpServer(
         res,
         transports,
         lastSeen,
+        activeRequests,
         createMcpServer,
         options.path,
         authMiddleware,
@@ -187,7 +252,13 @@ export async function startMcpHttpServer(
   // Reclaim leaked sessions (reconnect-without-DELETE). unref() so the timer
   // never keeps the process alive on its own.
   const reaper = setInterval(() => {
-    const evicted = reapIdleSessions(transports, lastSeen, Date.now(), SESSION_IDLE_TTL_MS);
+    const evicted = reapIdleSessions(
+      transports,
+      lastSeen,
+      activeRequests,
+      Date.now(),
+      SESSION_IDLE_TTL_MS
+    );
     if (evicted.length > 0) {
       logInfo('Reaped idle MCP sessions', { count: evicted.length });
     }
@@ -276,6 +347,7 @@ async function handleRequest(
   res: ServerResponse,
   transports: Map<string, StreamableHTTPServerTransport>,
   lastSeen: Map<string, number>,
+  activeRequests: Map<string, number>,
   createMcpServer: () => Promise<McpServer>,
   mcpPath: string,
   authMiddleware: (req: IncomingMessage, res: ServerResponse) => { authorized: boolean },
@@ -325,8 +397,25 @@ async function handleRequest(
   const sessionId = getSessionId(req);
   const existingTransport = sessionId ? transports.get(sessionId) : undefined;
   if (existingTransport && sessionId) {
-    lastSeen.set(sessionId, Date.now()); // refresh idle TTL on every request
-    await dispatchToTransport(req, res, existingTransport);
+    lastSeen.set(sessionId, Date.now());
+    updateActiveRequests(activeRequests, sessionId, 1);
+    try {
+      const body = req.method === 'POST' ? await readJsonBody(req) : undefined;
+      const deliveryFailures = toolNamesFromBody(body).map((toolName) =>
+        observeToolResponseDelivery(res, toolName)
+      );
+      try {
+        await dispatchToTransport(req, res, existingTransport, body);
+      } catch (error) {
+        for (const recordFailure of deliveryFailures) recordFailure();
+        throw error;
+      }
+    } finally {
+      updateActiveRequests(activeRequests, sessionId, -1);
+      // A long-running request is active, not idle. Start its idle period only
+      // after the response path has completed.
+      if (transports.has(sessionId)) lastSeen.set(sessionId, Date.now());
+    }
     return;
   }
 
@@ -373,6 +462,7 @@ async function handleRequest(
     if (closedSessionId) {
       transports.delete(closedSessionId);
       lastSeen.delete(closedSessionId);
+      activeRequests.delete(closedSessionId);
       logInfo('MCP HTTP session closed', { sessionId: closedSessionId });
     }
     void mcpServer.close();
