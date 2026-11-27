@@ -8,7 +8,7 @@
 #   docker build -t workspace-qdrant-mcp:local .
 #   docker run -i -e MCP_SERVER_MODE=http workspace-qdrant-mcp:local
 
-ARG NODE_VERSION=20
+ARG NODE_VERSION=22
 ARG RUST_VERSION=1
 
 # ---- Build the native addon from source -----------------------------------

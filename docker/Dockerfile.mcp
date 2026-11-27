@@ -38,12 +38,12 @@
 # only succeeds when MCP_SERVER_MODE=http. stdio-mode deployments should
 # disable the health check at run time (`docker run --no-healthcheck`).
 
-ARG NODE_VERSION=20
+ARG NODE_VERSION=22
 ARG BUILDKIT_INLINE_CACHE=1
 
 # ─────────────────────────────────────────────
 # Stage 1: Build
-# node:20-bookworm supplies the full Debian toolchain required to compile native
+# node:22-bookworm supplies the full Debian toolchain required to compile native
 # addons (better-sqlite3 uses node-gyp → gcc, python3, make).
 # ─────────────────────────────────────────────
 FROM node:${NODE_VERSION}-bookworm AS builder
@@ -90,7 +90,7 @@ RUN npm prune --production
 
 # ─────────────────────────────────────────────
 # Stage 2: Runtime
-# node:20-alpine is minimal (~55 MB compressed).  Alpine includes the 'node'
+# node:22-alpine is minimal. Alpine includes the 'node'
 # user (UID 1000) built into the official image, so no useradd is required.
 # ─────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS runtime
