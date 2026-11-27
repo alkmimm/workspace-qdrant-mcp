@@ -126,7 +126,7 @@ export interface TcpProbe {
 }
 
 /**
- * Best-effort TCP connect within 2s. Matches PS Test-TcpEndpoint. Returns ok
+ * Best-effort TCP connect within 5s. Returns ok
  * even when the underlying socket errors out asynchronously — we only need to
  * know whether the daemon endpoint is reachable.
  */
@@ -152,9 +152,9 @@ export function testTcpEndpoint(endpoint: string | null | undefined): Promise<Tc
       resolvePromise(result);
     };
     const socket = netConnect({ host, port, family: 4 });
-    socket.setTimeout(2000);
+    socket.setTimeout(5000);
     socket.once('connect', () => settle({ ok: true, host, port }));
-    socket.once('timeout', () => settle({ ok: false, host, port, error: 'timeout (2s)' }));
+    socket.once('timeout', () => settle({ ok: false, host, port, error: 'timeout (5s)' }));
     socket.once('error', (err: Error) => settle({ ok: false, host, port, error: err.message }));
   });
 }
@@ -186,7 +186,6 @@ export async function testQdrant(url: string | null | undefined): Promise<Qdrant
 
 // ── captured spawn (used by git snapshots) ─────────────────────────────────────
 
-
 /**
  * Spawn a command and capture stdout/stderr, with a hard timeout. Used by the
  * git-snapshot helper (runGitSync); daemon health/queue/watch probes use gRPC.
@@ -217,7 +216,6 @@ function spawnSyncCaptured(
     timedOut: res.signal === 'SIGTERM',
   };
 }
-
 
 // ── Observation builder ────────────────────────────────────────────────────
 
@@ -276,6 +274,24 @@ export interface Observation {
   branches: ObservationBranch[];
 }
 
+export interface ObservationProbeCache {
+  qdrant: Map<string, Promise<QdrantProbe>>;
+  daemonTcp: Map<string, Promise<TcpProbe>>;
+  daemonHealth: Promise<DaemonHealthResult>;
+}
+
+function cachedProbe<T>(
+  cache: Map<string, Promise<T>>,
+  key: string,
+  probe: () => Promise<T>
+): Promise<T> {
+  const existing = cache.get(key);
+  if (existing) return existing;
+  const pending = probe();
+  cache.set(key, pending);
+  return pending;
+}
+
 function serviceStatusLabel(value: number): string {
   return ServiceStatus[value] ?? String(value);
 }
@@ -310,6 +326,16 @@ async function probeDaemonHealth(
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+export function createObservationProbeCache(
+  daemonClient: DaemonClient | null | undefined
+): ObservationProbeCache {
+  return {
+    qdrant: new Map(),
+    daemonTcp: new Map(),
+    daemonHealth: probeDaemonHealth(daemonClient),
+  };
 }
 
 /**
@@ -472,7 +498,7 @@ export async function probeDaemonWatches(
 export async function newObservation(
   project: RegistryProject,
   daemonClient: DaemonClient | null | undefined,
-  opts?: { skipQueue?: boolean }
+  opts?: { skipQueue?: boolean; probes?: ObservationProbeCache }
 ): Promise<Observation> {
   const root = project.root;
 
@@ -502,10 +528,18 @@ export async function newObservation(
   // `skipQueue` is set by status_all/observe_all callers that report the
   // daemon-wide queue once at the top level (GetQueueStats has no tenant
   // filter), so the per-project probe would just repeat the same global counts.
+  const qdrantProbe = opts?.probes
+    ? cachedProbe(opts.probes.qdrant, project.qdrantUrl ?? '', () => testQdrant(project.qdrantUrl))
+    : testQdrant(project.qdrantUrl);
+  const tcpProbe = opts?.probes
+    ? cachedProbe(opts.probes.daemonTcp, project.daemonEndpoint ?? '', () =>
+        testTcpEndpoint(project.daemonEndpoint)
+      )
+    : testTcpEndpoint(project.daemonEndpoint);
   const [qdrant, daemonTcp, wqmHealth, queue] = await Promise.all([
-    testQdrant(project.qdrantUrl),
-    testTcpEndpoint(project.daemonEndpoint),
-    probeDaemonHealth(daemonClient),
+    qdrantProbe,
+    tcpProbe,
+    opts?.probes?.daemonHealth ?? probeDaemonHealth(daemonClient),
     opts?.skipQueue
       ? Promise.resolve<DaemonQueueResult>({
           ok: false,

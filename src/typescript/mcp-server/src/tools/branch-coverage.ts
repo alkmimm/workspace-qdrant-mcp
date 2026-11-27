@@ -17,6 +17,7 @@ import type { BranchFileCount } from '../clients/tracked-files-queries/index.js'
 import type { SqliteStateManager } from '../clients/sqlite-state-manager.js';
 import {
   countFilesAtBranchTip,
+  getPathsChangedBetween,
   listBranchCheckouts,
   type BranchCheckout,
 } from '../utils/git-branch-diff.js';
@@ -32,6 +33,12 @@ export interface BranchCoverage {
   tip_files?: number;
   /** indexed_files / tip_files, rounded to 2 decimals. */
   ratio?: number;
+  /** The branch tip has the same file content as the trunk and can use trunk fill-in. */
+  inherited_from_trunk?: boolean;
+  /** Files effectively readable after unchanged-path trunk fill-in. */
+  effective_indexed_files?: number;
+  /** effective_indexed_files / tip_files, rounded to 2 decimals. */
+  effective_ratio?: number;
 }
 
 export interface BranchCoverageReport {
@@ -45,6 +52,8 @@ export interface BranchCoverageReport {
 export interface CoverageGit {
   checkouts(): Promise<BranchCheckout[] | null>;
   tipFiles(branch: string): Promise<number | null>;
+  /** Whether the branch and trunk have identical tracked file content. */
+  matchesTrunk?(trunk: string, branch: string): Promise<boolean | null>;
 }
 
 /** A branch is flagged below this fraction of the trunk's own ratio. */
@@ -88,15 +97,29 @@ export async function computeBranchCoverage(params: {
   );
   branches.sort((a, b) => b.indexed_files - a.indexed_files || a.branch.localeCompare(b.branch));
 
-  const trunkRatio = branches.find((b) => b.branch === trunk)?.ratio;
+  const trunkEntry = branches.find((b) => b.branch === trunk);
+  const trunkRatio = trunkEntry?.ratio;
+  if (trunk && trunkEntry && git.matchesTrunk) {
+    await Promise.all(
+      branches.map(async (b) => {
+        if (b.branch === trunk || b.checkout === undefined || b.tip_files === undefined) return;
+        const matches = await git.matchesTrunk!(trunk, b.branch);
+        if (matches !== true) return;
+        b.inherited_from_trunk = true;
+        b.effective_indexed_files = trunkEntry.indexed_files;
+        b.effective_ratio = Math.round((trunkEntry.indexed_files / b.tip_files) * 100) / 100;
+      })
+    );
+  }
   const warnings: string[] = [];
   for (const b of branches) {
     if (b.branch === trunk || b.checkout === undefined) continue;
     if (b.tip_files === undefined || b.ratio === undefined || b.tip_files < MIN_TIP_FILES) continue;
+    if (b.inherited_from_trunk) continue;
     const floor =
       trunkRatio !== undefined ? trunkRatio * PARTIAL_FRACTION_OF_TRUNK : PARTIAL_ABSOLUTE_RATIO;
     if (b.ratio >= floor) continue;
-    const pct = (r: number) => `${Math.round(r * 100)}%`;
+    const pct = (r: number): string => `${Math.round(r * 100)}%`;
     warnings.push(
       `Branch '${b.branch}' (checked out at ${b.checkout}): the index holds ${b.indexed_files} of ` +
         `the ${b.tip_files} files in its tip (${pct(b.ratio)})` +
@@ -129,7 +152,7 @@ export async function probeBranchCoverage(
     return computeBranchCoverage({
       counts,
       trunk: null,
-      git: { checkouts: async () => null, tipFiles: async () => null },
+      git: { checkouts: () => Promise.resolve(null), tipFiles: () => Promise.resolve(null) },
     });
   }
   return computeBranchCoverage({
@@ -138,6 +161,10 @@ export async function probeBranchCoverage(
     git: {
       checkouts: () => listBranchCheckouts(root),
       tipFiles: (branch) => countFilesAtBranchTip(root, branch),
+      matchesTrunk: async (trunk, branch) => {
+        const changed = await getPathsChangedBetween(root, trunk, branch);
+        return changed === null ? null : changed.size === 0;
+      },
     },
   });
 }

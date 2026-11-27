@@ -62,8 +62,44 @@ INNER
 
 install_hooks() {
     sh "$INSTALL" --repo "$REPO" --wqm-script "$SYNC" --log "$LOG" \
-        --mcp-url http://localhost:6335/mcp --token unused >/dev/null 2>&1
+        --mcp-url http://localhost:6335/mcp --token test-token \
+        --host-dev-root /host/dev --container-dev-root /workspace >/dev/null 2>&1
 }
+
+# ── Every configured value must reach the sync child ─────────────────────────
+setup
+ENV_CAPTURE="$WORK/env.txt"
+cat > "$SYNC" <<INNER
+#!/bin/sh
+printf '%s\n' \
+  "hook=\${WQM_HOOK_NAME:-}" \
+  "url=\${WQM_MCP_URL:-}" \
+  "token=\${WQM_MCP_TOKEN:-}" \
+  "log=\${WQM_HOOK_LOG:-}" \
+  "host=\${WQM_HOST_DEV_ROOT:-}" \
+  "container=\${WQM_DEV_ROOT:-}" \
+  "arg=\${1:-}" > "$ENV_CAPTURE"
+INNER
+chmod 644 "$SYNC"
+install_hooks
+HOOK="$REPO/.git/hooks/post-commit"
+sh "$HOOK" >/dev/null 2>&1 || true
+EXPECTED="$WORK/expected-env.txt"
+cat > "$EXPECTED" <<INNER
+hook=post-commit
+url=http://localhost:6335/mcp
+token=test-token
+log=$LOG
+host=/host/dev
+container=/workspace
+arg=post-commit
+INNER
+if cmp -s "$EXPECTED" "$ENV_CAPTURE"; then
+    ok "hook propagates endpoint, token, paths, log and hook name"
+else
+    fail "generated hook lost configured environment before invoking the sync child"
+fi
+teardown
 
 # ── A non-executable sync script must still run ──────────────────────────────
 setup

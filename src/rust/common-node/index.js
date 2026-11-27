@@ -167,12 +167,13 @@ function tokenizeJs(text) {
   const stopwords = new Set([
     'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'has',
     'he', 'in', 'is', 'it', 'its', 'of', 'on', 'or', 'that', 'the', 'to',
-    'was', 'were', 'will', 'with', 'this', 'these', 'those', 'you', 'your',
+    'was', 'were', 'will', 'with', 'this', 'but', 'they', 'have', 'had',
+    'what', 'when', 'where', 'who', 'which', 'why', 'how',
   ])
 
   return String(text)
     .toLowerCase()
-    .match(/[a-z0-9]+/g)?.filter((token) => token.length > 1 && !stopwords.has(token)) ?? []
+    .match(/[a-z0-9_]+/g)?.filter((token) => token.length > 1 && !stopwords.has(token)) ?? []
 }
 
 function isValidItemTypeJs(value) {

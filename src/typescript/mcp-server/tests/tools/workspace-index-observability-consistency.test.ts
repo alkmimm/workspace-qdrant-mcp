@@ -118,6 +118,35 @@ describe('workspace_index observability consistency', () => {
     });
   });
 
+  it('probes shared service endpoints only once in status_all', async () => {
+    process.env['QDRANT_URL'] = 'http://runtime-qdrant:7333';
+    process.env['WQM_DAEMON_ENDPOINT'] = '127.0.0.1:54321';
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const roots = [
+      join(tmpdir(), 'wqm-shared-probe-a-no-such-repo'),
+      join(tmpdir(), 'wqm-shared-probe-b-no-such-repo'),
+    ];
+    const daemon = makeDaemon(
+      roots.map((project_root, i) => ({
+        project_id: `project-${i}`,
+        project_name: `project-${i}`,
+        project_root,
+        is_active: true,
+      }))
+    );
+
+    const result = (await runStatusAll({ registryPath: writeRegistry() }, daemon)) as {
+      count: number;
+    };
+
+    expect(result.count).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(daemon.healthCheck).toHaveBeenCalledTimes(1);
+    expect(daemon.getQueueStats).toHaveBeenCalledTimes(1);
+  });
+
   it('includes daemon-only projects in observe project/all and incremental check all', async () => {
     process.env['QDRANT_URL'] = 'http://runtime-qdrant:7333';
     process.env['WQM_DAEMON_ENDPOINT'] = '127.0.0.1:54321';

@@ -35,7 +35,11 @@ const emnifyCounts = [
 
 describe('computeBranchCoverage', () => {
   it('flags a checked-out branch far below the trunk ratio (the emnify case)', async () => {
-    const report = await computeBranchCoverage({ counts: emnifyCounts, trunk: 'develop', git: emnifyGit });
+    const report = await computeBranchCoverage({
+      counts: emnifyCounts,
+      trunk: 'develop',
+      git: emnifyGit,
+    });
 
     const fase5 = report.branches.find((b) => b.branch === 'feat/fase-5');
     expect(fase5).toMatchObject({
@@ -51,7 +55,11 @@ describe('computeBranchCoverage', () => {
   });
 
   it('does not flag a healthy branch (chore/fase-1: 85% vs 87%)', async () => {
-    const report = await computeBranchCoverage({ counts: emnifyCounts, trunk: 'develop', git: emnifyGit });
+    const report = await computeBranchCoverage({
+      counts: emnifyCounts,
+      trunk: 'develop',
+      git: emnifyGit,
+    });
     expect(report.warnings.join('\n')).not.toContain('chore/fase-1');
   });
 
@@ -81,6 +89,48 @@ describe('computeBranchCoverage', () => {
       indexed_files: 0,
       ratio: 0,
     });
+    expect(report.warnings).toHaveLength(1);
+  });
+
+  it('inherits trunk coverage when a checked-out branch has identical content', async () => {
+    const report = await computeBranchCoverage({
+      counts: [{ branch: 'main', files: 90 }],
+      trunk: 'main',
+      git: {
+        checkouts: async () => [
+          { path: '/repo', branch: 'main' },
+          { path: '/repo-dev', branch: 'dev' },
+        ],
+        tipFiles: async () => 100,
+        matchesTrunk: async (_trunk, branch) => branch === 'dev',
+      },
+    });
+
+    expect(report.branches.find((b) => b.branch === 'dev')).toMatchObject({
+      indexed_files: 0,
+      ratio: 0,
+      inherited_from_trunk: true,
+      effective_indexed_files: 90,
+      effective_ratio: 0.9,
+    });
+    expect(report.warnings).toEqual([]);
+  });
+
+  it('still warns when an unlabelled worktree differs from the trunk', async () => {
+    const report = await computeBranchCoverage({
+      counts: [{ branch: 'main', files: 90 }],
+      trunk: 'main',
+      git: {
+        checkouts: async () => [
+          { path: '/repo', branch: 'main' },
+          { path: '/repo-old', branch: 'old' },
+        ],
+        tipFiles: async () => 100,
+        matchesTrunk: async () => false,
+      },
+    });
+
+    expect(report.branches.find((b) => b.branch === 'old')?.inherited_from_trunk).toBeUndefined();
     expect(report.warnings).toHaveLength(1);
   });
 
@@ -116,7 +166,11 @@ describe('computeBranchCoverage', () => {
 
 describe('response shaping', () => {
   it('project_status keeps live branches in full and counts the rest', async () => {
-    const report = await computeBranchCoverage({ counts: emnifyCounts, trunk: 'develop', git: emnifyGit });
+    const report = await computeBranchCoverage({
+      counts: emnifyCounts,
+      trunk: 'develop',
+      git: emnifyGit,
+    });
     const fields = coverageResponseFields(report);
     expect(fields.index_coverage?.branches.map((b) => b.branch).sort()).toEqual([
       'chore/fase-1',
@@ -129,9 +183,17 @@ describe('response shaping', () => {
   });
 
   it('list_branches gains the index view, keyed by the tenant', async () => {
-    const report = await computeBranchCoverage({ counts: emnifyCounts, trunk: 'develop', git: emnifyGit });
+    const report = await computeBranchCoverage({
+      counts: emnifyCounts,
+      trunk: 'develop',
+      git: emnifyGit,
+    });
     const out = (await withIndexCoverage(
-      Promise.resolve({ success: true, projectId: 'dd8113bcff19', branches: [{ name: 'develop' }] }),
+      Promise.resolve({
+        success: true,
+        projectId: 'dd8113bcff19',
+        branches: [{ name: 'develop' }],
+      }),
       async (tenant) => (tenant === 'dd8113bcff19' ? report : null)
     )) as Record<string, unknown>;
     expect(out['branches']).toEqual([{ name: 'develop' }]);

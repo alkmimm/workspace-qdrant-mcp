@@ -25,6 +25,7 @@ import {
   isWorktree,
 } from './../utils/git-utils.js';
 import {
+  createObservationProbeCache,
   getGitSnapshot,
   newObservation,
   probeDaemonProjectStatus,
@@ -711,8 +712,9 @@ export async function runStatusAll(
   // (Per-tenant queue stats would need a tenant filter on GetQueueStats — see
   // docs/specs/14-future-development.md.)
   const daemonQueue = await probeDaemonQueue(daemonClient);
+  const probes = createObservationProbeCache(daemonClient);
   const rawObservations = await Promise.all(
-    projects.map((p) => newObservation(p, daemonClient, { skipQueue: true }))
+    projects.map((p) => newObservation(p, daemonClient, { skipQueue: true, probes }))
   );
   const observations = rawObservations.map(({ queue: _queue, ...rest }) => rest);
   return {
@@ -751,9 +753,10 @@ export async function runObserveAll(
   daemonClient: DaemonClient | null | undefined
 ): Promise<unknown> {
   const enabled = await enabledProjectsIncludingDaemon(args.registryPath, daemonClient);
+  const probes = createObservationProbeCache(daemonClient);
   const observations = await Promise.all(
     enabled.map(async (p) => {
-      const obs = await newObservation(p, daemonClient);
+      const obs = await newObservation(p, daemonClient, { probes });
       saveObservation(args.registryPath, obs);
       return obs;
     })
