@@ -9,13 +9,18 @@ export const readLogToolDefinition = {
     openWorldHint: false,
   },
   description:
-    'Read a UTF-8 file in the server log directory (WQM_LOG_DIR). Compact mode groups only consecutive identical lines, ignoring a leading RFC 3339 timestamp. Template mode also groups consecutive memexd queue events with varying item IDs and shows min–max duration for successful items. Interleaved mode groups matching events even with intervening messages. Use raw mode on any listed line or inclusive range to inspect the original text.',
+    'Read a UTF-8 file from an allowlisted server log source. source="mcp" reads WQM_LOG_DIR; operators can configure additional read-only aliases with WQM_READ_LOG_ROOTS. Compact mode groups only consecutive identical lines, ignoring a leading RFC 3339 timestamp. Template mode also groups consecutive memexd queue events with varying item IDs and shows min–max duration for successful items. Interleaved mode groups matching events even with intervening messages. Use raw mode on any listed line or inclusive range to inspect the original text.',
   inputSchema: {
     type: 'object' as const,
     properties: {
       file: {
         type: 'string',
         description: 'Log basename (.log or .jsonl, optional numeric rotation).',
+      },
+      source: {
+        type: 'string',
+        pattern: '^[a-z][a-z0-9_-]{0,31}$',
+        description: 'Configured log source alias. Default: mcp.',
       },
       mode: {
         type: 'string',

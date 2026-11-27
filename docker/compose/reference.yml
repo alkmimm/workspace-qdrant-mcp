@@ -129,9 +129,11 @@ services:
       WQM_DAEMON_ENDPOINT: memexd:50051
       WQM_LOG_LEVEL: ${WQM_LOG_LEVEL:-INFO}
       WQM_LOG_DIR: /home/node/.local/share/workspace-qdrant/logs
+      WQM_READ_LOG_ROOTS: '{"extra":"/var/log/wqm/read-log-extra"}'
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     volumes:
       - ${WQM_STATE_DIR:-./state}/mcp:/home/node/.local/share/workspace-qdrant
+      - ${WQM_READ_LOG_EXTRA_DIR:-./state/mcp/logs}:/var/log/wqm/read-log-extra:ro
     networks:
       - workspace-network
 

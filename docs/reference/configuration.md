@@ -82,6 +82,7 @@ Environment variables override the equivalent values in the configuration file.
 | `WQM_DAEMON_PORT` | integer | `50051` | Daemon gRPC port |
 | `WQM_LOG_LEVEL` | string | `info` | Minimum log level (`trace`, `debug`, `info`, `warn`, `error`) |
 | `WQM_LOG_DIR` | string | (OS-canonical) | Override log directory for all components |
+| `WQM_READ_LOG_ROOTS` | JSON object | `{}` | Additional alias-to-absolute-directory allowlist for MCP `read_log`; `mcp` remains reserved for `WQM_LOG_DIR` |
 | `WQM_LOG_JSON` | bool | `true` | Enable JSON-formatted log output (daemon) |
 | `WQM_LOG_CONSOLE` | bool | `false` (service) / `true` (foreground) | Console log output (daemon) |
 | `WQM_STDIO_MODE` | bool | `false` | Force stdio transport mode |

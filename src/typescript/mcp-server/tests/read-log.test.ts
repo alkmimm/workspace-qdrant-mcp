@@ -7,16 +7,19 @@ import { readLog } from '../src/tools/read-log.js';
 
 describe('read_log', () => {
   let dir: string;
+  let extraDir: string;
   const args = { file: 'memexd.log' };
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'read-log-'));
+    extraDir = await mkdtemp(join(tmpdir(), 'read-log-extra-'));
     vi.stubEnv('WQM_LOG_DIR', dir);
   });
 
   afterEach(async () => {
     vi.unstubAllEnvs();
     await rm(dir, { recursive: true, force: true });
+    await rm(extraDir, { recursive: true, force: true });
   });
 
   it('groups consecutive events within the range and preserves changes and stack frames', async () => {
@@ -38,6 +41,7 @@ describe('read_log', () => {
     expect(await readLog({ ...args, mode: 'raw', startLine: 2 }, fields)).toBe(text);
     expect(fields).toEqual({
       mode: 'raw',
+      source: 'mcp',
       requested_start_line: 2,
       requested_end_line: 201,
       start_line: 2,
@@ -49,6 +53,7 @@ describe('read_log', () => {
     expect(await readLog({ ...args, startLine: 5 }, empty)).toBe('');
     expect(empty).toEqual({
       mode: 'compact',
+      source: 'mcp',
       requested_start_line: 5,
       requested_end_line: 204,
       start_line: null,
@@ -327,6 +332,41 @@ describe('read_log', () => {
     await expect(readLog(args)).rejects.toThrow();
     await mkdir(join(dir, args.file));
     await expect(readLog(args)).rejects.toThrow('regular log file');
+  });
+
+  it('reads from an explicitly configured source and records its alias', async () => {
+    vi.stubEnv('WQM_READ_LOG_ROOTS', JSON.stringify({ extra: extraDir }));
+    await writeFile(join(extraDir, args.file), 'external\n');
+    const fields = {};
+    expect(await readLog({ ...args, source: 'extra', mode: 'raw' }, fields)).toBe('external\n');
+    expect(fields).toMatchObject({ source: 'extra', bytes_in: 9, bytes_out: 9 });
+  });
+
+  it('defaults to the mcp source even when extra roots are configured', async () => {
+    vi.stubEnv('WQM_READ_LOG_ROOTS', JSON.stringify({ extra: extraDir }));
+    await writeFile(join(dir, args.file), 'mcp\n');
+    await writeFile(join(extraDir, args.file), 'external\n');
+    expect(await readLog({ ...args, mode: 'raw' })).toBe('mcp\n');
+  });
+
+  it.each([
+    ['not JSON', 'WQM_READ_LOG_ROOTS'],
+    [JSON.stringify({ mcp: '/tmp/override' }), 'alias'],
+    [JSON.stringify({ '../escape': '/tmp' }), 'alias'],
+    [JSON.stringify({ extra: 'relative' }), 'absolute'],
+  ])('rejects an unsafe extra-root configuration: %s', async (value, message) => {
+    vi.stubEnv('WQM_READ_LOG_ROOTS', value);
+    await expect(readLog({ ...args, source: 'extra' })).rejects.toThrow(message);
+  });
+
+  it('rejects unknown and non-string source selectors without reading a file', async () => {
+    vi.stubEnv('WQM_READ_LOG_ROOTS', JSON.stringify({ extra: extraDir }));
+    const fields = {};
+    await expect(readLog({ ...args, source: 'missing' }, fields)).rejects.toThrow(
+      'Available sources: extra, mcp'
+    );
+    expect(fields).toEqual({ mode: 'compact', source: 'missing' });
+    await expect(readLog({ ...args, source: 1 })).rejects.toThrow('source');
   });
 
   it.skipIf(process.platform === 'win32')('refuses symbolic links', async () => {

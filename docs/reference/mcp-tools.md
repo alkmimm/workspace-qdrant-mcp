@@ -446,7 +446,21 @@ truncated). If nothing matches exactly, the call fails with a clear error instea
 
 ## read_log
 
-Read a UTF-8 log by basename from the MCP server's log directory (`WQM_LOG_DIR` or the platform default). Supply a regular `.log` or `.jsonl` file, optionally with a numeric rotation suffix. The file must be visible to the server. For Docker Compose, capture the daemon's stdout and stderr in the MCP log volume first, for example from the repository root:
+Read a UTF-8 log by basename from an allowlisted server log source. The default source, `mcp`, is the MCP server's log directory (`WQM_LOG_DIR` or the platform default). Supply a regular `.log` or `.jsonl` file, optionally with a numeric rotation suffix. The file must be visible to the server.
+
+Operators can expose additional directories without allowing callers to submit arbitrary paths. Set `WQM_READ_LOG_ROOTS` to a JSON object whose keys are aliases and whose values are absolute server-side directories. Aliases must start with a lowercase letter and contain only lowercase letters, digits, `_` or `-`. The reserved alias `mcp` cannot be replaced. For example:
+
+```sh
+export WQM_READ_LOG_ROOTS='{"merge-queue":"/var/log/wqm/merge-queue"}'
+```
+
+```json
+{"source":"merge-queue","file":"verify-49ee73734ed1.log","mode":"auto"}
+```
+
+The standard Docker Compose deployment provides one optional alias, `extra`. Set `WQM_READ_LOG_EXTRA_DIR` in `docker/.env` to the narrow host log directory to mount read-only, then recreate the MCP container. Do not point it at a home directory, cache root or project root. `file` remains a basename: separators, traversal, non-log extensions, directories and symbolic links are rejected.
+
+For Docker Compose, another option is to capture the daemon's stdout and stderr in the MCP log volume first, for example from the repository root:
 
 ```sh
 docker compose logs --no-color --no-log-prefix memexd > "${WQM_STATE_DIR:-./state}/mcp/logs/memexd-snapshot.log" 2>&1

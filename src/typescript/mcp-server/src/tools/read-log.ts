@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { formatLog } from './read-log-format.js';
 import { recordReadLogUsage } from '../telemetry/metrics.js';
 import { READ_LOG_MODES } from '../tool-definitions/read-log.js';
-import { getLogDirectory } from '../utils/paths.js';
+import { getReadLogDirectories } from '../utils/paths.js';
 
 const DEFAULT_LINES = 200;
 const MAX_LINES = 2000;
@@ -78,6 +78,16 @@ export async function readLog(
   const mode = requested === undefined ? 'compact' : READ_LOG_MODES.find((m) => m === requested);
   if (logFields && mode) logFields.mode = mode;
   const name = args?.['file'];
+  const source = args?.['source'] === undefined ? 'mcp' : args['source'];
+  if (typeof source !== 'string') throw new Error('source must be a configured log source alias');
+  if (logFields) logFields.source = source;
+  const roots = getReadLogDirectories();
+  const directory = roots.get(source);
+  if (directory === undefined) {
+    throw new Error(
+      `Unknown log source: ${source}. Available sources: ${[...roots.keys()].sort().join(', ')}`
+    );
+  }
   if (
     typeof name !== 'string' ||
     !/^[\w-][\w.-]*\.(?:log|jsonl)(?:\.\d+)?$/i.test(name) ||
@@ -105,7 +115,7 @@ export async function readLog(
     throw new Error(`Select 1 to ${MAX_LINES} consecutive lines`);
   if (logFields) Object.assign(logFields, { requested_start_line: start, requested_end_line: end });
 
-  const path = join(getLogDirectory(), name);
+  const path = join(directory, name);
   const entry = await lstat(path);
   if (!entry.isFile()) throw new Error('Expected a regular log file');
   const handle = await open(

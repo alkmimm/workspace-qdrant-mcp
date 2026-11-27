@@ -348,6 +348,10 @@ services:
     volumes:
       # Persistent MCP state; logs are written under logs/ inside this volume.
       - ${WQM_STATE_DIR:-./state}/mcp:/home/node/.local/share/workspace-qdrant
+      # Optional operator-selected log directory for read_log. It is mounted
+      # read-only and exposed only through the fixed `extra` alias; callers
+      # still cannot submit paths or traverse below this root.
+      - ${WQM_READ_LOG_EXTRA_DIR:-./state/mcp/logs}:/var/log/wqm/read-log-extra:ro
       # Mirror WQM_DEV_ROOT so the MCP server can shell out to `git` and read
       # the same project tree the daemon watches. Identical path on host and
       # container preserves the path-transparency invariant (spec 16).
@@ -405,6 +409,7 @@ services:
       WQM_DAEMON_ENDPOINT: memexd:50051
       WQM_LOG_LEVEL: ${WQM_LOG_LEVEL:-INFO}
       WQM_LOG_DIR: /home/node/.local/share/workspace-qdrant/logs
+      WQM_READ_LOG_ROOTS: '{"extra":"/var/log/wqm/read-log-extra"}'
       # Point the MCP's read-only SQLite handle at the same memexd.db the
       # daemon writes — the memexd_db named volume mounted at /var/lib/memexd
       # above (NOT the ./state/memexd bind, which lacks memexd.db). The MCP

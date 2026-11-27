@@ -10,7 +10,7 @@
  *   Logs:   ~/Library/Logs/workspace-qdrant/
  */
 
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { platform, homedir, tmpdir } from 'node:os';
 import { mkdirSync, existsSync } from 'node:fs';
 
@@ -85,6 +85,48 @@ export function getLogDirectory(): string {
     default:
       return join(getDataDirectory(), 'logs');
   }
+}
+
+const LOG_SOURCE_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+const MAX_EXTRA_LOG_SOURCES = 16;
+
+/**
+ * Read-only roots exposed to the MCP `read_log` tool.
+ *
+ * `mcp` always resolves to the canonical WQM_LOG_DIR. Operators may add a
+ * small, explicit alias map through WQM_READ_LOG_ROOTS, for example:
+ * `{"merge-queue":"/var/log/wqm/merge-queue"}`. The configured paths are
+ * trusted deployment inputs; callers can select an alias but can never supply
+ * a path.
+ */
+export function getReadLogDirectories(): ReadonlyMap<string, string> {
+  const roots = new Map<string, string>([['mcp', getLogDirectory()]]);
+  const raw = process.env['WQM_READ_LOG_ROOTS']?.trim();
+  if (raw === undefined || raw === '') return roots;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('WQM_READ_LOG_ROOTS must be a JSON object of alias-to-absolute-path entries');
+  }
+  if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
+    throw new Error('WQM_READ_LOG_ROOTS must be a JSON object of alias-to-absolute-path entries');
+  }
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  if (entries.length > MAX_EXTRA_LOG_SOURCES) {
+    throw new Error(`WQM_READ_LOG_ROOTS supports at most ${MAX_EXTRA_LOG_SOURCES} entries`);
+  }
+  for (const [alias, directory] of entries) {
+    if (!LOG_SOURCE_PATTERN.test(alias) || alias === 'mcp') {
+      throw new Error(`Invalid WQM_READ_LOG_ROOTS alias: ${alias}`);
+    }
+    if (typeof directory !== 'string' || !isAbsolute(directory) || directory.includes('\0')) {
+      throw new Error(`WQM_READ_LOG_ROOTS path for ${alias} must be absolute`);
+    }
+    roots.set(alias, directory);
+  }
+  return roots;
 }
 
 /**
