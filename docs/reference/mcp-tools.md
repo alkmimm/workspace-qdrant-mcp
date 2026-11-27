@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-The workspace-qdrant MCP server exposes twelve tools to AI assistants. All tools except the static `help` communicate with the `memexd` daemon over gRPC.
+The workspace-qdrant MCP server exposes thirteen tools to AI assistants. `help` and `read_log` are handled locally.
 
 ## Tool Index
 
@@ -11,6 +11,7 @@ The workspace-qdrant MCP server exposes twelve tools to AI assistants. All tools
 | [`rules`](#rules) | Manage persistent behavioral rules |
 | [`store`](#store) | Store content, register projects, save notes |
 | [`scratchpad`](#scratchpad) | List, update, or delete scratchpad notes |
+| [`read_log`](#read_log) | Read a server log by line range and group consecutive repetitions |
 | [`grep`](#grep) | Exact substring or regex search using FTS5 |
 | [`list`](#list) | List project files and folder structure |
 | [`embedding`](#embedding) | Generate vector embeddings for text |
@@ -442,6 +443,83 @@ truncated). If nothing matches exactly, the call fails with a clear error instea
 ```
 
 ---
+
+## read_log
+
+Read a UTF-8 log by basename from the MCP server's log directory (`WQM_LOG_DIR` or the platform default). Supply a regular `.log` or `.jsonl` file, optionally with a numeric rotation suffix. The file must be visible to the server. For Docker Compose, capture the daemon's stdout and stderr in the MCP log volume first, for example from the repository root:
+
+```sh
+docker compose logs --no-color --no-log-prefix memexd > "${WQM_STATE_DIR:-./state}/mcp/logs/memexd-snapshot.log" 2>&1
+```
+
+```json
+{"file":"memexd-snapshot.log","startLine":120,"endLine":609}
+```
+
+Line numbers are one-based and inclusive. The default window is 200 lines. Each call accepts up to 2,000 lines and 1 MiB of source text. Reading past EOF returns the available portion. Use a stable snapshot for repeatable line numbers across calls.
+
+The default `compact` mode groups adjacent lines with matching text, ignoring a leading RFC 3339 timestamp when both lines have one. Each run shows its source lines, count, last timestamp when available, and first original line. Messages with differing IDs, codes, or stack frames stay distinct. Use `"mode":"raw"` with the same file and a narrower interval to get the exact lines, including line endings.
+
+Set `"mode":"template"` for memexd queue logs. Within a run of consecutive events, a changing 32-digit hexadecimal queue item ID is displayed as `<id>`. This applies to the `queue_id` field of a `queue.process_item` span and to the item ID in the batch processor’s success message. For those success messages, varying durations are displayed as a minimum–maximum range in milliseconds. Tenant fields, operations, counts and error codes must match. Unrecognized lines follow the usual compact grouping. To inspect each ID and duration in a group marked `[L120-127 ×8 …]`, call `read_log` on the same snapshot with `{"file":"memexd-snapshot.log","mode":"raw","startLine":120,"endLine":127}`.
+
+Use `"mode":"interleaved"` to group matching events across intervening messages using the same rules as `template`. By default, `"groupBy":"block"` starts a new group set every 100 lines from the requested `startLine`. Choose `"groupBy":"window"` to group across the entire selected interval. Groups appear in order of first occurrence within each block. The summary names the snapshot and lists the absolute line numbers of every occurrence, including singletons. For example, `[L18,57-58,826 ×4 …]` refers to four occurrences. To inspect them with `raw`, request lines 18–18, 57–58 and 826–826 of the same file.
+
+```json
+{"file":"memexd-snapshot.log","mode":"interleaved","groupBy":"window","startLine":1,"endLine":1000}
+```
+
+Use `"mode":"auto"` to return the smallest summary by UTF-8 byte length. It compares `compact`, `template`, `interleaved` with `groupBy:"block"`, and `interleaved` with `groupBy:"window"`, in that tie-breaking order. The response is the chosen text verbatim, including any line references. Omit `groupBy` with `auto`. Token savings depend on the tokenizer.
+
+### Usage and byte savings by mode
+
+Each successful MCP `Tool called` log entry for `tool="read_log"` includes the requested `mode`. An omitted mode is recorded as `compact`. An `auto` request is recorded as `auto` regardless of the selected format. The inclusive bounds are `requested_start_line` and `requested_end_line` for the request, and `start_line` and `end_line` for the lines actually read. Both actual bounds are null for an empty read. `bytes_in` counts source bytes in the selected range, including line endings. `bytes_out` counts the UTF-8 bytes of the returned text, excluding the MCP envelope. A summary can expand the input.
+
+For successful reads, Prometheus exposes `wqm_mcp_read_log_reads_total{mode}` and `wqm_mcp_read_log_bytes_total{mode,kind}`, with `kind="raw"` or `"returned"`. Errors use the existing tool invocation counter. To calculate the percentage of source bytes saved in the last day for each mode with nonzero input, use:
+
+```promql
+100 * (1 -
+  sum by (mode) (increase(wqm_mcp_read_log_bytes_total{kind="returned"}[1d]))
+  / (sum by (mode) (increase(wqm_mcp_read_log_bytes_total{kind="raw"}[1d])) > 0)
+)
+```
+
+#### Track local usage after the two manual validations
+
+From the repository root, run the following command whenever you want the cumulative usage since **2026-11-26 22:55:25 UTC** (19:55:25 in São Paulo).
+
+```sh
+python3 scripts/read-log-usage.py
+```
+
+The [usage script](../../scripts/read-log-usage.py) reads `http://127.0.0.1:9092/metrics` and uses the Docker CLI to check the start time of the local `wqm-mcp` container. The query itself adds no `read_log` calls. If the endpoint requires authentication, export `MCP_METRICS_TOKEN` or the Compose stack's `MCP_HTTP_TOKEN` in the calling shell.
+
+The script subtracts the following baseline from each mode's current counters. The other three modes started at zero.
+
+| Manual validation | Requested mode | Successful calls | Raw bytes | Returned bytes |
+|---|---|---:|---:|---:|
+| Telemetry check on `memexd-heartbeats.log`, lines 997–1010 requested and 997–1000 read | `auto` | 1 | 885 | 282 |
+| Codex client check on `mcp-server.1.jsonl`, lines 1–2 | `raw` | 1 | 361 | 361 |
+
+Each row reports the additional successful calls, raw bytes and returned bytes for that mode. `saved_bytes` is raw minus returned after subtracting the baseline. `savings` divides those saved bytes by the raw bytes for the period. It shows `n/a` for zero input and a negative percentage when the output grew. Later manual checks count alongside other calls because the counters have no caller label.
+
+The counters reset when the MCP restarts. If the container generation changes or a counter falls below its baseline, the script exits with an error. To recover exact totals across restarts, aggregate retained successful `Tool called` events for `tool="read_log"` after the baseline time by `mode`, counting events and summing `bytes_in` and `bytes_out`. The time filter already excludes both validations.
+
+### Decision on the 18-line shortcut
+
+The fork keeps the `auto` shortcut at **18 lines inclusive** and considers this optimization complete. When no adjacent events share a template key, both `compact` and `template` reproduce the input, so `auto` can skip rendering them. From 19 lines onward, `auto` uses the general selection algorithm. The cutoff affects formatting time only. The byte-length comparison, tie order and line references for `raw` apply at every window size.
+
+The benchmarks measured in-memory formatting on two memexd snapshots, using 17 fresh Node.js processes and an A/A control with two identical copies of the baseline. Values below are median latency reductions with 95% confidence intervals. The 17–19-line comparison covered every starting offset. The 19–32-line simulation sampled across all offsets and gave each window size equal weight.
+
+| Comparison | Lines | `memexd-heartbeats.log` | `memexd.log` |
+|---|---:|---:|---:|
+| Fixed limit of 18 vs. 16 | 17 | 18.61% [17.94, 19.01] | 3.87% [3.67, 4.75] |
+| Fixed limit of 18 vs. 16 | 18 | 16.94% [15.76, 17.86] | 1.69% [0.57, 2.76] |
+| Fixed limit of 18 vs. 16 | 19 (reference) | −0.45% [−1.59, 0.38] | −0.74% [−1.59, 0.09] |
+| Shortcut selected by repetition pattern vs. fixed limit of 18 | 19–32 | 11.28% [10.80, 11.42] | 0.33% [0.04, 0.63] |
+
+The adaptive rule saved about 0.16 µs per window on `memexd.log`. Its direct comparison with a simple extension to 32 lines yielded confidence intervals spanning zero on both files. All 41,314 sliding windows in the 19–32-line simulation returned byte-identical output. These results closed the investigation on these captures.
+
+**Reevaluate the cutoff** if profiling real `read_log` calls shows that formatting 19–32-line windows accounts for a meaningful share of end-to-end latency, especially on heartbeat-like workloads. Start with the simple fixed extension on a new representative capture. Compare it with the 18-line baseline using an A/A control, and check output equality byte for byte.
 
 ## grep
 

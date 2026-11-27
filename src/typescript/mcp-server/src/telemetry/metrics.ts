@@ -1,9 +1,11 @@
 /**
  * Prometheus metrics for the workspace-qdrant MCP server.
  *
- * Defines 12 metric families:
+ * Metric families include:
  *   wqm_mcp_tool_invocations_total     - Counter, labels [tool, status]
  *   wqm_mcp_tool_duration_seconds      - Histogram, label [tool], buckets [0.01…5]
+ *   wqm_mcp_read_log_reads_total       - Counter, label [mode]
+ *   wqm_mcp_read_log_bytes_total       - Counter, labels [mode, kind]
  *   wqm_mcp_session_count              - Gauge
  *   wqm_mcp_daemon_fallback_total      - Counter, labels [tool, reason]
  *   wqm_mcp_multiclone_search_total    - Counter, label [degraded]
@@ -24,6 +26,7 @@
  */
 
 import { Counter, Histogram, Gauge, Registry } from 'prom-client';
+import { READ_LOG_MODES, type ReadLogMode } from '../tool-definitions/read-log.js';
 import { pushMetricsToOTLP } from './otlp.js';
 
 /** Shared Prometheus registry for this MCP server process. */
@@ -45,6 +48,33 @@ export const toolDuration = new Histogram({
   buckets: [0.01, 0.05, 0.1, 0.5, 1, 5],
   registers: [register],
 });
+
+const readLogReads = new Counter({
+  name: 'wqm_mcp_read_log_reads_total',
+  help: 'Successful read_log calls by requested mode',
+  labelNames: ['mode'] as const,
+  registers: [register],
+});
+
+const readLogBytes = new Counter({
+  name: 'wqm_mcp_read_log_bytes_total',
+  help: 'Source bytes read and UTF-8 text bytes returned by read_log',
+  labelNames: ['mode', 'kind'] as const,
+  registers: [register],
+});
+
+// Expose zeroes before the first read so a scrape can capture the baseline for each mode.
+for (const mode of READ_LOG_MODES) {
+  readLogReads.inc({ mode }, 0);
+  readLogBytes.inc({ mode, kind: 'raw' }, 0);
+  readLogBytes.inc({ mode, kind: 'returned' }, 0);
+}
+
+export function recordReadLogUsage(mode: ReadLogMode, bytesIn: number, bytesOut: number): void {
+  readLogReads.inc({ mode });
+  readLogBytes.inc({ mode, kind: 'raw' }, bytesIn);
+  readLogBytes.inc({ mode, kind: 'returned' }, bytesOut);
+}
 
 export const sessionCount = new Gauge({
   name: 'wqm_mcp_session_count',

@@ -40,6 +40,9 @@ describe('server instructions kernel', () => {
     expect(SERVER_INSTRUCTIONS).toContain('scratchpad');
     expect(SERVER_INSTRUCTIONS).toContain('`grep`');
     expect(SERVER_INSTRUCTIONS).toContain('`graph`');
+    expect(SERVER_INSTRUCTION_LINES.find((line) => line.startsWith('Routing:'))).toContain(
+      '`read_log`'
+    );
     expect(SERVER_INSTRUCTIONS).toContain('feedback');
   });
 

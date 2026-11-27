@@ -24,6 +24,7 @@ const READ_ONLY = new Set([
   'search_eval',
   'graph',
   'help',
+  'read_log',
 ]);
 
 // Tools with at least one persistent-state mutation — must NOT claim read-only.

@@ -14,7 +14,7 @@ trust_level = "trusted"
 enabled = true
 startup_timeout_sec = 20
 tool_timeout_sec = 120
-enabled_tools = ["search", "retrieve", "grep", "list", "store", "scratchpad", "rules", "workspace_index", "graph", "help"]
+enabled_tools = ["search", "retrieve", "grep", "list", "store", "scratchpad", "rules", "workspace_index", "graph", "help", "read_log"]
 url = "http://localhost:6335/mcp"
 bearer_token_env_var = "MCP_HTTP_TOKEN"
 

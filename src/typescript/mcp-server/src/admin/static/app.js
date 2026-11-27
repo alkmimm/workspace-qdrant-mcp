@@ -1511,6 +1511,13 @@ const PG_TOOLS = [
     F('libraryName', 'text', { adv: true }),
     F('projectId', 'text', { adv: true }),
   ] },
+  { name: 'read_log', mutates: false, note: 'read consecutive lines from a server log', fields: [
+    F('file', 'text', { req: true, ph: 'memexd.log' }),
+    F('mode', 'enum', { enum: ['compact', 'template', 'interleaved', 'auto', 'raw'] }),
+    F('groupBy', 'enum', { enum: ['block', 'window'], adv: true }),
+    F('startLine', 'number'),
+    F('endLine', 'number'),
+  ] },
   { name: 'grep', mutates: false, note: 'exact / regex FTS substring search', fields: [
     F('pattern', 'text', { req: true, ph: 'literal or regex' }),
     F('cwd', 'text'),
@@ -1881,7 +1888,9 @@ function pgRenderResult(resp) {
   els.pgHits.innerHTML = resp.ok
     ? pgHitsTable(resp.tool, resp.result)
     : `<pre class="debug error" style="white-space:pre-wrap">${escapeHtml(resp.error || 'error')}</pre>`;
-  els.pgRaw.textContent = JSON.stringify(resp.ok ? resp.result : resp, null, 2);
+  els.pgRaw.textContent = resp.ok && typeof resp.result === 'string'
+    ? resp.result
+    : JSON.stringify(resp.ok ? resp.result : resp, null, 2);
 }
 
 async function pgRun() {

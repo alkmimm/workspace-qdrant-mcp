@@ -40,6 +40,8 @@ Source: `src/typescript/mcp-server/src/telemetry/metrics.ts`
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `wqm_mcp_tool_invocations_total` | Counter | `tool`, `status` | Total tool calls; `status` is `success` or `error`. |
+| `wqm_mcp_read_log_reads_total` | Counter | `mode` | Successful log reads by requested mode, including empty reads. |
+| `wqm_mcp_read_log_bytes_total` | Counter | `mode`, `kind` | Selected source bytes (`raw`) and returned UTF-8 text bytes (`returned`). See [usage and byte savings by mode](../../docs/reference/mcp-tools.md#usage-and-byte-savings-by-mode). |
 | `wqm_mcp_tool_duration_seconds` | Histogram | `tool` | Tool execution time. |
 | `wqm_mcp_session_count` | Gauge | - | Active MCP sessions. |
 | `wqm_mcp_daemon_fallback_total` | Counter | `tool`, `reason` | Times the daemon was unreachable and a fallback was used. |
