@@ -13,6 +13,7 @@ import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/se
 import {
   observeToolResponseDelivery,
   reapIdleSessions,
+  SessionEventStore,
   toolNamesFromBody,
   updateActiveRequests,
   withoutContentLength,
@@ -101,6 +102,37 @@ describe('active request tracking', () => {
     expect(active.get('session')).toBe(1);
     updateActiveRequests(active, 'session', -1);
     expect(active.has('session')).toBe(false);
+  });
+});
+
+describe('SessionEventStore', () => {
+  it('replays results written after the client priming event', async () => {
+    const store = new SessionEventStore();
+    const primingId = await store.storeEvent('stream-a', {} as never);
+    const response = { jsonrpc: '2.0', id: 2, result: { ok: true } } as const;
+    const responseId = await store.storeEvent('stream-a', response);
+    await store.storeEvent('stream-b', { jsonrpc: '2.0', method: 'notifications/progress' });
+    const replayed: Array<{ id: string; message: unknown }> = [];
+
+    const streamId = await store.replayEventsAfter(primingId, {
+      send: async (id, message) => {
+        replayed.push({ id, message });
+      },
+    });
+
+    expect(streamId).toBe('stream-a');
+    expect(replayed).toEqual([{ id: responseId, message: response }]);
+    expect(await store.getStreamIdForEventId(primingId)).toBe('stream-a');
+  });
+
+  it('bounds retained events and rejects an expired resume cursor', async () => {
+    const store = new SessionEventStore(2);
+    const expired = await store.storeEvent('stream', {} as never);
+    await store.storeEvent('stream', { jsonrpc: '2.0', method: 'notifications/one' });
+    await store.storeEvent('stream', { jsonrpc: '2.0', method: 'notifications/two' });
+
+    expect(await store.getStreamIdForEventId(expired)).toBeUndefined();
+    expect(await store.replayEventsAfter(expired, { send: vi.fn() })).toBe('');
   });
 });
 

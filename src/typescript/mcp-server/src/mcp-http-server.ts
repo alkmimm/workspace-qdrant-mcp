@@ -25,9 +25,10 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import type { EventStore } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { isInitializeRequest, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 
 import type { HttpTlsOptions, HttpTransportOptions } from './server-types.js';
 import { recordHttpRequest, recordToolResponseDelivery } from './telemetry/metrics.js';
@@ -51,6 +52,56 @@ const SESSION_IDLE_TTL_MS = ((): number => {
 })();
 /** How often the idle-session reaper runs. */
 const SESSION_REAP_INTERVAL_MS = 60_000;
+
+/**
+ * Per-session event store used by Streamable HTTP resumability.
+ *
+ * Besides replaying a response after a transient disconnect, configuring an
+ * event store makes the SDK emit an SSE priming event as soon as a tool call is
+ * accepted. That first byte prevents HTTP clients/proxies with a 300-second
+ * response-header timeout from dropping a valid long-running call before its
+ * result is ready. The store is intentionally bounded and dies with the MCP
+ * session, so abandoned sessions cannot grow process memory indefinitely.
+ */
+export class SessionEventStore implements EventStore {
+  private readonly events = new Map<string, { streamId: string; message: JSONRPCMessage }>();
+  private sequence = 0;
+
+  constructor(private readonly maxEvents = 256) {}
+
+  async storeEvent(streamId: string, message: JSONRPCMessage): Promise<string> {
+    const eventId = `${++this.sequence}-${randomUUID()}`;
+    this.events.set(eventId, { streamId, message });
+    while (this.events.size > this.maxEvents) {
+      const oldest = this.events.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.events.delete(oldest);
+    }
+    return eventId;
+  }
+
+  async getStreamIdForEventId(eventId: string): Promise<string | undefined> {
+    return this.events.get(eventId)?.streamId;
+  }
+
+  async replayEventsAfter(
+    lastEventId: string,
+    { send }: { send: (eventId: string, message: JSONRPCMessage) => Promise<void> }
+  ): Promise<string> {
+    const found = this.events.get(lastEventId);
+    if (!found) return '';
+    let afterLast = false;
+    for (const [eventId, event] of this.events) {
+      if (event.streamId !== found.streamId) continue;
+      if (eventId === lastEventId) {
+        afterLast = true;
+        continue;
+      }
+      if (afterLast) await send(eventId, event.message);
+    }
+    return found.streamId;
+  }
+}
 
 /**
  * Close sessions whose last activity is older than `ttlMs`. Returns the evicted
@@ -439,6 +490,8 @@ async function handleRequest(
   let transport!: StreamableHTTPServerTransport;
   transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: (): string => randomUUID(),
+    eventStore: new SessionEventStore(),
+    retryInterval: 1_000,
     onsessioninitialized: (newSessionId: string): void => {
       transports.set(newSessionId, transport);
       lastSeen.set(newSessionId, Date.now());
