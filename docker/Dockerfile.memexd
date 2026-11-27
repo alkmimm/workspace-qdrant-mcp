@@ -577,8 +577,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- \
         branch_mirror branch_reconcile add_branch_to_file_metadata_by_file_ids branch_bulk \
         --test-threads=4 2>&1 | tee /tmp/branch-mirror.log; \
-    grep -q "^test result: ok\. 23 passed" /tmp/branch-mirror.log \
-    || { echo "GATE: expected exactly 23 branch-mirror + bulk branch-membership tests (incl. \
+    grep -q "^test result: ok\. 25 passed" /tmp/branch-mirror.log \
+    || { echo "GATE: expected exactly 25 branch-mirror + bulk branch-membership tests (incl. \
 the hash-certified worktree bulk and the batched Qdrant append plan) to run and pass — this gate counted nothing until 2026-11-10, \
 so a rename silently emptied it. If you ADDED a test here, bump this count."; exit 1; }
 
@@ -625,9 +625,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- \
         unified_queue_processor::processing_loop::concurrent_dispatch::tests \
         --test-threads=4 2>&1 | tee /tmp/dispatch.log; \
-    grep -q "^test result: ok\. 7 passed" /tmp/dispatch.log \
-    || { echo "GATE: expected exactly 7 dispatch-driver tests (refill, semaphore, cancellation, \
-memory pressure) to run and pass. If you ADDED a test here, bump this count."; exit 1; }
+    grep -q "^test result: ok\. 9 passed" /tmp/dispatch.log \
+    || { echo "GATE: expected exactly 9 dispatch-driver tests (refill, prune priority, semaphore, \
+cancellation, memory pressure) to run and pass. If you ADDED a test here, bump this count."; exit 1; }
 
 # Queue finalization runs here, same rationale: hermetic (tempdir SQLite). The
 # FTS5 batch writer is a SECOND finalizer, running concurrently with the
@@ -652,7 +652,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 resolve_destination, FTS5 batch finalize) to run and pass. If you ADDED a test here, bump this \
 count."; exit 1; }
 
-# Guard the shared file-mutation lookup and typed uplift selection.
+# Guard metadata refresh, the shared file-mutation lookup, and typed uplift selection.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
@@ -660,9 +660,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ORT_LIB_LOCATION=/opt/onnxruntime/lib \
     cargo test -p workspace-qdrant-core --lib -- \
         file_mutation_retries_when_tracking_lookup_fails uplift_page_keeps_real_ids_for_unmarked_points \
+        stats_reader_skips_unchanged_ticks_and_refreshes_after_external_commit \
         --test-threads=4 > /tmp/file-mutation-uplift.log 2>&1; \
     result=$?; cat /tmp/file-mutation-uplift.log; \
-    [ "$result" -eq 0 ] && grep -q "^test result: ok\. 2 passed; 0 failed; 0 ignored" /tmp/file-mutation-uplift.log
+    [ "$result" -eq 0 ] && grep -q "^test result: ok\. 3 passed; 0 failed; 0 ignored" /tmp/file-mutation-uplift.log
 
 # Index staleness runs here, same rationale: hermetic (in-memory SQLite, no
 # I/O). On 2026-11-10 the queue had been stuck for 4 days and nobody knew: the
@@ -765,8 +766,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         strategies::processing::file::graph_lsp_calls::tests \
         lsp::project_manager::call_hierarchy::tests \
         --test-threads=4 2>&1 | tee /tmp/graph-core.log; \
-    grep -q "^test result: ok\. 286 passed" /tmp/graph-core.log \
-    || { echo "GATE: expected exactly 286 core graph tests (graph::, backfill, ingest, LSP calls, git::tips) \
+    grep -q "^test result: ok\. 288 passed" /tmp/graph-core.log \
+    || { echo "GATE: expected exactly 288 core graph tests (graph::, backfill, ingest, LSP calls, git::tips) \
 to run and pass. If you ADDED a test here, bump this count."; exit 1; } \
  && cargo test -p workspace-qdrant-core --no-fail-fast \
         --test graph_algorithm_tests --test graph_extractor_tests \
@@ -1139,10 +1140,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo test -p workspace-qdrant-core --lib -- \
         startup::reconciliation::branch_prune \
         startup::reconciliation::tests::branch_prune:: \
+        strategies::processing::file::branch_prune_batch::tests \
         --test-threads=4 2>&1 | tee /tmp/branch-prune.log; \
-    grep -q "^test result: ok\. 20 passed" /tmp/branch-prune.log \
-    || { echo "GATE: expected exactly 20 branch-prune tests to run and pass (4 payload/count + \
-6 policy + 10 integration, 2 of them on dropping a dead branch's queued work) — libtest exits \
+    grep -q "^test result: ok\. 22 passed" /tmp/branch-prune.log \
+    || { echo "GATE: expected exactly 22 branch-prune tests to run and pass (4 payload/count + \
+6 policy + 10 integration + 2 grouped prune) — libtest exits \
 0 when a positional filter matches nothing, so a module rename would silently un-gate the \
 guards that decide which branch's index is deleted. If you ADDED a test here, bump this \
 count."; exit 1; }

@@ -1108,8 +1108,8 @@ pub fn start_git_state_monitor(pool: SqlitePool) -> JoinHandle<()> {
 /// Periodically refresh `file_metadata`-derived gauges from search.db
 /// (Task #3 of the FTS5 size-guard series).
 ///
-/// Queries `file_metadata` grouped by `(tenant_id, branch)` every 30s and
-/// pushes file_count, total_bytes, and fts5_skipped_count into the matching
+/// Checks search.db for changes every 30s. After a change, aggregates
+/// `file_metadata` by `(tenant_id, branch)` and publishes the counts to the
 /// Prometheus gauges. Skipped pairs that disappear (e.g., after a project
 /// is removed) are zeroed-out so panels don't show stale series — mirrors
 /// the convention in `start_queue_depth_exporter`.
@@ -1121,17 +1121,32 @@ pub fn start_git_state_monitor(pool: SqlitePool) -> JoinHandle<()> {
 /// use the admin UI / sidecar SQL queries.
 pub fn start_file_metadata_exporter(search_db: Arc<SearchDbManager>) -> JoinHandle<()> {
     let handle = tokio::spawn(async move {
+        use std::collections::HashSet;
+        use workspace_qdrant_core::search_db::FileMetadataStatsReader;
+
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-        // Tracks every (tenant_id, branch) pair we've ever emitted so we can
-        // zero-out gauges for pairs that vanish (deleted projects / branches).
-        let known: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<(String, String)>>> =
-            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut reader = None;
+        let mut known = HashSet::<(String, String)>::new();
+        let mut logged_first_skip = false;
 
         loop {
             interval.tick().await;
-            match search_db.file_metadata_stats_by_tenant_branch().await {
-                Ok(rows) => {
-                    let mut seen = std::collections::HashSet::new();
+            if reader.is_none() {
+                match FileMetadataStatsReader::open(search_db.path()).await {
+                    Ok(connection) => reader = Some(connection),
+                    Err(e) => {
+                        debug!(error = %e, "file_metadata exporter connection failed");
+                        continue;
+                    }
+                }
+            }
+            let Some(connection) = reader.as_mut() else {
+                continue;
+            };
+            match connection.refresh_if_changed().await {
+                Ok(Some(rows)) => {
+                    let mut seen = HashSet::new();
                     for row in rows {
                         METRICS.set_file_metadata_stats(
                             &row.tenant_id,
@@ -1142,15 +1157,21 @@ pub fn start_file_metadata_exporter(search_db: Arc<SearchDbManager>) -> JoinHand
                         );
                         seen.insert((row.tenant_id, row.branch));
                     }
-                    let mut guard = known.lock().await;
-                    for pair in guard.iter() {
-                        if !seen.contains(pair) {
-                            METRICS.set_file_metadata_stats(&pair.0, &pair.1, 0, 0, 0);
-                        }
+                    for pair in known.difference(&seen) {
+                        METRICS.set_file_metadata_stats(&pair.0, &pair.1, 0, 0, 0);
                     }
-                    guard.extend(seen);
+                    known = seen;
                 }
-                Err(e) => debug!("file_metadata stats refresh failed: {}", e),
+                Ok(None) => {
+                    if !logged_first_skip {
+                        info!("file_metadata exporter skipped aggregation (search.db unchanged)");
+                        logged_first_skip = true;
+                    }
+                }
+                Err(e) => {
+                    debug!(error = %e, "file_metadata stats refresh failed");
+                    reader = None;
+                }
             }
         }
     });

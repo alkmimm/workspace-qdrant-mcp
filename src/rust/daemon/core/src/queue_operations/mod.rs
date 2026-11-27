@@ -14,6 +14,7 @@ mod file_routing;
 mod query;
 mod triage;
 
+pub(crate) use query::has_ready_work;
 pub use query::InFlightSummary;
 mod update;
 mod validation;
