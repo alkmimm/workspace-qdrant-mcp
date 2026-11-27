@@ -86,12 +86,15 @@ const DOMAIN_GLOSSARY = [
 ].join('; ');
 
 const SYSTEM_PROMPT =
-  'You translate software-engineering search queries into English. ' +
+  'You translate software-engineering search queries from Portuguese into English. ' +
+  'Output MUST be English. ' +
   'Reply with the translation ONLY — no quotes, no explanation, no preamble. ' +
+  'Never paraphrase in Portuguese, even when the input discusses translation or language. ' +
   'Keep code identifiers, file paths, and technical terms exactly as written. ' +
   'Use this codebase glossary when the source term appears: ' +
   DOMAIN_GLOSSARY +
-  '. Translate the question as a question; never answer it.';
+  '. Translate the question as a question; never answer it. ' +
+  'Example: Onde a tradução de consultas é aplicada? -> Where is query translation applied?';
 
 /** Minimal shape consumed from an OpenAI-compatible chat completion. */
 interface ChatCompletionResponse {

@@ -57,6 +57,19 @@ describe('QueryTranslator', () => {
     expect(body.messages.at(-1)).toEqual({ role: 'user', content: PT });
   });
 
+  it('explicitly requires English when the Portuguese query discusses translation', async () => {
+    const fetchImpl = respondWith(EN);
+    await translator(fetchImpl).translateToEnglish(
+      'Onde a tradução de consultas em português é aplicada antes da busca semântica?'
+    );
+
+    const body = JSON.parse((vi.mocked(fetchImpl).mock.calls[0]![1] as RequestInit).body as string);
+    const systemPrompt = body.messages[0]?.content as string;
+    expect(systemPrompt).toContain('Output MUST be English');
+    expect(systemPrompt).toContain('even when the input discusses translation or language');
+    expect(systemPrompt).toContain('Where is query translation applied?');
+  });
+
   it('sends no Authorization header — the sidecar is unauthenticated', async () => {
     const fetchImpl = respondWith(EN);
     await translator(fetchImpl).translateToEnglish(PT);
