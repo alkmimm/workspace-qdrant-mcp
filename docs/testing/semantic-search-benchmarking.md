@@ -253,8 +253,9 @@ Verdict: `poor` → `mixed` (only `top3 < 80%` remains).
 
 ## Reaching the remaining gate (`top3 ≥ 80%`)
 
-**Update (2026-06-16) — the gate was reached by the embedding upgrade, not the
-reranker.** Cheap levers (dedup, overfetch, path-boost) plus a second-stage
+**Update (2026-06-16) — the recall gate was reached by the embedding upgrade,
+not the reranker; the top-3 gate remains open.** Cheap levers (dedup, overfetch,
+path-boost) plus a second-stage
 cross-encoder lifted recall@10 to the ~58–73% range but stalled on top-3,
 because every dense model up to that point (all-MiniLM → e5 → BGE-M3) was
 *general/multilingual*, not code-specialized — the misses were **retrieval**
