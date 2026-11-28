@@ -81,7 +81,7 @@ impl LoopState {
             idle_since: None,
             last_grammar_check,
             maintenance_scheduler,
-            graph_backfill: Default::default(),
+            graph_backfill: crate::strategies::processing::file::GraphBackfill::from_env(),
         }
     }
 }

@@ -138,6 +138,8 @@ Use these when ingestion is the bottleneck:
 | `WQM_QUEUE_MAX_CONCURRENT_ITEMS` | `1` | Items dispatched in parallel within a queue batch |
 | `WQM_QUEUE_BATCH_SIZE` | `10` | Items dequeued per cycle |
 | `WQM_QUEUE_POLL_INTERVAL_MS` | `500` | Delay between dequeue polls |
+| `WQM_GRAPH_BACKFILL_REFRESH_SECS` | `300` | Base delay between idle graph-generation repair sweeps |
+| `WQM_GRAPH_BACKFILL_MAX_NOOP_REFRESH_SECS` | `21600` | Maximum exponential delay after consecutive sweeps persist zero graph generations. A successful repair resets the interval. Failed foreground writes request a sweep at the base interval and restart the backoff for subsequent retries. |
 | `WQM_RESOURCE_MAX_CONCURRENT_EMBEDDINGS` | auto | Concurrent embedding jobs |
 | `WQM_RESOURCE_ONNX_INTRA_THREADS` | auto | ONNX threads per embedding job |
 | `WQM_RESOURCE_INTER_ITEM_DELAY_MS` | `50` | Delay between queue items |

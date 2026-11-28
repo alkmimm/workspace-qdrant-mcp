@@ -190,6 +190,11 @@ services:
       WQM_RESOURCE_CPU_PRESSURE_THRESHOLD: ${WQM_RESOURCE_CPU_PRESSURE_THRESHOLD:-1.2}
       WQM_QUEUE_BATCH_SIZE: ${WQM_QUEUE_BATCH_SIZE:-32}
       WQM_QUEUE_POLL_INTERVAL_MS: ${WQM_QUEUE_POLL_INTERVAL_MS:-100}
+      # Idle graph-generation repair. A completed no-op sweep doubles its delay
+      # until MAX_NOOP_REFRESH_SECS, avoiding repeated full-table scans after the
+      # graph converges. Any rebuilt generation resets the delay to the base.
+      WQM_GRAPH_BACKFILL_REFRESH_SECS: ${WQM_GRAPH_BACKFILL_REFRESH_SECS:-300}
+      WQM_GRAPH_BACKFILL_MAX_NOOP_REFRESH_SECS: ${WQM_GRAPH_BACKFILL_MAX_NOOP_REFRESH_SECS:-21600}
       # Item-level dispatch concurrency within a batch. `1` is byte-identical
       # to the legacy sequential loop — items dispatch one at a time, so ONE
       # slow item (slow embed / DB-write contention) stalls the whole queue for

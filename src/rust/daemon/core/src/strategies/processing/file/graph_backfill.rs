@@ -26,8 +26,12 @@ use crate::graph::GRAPH_EXTRACTOR_VERSION;
 use crate::queue_operations::has_ready_work;
 use crate::tracked_files_schema::compute_file_hash;
 
-/// Delay between completed sweeps.
-const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+/// Delay between completed sweeps before any no-op backoff is applied.
+const DEFAULT_REFRESH_INTERVAL_SECS: u64 = 300;
+/// Upper bound for repeated no-op sweeps. A converged graph should not consume a
+/// core every five minutes forever, but it must still heal generations that
+/// become reachable later.
+const DEFAULT_MAX_NOOP_REFRESH_INTERVAL_SECS: u64 = 6 * 3600;
 const PAGE_SIZE: i64 = 512;
 /// Wall-clock budget of one idle step: the queue may fill meanwhile, so the
 /// step yields well before a user-visible delay.
@@ -46,15 +50,92 @@ struct Pending {
 }
 
 /// State of the backfill across idle steps.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct GraphBackfill {
     pending: VecDeque<Pending>,
     sweep: Option<Sweep>,
     finished_at: Option<Instant>,
+    base_refresh_interval: Duration,
+    max_noop_refresh_interval: Duration,
+    consecutive_noop_sweeps: u32,
+    retry_incomplete_sweep: bool,
     scanned: u64,
     rebuilt: u64,
+    failed: u64,
     from_git: u64,
     unreachable: u64,
+}
+
+impl Default for GraphBackfill {
+    fn default() -> Self {
+        Self::with_intervals(
+            Duration::from_secs(DEFAULT_REFRESH_INTERVAL_SECS),
+            Duration::from_secs(DEFAULT_MAX_NOOP_REFRESH_INTERVAL_SECS),
+        )
+    }
+}
+
+impl GraphBackfill {
+    pub(crate) fn from_env() -> Self {
+        let base = env_duration(
+            "WQM_GRAPH_BACKFILL_REFRESH_SECS",
+            DEFAULT_REFRESH_INTERVAL_SECS,
+        );
+        let max = env_duration(
+            "WQM_GRAPH_BACKFILL_MAX_NOOP_REFRESH_SECS",
+            DEFAULT_MAX_NOOP_REFRESH_INTERVAL_SECS,
+        );
+        Self::with_intervals(base, max)
+    }
+
+    fn with_intervals(base: Duration, max: Duration) -> Self {
+        Self {
+            pending: VecDeque::new(),
+            sweep: None,
+            finished_at: None,
+            base_refresh_interval: base,
+            max_noop_refresh_interval: max.max(base),
+            consecutive_noop_sweeps: 0,
+            retry_incomplete_sweep: false,
+            scanned: 0,
+            rebuilt: 0,
+            failed: 0,
+            from_git: 0,
+            unreachable: 0,
+        }
+    }
+
+    fn refresh_interval(&self, repair_requested: bool) -> Duration {
+        if repair_requested || self.retry_incomplete_sweep {
+            self.base_refresh_interval
+        } else {
+            no_op_backoff(
+                self.base_refresh_interval,
+                self.max_noop_refresh_interval,
+                self.consecutive_noop_sweeps,
+            )
+        }
+    }
+
+    fn refresh_due(&self, now: Instant, repair_requested: bool) -> bool {
+        self.finished_at.is_none_or(|at| {
+            now.saturating_duration_since(at) >= self.refresh_interval(repair_requested)
+        })
+    }
+}
+
+fn env_duration(name: &str, default_secs: u64) -> Duration {
+    let secs = std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default_secs);
+    Duration::from_secs(secs)
+}
+
+fn no_op_backoff(base: Duration, max: Duration, streak: u32) -> Duration {
+    let multiplier = 1_u32.checked_shl(streak.min(31)).unwrap_or(u32::MAX);
+    base.saturating_mul(multiplier).min(max.max(base))
 }
 
 #[derive(Debug)]
@@ -129,17 +210,19 @@ impl GraphBackfill {
         let started = Instant::now();
         if self.pending.is_empty() {
             if self.sweep.is_none() {
-                if self
-                    .finished_at
-                    .is_some_and(|at| at.elapsed() < REFRESH_INTERVAL)
-                {
+                if !self.refresh_due(started, graph.backfill_requested()) {
                     return false;
+                }
+                if graph.take_backfill_request() {
+                    // Retry a newly discovered gap on its own backoff, starting
+                    // with the base interval even after a long idle streak.
+                    self.consecutive_noop_sweeps = 0;
                 }
                 match Sweep::start(&ctx.pool).await {
                     Ok(sweep) => self.sweep = Some(sweep),
                     Err(e) => {
                         warn!(error = %e, "graph backfill: could not start sweep");
-                        self.finish();
+                        self.finish(false);
                         return false;
                     }
                 }
@@ -147,12 +230,12 @@ impl GraphBackfill {
             match self.discover_page(ctx).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    self.finish();
+                    self.finish(true);
                     return false;
                 }
                 Err(e) => {
                     warn!(error = %e, "graph backfill: page discovery failed");
-                    self.finish();
+                    self.finish(false);
                     return false;
                 }
             }
@@ -179,7 +262,7 @@ impl GraphBackfill {
                 Ok(false) => {}
                 Err(e) => {
                     warn!(error = %e, "graph backfill: generation probe failed");
-                    self.finish();
+                    self.finish(false);
                     return false;
                 }
             }
@@ -194,7 +277,7 @@ impl GraphBackfill {
                 },
             };
             let abs_str = abs.to_string_lossy().to_string();
-            super::graph_ingest::rebuild_generation(
+            let persisted = super::graph_ingest::rebuild_generation(
                 ctx,
                 &p.tenant_id,
                 &p.collection,
@@ -209,10 +292,12 @@ impl GraphBackfill {
                 staged.is_none(),
             )
             .await;
-            if staged.is_some() {
-                self.from_git += 1;
+            if persisted {
+                self.rebuilt += 1;
+                self.from_git += u64::from(staged.is_some());
+            } else {
+                self.failed += 1;
             }
-            self.rebuilt += 1;
         }
         false
     }
@@ -269,21 +354,222 @@ impl GraphBackfill {
         Ok(true)
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, completed: bool) {
+        let no_op = completed && self.rebuilt == 0;
+        let next_noop_streak = if no_op {
+            self.consecutive_noop_sweeps.saturating_add(1)
+        } else if completed {
+            0
+        } else {
+            self.consecutive_noop_sweeps
+        };
+        let mut reset =
+            Self::with_intervals(self.base_refresh_interval, self.max_noop_refresh_interval);
+        reset.finished_at = Some(Instant::now());
+        reset.consecutive_noop_sweeps = next_noop_streak;
+        reset.retry_incomplete_sweep = !completed;
         if self.sweep.is_some() {
             info!(
                 scanned = self.scanned,
                 page_size = PAGE_SIZE,
                 rebuilt = self.rebuilt,
+                failed = self.failed,
                 from_git = self.from_git,
                 unreachable = self.unreachable,
+                completed,
+                no_op_streak = next_noop_streak,
+                next_refresh_secs = reset.refresh_interval(false).as_secs(),
                 "Graph backfill sweep ended"
             );
         }
-        *self = Self {
-            finished_at: Some(Instant::now()),
-            ..Self::default()
-        };
+        *self = reset;
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn no_op_backoff_doubles_and_caps() {
+        let base = Duration::from_secs(300);
+        let max = Duration::from_secs(3600);
+
+        assert_eq!(no_op_backoff(base, max, 0), Duration::from_secs(300));
+        assert_eq!(no_op_backoff(base, max, 1), Duration::from_secs(600));
+        assert_eq!(no_op_backoff(base, max, 2), Duration::from_secs(1200));
+        assert_eq!(no_op_backoff(base, max, 20), max);
+    }
+
+    #[test]
+    fn interval_configuration_never_allows_max_below_base() {
+        let backfill =
+            GraphBackfill::with_intervals(Duration::from_secs(900), Duration::from_secs(60));
+
+        assert_eq!(backfill.base_refresh_interval, Duration::from_secs(900));
+        assert_eq!(backfill.max_noop_refresh_interval, Duration::from_secs(900));
+    }
+
+    async fn repair_fixture() -> (ProcessingContext, SqlitePool, tempfile::TempDir) {
+        use crate::graph::{GraphDbManager, SharedGraphStore, SqliteGraphStore};
+        let dir = tempfile::tempdir().unwrap();
+        let graph_db = GraphDbManager::new(dir.path().join("graph.db"))
+            .await
+            .unwrap();
+        let graph_pool = graph_db.pool().clone();
+        let graph = SharedGraphStore::new(SqliteGraphStore::new(graph_pool.clone()));
+        let state_pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(crate::unified_queue_schema::CREATE_UNIFIED_QUEUE_SQL)
+            .execute(&state_pool)
+            .await
+            .unwrap();
+        sqlx::query(crate::watch_folders_schema::CREATE_WATCH_FOLDERS_SQL)
+            .execute(&state_pool)
+            .await
+            .unwrap();
+        sqlx::query(crate::tracked_files_schema::schema::CREATE_TRACKED_FILES_V41_SQL)
+            .execute(&state_pool)
+            .await
+            .unwrap();
+
+        let file = dir.path().join("empty.rs");
+        std::fs::write(&file, "").unwrap();
+        sqlx::query(
+            "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, enabled, created_at, updated_at) \
+             VALUES ('watch', ?1, 'projects', 'tenant', 1, '', '')",
+        )
+        .bind(dir.path().to_str().unwrap())
+        .execute(&state_pool)
+        .await.unwrap();
+        sqlx::query(
+            "INSERT INTO tracked_files (watch_folder_id, relative_path, file_hash, file_mtime, base_point, created_at, updated_at) \
+             VALUES ('watch', 'empty.rs', ?1, '', 'generation', '', '')",
+        )
+        .bind(compute_file_hash(&file).unwrap())
+        .execute(&state_pool)
+        .await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_graph_write BEFORE INSERT ON graph_generations \
+             BEGIN SELECT RAISE(ABORT, 'graph write failed'); END",
+        )
+        .execute(&graph_pool)
+        .await
+        .unwrap();
+
+        let ctx = super::super::tests::build_test_context(state_pool).with_graph_store(graph);
+        (ctx, graph_pool, dir)
+    }
+
+    #[tokio::test]
+    async fn failed_generation_write_backs_off_and_success_resets() {
+        let (ctx, graph_pool, _dir) = repair_fixture().await;
+        let base = Duration::from_secs(1);
+        let mut backfill = GraphBackfill::with_intervals(base, Duration::from_secs(60));
+        let graph = ctx.graph_store.as_ref().unwrap();
+        backfill.step(&ctx, Duration::MAX).await;
+        assert_eq!(backfill.rebuilt, 0);
+        assert_eq!(backfill.failed, 1);
+        assert!(!graph
+            .generation_extracted("tenant", "generation")
+            .await
+            .unwrap());
+        assert!(!graph.backfill_requested());
+        backfill.step(&ctx, Duration::MAX).await;
+        assert_eq!(backfill.refresh_interval(false), base * 2);
+
+        sqlx::query("DROP TRIGGER fail_graph_write")
+            .execute(&graph_pool)
+            .await
+            .unwrap();
+        backfill.finished_at = Some(Instant::now() - base * 2);
+        backfill.step(&ctx, Duration::MAX).await;
+        assert_eq!(backfill.rebuilt, 1);
+        assert!(graph
+            .generation_extracted("tenant", "generation")
+            .await
+            .unwrap());
+        backfill.step(&ctx, Duration::MAX).await;
+        assert_eq!(backfill.refresh_interval(false), base);
+    }
+
+    #[tokio::test]
+    async fn new_ingest_failure_wakes_backfill_before_idle_cap() {
+        let (ctx, graph_pool, dir) = repair_fixture().await;
+        let base = Duration::from_secs(1);
+        let cap = Duration::from_secs(3600);
+        let mut backfill = GraphBackfill::with_intervals(base, cap);
+        backfill.consecutive_noop_sweeps = 31;
+        let now = Instant::now();
+        backfill.finished_at = Some(now - base);
+        let graph = ctx.graph_store.as_ref().unwrap();
+        assert!(!backfill.refresh_due(now, false));
+        backfill.step(&ctx, Duration::MAX).await;
+        assert!(backfill.sweep.is_none());
+
+        super::super::graph_ingest::ingest_graph_edges(
+            &ctx,
+            "tenant",
+            "empty.rs",
+            dir.path().join("empty.rs").to_str().unwrap(),
+            &[],
+            "generation",
+            false,
+        )
+        .await;
+        assert!(graph.backfill_requested());
+        let finished = backfill.finished_at.unwrap();
+        assert!(!backfill.refresh_due(finished, true));
+        assert!(backfill.refresh_due(finished + base, true));
+
+        sqlx::query("DROP TRIGGER fail_graph_write")
+            .execute(&graph_pool)
+            .await
+            .unwrap();
+        backfill.step(&ctx, Duration::MAX).await;
+        assert!(!graph.backfill_requested());
+        assert!(graph
+            .generation_extracted("tenant", "generation")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn failed_requested_sweep_restarts_backoff_from_base() {
+        let (ctx, graph_pool, _dir) = repair_fixture().await;
+        let base = Duration::from_secs(1);
+        let cap = Duration::from_secs(3600);
+        let mut backfill = GraphBackfill::with_intervals(base, cap);
+        backfill.consecutive_noop_sweeps = 31;
+        backfill.finished_at = Some(Instant::now() - base);
+        assert_eq!(backfill.refresh_interval(false), cap);
+
+        let graph = ctx.graph_store.as_ref().unwrap();
+        graph.request_backfill();
+        for wait in [base, base * 2] {
+            backfill.finished_at = Some(Instant::now() - wait);
+            backfill.step(&ctx, Duration::MAX).await;
+            assert_eq!(backfill.failed, 1);
+            assert_eq!(backfill.rebuilt, 0);
+            assert!(!graph.backfill_requested());
+            backfill.step(&ctx, Duration::MAX).await;
+            let finished = backfill.finished_at.unwrap();
+            assert!(!backfill.refresh_due(finished + wait, false));
+            assert!(backfill.refresh_due(finished + wait * 2, false));
+        }
+
+        sqlx::query("DROP TRIGGER fail_graph_write")
+            .execute(&graph_pool)
+            .await
+            .unwrap();
+        backfill.finished_at = Some(Instant::now() - base * 4);
+        backfill.step(&ctx, Duration::MAX).await;
+        assert_eq!(backfill.rebuilt, 1);
+        assert!(graph
+            .generation_extracted("tenant", "generation")
+            .await
+            .unwrap());
+        backfill.step(&ctx, Duration::MAX).await;
+        assert_eq!(backfill.refresh_interval(false), base);
     }
 }
 

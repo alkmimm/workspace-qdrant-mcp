@@ -1,8 +1,10 @@
 //! PriorityManager: session lifecycle and priority management.
 
 use chrono::{Duration as ChronoDuration, Utc};
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
+use std::collections::BTreeMap;
 use std::time::Instant;
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use wqm_common::timestamps;
 
@@ -11,6 +13,10 @@ use crate::metrics::METRICS;
 use wqm_common::constants::COLLECTION_PROJECTS;
 
 use super::{OrphanedSessionCleanup, PriorityError, PriorityResult, SessionInfo};
+
+// The gRPC service and reaper have separate managers but publish to the same
+// registry. Hold this through commit and publication to keep snapshots ordered.
+static SESSION_TRANSITIONS: Mutex<()> = Mutex::const_new(());
 
 /// Priority Manager for server lifecycle-driven priority adjustments
 ///
@@ -51,42 +57,49 @@ impl PriorityManager {
             session_id
         };
 
-        // The project must exist (a watch_folders row for this tenant).
-        let exists: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM watch_folders WHERE tenant_id = ?1 AND collection = ?2 LIMIT 1",
-        )
-        .bind(tenant_id)
-        .bind(COLLECTION_PROJECTS)
-        .fetch_optional(&self.db_pool)
-        .await?;
-        if exists.is_none() {
-            return Err(PriorityError::ProjectNotFound(tenant_id.to_string()));
-        }
+        let _transition = SESSION_TRANSITIONS.lock().await;
+        let mut tx = crate::db_retry::begin_immediate(&self.db_pool).await?;
+        Self::require_project(&mut tx, tenant_id).await?;
 
         let now = timestamps::format_utc(&Utc::now());
-        sqlx::query(
+        let inserted = sqlx::query(
             r#"
             INSERT INTO project_sessions
                 (tenant_id, collection, session_id, registered_at, last_heartbeat_at)
             VALUES (?1, ?2, ?3, ?4, ?4)
             ON CONFLICT(tenant_id, collection, session_id)
-            DO UPDATE SET last_heartbeat_at = ?4
+            DO NOTHING
             "#,
         )
         .bind(tenant_id)
         .bind(COLLECTION_PROJECTS)
         .bind(session_id)
         .bind(&now)
-        .execute(&self.db_pool)
-        .await?;
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
 
-        let lifecycle = WatchFolderLifecycle::new(self.db_pool.clone());
-        lifecycle
-            .sync_is_active_from_sessions(tenant_id, COLLECTION_PROJECTS)
+        if !inserted {
+            sqlx::query(
+                "UPDATE project_sessions SET last_heartbeat_at = ?1 \
+                 WHERE tenant_id = ?2 AND collection = ?3 AND session_id = ?4",
+            )
+            .bind(&now)
+            .bind(tenant_id)
+            .bind(COLLECTION_PROJECTS)
+            .bind(session_id)
+            .execute(&mut *tx)
             .await?;
-        let active = self.live_session_count(tenant_id).await?;
+        }
 
-        METRICS.session_started(tenant_id, "high");
+        let active = Self::project_session_count(&mut tx, tenant_id).await?;
+        tx.commit().await?;
+
+        if inserted {
+            METRICS.session_created(tenant_id);
+        }
+        METRICS.set_active_session_count(tenant_id, i64::from(active));
         info!(
             "Session '{}' registered for project {}: {} live session(s)",
             session_id, tenant_id, active
@@ -94,16 +107,40 @@ impl PriorityManager {
         Ok(active)
     }
 
-    /// Count live sessions for a project (`project_sessions` rows).
-    async fn live_session_count(&self, tenant_id: &str) -> PriorityResult<i32> {
-        let count: i32 = sqlx::query_scalar(
+    async fn require_project(conn: &mut SqliteConnection, tenant_id: &str) -> PriorityResult<()> {
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM watch_folders WHERE tenant_id = ?1 AND collection = ?2 LIMIT 1",
+        )
+        .bind(tenant_id)
+        .bind(COLLECTION_PROJECTS)
+        .fetch_optional(conn)
+        .await?;
+        if exists.is_none() {
+            return Err(PriorityError::ProjectNotFound(tenant_id.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn live_session_count(
+        conn: &mut SqliteConnection,
+        tenant_id: &str,
+    ) -> PriorityResult<i32> {
+        Ok(sqlx::query_scalar(
             "SELECT COUNT(*) FROM project_sessions WHERE tenant_id = ?1 AND collection = ?2",
         )
         .bind(tenant_id)
         .bind(COLLECTION_PROJECTS)
-        .fetch_one(&self.db_pool)
-        .await?;
-        Ok(count)
+        .fetch_one(conn)
+        .await?)
+    }
+
+    async fn project_session_count(
+        conn: &mut SqliteConnection,
+        tenant_id: &str,
+    ) -> PriorityResult<i32> {
+        WatchFolderLifecycle::sync_is_active_from_sessions_on(conn, tenant_id, COLLECTION_PROJECTS)
+            .await?;
+        Self::live_session_count(conn, tenant_id).await
     }
 
     /// Drop a live session for a project (migration v42 model).
@@ -126,36 +163,29 @@ impl PriorityManager {
             session_id
         };
 
-        // Check if project exists
-        let exists: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM watch_folders WHERE tenant_id = ?1 AND collection = ?2 LIMIT 1",
-        )
-        .bind(tenant_id)
-        .bind(COLLECTION_PROJECTS)
-        .fetch_optional(&self.db_pool)
-        .await?;
+        let _transition = SESSION_TRANSITIONS.lock().await;
+        let mut tx = crate::db_retry::begin_immediate(&self.db_pool).await?;
+        Self::require_project(&mut tx, tenant_id).await?;
 
-        if exists.is_none() {
-            return Err(PriorityError::ProjectNotFound(tenant_id.to_string()));
-        }
-
-        sqlx::query(
+        let deleted = sqlx::query(
             "DELETE FROM project_sessions \
              WHERE tenant_id = ?1 AND collection = ?2 AND session_id = ?3",
         )
         .bind(tenant_id)
         .bind(COLLECTION_PROJECTS)
         .bind(session_id)
-        .execute(&self.db_pool)
-        .await?;
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
 
-        let lifecycle = WatchFolderLifecycle::new(self.db_pool.clone());
-        lifecycle
-            .sync_is_active_from_sessions(tenant_id, COLLECTION_PROJECTS)
-            .await?;
-        let remaining = self.live_session_count(tenant_id).await?;
+        let remaining = Self::project_session_count(&mut tx, tenant_id).await?;
+        tx.commit().await?;
 
-        METRICS.session_ended(tenant_id, "normal", 0.0);
+        if deleted {
+            METRICS.session_closed(tenant_id, 0.0);
+        }
+        METRICS.set_active_session_count(tenant_id, i64::from(remaining));
         info!(
             "Session '{}' unregistered for project {}: {} live session(s) remain",
             session_id, tenant_id, remaining
@@ -167,7 +197,8 @@ impl PriorityManager {
     ///
     /// Decrements `is_active` by 1 (clamped to 0) for only the watch folder
     /// at the specified path, leaving other entries for the same tenant
-    /// untouched. Returns the `is_active` value after the decrement.
+    /// untouched. Returns the `is_active` value after the decrement. Session
+    /// rows and their tenant-wide metric are unaffected by this priority change.
     pub async fn unregister_session_by_path(
         &self,
         tenant_id: &str,
@@ -200,8 +231,6 @@ impl PriorityManager {
             .await?
             .unwrap_or(0);
 
-        METRICS.session_ended(tenant_id, "normal", 0.0);
-
         info!(
             "Session unregistered for project {} at path {}: is_active={}",
             tenant_id, path, updated
@@ -214,7 +243,8 @@ impl PriorityManager {
     ///
     /// Maps a priority string ("high"/"normal") to a session count increment/decrement.
     /// "high" increments is_active, "normal" decrements it (floor 0).
-    /// Queue ordering is computed at dequeue time based on is_active.
+    /// Queue ordering is computed at dequeue time based on is_active. Only
+    /// session lifecycle operations publish the active-session metric.
     pub async fn set_priority(
         &self,
         tenant_id: &str,
@@ -389,35 +419,39 @@ impl PriorityManager {
         &self,
         timeout_secs: u64,
     ) -> PriorityResult<OrphanedSessionCleanup> {
+        let _transition = SESSION_TRANSITIONS.lock().await;
+        let mut tx = crate::db_retry::begin_immediate(&self.db_pool).await?;
         let cutoff = Utc::now() - ChronoDuration::seconds(timeout_secs as i64);
         let cutoff_str = timestamps::format_utc(&cutoff);
 
-        // Capture affected tenants before the delete (for the is_active
-        // re-projection and the returned summary).
-        let stale_tenants: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT tenant_id FROM project_sessions \
-             WHERE collection = ?1 AND last_heartbeat_at < ?2",
+        let deleted_tenants: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM project_sessions WHERE collection = ?1 AND last_heartbeat_at < ?2 \
+             RETURNING tenant_id",
         )
         .bind(COLLECTION_PROJECTS)
         .bind(&cutoff_str)
-        .fetch_all(&self.db_pool)
+        .fetch_all(&mut *tx)
         .await?;
+        let sessions_cleaned = deleted_tenants.len() as i32;
+        let mut deleted_by_tenant = BTreeMap::new();
+        for tenant_id in deleted_tenants {
+            *deleted_by_tenant.entry(tenant_id).or_insert(0) += 1;
+        }
 
-        let deleted = sqlx::query(
-            "DELETE FROM project_sessions WHERE collection = ?1 AND last_heartbeat_at < ?2",
-        )
-        .bind(COLLECTION_PROJECTS)
-        .bind(&cutoff_str)
-        .execute(&self.db_pool)
-        .await?;
-        let sessions_cleaned = deleted.rows_affected() as i32;
+        let mut affected = Vec::with_capacity(deleted_by_tenant.len());
+        for (tenant_id, removed) in deleted_by_tenant {
+            let remaining = Self::project_session_count(&mut tx, &tenant_id).await?;
+            affected.push((tenant_id, removed, remaining));
+        }
+        tx.commit().await?;
 
-        let lifecycle = WatchFolderLifecycle::new(self.db_pool.clone());
-        for tenant_id in &stale_tenants {
-            lifecycle
-                .sync_is_active_from_sessions(tenant_id, COLLECTION_PROJECTS)
-                .await?;
-            METRICS.session_ended(tenant_id, "high", 0.0);
+        let mut stale_tenants = Vec::with_capacity(affected.len());
+        for (tenant_id, removed, remaining) in affected {
+            for _ in 0..removed {
+                METRICS.session_closed(&tenant_id, 0.0);
+            }
+            METRICS.set_active_session_count(&tenant_id, i64::from(remaining));
+            stale_tenants.push(tenant_id);
         }
 
         let cleanup = OrphanedSessionCleanup {

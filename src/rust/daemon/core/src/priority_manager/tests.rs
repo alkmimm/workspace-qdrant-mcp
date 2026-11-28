@@ -1,4 +1,5 @@
 use super::*;
+use crate::metrics::METRICS;
 use crate::unified_queue_schema::CREATE_UNIFIED_QUEUE_SQL;
 use crate::watch_folders_schema::CREATE_WATCH_FOLDERS_SQL;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -116,6 +117,256 @@ async fn test_unregister_session_deactivates_project() {
         .unwrap();
     assert!(!info.is_active);
     assert_eq!(info.priority, "normal");
+}
+
+#[tokio::test]
+async fn test_session_metrics_follow_idempotent_database_state() {
+    let (pool, _temp_dir) = setup_test_db().await;
+    let priority_manager = PriorityManager::new(pool.clone());
+    let tenant_id = "metricsidem01";
+    create_test_project(&pool, tenant_id, "/test/metrics-idempotent").await;
+
+    priority_manager
+        .register_session(tenant_id, "same-session")
+        .await
+        .unwrap();
+    priority_manager
+        .register_session(tenant_id, "same-session")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        METRICS
+            .active_sessions
+            .with_label_values(&[tenant_id, "high"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        METRICS
+            .active_sessions
+            .with_label_values(&[tenant_id, "normal"])
+            .get(),
+        0
+    );
+    assert_eq!(
+        METRICS.total_sessions.with_label_values(&[tenant_id]).get(),
+        1
+    );
+
+    priority_manager
+        .unregister_session(tenant_id, "same-session")
+        .await
+        .unwrap();
+    // A repeated cleanup is also idempotent and must not drive the gauge below 0.
+    priority_manager
+        .unregister_session(tenant_id, "same-session")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        METRICS
+            .active_sessions
+            .with_label_values(&[tenant_id, "high"])
+            .get(),
+        0
+    );
+    assert_eq!(
+        METRICS
+            .active_sessions
+            .with_label_values(&[tenant_id, "normal"])
+            .get(),
+        0
+    );
+}
+
+fn active_session_metric(tenant: &str) -> i64 {
+    METRICS
+        .active_sessions
+        .with_label_values(&[tenant, "high"])
+        .get()
+}
+
+async fn expire_session(pool: &SqlitePool, tenant: &str, session_id: &str) {
+    sqlx::query(
+        "UPDATE project_sessions SET last_heartbeat_at = '2000-01-01T00:00:00.000Z' \
+         WHERE tenant_id = ?1 AND session_id = ?2",
+    )
+    .bind(tenant)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reregistration_with_reaper_keeps_a_live_session() {
+    let (pool, _temp_dir) = setup_test_db().await;
+    let tenant = "metrics-reregister";
+    create_test_project(&pool, tenant, "/test/reregister").await;
+    let manager = PriorityManager::new(pool.clone());
+    let reaper = PriorityManager::new(pool.clone());
+    manager.register_session(tenant, "client").await.unwrap();
+    for _ in 0..12 {
+        expire_session(&pool, tenant, "client").await;
+        let (registered, cleanup) = tokio::join!(
+            manager.register_session(tenant, "client"),
+            reaper.cleanup_orphaned_sessions(60),
+        );
+        cleanup.unwrap();
+        assert_eq!(registered.unwrap(), 1);
+        assert!(manager.heartbeat(tenant, "client").await.unwrap());
+        assert_eq!(active_session_metric(tenant), 1);
+    }
+}
+
+#[tokio::test]
+async fn registration_rolls_back_if_session_projection_fails() {
+    let (pool, _temp_dir) = setup_test_db().await;
+    let tenant = "metrics-registration-rollback";
+    create_test_project(&pool, tenant, "/test/register-rollback").await;
+    let manager = PriorityManager::new(pool.clone());
+    sqlx::query(
+        "CREATE TRIGGER fail_session_projection BEFORE UPDATE OF is_active ON watch_folders \
+         BEGIN SELECT RAISE(ABORT, 'projection failed'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(manager.register_session(tenant, "client").await.is_err());
+    assert!(!manager.heartbeat(tenant, "client").await.unwrap());
+    assert_eq!(active_session_metric(tenant), 0);
+    sqlx::query("DROP TRIGGER fail_session_projection")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(manager.register_session(tenant, "client").await.unwrap(), 1);
+    assert_eq!(METRICS.total_sessions.with_label_values(&[tenant]).get(), 1);
+}
+
+#[tokio::test]
+async fn watch_path_and_manual_priority_do_not_replace_live_session_gauge() {
+    let (pool, _temp_dir) = setup_test_db().await;
+    let tenant = "metrics-watch-path";
+    let manager = PriorityManager::new(pool.clone());
+    create_test_project(&pool, tenant, "/test/checkout").await;
+    sqlx::query(
+        "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, is_active, created_at, updated_at) \
+         VALUES ('metrics-worktree-id', '/test/worktree', 'projects', ?1, 0, '', '')",
+    )
+    .bind(tenant)
+    .execute(&pool)
+    .await
+    .unwrap();
+    manager.set_priority(tenant, "high").await.unwrap();
+    assert_eq!(active_session_metric(tenant), 0);
+    manager.register_session(tenant, "one").await.unwrap();
+    manager.register_session(tenant, "two").await.unwrap();
+    assert_eq!(
+        manager
+            .unregister_session_by_path(tenant, "/test/worktree")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(active_session_metric(tenant), 2);
+    manager.set_priority(tenant, "normal").await.unwrap();
+    assert_eq!(active_session_metric(tenant), 2);
+    manager.unregister_session(tenant, "one").await.unwrap();
+    assert_eq!(active_session_metric(tenant), 1);
+
+    // A priority-only update must still succeed when the session count used
+    // for telemetry cannot be queried.
+    sqlx::query("ALTER TABLE project_sessions RENAME TO unavailable_project_sessions")
+        .execute(&pool)
+        .await
+        .unwrap();
+    manager.set_priority(tenant, "normal").await.unwrap();
+    assert_eq!(active_session_metric(tenant), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_managers_publish_current_session_count() {
+    let (pool, _temp_dir) = setup_test_db().await;
+    let tenant = "metrics-concurrent";
+    create_test_project(&pool, tenant, "/test/concurrent-metrics").await;
+    let mut tasks = tokio::task::JoinSet::new();
+    for id in 0..12 {
+        let manager = PriorityManager::new(pool.clone());
+        tasks.spawn(async move {
+            let id = format!("client-{id}");
+            manager.register_session(tenant, &id).await.unwrap();
+            manager.unregister_session(tenant, &id).await.unwrap();
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+    assert_eq!(active_session_metric(tenant), 0);
+    let live: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM project_sessions WHERE tenant_id = ?1")
+            .bind(tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(live, 0);
+    let manager = PriorityManager::new(pool);
+    assert!(
+        !manager
+            .get_session_info(tenant)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active
+    );
+}
+
+#[tokio::test]
+async fn reaper_observes_only_sessions_actually_deleted() {
+    let (pool, _temp_dir) = setup_test_db().await;
+    let tenant = "metrics-reaper";
+    let manager = PriorityManager::new(pool.clone());
+    create_test_project(&pool, tenant, "/test/reaper-metrics").await;
+    for id in ["expired-a", "expired-b", "renewed", "fresh"] {
+        manager.register_session(tenant, id).await.unwrap();
+    }
+    for id in ["expired-a", "expired-b", "renewed"] {
+        expire_session(&pool, tenant, id).await;
+    }
+    // Deterministically model a row whose deletion is skipped after it was
+    // eligible at selection time. The delete result is the accounting source.
+    sqlx::query(
+        "CREATE TRIGGER renew_on_delete BEFORE DELETE ON project_sessions \
+         WHEN OLD.session_id = 'renewed' BEGIN \
+         UPDATE project_sessions SET last_heartbeat_at = '2099-01-01T00:00:00.000Z' \
+           WHERE tenant_id = OLD.tenant_id AND collection = OLD.collection \
+             AND session_id = OLD.session_id; \
+         SELECT RAISE(IGNORE); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let cleanup = manager.cleanup_orphaned_sessions(60).await.unwrap();
+    assert_eq!(cleanup.sessions_cleaned, 2);
+    assert_eq!(cleanup.projects_affected, 1);
+    assert_eq!(cleanup.demoted_projects, [tenant]);
+    assert_eq!(active_session_metric(tenant), 2);
+    assert_eq!(
+        METRICS
+            .session_duration_seconds
+            .with_label_values(&[tenant])
+            .get_sample_count(),
+        2
+    );
+    assert!(manager.heartbeat(tenant, "renewed").await.unwrap());
+    assert_eq!(
+        manager
+            .cleanup_orphaned_sessions(60)
+            .await
+            .unwrap()
+            .sessions_cleaned,
+        0
+    );
 }
 
 #[tokio::test]

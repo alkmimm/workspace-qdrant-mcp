@@ -8,6 +8,33 @@ use super::metrics_core::DaemonMetrics;
 // ── Session tracking helpers ──────────────────────────────────────
 
 impl DaemonMetrics {
+    /// Record creation of a distinct session without mutating the active gauge.
+    /// The lifecycle manager reconciles that gauge from `project_sessions`, the
+    /// source of truth, so idempotent registrations can never inflate it.
+    pub fn session_created(&self, project_id: &str) {
+        self.total_sessions.with_label_values(&[project_id]).inc();
+    }
+
+    /// Observe a closed session without decrementing an eventually-corruptible
+    /// gauge. Callers set the exact active count from persistent state.
+    pub fn session_closed(&self, project_id: &str, duration_secs: f64) {
+        self.session_duration_seconds
+            .with_label_values(&[project_id])
+            .observe(duration_secs);
+    }
+
+    /// Reconcile the active-session gauge with the durable session table.
+    pub fn set_active_session_count(&self, project_id: &str, count: i64) {
+        self.active_sessions
+            .with_label_values(&[project_id, "high"])
+            .set(count.max(0));
+        // `normal` means inactive in the current lifecycle model; it is not a
+        // second bucket of live sessions. Reset legacy negative series.
+        self.active_sessions
+            .with_label_values(&[project_id, "normal"])
+            .set(0);
+    }
+
     /// Record a new session start
     pub fn session_started(&self, project_id: &str, priority: &str) {
         self.active_sessions

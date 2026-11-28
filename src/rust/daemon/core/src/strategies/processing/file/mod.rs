@@ -903,6 +903,7 @@ async fn lookup_tracked_file_for_mutation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    pub(super) use skip_resolution::build_test_context;
 
     #[tokio::test]
     async fn file_mutation_retries_when_tracking_lookup_fails() {
@@ -1057,10 +1058,10 @@ mod tests {
             }
         }
 
-        /// Minimal context: lazy StorageClient (never contacted), no LSP, and
-        /// crucially `search_db: None` so the search sink resolves to Done
-        /// without touching FTS5 — the queue-state contract is what's under test.
-        fn build_test_context(pool: SqlitePool) -> ProcessingContext {
+        /// Minimal context with lazy storage, no LSP, and no search database.
+        pub(in crate::strategies::processing::file) fn build_test_context(
+            pool: SqlitePool,
+        ) -> ProcessingContext {
             let queue_manager = Arc::new(QueueManager::new(pool.clone()));
             let dense_provider = Arc::new(NoopDenseProvider);
             let embedding_generator = Arc::new(

@@ -5,6 +5,7 @@
 //! readers. SQLite WAL handles DB-level concurrency; this RwLock
 //! coordinates the Rust-level access pattern.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -25,6 +26,7 @@ use super::{
 #[derive(Clone)]
 pub struct SharedGraphStore<S: GraphStore> {
     inner: Arc<RwLock<S>>,
+    backfill_requested: Arc<AtomicBool>,
 }
 
 impl<S: GraphStore> SharedGraphStore<S> {
@@ -32,7 +34,23 @@ impl<S: GraphStore> SharedGraphStore<S> {
     pub fn new(store: S) -> Self {
         Self {
             inner: Arc::new(RwLock::new(store)),
+            backfill_requested: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Ask the queue processor to check for gaps after an ingest failed.
+    pub(crate) fn request_backfill(&self) {
+        self.backfill_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn backfill_requested(&self) -> bool {
+        self.backfill_requested.load(Ordering::Relaxed)
+    }
+
+    /// Take the request covered by the sweep about to start. Requests made
+    /// during that sweep remain set for the next one.
+    pub(crate) fn take_backfill_request(&self) -> bool {
+        self.backfill_requested.swap(false, Ordering::Relaxed)
     }
 
     /// Access the inner store under a read lock for advanced operations.
