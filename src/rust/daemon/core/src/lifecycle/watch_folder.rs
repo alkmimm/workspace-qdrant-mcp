@@ -19,7 +19,7 @@
 //! | SystemService (gRPC)    | `set_server_state`              |
 //! | startup::reconciliation  | `validate_watch_folders`        |
 
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use tracing::{debug, info};
 use wqm_common::timestamps;
 
@@ -243,6 +243,16 @@ impl WatchFolderLifecycle {
         tenant_id: &str,
         collection: &str,
     ) -> Result<u64, WatchFolderLifecycleError> {
+        let mut conn = self.pool.acquire().await?;
+        Self::sync_is_active_from_sessions_on(&mut conn, tenant_id, collection).await
+    }
+
+    /// Project the live session count within a caller's session transaction.
+    pub(crate) async fn sync_is_active_from_sessions_on(
+        conn: &mut SqliteConnection,
+        tenant_id: &str,
+        collection: &str,
+    ) -> Result<u64, WatchFolderLifecycleError> {
         let now = timestamps::format_utc(&chrono::Utc::now());
         let result = sqlx::query(
             r#"
@@ -260,7 +270,7 @@ impl WatchFolderLifecycle {
         .bind(&now)
         .bind(tenant_id)
         .bind(collection)
-        .execute(&self.pool)
+        .execute(conn)
         .await?;
 
         let rows = result.rows_affected();

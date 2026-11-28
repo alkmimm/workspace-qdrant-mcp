@@ -29,8 +29,8 @@ use crate::TextChunk;
 /// An empty extraction is stored too: it records that this generation has no
 /// symbols, so neither the dedup heal nor the backfill retries it.
 ///
-/// All graph errors are logged and swallowed — graph failures must never
-/// block the main ingestion pipeline.
+/// Graph errors are logged and request an earlier backfill without failing the
+/// main ingestion pipeline.
 pub(super) async fn ingest_graph_edges(
     ctx: &ProcessingContext,
     tenant_id: &str,
@@ -40,8 +40,35 @@ pub(super) async fn ingest_graph_edges(
     generation: &str,
     resolve_with_lsp: bool,
 ) {
+    let Some(graph_store) = &ctx.graph_store else {
+        return;
+    };
+    if !extract_and_persist(
+        ctx,
+        tenant_id,
+        file_path,
+        abs_file_path,
+        chunks,
+        generation,
+        resolve_with_lsp,
+    )
+    .await
+    {
+        graph_store.request_backfill();
+    }
+}
+
+async fn extract_and_persist(
+    ctx: &ProcessingContext,
+    tenant_id: &str,
+    file_path: &str,
+    abs_file_path: &str,
+    chunks: &[TextChunk],
+    generation: &str,
+    resolve_with_lsp: bool,
+) -> bool {
     let Some(ref graph_store) = ctx.graph_store else {
-        return; // Graph not initialized — skip silently
+        return false;
     };
 
     let mut extraction = extract_edges_from_text_chunks(chunks, tenant_id, file_path);
@@ -71,30 +98,53 @@ pub(super) async fn ingest_graph_edges(
         generation
     );
 
+    if !persist_graph(
+        graph_store,
+        tenant_id,
+        file_path,
+        generation,
+        &nodes,
+        &edges,
+    )
+    .await
+    {
+        return false;
+    }
+
+    // Throughput metric: count freshly-written edges by type so the
+    // Grafana "Code Graph" dashboard can show ingest rate per edge type.
+    let mut by_type: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for edge in &edges {
+        *by_type.entry(edge.edge_type.as_str()).or_default() += 1;
+    }
+    for (edge_type, count) in by_type {
+        crate::monitoring::metrics_core::METRICS
+            .graph_edges_ingested_total
+            .with_label_values(&[tenant_id, edge_type])
+            .inc_by(count);
+    }
+    true
+}
+
+async fn persist_graph(
+    graph_store: &crate::graph::SharedGraphStore<crate::graph::SqliteGraphStore>,
+    tenant_id: &str,
+    file_path: &str,
+    generation: &str,
+    nodes: &[crate::graph::GraphNode],
+    edges: &[crate::graph::GraphEdge],
+) -> bool {
     match graph_store
-        .reingest_file(tenant_id, file_path, generation, &nodes, &edges)
+        .reingest_file(tenant_id, file_path, generation, nodes, edges)
         .await
     {
-        Ok(()) => {
-            // Throughput metric: count freshly-written edges by type so the
-            // Grafana "Code Graph" dashboard can show ingest rate per edge type.
-            let mut by_type: std::collections::HashMap<&str, u64> =
-                std::collections::HashMap::new();
-            for edge in &edges {
-                *by_type.entry(edge.edge_type.as_str()).or_default() += 1;
-            }
-            for (edge_type, count) in by_type {
-                crate::monitoring::metrics_core::METRICS
-                    .graph_edges_ingested_total
-                    .with_label_values(&[tenant_id, edge_type])
-                    .inc_by(count);
-            }
-        }
+        Ok(()) => true,
         Err(e) => {
             warn!(
                 "Graph ingestion failed for {} (tenant {}): {}",
                 file_path, tenant_id, e
             );
+            false
         }
     }
 }
@@ -105,8 +155,8 @@ pub(super) async fn ingest_graph_edges(
 /// never paid here. A file no grammar covers is recorded as an empty
 /// extraction without parsing, so it is not retried.
 ///
-/// Best-effort like all graph work: errors are logged, never failing the
-/// pipeline. `file_path`/`abs_file_path` are where the BYTES are read (the
+/// Returns whether the generation was persisted, logging failures. The
+/// `file_path`/`abs_file_path` are where the bytes are read (the
 /// branch's own checkout); `relative_path` is the identity the graph keys on.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn rebuild_generation(
@@ -119,25 +169,16 @@ pub(crate) async fn rebuild_generation(
     base_path: &str,
     generation: &str,
     resolve_with_lsp: bool,
-) {
+) -> bool {
     let Some(ref graph_store) = ctx.graph_store else {
-        return;
+        return false;
     };
     let overrides = super::component::get_gitattributes(ctx, base_path).await;
     let has_language =
         crate::tree_sitter::detect_language_with_overrides(file_path, relative_path, &overrides)
             .is_some();
     if nothing_to_extract(file_path, has_language) {
-        if let Err(e) = graph_store
-            .reingest_file(tenant_id, relative_path, generation, &[], &[])
-            .await
-        {
-            warn!(
-                "graph rebuild: recording {} (generation {}) failed: {}",
-                relative_path, generation, e
-            );
-        }
-        return;
+        return persist_graph(graph_store, tenant_id, relative_path, generation, &[], &[]).await;
     }
     let provider =
         super::grammar::ensure_grammar_available(ctx, file_path, relative_path, &overrides).await;
@@ -152,10 +193,10 @@ pub(crate) async fn rebuild_generation(
                 "graph rebuild: parse failed for {} ({}): {}",
                 relative_path, abs_file_path, e
             );
-            return;
+            return false;
         }
     };
-    ingest_graph_edges(
+    extract_and_persist(
         ctx,
         tenant_id,
         relative_path,
@@ -164,7 +205,7 @@ pub(crate) async fn rebuild_generation(
         generation,
         resolve_with_lsp,
     )
-    .await;
+    .await
 }
 
 /// Whether a file has no symbols to extract and is recorded as an empty
@@ -207,6 +248,7 @@ pub(super) async fn heal_generation_after_dedup(
                 "graph heal: generation probe failed for {} (tenant {}): {} — skipping",
                 relative_path, item.tenant_id, e
             );
+            graph_store.request_backfill();
             return;
         }
     }
@@ -214,7 +256,7 @@ pub(super) async fn heal_generation_after_dedup(
         "graph heal: building generation {} of {} — dedup hit found none",
         generation, relative_path
     );
-    rebuild_generation(
+    if !rebuild_generation(
         ctx,
         &item.tenant_id,
         &item.collection,
@@ -225,7 +267,10 @@ pub(super) async fn heal_generation_after_dedup(
         generation,
         !super::item_metadata::reads_git_stage(item),
     )
-    .await;
+    .await
+    {
+        graph_store.request_backfill();
+    }
 }
 
 /// Delete one content generation's graph (it left the index).

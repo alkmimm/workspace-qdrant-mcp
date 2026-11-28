@@ -88,6 +88,65 @@ async fn test_deferred_shutdown_scheduled_when_delay_set() {
 }
 
 #[tokio::test]
+async fn worktree_deprioritize_notifies_when_session_table_is_unavailable() {
+    use futures::FutureExt;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let (pool, temp_dir) = setup_test_db().await;
+    let tenant = "worktree-metric";
+    let checkout_path = canonical_str(&temp_dir.path().join("checkout"));
+    let worktree_path = canonical_str(&temp_dir.path().join("worktree"));
+    create_test_watch_folder(&pool, tenant, &checkout_path).await;
+    sqlx::query(
+        "INSERT INTO watch_folders (watch_id, path, collection, tenant_id, is_worktree, created_at, updated_at) \
+         VALUES ('test-worktree', ?1, 'projects', ?2, 1, '', '')",
+    )
+    .bind(&worktree_path)
+    .bind(tenant)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let refresh = Arc::new(Notify::new());
+    let mut service = build_test_service(pool.clone(), 0);
+    service.watch_refresh_signal = Some(Arc::clone(&refresh));
+    service
+        .priority_manager
+        .register_session(tenant, "client")
+        .await
+        .unwrap();
+
+    // Make the session query fail while preserving the registered session.
+    sqlx::query("ALTER TABLE project_sessions RENAME TO unavailable_project_sessions")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = service
+        .deprioritize_project(Request::new(DeprioritizeProjectRequest {
+            project_id: tenant.into(),
+            watch_path: Some(worktree_path.clone()),
+            session_id: Some("client".into()),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(response.success);
+    assert!(!response.is_active);
+    assert_eq!(response.new_priority, "normal");
+    assert_eq!(refresh.notified().now_or_never(), Some(()));
+
+    let counts: Vec<i32> = sqlx::query_scalar(
+        "SELECT is_active FROM watch_folders WHERE tenant_id = ?1 ORDER BY path",
+    )
+    .bind(tenant)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, [1, 0]);
+}
+
+#[tokio::test]
 async fn test_reactivation_cancels_deferred_shutdown() {
     let (pool, temp_dir) = setup_test_db_with_queue().await;
     let project_dir = temp_dir.path().join("project");
